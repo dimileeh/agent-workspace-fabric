@@ -383,6 +383,102 @@ test("dashboard-summary first-load failure surfaces error without cached KPIs", 
   await expect(page.getByText(/last snapshot|may be stale/i)).toHaveCount(0);
 });
 
+test("dashboard-summary feed-level 403 clears last-good KPIs while capabilities stay reachable", async ({
+  page,
+}) => {
+  let summaryDenied = false;
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (summaryDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "tenant summary permission revoked" } },
+          403,
+        );
+        return;
+      }
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9");
+
+  summaryDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/tenant summary permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  // Capabilities still advertise fleet_summary → KPI shells remain, but counters
+  // must not keep the revoked snapshot (— / not 9, and not stale-cached).
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("—");
+  await expect(kpi(page, "Active")).not.toHaveAttribute("data-awf-stale", "true");
+  await expect(page.getByText(/last snapshot|may be stale/i)).toHaveCount(0);
+});
+
 test("dashboard-summary cached outage shows error and last_success_at", async ({ page }) => {
   let summaryOutage = false;
   const summary = localDashboardSummary({

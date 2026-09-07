@@ -218,6 +218,15 @@ test("loadDashboardSummary discards stale success and error via request generati
   );
 });
 
+test("loadDashboardSummary clears last-good snapshot on feed-level 401 or 403", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadDashboardSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setDashboardSummary\(null\);\s*setDashboardSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?setDashboardSummaryError\(result\.message\);/,
+    "Expected loadDashboardSummary to drop authorized counters on 401/403 rather than retain last-good as a transient outage",
+  );
+});
+
 test("loadCloudRuntime discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
