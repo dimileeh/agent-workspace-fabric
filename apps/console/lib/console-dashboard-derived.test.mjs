@@ -12,8 +12,10 @@ import {
   filterAndSortOverview,
   overviewSearchText,
   orderFullscreenWorkspaceIds,
+  planAutomaticLogTailRefresh,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
+  shouldStartPendingAutomaticLogTail,
 } from "./console-dashboard-derived.ts";
 
 const localCaps = {
@@ -325,4 +327,166 @@ test("filterAndSortOverview matches task_key shown on workspace cards", () => {
   );
   assert.equal(overviewSearchText(overview[1]).includes("awf-key-137"), true);
   assert.equal(overviewSearchText(overview[2]).includes("awf-key-137"), false);
+});
+
+function forgetRecordedAutomaticTailPart(parts, streamId, part) {
+  if (parts.get(streamId) === part) {
+    parts.delete(streamId);
+  }
+}
+
+test("401 or 403 then four unchanged listing polls retry the denied tail", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCZwi: a selected
+  // tail 401/403 used to keep its metadata fingerprint, so four later
+  // authorized listing polls with static metadata started zero retries and
+  // the latch stayed closed after access was restored. gCRNM only required
+  // transient retries; it did not prohibit this auth recovery.
+  const workspaceId = "ws_cd5252";
+  const stream = { streamId: "active.stdout", part: "2880:120:2026-05-21T10:00:10.000Z:" };
+  const deniedKey = `${workspaceId}:${stream.streamId}`;
+
+  for (const status of [401, 403]) {
+    const previousParts = new Map([[stream.streamId, stream.part]]);
+    const denied = new Set([deniedKey]);
+    forgetRecordedAutomaticTailPart(previousParts, stream.streamId, stream.part);
+
+    let starts = 0;
+    for (let poll = 0; poll < 4; poll += 1) {
+      const plan = planAutomaticLogTailRefresh({
+        workspaceId,
+        selectedStreamIds: [stream.streamId],
+        streams: [stream],
+        previousParts,
+        inFlightStreamKeys: new Set(),
+        deniedStreamKeys: denied,
+      });
+      assert.deepEqual(
+        plan.start.map((item) => item.streamId),
+        [stream.streamId],
+        `status ${status} poll ${poll} should retry the denied stream`,
+      );
+      assert.equal(plan.pending.length, 0);
+      starts += plan.start.length;
+      previousParts.clear();
+      for (const [streamId, part] of plan.nextParts) {
+        previousParts.set(streamId, part);
+      }
+      const overlapping = planAutomaticLogTailRefresh({
+        workspaceId,
+        selectedStreamIds: [stream.streamId],
+        streams: [stream],
+        previousParts,
+        inFlightStreamKeys: new Set([deniedKey]),
+        deniedStreamKeys: denied,
+      });
+      assert.equal(overlapping.start.length, 0, "an in-flight denial retry must not restart");
+      assert.deepEqual(
+        overlapping.pending.map((item) => item.streamId),
+        [stream.streamId],
+      );
+      assert.equal(
+        shouldStartPendingAutomaticLogTail({
+          workspaceId,
+          streamId: stream.streamId,
+          part: stream.part,
+          selectedWorkspaceId: workspaceId,
+          listingAuthDenied: false,
+          deniedStreamKeys: denied,
+          selectedStreamIds: [stream.streamId],
+          recordedParts: previousParts,
+        }),
+        false,
+        "pending drain must not retry a 401/403 in the same turn",
+      );
+      const staticDenied = planAutomaticLogTailRefresh({
+        workspaceId,
+        selectedStreamIds: [stream.streamId],
+        streams: [stream],
+        previousParts,
+        inFlightStreamKeys: new Set(),
+        deniedStreamKeys: denied,
+      });
+      assert.deepEqual(
+        staticDenied.start.map((item) => item.streamId),
+        [stream.streamId],
+        "static metadata must still retry while the 401/403 latch is held",
+      );
+      forgetRecordedAutomaticTailPart(previousParts, stream.streamId, stream.part);
+    }
+    assert.equal(starts, 4, `status ${status} should retry once per listing refresh`);
+    assert.equal(denied.has(deniedKey), true, "repeated denial must keep the latch");
+  }
+});
+
+test("static authorized listing refresh does not retry a tail that is not denied", () => {
+  const workspaceId = "ws_static";
+  const stream = { streamId: "active.stdout", part: "2880:120:opened:" };
+  const previousParts = new Map([[stream.streamId, stream.part]]);
+  const plan = planAutomaticLogTailRefresh({
+    workspaceId,
+    selectedStreamIds: [stream.streamId],
+    streams: [stream],
+    previousParts,
+    inFlightStreamKeys: new Set(),
+    deniedStreamKeys: new Set(),
+  });
+  assert.equal(plan.start.length, 0);
+  assert.equal(plan.pending.length, 0);
+});
+
+test("sibling 200 or 5xx does not clear or immediately retry a denied tail", () => {
+  const workspaceId = "ws_sibling";
+  const quiet = { streamId: "quiet.stdout", part: "2400:120:opened:" };
+  const active = { streamId: "active.stdout", part: "2880:120:opened:" };
+  const quietKey = `${workspaceId}:${quiet.streamId}`;
+  const activeKey = `${workspaceId}:${active.streamId}`;
+  const denied = new Set([quietKey, activeKey]);
+  const previousParts = new Map([
+    [quiet.streamId, quiet.part],
+    [active.streamId, active.part],
+  ]);
+
+  // Sibling 200 recovers only that stream and leaves the recorded part.
+  // A sibling 5xx also must not delete quiet's denial.
+  denied.delete(activeKey);
+  assert.equal(denied.has(quietKey), true);
+  assert.equal(denied.has(activeKey), false);
+
+  const plan = planAutomaticLogTailRefresh({
+    workspaceId,
+    selectedStreamIds: [quiet.streamId, active.streamId],
+    streams: [quiet, active],
+    previousParts,
+    inFlightStreamKeys: new Set(),
+    deniedStreamKeys: denied,
+  });
+  assert.deepEqual(
+    plan.start.map((item) => item.streamId),
+    [quiet.streamId],
+    "only the still-denied stream retries on a static listing refresh",
+  );
+  assert.equal(
+    shouldStartPendingAutomaticLogTail({
+      workspaceId,
+      streamId: quiet.streamId,
+      part: quiet.part,
+      selectedWorkspaceId: workspaceId,
+      listingAuthDenied: false,
+      deniedStreamKeys: denied,
+      selectedStreamIds: [quiet.streamId, active.streamId],
+      recordedParts: plan.nextParts,
+    }),
+    false,
+  );
+
+  denied.delete(quietKey);
+  const recovered = planAutomaticLogTailRefresh({
+    workspaceId,
+    selectedStreamIds: [quiet.streamId, active.streamId],
+    streams: [quiet, active],
+    previousParts: plan.nextParts,
+    inFlightStreamKeys: new Set(),
+    deniedStreamKeys: denied,
+  });
+  assert.equal(recovered.start.length, 0, "a recovered stream with static metadata is not retried");
 });

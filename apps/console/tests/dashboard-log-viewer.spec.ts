@@ -1563,6 +1563,158 @@ test(`inspector logs close live stream after tail authorization denial while lis
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCZwi: a 401/403 used
+// to keep the automatic-tail fingerprint, so later authorized listing polls
+// with unchanged metadata started zero retries and the latch stayed closed
+// after access returned. Retry is once per listing refresh, not an immediate
+// loop, and stays closed until this stream's own 200.
+for (const deniedStatus of [401, 403] as const) {
+test(`inspector logs retry a denied tail on unchanged listing refresh and recover (${deniedStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  let tailMode: "ok" | "denied" | "recover" = "ok";
+  let listingPolls = 0;
+  let tailReads = 0;
+  let streamOpens = 0;
+  const workspaceId = "ws_inspector_tail_auth_refresh";
+  const authorizedMarker = "inspector-tail-recovered-after-static-listing";
+  const liveSecret = "inspector-live-frame-before-denied-tail-recovers";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z", active: 1, failed: 0 });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      listingPolls += 1;
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      tailReads += 1;
+      if (tailMode === "denied") {
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+              message: "log tail permission revoked",
+            },
+          },
+          deniedStatus,
+        );
+        return;
+      }
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      const frames: AwfStreamFrame[] = [
+        { type: "connected", workspace_id: workspaceId },
+        {
+          type: "log",
+          seq: streamOpens,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          data: liveSecret,
+          offset: 0,
+          next_offset: liveSecret.length,
+          occurred_at: now,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
+  const output = inspector.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+  const readsBeforeDenial = tailReads;
+  const opensBeforeDenial = streamOpens;
+
+  tailMode = "denied";
+  await inspector.getByRole("button", { name: "Tail", exact: true }).click();
+  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  const readsAtDenial = tailReads;
+  expect(readsAtDenial).toBeGreaterThan(readsBeforeDenial);
+  const listingAtDenial = listingPolls;
+
+  await page.waitForTimeout(400);
+  expect(tailReads - readsAtDenial).toBeLessThanOrEqual(1);
+
+  tailMode = "recover";
+  await expect.poll(() => tailReads, { timeout: 20_000 }).toBeGreaterThan(readsAtDenial);
+  await expect.poll(() => listingPolls, { timeout: 20_000 }).toBeGreaterThan(listingAtDenial);
+  await expect(output).toContainText(authorizedMarker, { timeout: 12_000 });
+  await expect(inspector.getByText(/log tail permission revoked/i)).toHaveCount(0);
+  await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThan(opensBeforeDenial);
+});
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBlfk: a 200 from a
 // sibling tail must not clear a 401/403 latched for another selected stream,
 // including when the denied stream's retry hangs or returns 5xx. EventSource

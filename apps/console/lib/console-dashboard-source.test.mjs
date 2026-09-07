@@ -750,13 +750,24 @@ test("automatic inspector tails skip unchanged stream metadata and do not supers
   );
   assert.match(
     tails,
-    /if \(previousAutomaticTailPartsRef\.current\.get\(stream\.stream_id\) === part\) \{\s*continue;\s*\}/,
-    "Expected unchanged stream metadata to skip a new automatic tail read",
+    /planAutomaticLogTailRefresh\(\{[\s\S]*?deniedStreamKeys: logTailDeniedStreamKeysRef\.current,/,
+    "Expected automatic tail refreshes to ask the listing scheduler, including denied streams",
+  );
+  const derived = readFileSync(new URL("./console-dashboard-derived.ts", import.meta.url), "utf8");
+  assert.match(
+    derived,
+    /if \(unchanged && !denied\) \{\s*continue;\s*\}/,
+    "Expected unchanged stream metadata to skip a new automatic tail read unless that stream is still authorization-denied",
+  );
+  assert.match(
+    derived,
+    /if \(input\.inFlightStreamKeys\.has\(generationKey\)\) \{\s*pending\.push\(stream\);\s*continue;\s*\}/,
+    "Expected an in-flight automatic tail to be queued instead of bumping generation",
   );
   assert.match(
     tails,
-    /if \(logTailInFlightStreamKeysRef\.current\.has\(generationKey\)\) \{\s*pendingAutomaticTailsRef\.current\.set\(generationKey, \{/,
-    "Expected an in-flight automatic tail to be queued instead of bumping generation",
+    /for \(const item of plan\.pending\) \{[\s\S]*?pendingAutomaticTailsRef\.current\.set\(`\$\{selectedId\}:\$\{item\.streamId\}`, \{/,
+    "Expected a queued automatic tail to stay pending until the in-flight read settles",
   );
   assert.match(
     tails,
@@ -773,8 +784,8 @@ test("failed automatic inspector tails retry when stream metadata is unchanged",
   // next poll retries, including when a sibling denial already advanced
   // gated-detail generation and discarded this non-auth result. The part is
   // captured before the read so a later stream mutation cannot miss the
-  // fingerprint the effect recorded. Auth denials stay latched and must not
-  // be forgotten.
+  // fingerprint the effect recorded. A 401/403 also forgets that part so
+  // the next listing refresh can retry, but must not start a read here.
   const tails = dashboardSource.logTails;
   assert.match(
     tails,
@@ -814,10 +825,20 @@ test("failed automatic inspector tails retry when stream metadata is unchanged",
     forgetCall,
     "Expected a transient 5xx or network failure to forget the recorded automatic tail part",
   );
+  assert.match(
+    authBody,
+    forgetCall,
+    "Expected a 401/403 tail denial to forget the recorded part so the next listing refresh retries",
+  );
   assert.doesNotMatch(
     authBody,
-    /forgetRecordedAutomaticTailPart\(/,
-    "Expected a 401/403 tail denial to keep the recorded part so it is not auto-retried",
+    /loadLogTail\(/,
+    "Expected a 401/403 tail denial not to start another read in the same turn",
+  );
+  assert.match(
+    tails,
+    /!shouldStartPendingAutomaticLogTail\(\{[\s\S]*?deniedStreamKeys: logTailDeniedStreamKeysRef\.current,/,
+    "Expected a pending automatic tail not to start while that stream is still authorization-denied",
   );
 });
 

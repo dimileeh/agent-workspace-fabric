@@ -311,3 +311,83 @@ export function orderFullscreenWorkspaceIds(
   const remaining = selection.filter((workspaceId) => !orderedVisible.includes(workspaceId));
   return [...orderedVisible, ...remaining];
 }
+
+export type AutomaticLogTailRefreshCandidate = {
+  streamId: string;
+  part: string;
+};
+
+export type AutomaticLogTailRefreshPlan = {
+  start: AutomaticLogTailRefreshCandidate[];
+  pending: AutomaticLogTailRefreshCandidate[];
+  nextParts: Map<string, string>;
+};
+
+function automaticLogTailGenerationKey(workspaceId: string, streamId: string): string {
+  return `${workspaceId}:${streamId}`;
+}
+
+/**
+ * Decide which selected tails a listing refresh should read.
+ *
+ * Unchanged byte/line/open/close metadata skips a new read so array identity
+ * cannot supersede an in-flight success. A stream still latched for 401/403
+ * is the exception: each authorized listing refresh starts one retry even
+ * when metadata is static. An in-flight read is queued, never restarted.
+ */
+export function planAutomaticLogTailRefresh(input: {
+  workspaceId: string;
+  selectedStreamIds: readonly string[];
+  streams: readonly AutomaticLogTailRefreshCandidate[];
+  previousParts: ReadonlyMap<string, string>;
+  inFlightStreamKeys: ReadonlySet<string>;
+  deniedStreamKeys: ReadonlySet<string>;
+}): AutomaticLogTailRefreshPlan {
+  const selected = new Set(input.selectedStreamIds);
+  const nextParts = new Map<string, string>();
+  const start: AutomaticLogTailRefreshCandidate[] = [];
+  const pending: AutomaticLogTailRefreshCandidate[] = [];
+  for (const stream of input.streams) {
+    if (!selected.has(stream.streamId)) {
+      continue;
+    }
+    nextParts.set(stream.streamId, stream.part);
+    const unchanged = input.previousParts.get(stream.streamId) === stream.part;
+    const generationKey = automaticLogTailGenerationKey(input.workspaceId, stream.streamId);
+    const denied = input.deniedStreamKeys.has(generationKey);
+    if (unchanged && !denied) {
+      continue;
+    }
+    if (input.inFlightStreamKeys.has(generationKey)) {
+      pending.push(stream);
+      continue;
+    }
+    start.push(stream);
+  }
+  return { start, pending, nextParts };
+}
+
+/**
+ * A queued automatic tail may start only after its own read settles, and
+ * never while that stream is still authorization-denied. Drain is not a
+ * listing refresh: starting here would retry a 401/403 in the same turn.
+ */
+export function shouldStartPendingAutomaticLogTail(input: {
+  workspaceId: string;
+  streamId: string;
+  part: string;
+  selectedWorkspaceId: string | null;
+  listingAuthDenied: boolean;
+  deniedStreamKeys: ReadonlySet<string>;
+  selectedStreamIds: readonly string[];
+  recordedParts: ReadonlyMap<string, string>;
+}): boolean {
+  const generationKey = automaticLogTailGenerationKey(input.workspaceId, input.streamId);
+  return (
+    input.selectedWorkspaceId === input.workspaceId &&
+    !input.listingAuthDenied &&
+    !input.deniedStreamKeys.has(generationKey) &&
+    input.selectedStreamIds.includes(input.streamId) &&
+    input.recordedParts.get(input.streamId) === input.part
+  );
+}

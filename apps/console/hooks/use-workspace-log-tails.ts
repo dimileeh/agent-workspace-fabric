@@ -12,6 +12,8 @@ import {
 import {
   DROP_ALL_GATED_DETAIL_FEEDS,
   noteGatedDetailDrop,
+  planAutomaticLogTailRefresh,
+  shouldStartPendingAutomaticLogTail,
   type GatedDetailDropStamp,
   orderFullscreenWorkspaceIds,
 } from "@/lib/console-dashboard-derived";
@@ -52,9 +54,11 @@ function automaticLogTailPart(stream: WorkspaceLogStream): string {
 
 /**
  * Drop a recorded automatic tail only when it is still the attempt that failed.
- * A later poll with the same byte/line/open/close metadata must retry a
- * transient 5xx or network failure. A newer part already recorded while this
- * read was in flight must stay so its pending follow-up is not discarded.
+ * A later authorized listing refresh with the same byte/line/open/close
+ * metadata must retry a transient 5xx/network failure and a 401/403 denial.
+ * A newer part already recorded while this read was in flight must stay so
+ * its pending follow-up is not discarded. Forgetting the part does not start
+ * another read in the failure callback.
  */
 function forgetRecordedAutomaticTailPart(parts: Map<string, string>, streamId: string, part: string): void {
   if (parts.get(streamId) === part) {
@@ -222,12 +226,20 @@ export function useWorkspaceLogTails({
     }
     pendingAutomaticTailsRef.current.delete(generationKey);
     const selectedStreamIds = automaticSelectedStreamsRef.current;
+    // Denied streams wait for the next listing refresh. Starting the queued
+    // follow-up here would retry 401/403 in the same turn, and a sibling
+    // 200/5xx must not clear or reopen this stream.
     if (
-      selectedIdRef.current !== pending.workspaceId ||
-      logListingAuthDeniedRef.current ||
-      logTailDeniedStreamKeysRef.current.has(generationKey) ||
-      !selectedStreamIds.includes(pending.stream.stream_id) ||
-      previousAutomaticTailPartsRef.current.get(pending.stream.stream_id) !== pending.part
+      !shouldStartPendingAutomaticLogTail({
+        workspaceId: pending.workspaceId,
+        streamId: pending.stream.stream_id,
+        part: pending.part,
+        selectedWorkspaceId: selectedIdRef.current,
+        listingAuthDenied: logListingAuthDeniedRef.current,
+        deniedStreamKeys: logTailDeniedStreamKeysRef.current,
+        selectedStreamIds,
+        recordedParts: previousAutomaticTailPartsRef.current,
+      })
     ) {
       return;
     }
@@ -337,6 +349,15 @@ export function useWorkspaceLogTails({
               stream.stream_id,
             );
             logTailDeniedStreamKeysRef.current.add(logTailRefreshErrorKey(workspaceId, stream.stream_id));
+            // Stay latched and do not call loadLogTail again here. Forget this
+            // attempt's recorded part so the next authorized listing refresh
+            // retries even when metadata is static. Sibling 200/5xx still
+            // cannot clear this denial.
+            forgetRecordedAutomaticTailPart(
+              previousAutomaticTailPartsRef.current,
+              stream.stream_id,
+              scheduledAutomaticPart,
+            );
             settleInFlight();
             logTailAuthDeniedRef.current = true;
             setLogTailAuthDenied(true);
@@ -483,31 +504,39 @@ export function useWorkspaceLogTails({
       pendingAutomaticTailsRef.current.clear();
       previousAutomaticTailWorkspaceRef.current = selectedId;
     }
-    const selectedIds = new Set(selectedStreams);
-    const nextParts = new Map<string, string>();
-    for (const stream of detailStreams) {
-      if (!selectedIds.has(stream.stream_id)) {
+    const streamById = new Map(detailStreams.map((stream) => [stream.stream_id, stream]));
+    const plan = planAutomaticLogTailRefresh({
+      workspaceId: selectedId,
+      selectedStreamIds: selectedStreams,
+      streams: detailStreams.map((stream) => ({
+        streamId: stream.stream_id,
+        part: automaticLogTailPart(stream),
+      })),
+      previousParts: previousAutomaticTailPartsRef.current,
+      inFlightStreamKeys: logTailInFlightStreamKeysRef.current,
+      deniedStreamKeys: logTailDeniedStreamKeysRef.current,
+    });
+    for (const item of plan.pending) {
+      const stream = streamById.get(item.streamId);
+      if (!stream) {
         continue;
       }
-      const part = automaticLogTailPart(stream);
-      nextParts.set(stream.stream_id, part);
-      if (previousAutomaticTailPartsRef.current.get(stream.stream_id) === part) {
+      pendingAutomaticTailsRef.current.set(`${selectedId}:${item.streamId}`, {
+        workspaceId: selectedId,
+        stream,
+        selectedStreamIds: selectedStreams,
+        part: item.part,
+      });
+    }
+    for (const item of plan.start) {
+      const stream = streamById.get(item.streamId);
+      if (!stream) {
         continue;
       }
-      const generationKey = `${selectedId}:${stream.stream_id}`;
-      if (logTailInFlightStreamKeysRef.current.has(generationKey)) {
-        pendingAutomaticTailsRef.current.set(generationKey, {
-          workspaceId: selectedId,
-          stream,
-          selectedStreamIds: selectedStreams,
-          part,
-        });
-        continue;
-      }
-      pendingAutomaticTailsRef.current.delete(generationKey);
+      pendingAutomaticTailsRef.current.delete(`${selectedId}:${item.streamId}`);
       void loadLogTail(selectedId, stream, selectedStreams);
     }
-    previousAutomaticTailPartsRef.current = nextParts;
+    previousAutomaticTailPartsRef.current = plan.nextParts;
   }, [detailStreams, loadLogTail, selectedId, selectedStreams]);
 
   const reloadSelectedLogs = useCallback(() => {
