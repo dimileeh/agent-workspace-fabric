@@ -491,9 +491,15 @@ test("loadLogTail retains last-successful tails on transient refresh failure", (
   const authBody = body.slice(authIdx, transientIdx);
   assert.match(
     authBody,
-    /current\.filter\(\s*\(entry\) => !\(entry\.workspaceId === workspaceId && entry\.streamId === stream\.stream_id\)/,
-    "Expected 401/403 to drop prior tail and live entries for that stream",
+    /logTailAuthDeniedRef\.current = true;[\s\S]*?setLogTailAuthDenied\(true\);/,
+    "Expected 401/403 to latch tail denial so the inspector EventSource closes",
   );
+  assert.match(
+    authBody,
+    /current\.filter\(\(entry\) => entry\.workspaceId !== workspaceId\)/,
+    "Expected 401/403 to drop prior tail and live entries for the revoked workspace",
+  );
+  assert.match(authBody, /setStreamOffsets\(\{\}\)/, "Expected 401/403 to clear retained stream offsets");
   assert.match(authBody, /tail-error:/, "Expected 401/403 to record an error line after clearing authorized tails");
 
   const transientBody = body.slice(transientIdx, body.indexOf("const tailEntry", transientIdx));
@@ -531,6 +537,38 @@ test("loadLogTail retains last-successful tails on transient refresh failure", (
     dashboardSource.logs,
     /stale=\{Boolean\(refreshError\) && entries\.length > 0\}/,
     "Expected a retained tail snapshot to be marked stale while the refresh error is shown",
+  );
+});
+
+test("tail authorization denial closes the inspector live stream", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gARNY: a /logs/{stream}
+  // 401/403 while listing stays reachable must latch denial and tear down the
+  // selected workspace EventSource. Listing success must not clear that latch.
+  const tails = dashboardSource.logTails;
+  const authIdx = tails.indexOf("if (isLogTailAuthFailure(result.status))");
+  assert.ok(authIdx > 0, "Expected an auth-failure branch inside loadLogTail");
+  const authEnd = tails.indexOf("Transient network/5xx", authIdx);
+  const authBody = tails.slice(authIdx, authEnd);
+  assert.match(
+    authBody,
+    /gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?logTailAuthDeniedRef\.current = true;[\s\S]*?setLogTailAuthDenied\(true\);[\s\S]*?setStreamOffsets\(\{\}\)/,
+    "Expected tail 401/403 to invalidate in-flight tails, latch denial, and clear offsets",
+  );
+  assert.doesNotMatch(
+    authBody,
+    /logListingAuthDeniedRef\.current = true/,
+    "Expected tail denial not to reuse the listing latch that a later listing 200 would clear",
+  );
+
+  assert.match(
+    dashboardSource.liveStream,
+    /if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return;\s*\}/,
+    "Expected live log frames to be dropped while tail authorization is denied",
+  );
+  assert.match(
+    tails,
+    /setLogEntries\(\(current\) => \{\s*\/\/ Functional updaters can flush after a newer tail or listing 401\/403\.[\s\S]*?if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return current;\s*\}/,
+    "Expected a later successful tail write to no-op if tail denial latches again before flush",
   );
 });
 
@@ -971,8 +1009,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.liveStream,
-    /if \(!selectedId \|\| logListingAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected inspector /stream to close when listing authorization is denied, not only drop frames after they arrive",
+    /if \(!selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected inspector /stream to close when listing or tail authorization is denied, not only drop frames after they arrive",
   );
   assert.match(
     dashboardSource.detailLoader,

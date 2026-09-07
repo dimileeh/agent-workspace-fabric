@@ -203,6 +203,9 @@ export function useWorkspaceLogTails({
         }));
         return;
       }
+      // A 200 after tail denial recovers /stream. Functional updaters below
+      // re-check the latch so a newer 401/403 that lands first cannot lose to
+      // this in-flight write and refill revoked output.
       if (logTailAuthDeniedRef.current) {
         logTailAuthDeniedRef.current = false;
         setLogTailAuthDenied(false);
@@ -221,7 +224,9 @@ export function useWorkspaceLogTails({
         kind: "tail" as const,
       };
       setLogEntries((current) => {
-        if (logListingAuthDeniedRef.current) {
+        // Functional updaters can flush after a newer tail or listing 401/403.
+        // Do not restore authorized contents once either latch is held.
+        if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
           return current;
         }
         return trimLogEntries(
@@ -238,7 +243,7 @@ export function useWorkspaceLogTails({
         );
       });
       setStreamOffsets((current) => {
-        if (logListingAuthDeniedRef.current) {
+        if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
           return current;
         }
         return {
