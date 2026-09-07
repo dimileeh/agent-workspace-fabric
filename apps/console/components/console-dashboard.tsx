@@ -479,18 +479,26 @@ const searchParams = useSearchParams();
     } else if (appliedCapabilitiesRef.current !== null) {
       clearNewlyUnsupportedCapabilityFeeds(appliedCapabilitiesRef.current, parsed.capabilities);
     }
+    // Capture before clear: a concurrent loadOverview (context sync / poll) may
+    // still have refused while the latch was set; refill immediately so recovery
+    // does not wait for the next overview poll tick.
+    const wasAuthDenied = consoleAuthDeniedRef.current;
     consoleAuthDeniedRef.current = false;
     appliedCapabilitiesRef.current = parsed.capabilities;
     setCapabilities(parsed.capabilities);
     setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);
     setCapabilitiesReady(true);
+    if (wasAuthDenied) {
+      void loadOverview();
+    }
     return parsed.capabilities;
   }, [
     capabilityIdentityKey,
     clearAuthorizedConsoleFeeds,
     clearNewlyUnsupportedCapabilityFeeds,
     invalidateAuthorizedFeedsIfContextChanged,
+    loadOverview,
   ]);
 
   const loadResourceSaturation = useCallback(async () => {

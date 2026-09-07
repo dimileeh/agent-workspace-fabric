@@ -145,6 +145,23 @@ test("loadCapabilities discards stale responses via request generation", () => {
   );
 });
 
+test("loadCapabilities reloads overview after clearing a latched auth denial", () => {
+  const dashboard = dashboardSource.dashboard;
+  // Successful negotiation must not leave the workspace list empty until the
+  // next poll tick: clear the latch and immediately refill overview when
+  // recovery follows a prior 401/403.
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?const wasAuthDenied = consoleAuthDeniedRef\.current;[\s\S]*?consoleAuthDeniedRef\.current = false;[\s\S]*?if \(wasAuthDenied\) \{\s*void loadOverview\(\);\s*\}/,
+    "Expected loadCapabilities to refill overview immediately after clearing a latched auth denial",
+  );
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?\}, \[[\s\S]*?loadOverview[\s\S]*?\]\);/,
+    "Expected loadCapabilities to depend on loadOverview for auth-recovery refill",
+  );
+});
+
 test("loadCapabilities clears authorized feeds when identity is lost to parse failure", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
