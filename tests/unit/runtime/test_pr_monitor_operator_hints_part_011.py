@@ -133,6 +133,74 @@ async def test_timeout_retry_marker_is_on_the_row_before_the_worker_can_die(
 
 
 @pytest.mark.unit
+async def test_unexpected_write_failure_still_returns_the_retry_envelope(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cycle keeps its watchdog reason code when the durable write faults.
+
+    The helper-level tests pin the degradation itself; this one pins the
+    consequence the reviewer described (PRRT_kwDOSJAM6s6f_brh): an unclassified
+    write fault must not escape the retry branch, or the caller returns no
+    ``operator_hint_timeout_retry`` envelope and a storage error replaces
+    ``AGENT_IDLE_TIMEOUT`` in operation history.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("a" * 40, None)
+
+    async def _timed_out(**_kwargs: object) -> object:
+        raise AgentVerdictExecutionError(
+            reason_code="AGENT_IDLE_TIMEOUT",
+            reason=f"agent timed out; preserved work at {_PRESERVED_HEAD}",
+            preserved_head_sha=_PRESERVED_HEAD,
+        )
+
+    async def _write_blows_up(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("repository raised something unclassified")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _timed_out)
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.operator_hint_timeout_retry._write_timeout_retry_marker",
+        _write_blows_up,
+    )
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.operator_hint_timeout_retry is True
+    assert result.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert state.threads_addressed_ids[operator_hint_timeout_retry_key(hint)] == "retried"
+    # Degraded, so the budget is in memory only — the row keeps whatever it had.
+    assert await _persisted_marker(factory, workspace_id, hint) is None
+
+
+@pytest.mark.unit
 async def test_durable_marker_write_failure_keeps_the_in_memory_budget() -> None:
     """A DB fault degrades to the in-memory marker and only logs."""
     hint = _hint()
