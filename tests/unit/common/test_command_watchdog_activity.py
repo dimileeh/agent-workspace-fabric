@@ -325,6 +325,43 @@ async def test_probe_is_bounded_when_only_an_idle_timeout_is_configured() -> Non
 
 
 @pytest.mark.unit
+async def test_idle_only_deadline_still_fires_after_a_probe_that_answers() -> None:
+    """Bounding the idle-only probe must not cost the idle timeout itself.
+
+    The budget in this configuration is one full idle window, so a probe that
+    answers inside it is *not* abandoned as "unknown" — its negative answer still
+    reaches the watchdog and the configured idle deadline fires, terminating a
+    child that would otherwise sleep well past it. Without that, the fix for the
+    stalled probe would have traded a parked watchdog for an unenforceable
+    deadline.
+    """
+    runner = AsyncioSubprocessRunner()
+    probe_calls = 0
+
+    async def _probe() -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        await asyncio.sleep(0.05)  # Comfortably inside the 0.2s idle window.
+        return False
+
+    result = await asyncio.wait_for(
+        runner.run_streaming(
+            [sys.executable, "-c", _SILENT_CHILD],
+            wall_timeout_seconds=None,
+            idle_timeout_seconds=0.2,
+            activity_probe=_probe,
+        ),
+        # Guard: with no wall cap, only the idle deadline can end this run.
+        timeout=10.0,
+    )
+
+    assert probe_calls == 1
+    assert result.returncode == 124
+    assert result.reason_code == COMMAND_IDLE_TIMEOUT_REASON
+    assert "idle timeout after 0.2s without output or worktree activity" in result.stderr
+
+
+@pytest.mark.unit
 async def test_blocking_sync_probe_still_hits_the_wall_deadline() -> None:
     """A probe that blocks *inline* must not hold the watchdog past the cap.
 
