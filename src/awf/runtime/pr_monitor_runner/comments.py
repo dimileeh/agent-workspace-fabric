@@ -20,6 +20,9 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    _record_accepted_item_commit_provenance,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdict,
     AgentVerdictExecutionError,
@@ -77,7 +80,7 @@ async def _address_thread(
     monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
     """Ask the monitor agent to resolve a review thread and return its verdict."""
-    del base_branch, remote_branch, operation_id, operation_type, monitor_log
+    del base_branch, remote_branch, operation_type, monitor_log
     from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -133,7 +136,18 @@ async def _address_thread(
             reason_code=exc.reason_code,
             preserved_head_sha=exc.preserved_head_sha,
         )
-        return "agent_failed"
+        result = _agent_failed_result(exc)
+    # #935: an accepted item commit must leave a durable audit trail immediately —
+    # the batch's ``comment_repair`` operation row is only finalised on push, so a
+    # restart between items would otherwise strand this commit with no provenance.
+    await _record_accepted_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=thread.thread_id,
+        item_start_head=operation_start_head,
+        operation_id=operation_id,
+    )
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -211,7 +225,7 @@ async def _address_review_comment_result(
     monitor_log: WorkspaceLogSink | None = None,
 ) -> VerdictResult | MonitorVerdictResult:
     """Resolve a review comment while retaining its full monitor result."""
-    del base_branch, remote_branch, operation_id, operation_type, monitor_log
+    del base_branch, remote_branch, operation_type, monitor_log
     from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
 
     prompt_owned_paths = (
@@ -238,7 +252,7 @@ async def _address_review_comment_result(
         task_tag=resolved_task_tag,
     )
     try:
-        return await runner._invoke_cli_for_verdict_result(
+        result: VerdictResult | MonitorVerdictResult = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=prompt,
             commit_message=f"fix: address PR review comment {comment.comment_id}",
@@ -251,7 +265,17 @@ async def _address_review_comment_result(
             evidence_body_hash=_review_comment_body_hash(comment),
         )
     except AgentVerdictExecutionError as exc:
-        return _agent_failed_result(exc)
+        result = _agent_failed_result(exc)
+    # #935: record the accepted item commit before the batch ends (see _address_thread).
+    await _record_accepted_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=str(comment.comment_id),
+        item_start_head=operation_start_head,
+        operation_id=operation_id,
+    )
+    return result
 
 
 def _agent_failed_result(exc: AgentVerdictExecutionError) -> MonitorVerdictResult:
