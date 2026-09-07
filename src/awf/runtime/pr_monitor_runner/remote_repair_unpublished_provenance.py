@@ -61,11 +61,25 @@ _REVIEW_ITEM_ID = r"(?:[A-Z]{2,4}_[A-Za-z0-9_-]{6,}|issue:\d+|bb(?:task|comment|
 # id, never a bare number; accepting digits there would match ordinary subjects such as
 # ``fix: address 404 errors`` and preserve — then push — commits AWF cannot attribute.
 _BARE_REVIEW_ITEM_ID = r"\d{3,}"
+# A task-tagged workspace legitimately carries the workspace task tag ahead of those
+# subjects: ``commit_message_with_task_tag`` prepends it to every AWF-authored commit
+# (``_commit_dirty_worktree``) and ``_commit_footer`` instructs the agent to prefix its
+# own commits identically — bare for Jira issue keys (``PROJ-123 fix: address …``),
+# bracketed for Aira entity keys (``[PROJ-T123] fix: address …``). Anchoring at
+# ``^fix`` would reject both and park accepted repair commits, so allow one leading
+# validated tag. The shape mirrors ``common/task_tag`` (``TASK_TAG_PATTERN`` /
+# ``ENTITY_KEY_PATTERN``) with the brackets optional so a tag written in the other
+# emitted form still matches; attribution still rests on the review-item id that
+# follows, so this cannot widen which subjects qualify.
+_TASK_TAG = r"[A-Z][A-Z0-9]+-T?\d+"
+_TASK_TAG_PREFIX = rf"(?:(?:\[{_TASK_TAG}\]|{_TASK_TAG}) +)?"
 # The four subjects AWF emits for review items: ``comments.py`` uses
 # ``fix: address PR review thread|comment <id>``; ``monitor_prompts.py`` asks the
 # agent for ``fix: address <id> — …`` / ``fix: address review comment <id> — …``.
 _REVIEW_ITEM_COMMIT_SUBJECT_RE = re.compile(
-    r"^fix: address (?:(?:PR )?review (?:thread|comment) (?:"
+    r"^"
+    + _TASK_TAG_PREFIX
+    + r"fix: address (?:(?:PR )?review (?:thread|comment) (?:"
     + _REVIEW_ITEM_ID
     + r"|"
     + _BARE_REVIEW_ITEM_ID

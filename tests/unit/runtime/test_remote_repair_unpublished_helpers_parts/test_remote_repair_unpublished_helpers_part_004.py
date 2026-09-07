@@ -154,7 +154,32 @@ def test_review_item_commit_subject_matches_bitbucket_shapes(subject: str) -> No
 @pytest.mark.parametrize(
     "subject",
     [
+        # A task-tagged workspace prefixes the same subjects with the workspace tag:
+        # bare for Jira issue keys, bracketed for Aira entity keys (PRRT_kwDOSJAM6s6fwa0B).
+        "PROJ-123 fix: address PR review thread PRRT_kwDOSJAM6s6fjOze",
+        "[PROJ-T123] fix: address PR review thread PRRT_kwDOSJAM6s6fjOze",
+        "PROJ-123 fix: address PRRT_kwDOSJAM6s6fjOze — tighten the guard",
+        "[PROJ-T123] fix: address review comment 4688598838 — tighten the guard",
+        "AIRA-T299 fix: address PR review comment issue:4688598838",
+        "[PROJ-123] fix: address PR review thread bbcomment:557058",
+    ],
+)
+def test_review_item_commit_subject_matches_task_tagged_shapes(subject: str) -> None:
+    assert _provenance._is_review_item_commit_subject(subject) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "subject",
+    [
         "fix: address operator hint",
+        # The tag prefix is only tolerated ahead of a review-item subject; it never
+        # makes an unattributable subject preservable on its own.
+        "PROJ-123 chore: unrelated local work",
+        "PROJ-123 fix: address 404 errors",
+        # Not a validated task-tag shape, so the subject stays unanchored and unmatched.
+        "wip fix: address PR review thread PRRT_kwDOSJAM6s6fjOze",
+        "Revert PROJ-123 fix: address PR review thread PRRT_kwDOSJAM6s6fjOze",
         "fix: address PR #922 CI failure",
         "chore: unrelated local work",
         "fix: address the reviewer feedback",
