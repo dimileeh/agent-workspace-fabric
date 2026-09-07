@@ -305,6 +305,15 @@ export function ConsoleDashboard() {
           gatedDetailFeedGenerationRef.current += 1;
           setOverview([]);
           setOverviewTruncationWarning(null);
+          // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
+          // retained agent/model options stay visible on the rail, and an
+          // active prior filter can keep a later recovered list empty.
+          setRetainedAgents([]);
+          setRetainedModels([]);
+          setAgentFilters([]);
+          setModelFilters([]);
+          setRepoFilter("");
+          setSearchText("");
           setSelectedId(null);
           setDetail(emptyDetail);
           setSelectedStreams([]);

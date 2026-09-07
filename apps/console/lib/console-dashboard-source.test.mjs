@@ -484,6 +484,25 @@ test("loadOverview auth denial closes dependent workspace surfaces", () => {
   );
 });
 
+test("loadOverview auth denial clears retained agent/model filters", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f_LzJ: overview
+  // feed-level 401/403 must drop tenant-learned filter metadata, not only rows.
+  // Leaving retainedAgents/retainedModels and active agent/model/repo/search
+  // filters intact exposes prior identifiers and can keep a later recovered
+  // list empty. Mirror clearAuthorizedConsoleFeeds without calling it.
+  const dashboard = dashboardSource.dashboard;
+  const authDeniedIdx = dashboard.indexOf("if (pageAuthDenied) {");
+  assert.ok(authDeniedIdx > 0, "Expected pageAuthDenied clear path in loadOverview");
+  const loadOverviewEnd = dashboard.indexOf("}, [setSelectedId]);", authDeniedIdx);
+  assert.ok(loadOverviewEnd > authDeniedIdx, "Expected loadOverview callback end after pageAuthDenied");
+  const authDeniedBody = dashboard.slice(authDeniedIdx, loadOverviewEnd);
+  assert.match(
+    authDeniedBody,
+    /setRetainedAgents\(\[\]\);\s*setRetainedModels\(\[\]\);[\s\S]*?setAgentFilters\(\[\]\);\s*setModelFilters\(\[\]\);\s*setRepoFilter\(""\);\s*setSearchText\(""\);/,
+    "Expected overview auth denial to reset retained agent/model metadata and active filters",
+  );
+});
+
 test("loadOverview retains last-good snapshot on transient page failure; clears on 401/403", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
