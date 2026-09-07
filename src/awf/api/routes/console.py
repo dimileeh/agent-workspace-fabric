@@ -462,6 +462,53 @@ class ConsoleDashboardSummaryResponse(BaseModel):
     counts: ConsoleDashboardCountsResponse
     overlap: ConsoleDashboardOverlapResponse
 
+    @model_validator(mode="after")
+    def counts_respect_documented_subsets(self) -> Self:
+        """Reject contradictory fleet tallies when related counts are non-null.
+
+        Matches the shipped TS ``parseDashboardSummary`` so malformed hosted
+        payloads fail closed rather than rendering impossible KPI relationships.
+        """
+        counts = self.counts
+        overlap = self.overlap
+        if (
+            counts.active is not None
+            and counts.executing is not None
+            and counts.executing > counts.active
+        ):
+            raise ValueError("counts.executing must be <= counts.active")
+        if (
+            overlap.awaiting_human_subset_of_monitoring_pr
+            and counts.awaiting_human is not None
+            and counts.monitoring_pr is not None
+            and counts.awaiting_human > counts.monitoring_pr
+        ):
+            raise ValueError("counts.awaiting_human must be <= counts.monitoring_pr")
+        if (
+            overlap.awaiting_operator_in_active_not_executing
+            and counts.awaiting_operator is not None
+        ):
+            if counts.active is not None and counts.awaiting_operator > counts.active:
+                raise ValueError("counts.awaiting_operator must be <= counts.active")
+            if (
+                counts.active is not None
+                and counts.executing is not None
+                and counts.awaiting_operator + counts.executing > counts.active
+            ):
+                raise ValueError(
+                    "counts.awaiting_operator + counts.executing must be <= counts.active"
+                )
+        if overlap.retrying_in_active_not_executing and counts.retrying is not None:
+            if counts.active is not None and counts.retrying > counts.active:
+                raise ValueError("counts.retrying must be <= counts.active")
+            if (
+                counts.active is not None
+                and counts.executing is not None
+                and counts.retrying + counts.executing > counts.active
+            ):
+                raise ValueError("counts.retrying + counts.executing must be <= counts.active")
+        return self
+
 
 @router.get("/capabilities", response_model=ConsoleCapabilitiesResponse)
 async def get_console_capabilities() -> ConsoleCapabilitiesResponse:

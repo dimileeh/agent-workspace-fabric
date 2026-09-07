@@ -327,3 +327,49 @@ def test_dashboard_summary_accepts_positive_integer_since_hours() -> None:
     payload["window"]["since_hours"] = 1
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.window.since_hours == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "counts_patch,overlap_patch",
+    [
+        ({"active": 1, "executing": 2}, {}),
+        (
+            {"monitoring_pr": 1, "awaiting_human": 2},
+            {"awaiting_human_subset_of_monitoring_pr": True},
+        ),
+        (
+            {"active": 2, "executing": 2, "awaiting_operator": 1},
+            {"awaiting_operator_in_active_not_executing": True},
+        ),
+        (
+            {"active": 2, "executing": 2, "retrying": 1},
+            {"retrying_in_active_not_executing": True},
+        ),
+    ],
+)
+def test_dashboard_summary_rejects_contradictory_count_subsets(
+    counts_patch: dict[str, int],
+    overlap_patch: dict[str, bool],
+) -> None:
+    """Match the shipped TS parser: declared subset relationships must hold."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["counts"].update(counts_patch)
+    payload["overlap"].update(overlap_patch)
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_skips_subset_checks_for_null_counts_or_false_flags() -> None:
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["counts"]["active"] = None
+    payload["counts"]["executing"] = 5
+    assert ConsoleDashboardSummaryResponse.model_validate(payload).counts.executing == 5
+
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["counts"]["monitoring_pr"] = 1
+    payload["counts"]["awaiting_human"] = 2
+    payload["overlap"]["awaiting_human_subset_of_monitoring_pr"] = False
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.counts.awaiting_human == 2

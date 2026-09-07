@@ -247,6 +247,41 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
       return null;
     }
   }
+  // Documented subset relationships: enforce when related counts are present so
+  // contradictory hosted snapshots fail closed and the UI keeps last-good data.
+  const active = counts.active as number | null;
+  const executing = counts.executing as number | null;
+  const monitoringPr = counts.monitoring_pr as number | null;
+  const awaitingHuman = counts.awaiting_human as number | null;
+  const awaitingOperator = counts.awaiting_operator as number | null;
+  const retrying = counts.retrying as number | null;
+  if (active != null && executing != null && executing > active) {
+    return null;
+  }
+  if (
+    overlap.awaiting_human_subset_of_monitoring_pr === true &&
+    awaitingHuman != null &&
+    monitoringPr != null &&
+    awaitingHuman > monitoringPr
+  ) {
+    return null;
+  }
+  if (overlap.awaiting_operator_in_active_not_executing === true && awaitingOperator != null) {
+    if (active != null && awaitingOperator > active) {
+      return null;
+    }
+    if (active != null && executing != null && awaitingOperator + executing > active) {
+      return null;
+    }
+  }
+  if (overlap.retrying_in_active_not_executing === true && retrying != null) {
+    if (active != null && retrying > active) {
+      return null;
+    }
+    if (active != null && executing != null && retrying + executing > active) {
+      return null;
+    }
+  }
   return {
     ...(payload as ConsoleDashboardSummary),
     coverage: {

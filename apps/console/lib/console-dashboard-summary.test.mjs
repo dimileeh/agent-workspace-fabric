@@ -82,3 +82,68 @@ test("parseDashboardSummary requires a positive integer since_hours", () => {
   assert.ok(ok);
   assert.equal(ok.window.since_hours, 1);
 });
+
+test("parseDashboardSummary rejects contradictory count subset relationships", () => {
+  // Domain: executing ⊆ active.
+  assert.equal(
+    parseDashboardSummary(validSummary({ counts: { ...fixture.counts, active: 1, executing: 2 } })),
+    null,
+  );
+  // Declared overlap: awaiting_human ⊆ monitoring_pr.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: 2 },
+        overlap: { ...fixture.overlap, awaiting_human_subset_of_monitoring_pr: true },
+      }),
+    ),
+    null,
+  );
+  // Declared overlap: awaiting_operator ∈ active ∉ executing.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        counts: { ...fixture.counts, active: 2, executing: 2, awaiting_operator: 1 },
+        overlap: { ...fixture.overlap, awaiting_operator_in_active_not_executing: true },
+      }),
+    ),
+    null,
+  );
+  // Declared overlap: retrying ∈ active ∉ executing.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        counts: { ...fixture.counts, active: 2, executing: 2, retrying: 1 },
+        overlap: { ...fixture.overlap, retrying_in_active_not_executing: true },
+      }),
+    ),
+    null,
+  );
+});
+
+test("parseDashboardSummary skips subset checks when related counts are null or flags false", () => {
+  assert.ok(
+    parseDashboardSummary(validSummary({ counts: { ...fixture.counts, active: null, executing: 5 } })),
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: 2 },
+        overlap: { ...fixture.overlap, awaiting_human_subset_of_monitoring_pr: false },
+      }),
+    ),
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        counts: { ...fixture.counts, active: 2, executing: 2, awaiting_operator: 1 },
+        overlap: { ...fixture.overlap, awaiting_operator_in_active_not_executing: false },
+      }),
+    ),
+  );
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({ counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: null } }),
+    ),
+  );
+});
