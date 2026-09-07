@@ -742,12 +742,17 @@ class AgentAdapter(ABC):
                     # back (#932) would never see the timeout. Carry the watchdog
                     # classification on the escalating cleanup error.
                     #
-                    # The tag is consumed by the agent-service recovery loop
-                    # (``runtime/pr_monitor_runner/agent_service_recovery.py`` and
-                    # its ``control/executor`` twin): when it recovers a tagged
-                    # cleanup error it must publish the timeout rollback floor and
-                    # sink the timed-out run's dirty worktree *before* any rerun,
-                    # and give the rerun up when that preservation is not secured.
+                    # The tag has two consumers: the PR-monitor service-recovery
+                    # loop (``runtime/pr_monitor_runner/agent_service_recovery.py``)
+                    # and the control-plane executor recovery
+                    # (``control/executor/agent_service_recovery.py``), which
+                    # republishes it as the ``source_reason_code`` of a
+                    # give-up so the failure records the watchdog timeout rather
+                    # than the EXEC_PROCESS_CLEANUP_FAILED mask. When either
+                    # recovers a tagged cleanup error it must publish the timeout
+                    # rollback floor and sink the timed-out run's dirty worktree
+                    # *before* any rerun, and give the rerun up when that
+                    # preservation is not secured.
                     # Untagged cleanup errors reach the caller's preserve handler
                     # as plain service failures, so do not drop this assignment.
                     cleanup_exc.agent_reason_code = reason_code
