@@ -460,19 +460,23 @@ async def test_correction_residue_fingerprint_surfaces_edit_with_local_fsmonitor
     worktree.mkdir()
     init_git_worktree(worktree)
     sentinel_script = tmp_path / "evil_fsmonitor.sh"
+    # Protocol V2 requires ``token\\0`` then NUL-delimited paths. A newline-only
+    # ``echo`` token makes Git's ``is_trivial`` read one past the capture buffer;
+    # when that byte is ``/``, every CE_FSMONITOR_VALID bit is cleared and the
+    # poison assertion flakes (seen on Git 2.55 CI runners).
     sentinel_script.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1" = "version" ] || [ "$1" = "--query" ]; then\n'
-        '  echo "1"\n'
-        "  exit 0\n"
-        "fi\n"
-        'echo "last_update_token"\n'
-        "exit 0\n",
+        "#!/bin/sh\nprintf 'last_update_token\\0'\nexit 0\n",
         encoding="utf-8",
     )
     sentinel_script.chmod(0o755)
     subprocess.run(
         ["git", "config", "core.fsmonitor", str(sentinel_script)],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.fsmonitorHookVersion", "2"],
         cwd=worktree,
         check=True,
         capture_output=True,

@@ -6,6 +6,8 @@ import pytest
 
 from awf.runtime.feedback_policy import (
     CLOSED_OUTDATED_THREAD_VERDICTS,
+    RESOLVABLE_THREAD_VERDICTS,
+    _legacy_review_thread_body_hash,
     canonical_unresolved_inline_threads,
     needs_comment_attention,
     outdated_thread_has_fresh_feedback,
@@ -15,6 +17,7 @@ from awf.runtime.feedback_policy import (
     review_thread_body_state_key,
     thread_enters_address_comments,
     thread_needs_attention,
+    thread_resolution_pending,
     unresolved_active_count,
     unresolved_canonical_count,
     unresolved_outdated_unique_count,
@@ -768,3 +771,39 @@ def test_preferred_duplicate_review_thread_requires_at_least_one_copy() -> None:
     """Empty transport groups are a caller bug — refuse rather than invent a thread."""
     with pytest.raises(ValueError, match="at least one copy"):
         preferred_duplicate_review_thread(())
+
+
+@pytest.mark.unit
+def test_thread_resolution_pending_requires_resolvable_verdict_and_matching_hash() -> None:
+    """#925: only a resolvable verdict on an unchanged conversation awaits resolve."""
+    thread = _thread("PRRT_pending")
+    body_key = review_thread_body_state_key("PRRT_pending")
+    matching = {
+        "PRRT_pending": "fix_committed",
+        body_key: review_thread_body_hash(thread),
+    }
+    assert thread_resolution_pending(matching, thread)
+    for verdict in RESOLVABLE_THREAD_VERDICTS:
+        assert thread_resolution_pending({**matching, "PRRT_pending": verdict}, thread)
+    # Verdicts that must keep the thread open.
+    assert not thread_resolution_pending({**matching, "PRRT_pending": "needs_human"}, thread)
+    assert not thread_resolution_pending({**matching, "PRRT_pending": "agent_failed"}, thread)
+    # Never addressed.
+    assert not thread_resolution_pending({body_key: review_thread_body_hash(thread)}, thread)
+    # No recorded body snapshot / a stale one: the conversation may have moved on.
+    assert not thread_resolution_pending({"PRRT_pending": "fix_committed"}, thread)
+    assert not thread_resolution_pending(
+        {"PRRT_pending": "fix_committed", body_key: "deadbeef"}, thread
+    )
+
+
+@pytest.mark.unit
+def test_thread_resolution_pending_accepts_legacy_body_hash() -> None:
+    """A pre-normalize hash still means "this conversation is unchanged"."""
+    thread = _thread("PRRT_legacy")
+    legacy = _legacy_review_thread_body_hash(thread)
+    state_map = {
+        "PRRT_legacy": "false_positive",
+        review_thread_body_state_key("PRRT_legacy"): legacy,
+    }
+    assert thread_resolution_pending(state_map, thread)

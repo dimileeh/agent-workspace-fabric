@@ -518,7 +518,9 @@ async def test_fix_cycle_breaks_settle_when_remote_head_advances_unreconciled(
     )
 
     assert result.failed is False
-    assert settle_calls == 1
+    # One settle re-poll, then the #910 post-action PR re-check (same stub); settle
+    # did NOT continue into a second pass under the advanced tip.
+    assert settle_calls == 2
     assert address_thread_ids == ["T_first"]
     assert cycle_start_heads == [remote_open]
     assert remote_advanced not in cycle_start_heads
@@ -634,8 +636,12 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     """Line coords relative to a newer remote head must map and accept a real FIXED.
 
     When the remote PR head advances (or coords are already for a later commit),
-    anchoring evidence at that head accepts a line-scoped fix. Anchoring at an
-    older SHA maps that line to failure and rejects a real fix.
+    anchoring evidence at that head accepts a line-scoped fix on the first
+    attempt. Anchoring at an older SHA maps that line elsewhere, so the same
+    contentful change fails the line-anchored gate on attempt 0 and earns the
+    correction prompt; the correction's path-level re-check then accepts the
+    change, because it is in the item's own range and touches the reviewed file
+    (#925 D1).
     """
     worktree = tmp_path / "worktrees" / "ws_protocol"
     worktree.mkdir(parents=True)
@@ -681,7 +687,10 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     monkeypatch.setattr(comment_verdict, "repair_agent_runtime_ownership", _ok)
     monkeypatch.setattr(comment_verdict, "mirror_path_for_worktree", lambda _path: None)
 
-    async def _fixed_agent(**_kwargs: object) -> AgentRunResult:
+    prompts: list[str] = []
+
+    async def _fixed_agent(**kwargs: object) -> AgentRunResult:
+        prompts.append(str(kwargs["prompt"]))
         return AgentRunResult(
             returncode=0,
             stdout="AWF-VERDICT: FIXED: updated reviewed line",
@@ -706,23 +715,30 @@ async def test_later_pass_anchor_accepts_real_item_line_fix(
     )
     assert result.verdict == "fix_committed"
     assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
+    assert len(prompts) == 1
 
-    # Stale operation-open anchor must fail-closed for this settle-thread line.
-    with pytest.raises(AgentVerdictProtocolError) as stale:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="fix the reviewed line",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=pass_head,
-            evidence_item_path="src/mod.py",
-            evidence_item_line=7,
-            evidence_anchor_head=operation_open,
-            commit_dirty_changes=False,
-        )
-    assert stale.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # A stale operation-open anchor maps the line elsewhere, so the line gate
+    # rejects attempt 0 and the agent is told so. The re-affirmed FIXED is then
+    # accepted at path level: the commit is in the item's own range and changes
+    # the reviewed file, so it is kept rather than escalated to a human.
+    prompts.clear()
+    stale = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="fix the reviewed line",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=pass_head,
+        evidence_item_path="src/mod.py",
+        evidence_item_line=7,
+        evidence_anchor_head=operation_open,
+        commit_dirty_changes=False,
+    )
+    assert stale.verdict == "fix_committed"
+    assert _git(worktree, "rev-parse", "HEAD").stdout.strip() == fixed_tip
+    assert len(prompts) == 2
+    assert "no new item-scoped Git change" in prompts[1]
 
 
 @pytest.mark.unit

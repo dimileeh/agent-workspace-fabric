@@ -436,30 +436,42 @@ async def _seed_failed_source_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
     task_kind: str,
+    execution_mode: str | None = "local",
+    auto_merge: bool = False,
+    task_policy_overrides: dict[str, object] | None = None,
 ) -> str:
     """Persist a source workspace for a task kind that bypasses direct create.
 
     ``sync_feature_pr`` is created through the PR-adoption flow (via
     ``WorkspaceRepository.create``), not the public request path, so retry
     coverage seeds the row the same way instead of building a rejected request.
+
+    ``execution_mode`` controls ``pr_adoption.execution.mode`` for sync-feature
+    rows. Pass ``None`` to omit the execution block (legacy local default).
     """
     async with factory() as session:
         repo = WorkspaceRepository(session)
         task_policy = None
         if task_kind == "sync_feature_pr":
+            adoption: dict[str, object] = {
+                "repo_slug": "example/retryable",
+                "pr_number": 42,
+                "pr_url": "https://github.com/example/retryable/pull/42",
+                "head_ref": "contributors/fix-123",
+                "base_ref": "development",
+                "head_sha": "b" * 40,
+                "base_sha": "a" * 40,
+            }
+            if execution_mode is not None:
+                adoption["execution"] = {"mode": execution_mode}
             task_policy = {
                 "task_kind": task_kind,
-                "pr_adoption": {
-                    "repo_slug": "example/retryable",
-                    "pr_number": 42,
-                    "pr_url": "https://github.com/example/retryable/pull/42",
-                    "head_ref": "contributors/fix-123",
-                    "base_ref": "development",
-                    "head_sha": "b" * 40,
-                    "base_sha": "a" * 40,
-                    "execution": {"mode": "local"},
-                },
+                "pr_adoption": adoption,
             }
+            if task_policy_overrides:
+                task_policy.update(task_policy_overrides)
+        elif task_policy_overrides:
+            task_policy = dict(task_policy_overrides)
         source = await repo.create(
             repo_url="git@github.com:example/retryable.git",
             branch_base="development",
@@ -468,7 +480,7 @@ async def _seed_failed_source_workspace(
             task_external_id="TICKET-RETRY",
             task_class="test_task",
             owned_paths=["src/awf/retry/**"],
-            auto_merge=False,
+            auto_merge=auto_merge,
             initial_review_grace_period_seconds=30,
             agent=AgentRuntime.codex.value,
             profile_ref="python",
@@ -480,6 +492,116 @@ async def _seed_failed_source_workspace(
         )
         await session.commit()
         return source.id
+
+
+async def _mark_cancelled(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    branch_name: str = "codex/old-attempt",
+    remote_push_branch: str | None = None,
+    release_runtime: bool = True,
+    pr_url: str | None = None,
+) -> None:
+    """Mark a workspace as cancelled with shared evidence for retry tests."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.branch_name = branch_name
+        workspace.remote_push_branch = remote_push_branch
+        workspace.pr_url = pr_url
+        workspace.compose_project_name = "awf_old_attempt"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.cancelled,
+            reason_code="TEST_CANCEL",
+        )
+        if release_runtime:
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+            )
+        await session.commit()
+
+
+def _settings_with_hosted_delegation(tmp_path: Path) -> Settings:
+    """Settings with hosted delegation configured and an empty host home."""
+    return Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        hosted_delegation_base_url="https://hosted.example.test",
+        hosted_delegation_bearer_token="hosted-token",
+    )
+
+
+def _assert_hosted_local_preflight_bypass(
+    task_policy: dict[str, object],
+    *,
+    agent: str = "codex",
+) -> None:
+    """Hosted open retry must record a schema-valid nonblocking bypass snapshot."""
+    from awf.api.schemas import ProviderReadinessPreflightResponse
+    from awf.service.pr_monitor_adoption_cursor_preflight import (
+        _needs_deferred_cursor_auto_router_preflight,
+    )
+    from awf.service.workspaces_retry import (
+        HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON,
+    )
+
+    snapshot = task_policy.get("provider_readiness_preflight")
+    assert isinstance(snapshot, dict)
+    assert snapshot.get("blocks_launch") is False
+    assert snapshot.get("reason_code") == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+    assert _needs_deferred_cursor_auto_router_preflight(task_policy) is False
+    # Must serialize as WorkspaceRetryResponse / WorkspaceResponse preflight
+    # (PRRT_kwDOSJAM6s6fjz5r): missing provider/agent/auth_* fields raise 500.
+    validated = ProviderReadinessPreflightResponse.model_validate(snapshot)
+    assert validated.agent == agent
+    assert validated.blocks_launch is False
+    assert validated.reason_code == HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+
+
+async def _prepare_hosted_open_source(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    terminal: str = "failed",
+    auto_merge: bool = True,
+) -> str:
+    """Seed a terminal hosted sync_feature_pr adoption ready for retry."""
+    first_id = await _seed_failed_source_workspace(
+        factory,
+        task_kind="sync_feature_pr",
+        execution_mode="hosted",
+        auto_merge=auto_merge,
+    )
+    if terminal == "cancelled":
+        await _mark_cancelled(
+            factory,
+            first_id,
+            branch_name="feature-sync/hosted-open",
+            remote_push_branch="contributors/fix-123",
+            pr_url=None,
+        )
+    else:
+        await _mark_failed(
+            factory,
+            first_id,
+            branch_name="feature-sync/hosted-open",
+            remote_push_branch="contributors/fix-123",
+            pr_url=None,
+        )
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first_id)
+        assert source is not None
+        source.pr_number = 42
+        source.compose_project_name = None
+        source.compose_file_path = None
+        await session.commit()
+    return first_id
 
 
 def _live_pr_state(

@@ -266,6 +266,68 @@ class TestPullRequestUrlParsing:
         with pytest.raises(ValueError):
             parse_github_pull_request_url(pr_url)
 
+    @pytest.mark.unit
+    def test_forge_dispatch_parses_bitbucket_pr_url(self) -> None:
+        from awf.common.github_client import parse_forge_pull_request_url
+
+        repo, number = parse_forge_pull_request_url(
+            "https://bitbucket.org/example/retryable/pull-requests/42",
+            forge="bitbucket",
+        )
+
+        assert repo.forge == "bitbucket"
+        assert repo.slug() == "example/retryable"
+        assert number == 42
+
+    @pytest.mark.unit
+    def test_forge_dispatch_rejects_github_url_for_bitbucket_forge(self) -> None:
+        from awf.common.github_client import parse_forge_pull_request_url
+
+        with pytest.raises(ValueError):
+            parse_forge_pull_request_url(
+                "https://github.com/example/retryable/pull/42",
+                forge="bitbucket",
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "pr_url",
+        [
+            "https://bitbucket.org/example/retryable/pull/42",
+            "https://bitbucket.org/example/retryable/issues/42",
+            "https://bitbucket.org/example/retryable/pull-requests/0",
+            "https://bitbucket.org/example/retryable/pull-requests/not-a-number",
+        ],
+    )
+    def test_forge_dispatch_rejects_invalid_bitbucket_pr_urls(self, pr_url: str) -> None:
+        from awf.common.github_client import parse_forge_pull_request_url
+
+        with pytest.raises(ValueError):
+            parse_forge_pull_request_url(pr_url, forge="bitbucket")
+
+    @pytest.mark.unit
+    def test_forge_dispatch_rejects_unsupported_forge(self) -> None:
+        from awf.common.github_client import parse_forge_pull_request_url
+
+        with pytest.raises(ValueError, match="Unsupported forge"):
+            parse_forge_pull_request_url(
+                "https://github.com/example/retryable/pull/42",
+                forge="gitlab",  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.unit
+    def test_forge_dispatch_parses_github_via_forge_param(self) -> None:
+        from awf.common.github_client import parse_forge_pull_request_url
+
+        repo, number = parse_forge_pull_request_url(
+            "https://github.com/example/retryable/pull/7",
+            forge="github",
+        )
+
+        assert repo.forge == "github"
+        assert repo.slug() == "example/retryable"
+        assert number == 7
+
 
 class TestFetchPullRequestAdoptionMetadata:
     @pytest.mark.unit

@@ -1077,6 +1077,12 @@ async def handle_merge_action(
                     status=merge_status,
                     state=state,
                     blocker_reason=notification_reason,
+                    # Re-read PR state at the notification boundary: the merge
+                    # attempt whose rejection is being escalated ran after this
+                    # snapshot, and a PR merged/closed out-of-band in between must
+                    # not collect a stale needs-human comment.
+                    workspace_id=workspace_id,
+                    recheck_context="merge_method_preflight_notification",
                 )
             except ForgeClientError as exc:
                 # Both forges post the human notification through ``self._deps.gh``;
@@ -1229,6 +1235,10 @@ async def handle_merge_action(
                     status=merge_status,
                     state=state,
                     blocker_reason=blocker_reason,
+                    # Same boundary re-read as the merge-method arm above: the
+                    # rejected merge attempt post-dates this snapshot.
+                    workspace_id=workspace_id,
+                    recheck_context="merge_blocked_notification",
                 )
             except ForgeClientError as exc:
                 # Transient blip waits then keeps polling; permanent fault re-raises.
@@ -1257,14 +1267,32 @@ async def handle_merge_action(
 
         if merge_sha is None:  # pragma: no cover - defensive invariant
             raise RuntimeError("merge critical section exited without a merge result")
-        self._write_defer_signal(
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            terminal_action="Merge",
-            merged=True,
-            status=merge_status,
-            state=state,
-        )
+
+        async def _publish_merge_defer_signal() -> None:
+            """Publish the terminal artifact once the ``completed`` write commits."""
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="Merge",
+                merged=True,
+                status=merge_status,
+                state=state,
+            )
+
+        # The operation record is this runner's own audit row — it is finished either
+        # way — but the workspace-scoped writes are gated on the terminate sink's
+        # owner fence, same seam as the ``ShortCircuitCompleted`` arm and
+        # ``_finish_cycle_for_terminal_pr`` (PRRT_kwDOSJAM6s6fsqcA /
+        # PRRT_kwDOSJAM6s6fsrlC). A long merge critical section can outlive this
+        # runner's monitor lease, so the PR merges here while the row already belongs
+        # to a newer claimant: publishing a "monitor is done" defer signal (or letting
+        # ``run()``'s post-``_execute`` persist flush this stale state, clobbering the
+        # live claimant's ``monitor_threads_addressed`` / ``monitor_last_commit_sha``)
+        # would then land on a row still in ``monitoring_pr``. The new owner's next
+        # poll sees the merged PR and completes the workspace itself. The gate is the
+        # sink's transition commit, NOT its return, so a cancellation inside its
+        # post-commit cleanup cannot strand a completed workspace with no terminal
+        # artifact (PRRT_kwDOSJAM6s6fvDbP / PRRT_kwDOSJAM6s6fvGsq).
         await self._record_monitor_state_operation(
             workspace_id=workspace_id,
             action="completed",
@@ -1283,14 +1311,16 @@ async def handle_merge_action(
             monitor_log=monitor_log,
             extra_identity=("merge", merge_sha),
         )
-        await self._terminate_completed(
+        if not await self._terminate_completed(
             workspace_id,
             pr_merge_sha=merge_sha,
             repo_url=repo_url,
             base_branch=base_branch,
             compose_project=compose_project,
             compose_file=compose_file,
-        )
+            on_transition_committed=_publish_merge_defer_signal,
+        ):
+            state.monitor_writes_suppressed = True
         return True
 
     return None

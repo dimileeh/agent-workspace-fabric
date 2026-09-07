@@ -14,7 +14,6 @@ from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
-    AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
@@ -530,28 +529,38 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         body_excerpt="fix the helper used here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_when_same_file_unrelated_line_changed(
+async def test_same_file_off_anchor_fix_accepted_on_the_correction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue:5381831025: same-file edits away from the review line must not count."""
+    """issue:5381831025 + #925 D1: attempt 0 strict, correction path-level.
+
+    Attempt 0 keeps the strict line-anchored evidence rule, so the misplaced
+    FIXED still earns its correction prompt. Having been told its FIXED carried
+    no line evidence, the agent re-affirms it — and the item's own commit range
+    does change the reviewed file, so the off-anchor fix is accepted rather than
+    escalated to a human. Cross-file cases below still reject on both attempts.
+    """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
@@ -579,20 +588,23 @@ async def test_fixed_rejected_when_same_file_unrelated_line_changed(
         body_excerpt="fix the null check here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Accepted only on the correction, and only because the commit changes the
+    # reviewed file: the fix is kept, not rolled back and not escalated.
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
+    assert "no new item-scoped Git change" in runner.prompts[1]
 
 
 @pytest.mark.unit
@@ -632,19 +644,22 @@ async def test_bundled_inline_thread_rejects_outside_inline_path(
         ),
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
@@ -680,19 +695,22 @@ async def test_fixed_rejected_when_contentful_descendant_is_unrelated(
         body_excerpt="fix the null check here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 

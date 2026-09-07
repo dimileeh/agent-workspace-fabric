@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
+from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
 from awf.control.executor.helpers import (
     _pre_push_validation_phase_names,
@@ -260,6 +261,11 @@ async def _validated_git_push_result(
     operation_start_head: str | None = None,
     allow_validation_fix_passes: bool = True,
     allow_resync_on_rejection: bool = True,
+    pr_number: int | None = None,
+    pr_terminal_context: str | None = None,
+    repo: RepoRef | None = None,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
 ) -> _GitPushResult:
     """Run pre-push validation with optional fix passes before pushing.
 
@@ -277,6 +283,24 @@ async def _validated_git_push_result(
     commit (PR #609 comment 4512881681). Disabling the fix passes leaves validation
     itself intact: a real failure surfaces (the grant survives for a re-resume)
     rather than being papered over with ungranted protected commits.
+
+    ``pr_number`` + ``pr_terminal_context`` arm the post-validation #910 recheck.
+    Every action seam re-reads PR state BEFORE calling in, but validation (plus its
+    agent fix passes) is the LONGEST step left in the cycle — a full profile suite
+    can run for many minutes — so a PR that merged or closed while it ran would
+    still be pushed against the guard's intent. Re-read PR state once more here and
+    return the moot envelope instead (PRRT_kwDOSJAM6s6fjOze).
+
+    The recheck runs BEFORE branching on ``validation_result.passed``: a failing
+    result is exactly as stale as a passing one, and most pre-push failure reason
+    codes (toolchain missing, rollback failed, worktree cleanup failed, …) are
+    ``terminal_monitor_failure``, so returning the failure makes the loop
+    ``_terminate_failed`` a workspace whose PR already merged instead of completing
+    it as moot (PRRT_kwDOSJAM6s6fuRgt). ``repo`` is optional: the guard
+    self-resolves it from the workspace row. Callers with no PR context (and the
+    tests that exercise validation alone) omit ``pr_number``/``pr_terminal_context``
+    and keep the previous behavior; the no-validation early return below skips the
+    recheck because no time elapses between the seam's guard and that push.
     """
     if self._deps.validation is None:
         return cast(
@@ -301,6 +325,18 @@ async def _validated_git_push_result(
         operation_start_head=operation_start_head,
         allow_validation_fix_passes=allow_validation_fix_passes,
     )
+    if pr_number is not None and pr_terminal_context is not None:
+        moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=f"{pr_terminal_context}_post_validation",
+            operation_id=operation_id,
+            operation_type=operation_type,
+            repo=repo,
+            worktree_path=worktree_path,
+        )
+        if moot_result is not None:
+            return cast(_GitPushResult, moot_result)
     if not validation_result.passed:
         return _GitPushResult(
             pushed=False,

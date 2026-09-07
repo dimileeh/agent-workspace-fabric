@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from awf.api import schemas as api_schemas
 from awf.api import schemas_responses
 from awf.api.schemas import (
     PullRequestMonitorAdoptionRequest,
@@ -34,8 +35,19 @@ def _create_request(task_tag: str | None | object = "__unset__") -> WorkspaceCre
 
 @pytest.mark.unit
 def test_pr_monitor_request_models_are_owned_by_api_schemas() -> None:
-    assert PullRequestMonitorExecutionPolicy.__module__ == "awf.api.schemas"
-    assert PullRequestMonitorAdoptionRequest.__module__ == "awf.api.schemas"
+    """PR-monitor *request* contracts must never be filed under response leaves.
+
+    PRRT_kwDOSJAM6s6S7WnD rejected parking these request models in
+    ``schemas_responses`` (the response-leaf module). Issue #911 moved them into
+    the purpose-named ``schemas_pr_adoption`` because ``schemas`` had reached the
+    1500-line maintainability cap; the ownership rule is unchanged — they are
+    reachable from ``awf.api.schemas`` (the single import surface for REST + MCP)
+    and stay out of ``schemas_responses``.
+    """
+    assert PullRequestMonitorExecutionPolicy.__module__ == "awf.api.schemas_pr_adoption"
+    assert PullRequestMonitorAdoptionRequest.__module__ == "awf.api.schemas_pr_adoption"
+    assert api_schemas.PullRequestMonitorExecutionPolicy is PullRequestMonitorExecutionPolicy
+    assert api_schemas.PullRequestMonitorAdoptionRequest is PullRequestMonitorAdoptionRequest
     assert not hasattr(schemas_responses, "PullRequestMonitorExecutionPolicy")
     assert not hasattr(schemas_responses, "PullRequestMonitorAdoptionRequest")
 

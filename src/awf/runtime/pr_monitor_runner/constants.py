@@ -114,6 +114,20 @@ _PROTECTED_SCOPE_PAUSED_REASON = "PROTECTED_SCOPE_PAUSED_BLOCKED"
 
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 
+# The PR went terminal (merged or closed on the forge) WHILE a long monitor
+# action was still running, so everything the action was about to do — push the
+# repair, pause into ``blocked``, ping a human — is moot (#910). ``decide()``
+# maps merged/closed to ``ShortCircuitCompleted`` / ``Abort`` only at the START
+# of a poll cycle, so the post-action seams re-read PR state themselves and
+# carry this reason code into the log line, the ``workspace.monitor_action_moot``
+# event, and the non-paused push result the caller finishes on.
+_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON = "MONITOR_ACTION_MOOT_PR_TERMINAL"
+
+# The post-action re-fetch itself failed with a transient forge fault. The guard
+# fails OPEN (today's push/pause behavior runs unchanged) but the blip stays
+# attributable through this distinct reason code.
+_MONITOR_ACTION_MOOT_RECHECK_FAILED_REASON = "MONITOR_ACTION_MOOT_RECHECK_FAILED"
+
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
 
 _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
