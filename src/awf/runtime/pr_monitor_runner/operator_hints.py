@@ -43,7 +43,7 @@ from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
 )
 from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import (
     clear_timeout_retry,
-    mark_timeout_retry_used,
+    mark_timeout_retry_used_durably,
     should_retry_timed_out_hint,
     timeout_retry_reason_code,
 )
@@ -355,7 +355,19 @@ async def _run_operator_hint_cycle(
                 # would record this cycle as a succeeded ``needs_human`` and the
                 # watchdog failure would vanish from operation history — exactly
                 # the "retries must preserve reason codes" rule (AGENTS.md).
-                mark_timeout_retry_used(state, hint)
+                #
+                # The marker goes straight to the workspace row, ahead of the
+                # return and every later await: the hint stays durably pending,
+                # so a worker killed before the next ``_persist_state`` (or a
+                # ``_finish_monitor_operation`` fault) would resume with a
+                # pending hint and no budget and grant the "single" retry all
+                # over again (PRRT_kwDOSJAM6s6fzBXq).
+                await mark_timeout_retry_used_durably(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                    hint=hint,
+                )
                 return _GitPushResult(
                     pushed=False,
                     failed=False,
