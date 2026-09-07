@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   capabilityIdentityKey,
@@ -13,6 +16,14 @@ import {
   resolveWorkspaceLogStreamAccess,
 } from "./console-capabilities.ts";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "./console-dashboard-summary.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const IDENTITY_MATRIX = JSON.parse(
+  readFileSync(
+    join(HERE, "../../../docs/console/fixtures/v1/capabilities.identity-matrix.json"),
+    "utf8",
+  ),
+);
 
 const localCapabilities = {
   schema_version: 1,
@@ -471,6 +482,34 @@ test("hosted capabilities require identity with a non-empty tenant_id", () => {
   assert.equal(nullTenant.ok, false);
   if (nullTenant.ok) return;
   assert.equal(nullTenant.kind, "malformed");
+
+  const whitespaceTenant = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: "   " },
+  });
+  assert.equal(whitespaceTenant.ok, false);
+  if (whitespaceTenant.ok) return;
+  assert.equal(whitespaceTenant.kind, "malformed");
+});
+
+test("shared identity matrix matches parseConsoleCapabilities", () => {
+  for (const caseRow of IDENTITY_MATRIX.cases) {
+    const parsed = parseConsoleCapabilities(caseRow.payload);
+    const expectOk = caseRow.expect === "accept";
+    assert.equal(
+      parsed.ok,
+      expectOk,
+      `${caseRow.name}: expected ${caseRow.expect}, got ok=${parsed.ok}`,
+    );
+  }
+});
+
+test("capabilityIdentityKey treats whitespace hosted tenant as missing discriminator", () => {
+  const blankish = capabilityIdentityKey({
+    ...hostedCapabilities,
+    identity: { backend_id: "awf-cloud", scope: "tenant", tenant_id: " \t " },
+  });
+  assert.match(blankish, /^hosted\|missing-tenant-discriminator\|/);
 });
 
 test("hosted tenant identity keys differ so feed epochs can advance", () => {

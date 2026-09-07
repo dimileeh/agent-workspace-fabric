@@ -703,6 +703,7 @@
           "tenant_id": {
             "anyOf": [
               {
+                "pattern": ".*\\S.*",
                 "type": "string"
               },
               {
@@ -804,7 +805,7 @@
                   "type": "string"
                 },
                 "tenant_id": {
-                  "minLength": 1,
+                  "pattern": ".*\\S.*",
                   "type": "string"
                 }
               },

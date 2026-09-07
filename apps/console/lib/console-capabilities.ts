@@ -63,12 +63,12 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
   const identity = capabilities.identity;
   const backendId = identity?.backend_id ?? "";
   const scope = identity?.scope ?? "";
-  const tenantId = identity?.tenant_id ?? "";
+  const tenantId = typeof identity?.tenant_id === "string" ? identity.tenant_id : "";
   if (capabilities.backend_kind === "hosted") {
     // Never emit hosted||| — that collapses every tenant onto one epoch key.
     // Parse rejects incomplete hosted identity; this is defense in depth for
     // any direct callers and for race windows around tenant switches.
-    if (!backendId || !scope || !tenantId) {
+    if (!backendId || !scope || tenantId.trim() === "") {
       return `hosted|missing-tenant-discriminator|${backendId}|${scope}|${tenantId}`;
     }
     return ["hosted", backendId, scope, tenantId].join("|");
@@ -78,6 +78,21 @@ export function capabilityIdentityKey(capabilities: ConsoleCapabilities): string
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+/** Matches Python tenant_id_must_not_be_blank / OpenAPI pattern .*\\S.* */
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function validateIdentityTenantId(identity: Record<string, unknown>): string | null {
+  if (!("tenant_id" in identity) || identity.tenant_id == null) {
+    return null;
+  }
+  if (!isNonBlankString(identity.tenant_id)) {
+    return "identity.tenant_id must be a nonempty (non-whitespace) string when provided.";
+  }
+  return null;
 }
 
 function validateHostedIdentity(identity: unknown): string | null {
@@ -91,10 +106,20 @@ function validateHostedIdentity(identity: unknown): string | null {
   if (!isNonEmptyString(record.scope)) {
     return "Hosted console capabilities require a non-empty identity.scope.";
   }
-  if (!isNonEmptyString(record.tenant_id)) {
+  if (!isNonBlankString(record.tenant_id)) {
     return "Hosted console capabilities require a non-empty identity.tenant_id.";
   }
   return null;
+}
+
+function validateOptionalLocalIdentity(identity: unknown): string | null {
+  if (identity == null) {
+    return null;
+  }
+  if (typeof identity !== "object" || Array.isArray(identity)) {
+    return "Console capabilities identity malformed.";
+  }
+  return validateIdentityTenantId(identity as Record<string, unknown>);
 }
 
 function isRelativeV1Route(route: unknown): route is string {
@@ -211,6 +236,11 @@ export function parseConsoleCapabilities(
   }
   if (record.backend_kind === "hosted") {
     const identityError = validateHostedIdentity(record.identity);
+    if (identityError) {
+      return { ok: false, kind: "malformed", message: identityError };
+    }
+  } else {
+    const identityError = validateOptionalLocalIdentity(record.identity);
     if (identityError) {
       return { ok: false, kind: "malformed", message: identityError };
     }

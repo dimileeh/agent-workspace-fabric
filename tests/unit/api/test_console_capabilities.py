@@ -21,58 +21,19 @@ FIXTURES = Path(__file__).resolve().parents[3] / "docs" / "console" / "fixtures"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 OPENAPI_JSON = REPO_ROOT / "openapi.json"
 
-_CAPABILITIES_BASE: dict[str, Any] = {
-    "schema_version": 1,
-    "backend_kind": "hosted",
-    "generated_at": "2026-09-06T17:00:00Z",
-    "widgets": [],
-    "diagnostics": [],
-    "controls": [],
-}
-
-# Identical payloads checked against both Pydantic and committed OpenAPI.
+_IDENTITY_MATRIX = json.loads(
+    (FIXTURES / "capabilities.identity-matrix.json").read_text(encoding="utf-8")
+)
+_IDENTITY_MATRIX_CASES: list[dict[str, Any]] = _IDENTITY_MATRIX["cases"]
 _HOSTED_IDENTITY_NEGATIVE_PAYLOADS: dict[str, dict[str, Any]] = {
-    "hosted_identity_omitted": dict(_CAPABILITIES_BASE),
-    "hosted_identity_null": {**_CAPABILITIES_BASE, "identity": None},
-    "hosted_tenant_id_omitted": {
-        **_CAPABILITIES_BASE,
-        "identity": {"backend_id": "awf-cloud", "scope": "tenant"},
-    },
-    "hosted_tenant_id_null": {
-        **_CAPABILITIES_BASE,
-        "identity": {
-            "backend_id": "awf-cloud",
-            "scope": "tenant",
-            "tenant_id": None,
-        },
-    },
-    "hosted_tenant_id_empty": {
-        **_CAPABILITIES_BASE,
-        "identity": {
-            "backend_id": "awf-cloud",
-            "scope": "tenant",
-            "tenant_id": "",
-        },
-    },
+    case["name"]: case["payload"]
+    for case in _IDENTITY_MATRIX_CASES
+    if case["expect"] == "reject" and str(case["name"]).startswith("hosted_")
 }
-
 _HOSTED_IDENTITY_POSITIVE_PAYLOADS: dict[str, dict[str, Any]] = {
-    "hosted_complete_identity": {
-        **_CAPABILITIES_BASE,
-        "identity": {
-            "backend_id": "awf-cloud",
-            "scope": "tenant",
-            "tenant_id": "tenant_a",
-        },
-    },
-    "local_identity_omitted": {
-        "schema_version": 1,
-        "backend_kind": "local",
-        "generated_at": "2026-09-06T17:00:00Z",
-        "widgets": [],
-        "diagnostics": [],
-        "controls": [],
-    },
+    case["name"]: case["payload"]
+    for case in _IDENTITY_MATRIX_CASES
+    if case["expect"] == "accept" and case["name"] in {"hosted_complete", "local_identity_omitted"}
 }
 
 
@@ -174,42 +135,50 @@ async def test_console_capabilities_matches_local_fixture_shape(client: AsyncCli
 @pytest.mark.unit
 def test_hosted_capabilities_response_model_rejects_incomplete_identity() -> None:
     """Cloud implementers validating against the shared OpenAPI/Pydantic model must
-    not certify hosted payloads that omit identity or leave tenant_id empty."""
+    not certify hosted payloads that omit identity or leave tenant_id empty/blank."""
     for payload in _HOSTED_IDENTITY_NEGATIVE_PAYLOADS.values():
         with pytest.raises(ValidationError):
             ConsoleCapabilitiesResponse.model_validate(payload)
     ok = ConsoleCapabilitiesResponse.model_validate(
-        _HOSTED_IDENTITY_POSITIVE_PAYLOADS["hosted_complete_identity"]
+        _HOSTED_IDENTITY_POSITIVE_PAYLOADS["hosted_complete"]
     )
     assert ok.identity is not None
     assert ok.identity.tenant_id == "tenant_a"
 
 
 @pytest.mark.unit
-def test_hosted_identity_rule_matches_between_openapi_and_pydantic() -> None:
-    """Committed OpenAPI must machine-enforce the same hosted identity rule as Pydantic.
+def test_identity_tenant_nonblank_matrix_matches_openapi_and_pydantic() -> None:
+    """Shared fixture matrix: OpenAPI Draft202012 and Pydantic must agree.
 
-    Draft202012 against openapi.json and ConsoleCapabilitiesResponse.model_validate
-    must agree on the five hosted negatives and the local/hosted positives.
+    Encodes the Python strip()-nonblank tenant_id rule (spaces/tabs/newlines),
+    hosted completeness, local optional/null identity, and wrong-type rejects.
     """
     openapi_validator = _console_capabilities_openapi_validator()
-    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"][
-        "ConsoleCapabilitiesResponse"
-    ]
-    assert "if" in schema and "then" in schema, (
+    schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"]
+    capabilities_schema = schema["ConsoleCapabilitiesResponse"]
+    identity_schema = schema["ConsoleCapabilitiesIdentityResponse"]
+    assert "if" in capabilities_schema and "then" in capabilities_schema, (
         "published ConsoleCapabilitiesResponse must encode hosted identity via if/then"
     )
+    hosted_tenant = capabilities_schema["then"]["properties"]["identity"]["properties"]["tenant_id"]
+    assert hosted_tenant.get("pattern") == r".*\S.*", (
+        "hosted if/then tenant_id must encode nonblank (not mere minLength)"
+    )
+    tenant_any_of = identity_schema["properties"]["tenant_id"]["anyOf"]
+    string_branch = next(branch for branch in tenant_any_of if branch.get("type") == "string")
+    assert string_branch.get("pattern") == r".*\S.*", (
+        "identity.tenant_id string branch must encode nonblank when provided"
+    )
 
-    for name, payload in _HOSTED_IDENTITY_NEGATIVE_PAYLOADS.items():
-        assert not _pydantic_accepts(payload), f"pydantic should reject {name}"
-        assert not _openapi_accepts(openapi_validator, payload), (
-            f"openapi Draft202012 should reject {name}"
+    for case in _IDENTITY_MATRIX_CASES:
+        name = case["name"]
+        payload = case["payload"]
+        expect_accept = case["expect"] == "accept"
+        assert _pydantic_accepts(payload) is expect_accept, (
+            f"pydantic should {'accept' if expect_accept else 'reject'} {name}"
         )
-
-    for name, payload in _HOSTED_IDENTITY_POSITIVE_PAYLOADS.items():
-        assert _pydantic_accepts(payload), f"pydantic should accept {name}"
-        assert _openapi_accepts(openapi_validator, payload), (
-            f"openapi Draft202012 should accept {name}"
+        assert _openapi_accepts(openapi_validator, payload) is expect_accept, (
+            f"openapi Draft202012 should {'accept' if expect_accept else 'reject'} {name}"
         )
 
 

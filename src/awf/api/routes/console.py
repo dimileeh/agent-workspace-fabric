@@ -32,11 +32,14 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     """Encode hosted identity completeness in the published OpenAPI schema.
 
     The Python ``model_validator`` rejects hosted payloads that omit identity or
-    leave ``tenant_id`` empty/null. Descriptions alone are not machine-enforced
-    by Draft 2020-12 clients, so publish an ``if``/``then`` constraint that
-    requires nonempty ``backend_id``, ``scope``, and ``tenant_id`` when
-    ``backend_kind`` is ``hosted``. Local backends keep optional identity.
+    leave ``tenant_id`` empty/null/whitespace-only. Descriptions alone are not
+    machine-enforced by Draft 2020-12 clients, so publish an ``if``/``then``
+    constraint that requires nonempty ``backend_id``, ``scope``, and a nonblank
+    ``tenant_id`` (at least one non-whitespace character — matching
+    ``str.strip()``) when ``backend_kind`` is ``hosted``. Local backends keep
+    optional identity.
     """
+    nonblank_string = {"type": "string", "pattern": r".*\S.*"}
     schema["if"] = {
         "properties": {"backend_kind": {"const": "hosted"}},
         "required": ["backend_kind"],
@@ -50,7 +53,7 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
                 "properties": {
                     "backend_id": {"type": "string", "minLength": 1},
                     "scope": {"type": "string", "minLength": 1},
-                    "tenant_id": {"type": "string", "minLength": 1},
+                    "tenant_id": nonblank_string,
                 },
             }
         },
@@ -84,7 +87,8 @@ class ConsoleCapabilitiesIdentityResponse(BaseModel):
 
     backend_id: Annotated[str, Field(min_length=1)]
     scope: Annotated[str, Field(min_length=1)]
-    tenant_id: str | None = None
+    # pattern mirrors tenant_id_must_not_be_blank (strip-nonempty) in OpenAPI.
+    tenant_id: Annotated[str | None, Field(default=None, pattern=r".*\S.*")] = None
 
     @field_validator("tenant_id")
     @classmethod
