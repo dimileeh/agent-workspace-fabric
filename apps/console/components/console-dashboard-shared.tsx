@@ -669,11 +669,19 @@ export function parseJson(text: string): ParsedJson {
   }
 }
 
+export type LogTailReadResult = {
+  ok: boolean;
+  status: number;
+  message: string | null;
+  entry: LogEntry;
+  nextOffset: number;
+};
+
 export async function readLogTailEntry(
   workspaceId: string,
   stream: WorkspaceLogStream,
   activity = logStreamFallbackActivity(stream),
-): Promise<{ entry: LogEntry; nextOffset: number }> {
+): Promise<LogTailReadResult> {
   const offset = Math.max(stream.byte_count - 65_536, 0);
   const result = await apiGet<WorkspaceLogRead>(
     awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
@@ -684,6 +692,9 @@ export async function readLogTailEntry(
   if (!result.ok) {
     const now = new Date().toISOString();
     return {
+      ok: false,
+      status: result.status,
+      message: result.message,
       entry: {
         key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
         workspaceId,
@@ -701,6 +712,9 @@ export async function readLogTailEntry(
   }
 
   return {
+    ok: true,
+    status: 200,
+    message: null,
     entry: {
       key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
       workspaceId,
