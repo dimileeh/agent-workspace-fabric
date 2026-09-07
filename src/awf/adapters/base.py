@@ -55,6 +55,7 @@ from awf.common.compose_exec import (
     mark_masked_agent_reason_code,
 )
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import (
     agent_exec_env_passthrough as agent_exec_env_passthrough,
@@ -800,6 +801,15 @@ class AgentAdapter(ABC):
                     # could not complete, so escalate it as one and carry the
                     # watchdog classification the same way, keeping the
                     # timeout-preservation path reachable (PRRT_kwDOSJAM6s6f1JoH).
+                    # The escalation stands in for the original error everywhere
+                    # the failure is reported — the raised message, the log, and
+                    # the ``WorkspaceEvent`` built from them — so it carries the
+                    # original text too; only the traceback keeps ``__cause__``,
+                    # and without the detail an operator cannot tell a missing
+                    # docker binary from an exhausted host. A spawn failure can
+                    # quote the command environment, so redact it like any other
+                    # runtime log field.
+                    cleanup_detail = redact_secrets(str(cleanup_error))
                     _log.warning(
                         "agent.run.timeout_cleanup_error",
                         agent=self.name_str,
@@ -807,12 +817,16 @@ class AgentAdapter(ABC):
                         workspace_id=workspace_id,
                         reason_code=reason_code,
                         cleanup_error=type(cleanup_error).__name__,
+                        cleanup_error_detail=cleanup_detail,
                     )
+                    escalated_message = f"cleanup could not run: {type(cleanup_error).__name__}"
+                    if cleanup_detail:
+                        escalated_message = f"{escalated_message}: {cleanup_detail}"
                     escalated = ComposeExecCleanupError(
                         invocation_id=invocation.invocation_id,
                         source=invocation.source,
                         label=invocation.label,
-                        message=f"cleanup could not run: {type(cleanup_error).__name__}",
+                        message=escalated_message,
                     )
                     escalated.agent_reason_code = reason_code
                     raise escalated from cleanup_error

@@ -280,10 +280,11 @@ class _SpawnFailingTimeoutCleanupRunner:
     process that cannot be spawned, for instance.
     """
 
-    def __init__(self, *, cancel_first: bool = False) -> None:
-        """Initialize cleanup recording and whether the first call is cancelled."""
+    def __init__(self, *, cancel_first: bool = False, error: Exception | None = None) -> None:
+        """Initialize cleanup recording, first-call cancellation and the spawn error."""
         self.cleanup_calls: list[list[str]] = []
         self._cancel_first = cancel_first
+        self._error = error or OSError(12, "Cannot allocate memory")
 
     async def run(
         self,
@@ -299,7 +300,7 @@ class _SpawnFailingTimeoutCleanupRunner:
         assert "awf-cleanup" in args
         if self._cancel_first and len(self.cleanup_calls) == 1:
             raise asyncio.CancelledError
-        raise OSError(12, "Cannot allocate memory")
+        raise self._error
 
     async def run_streaming(
         self,
@@ -827,13 +828,53 @@ services:
         assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
         assert exc.value.agent_reason_code == "AGENT_TIMEOUT"
         assert isinstance(exc.value.__cause__, OSError)
+        # The escalation replaces the original error everywhere but the
+        # traceback chain, so it must carry *why* the cleanup could not run —
+        # the operator sees this message and this log line, not the __cause__.
+        assert "Cannot allocate memory" in str(exc.value)
         assert any(
             event.get("event") == "agent.run.timeout_cleanup_error"
             and event.get("reason_code") == "AGENT_TIMEOUT"
             and event.get("cleanup_error") == "OSError"
+            and "Cannot allocate memory" in str(event.get("cleanup_error_detail"))
             and event.get("workspace_id") == "ws_timeout_cleanup_error"
             for event in captured
         )
+
+    @pytest.mark.unit
+    async def test_unexpected_timeout_cleanup_error_detail_is_redacted(self) -> None:
+        """The preserved cleanup detail is redacted before it is logged or raised.
+
+        A spawn failure can quote the command environment, so the detail this
+        escalation now carries goes through ``redact_secrets`` like every other
+        runtime log field (PRRT_kwDOSJAM6s6f1JoH).
+        """
+        secret = "Bearer sk-ant-notarealtoken0123456789"
+        runner = _SpawnFailingTimeoutCleanupRunner(
+            error=OSError(f"exec failed with env AUTH={secret}")
+        )
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_cleanup_error_secret",
+            )
+
+        assert "notarealtoken" not in str(exc.value)
+        assert "exec failed with env" in str(exc.value)
+        details = [
+            str(event.get("cleanup_error_detail"))
+            for event in captured
+            if event.get("event") == "agent.run.timeout_cleanup_error"
+        ]
+        assert details
+        assert all("notarealtoken" not in detail for detail in details)
 
     @pytest.mark.unit
     async def test_cancelled_timeout_cleanup_sweep_error_never_displaces_the_cancellation(
