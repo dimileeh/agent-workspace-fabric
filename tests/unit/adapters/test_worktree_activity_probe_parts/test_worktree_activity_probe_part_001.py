@@ -234,24 +234,20 @@ async def test_packed_branch_ref_absence_stays_a_complete_observation(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stack_dir", ["common", "worktree"])
 async def test_reftable_commit_moving_only_the_stack_reports_activity(
     tmp_path: Path,
     worktree: Path,
-    stack_dir: str,
 ) -> None:
     """Under ``extensions.refStorage=reftable`` there is no loose ref to watch.
 
     HEAD is a stub naming ``refs/heads/.invalid``, so the resolved branch ref
-    never exists and its absence is a complete observation; the reflog and the
-    already-staged index do not move either. Every ref transaction rewrites
-    ``reftable/tables.list`` instead — in the common stack for a branch, in the
-    worktree's own for a detached HEAD — so that is the only path left that a
-    commit is guaranteed to move.
+    never exists and its absence is a complete observation; the ``logs/HEAD``
+    reflog and the already-staged index do not move either. This worktree's
+    *own* stack does: refs and reflogs that belong to one worktree — HEAD's
+    among them — live in ``$GIT_DIR/reftable``, so a commit here rewrites it.
     """
     git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/.invalid\n")
-    stack_root = git_dir if stack_dir == "worktree" else tmp_path / "mirror.git"
-    stack = stack_root / "reftable" / "tables.list"
+    stack = git_dir / "reftable" / "tables.list"
     stack.parent.mkdir(parents=True)
     stack.write_text("0x000000000001.ref\n", encoding="utf-8")
     _age_tree(worktree)
@@ -409,6 +405,36 @@ async def test_shared_common_dir_churn_is_not_reported_as_activity(
         "1" * 40 + "\n",
         encoding="utf-8",
     )
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_shared_reftable_stack_churn_is_not_reported_as_activity(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """The common ``reftable/tables.list`` is repository-wide, not this worktree's.
+
+    Under the reftable backend every ref transaction in *any* worktree of the
+    repo — a neighbouring workspace committing, tagging, or AWF fetching into
+    the shared mirror — rewrites that one file. Watching it would let unrelated
+    parallel workspaces keep suppressing this idle agent's timeout until the
+    wall cap, which is exactly the coupling the rest of the common dir is kept
+    out of the scan to avoid.
+    """
+    _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/.invalid\n")
+    common_dir = tmp_path / "mirror.git"
+    stack = common_dir / "reftable" / "tables.list"
+    stack.parent.mkdir(parents=True)
+    stack.write_text("0x000000000001.ref\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    stack.write_text("0x000000000001.ref\n0x000000000002.ref\n", encoding="utf-8")
     assert await probe() is False
 
 

@@ -23,8 +23,10 @@ Design notes:
   all sit still through one: HEAD keeps naming the same branch, ``logs/HEAD`` is
   not written when ``core.logAllRefUpdates`` is off, and an index already
   matching the previous probe is not rewritten. Under the ``reftable`` backend
-  the branch has no loose ref file to land in either, so ``reftable/tables.list``
-  — rewritten by every ref transaction — is watched too. So is ``FETCH_HEAD``,
+  the branch has no loose ref file to land in either, so the worktree's *own*
+  ``reftable/tables.list`` — where the refs and reflogs belonging to this
+  worktree alone, HEAD's among them, are rewritten by every ref transaction it
+  makes — is watched too. So is ``FETCH_HEAD``,
   the one path in the worktree's own Git state a quiet ``git fetch`` is
   guaranteed to move. A linked worktree's git dir holds nothing *but* this
   worktree's state, so it is **walked whole** like a second tree root rather
@@ -32,10 +34,12 @@ Design notes:
   above reaches — an in-place rewrite of ``ORIG_HEAD`` or ``COMMIT_EDITMSG``,
   and every step a rebase or a cherry-pick sequence writes inside an already
   existing ``rebase-merge`` / ``sequencer`` directory. The shared common dir is
-  deliberately not walked: one bare mirror backs every worktree of a repo, so
-  its churn is other workspaces' agents and would report this one as alive
-  regardless. Only the paths under it that belong to this worktree — its branch
-  ref, the reftable stack — are watched by name.
+  deliberately not walked, and nothing shared under it is watched by name
+  either: one bare mirror backs every worktree of a repo, so its churn is other
+  workspaces' agents and would report this one as alive regardless. That
+  includes the common ``reftable/tables.list``, which every worktree's ref
+  transactions rewrite. Only the one path under it that belongs to this
+  worktree — its branch ref — is watched by name.
 * Change is detected by comparing a **fingerprint of the whole tree** — every
   entry's path, mtime, ctime, size, inode and mode, combined order-independently — against
   the previous probe's, not by tracking one newest mtime. A single maximum
@@ -181,9 +185,11 @@ _GIT_DIR_ACTIVITY_FILES = (
 # The stack file of the ``reftable`` backend (``extensions.refStorage=reftable``),
 # rewritten by every ref transaction. Under that backend there is no loose ref
 # file for the resolved branch to land in, and ``HEAD`` is a stub naming
-# ``refs/heads/.invalid``, so it is the only path a commit moves. Watched under
-# the worktree's own git dir as well as the common one: per-worktree refs (a
-# detached HEAD) keep their own stack.
+# ``refs/heads/.invalid``, so this is where a commit here shows up instead.
+# Watched under the worktree's own git dir only — that stack holds the refs and
+# reflogs that are this worktree's alone, HEAD's among them. The common dir's
+# stack is shared by every worktree of the repo, so its churn is a neighbouring
+# workspace's and is deliberately left out; see ``_git_dir_paths``.
 _REFTABLE_STACK_FILE = Path("reftable") / "tables.list"
 
 # Each scan gets a daemon thread of its own, never the interpreter-wide default
@@ -724,14 +730,18 @@ class WorktreeActivityProbe:
         # going through a symlink — which the walk never descends — must not
         # quietly narrow that to the handful of names watched here.
         walk_roots: tuple[Path, ...] = (git_dir,)
-        if common_dir != git_dir:
-            watched.append(common_dir / _REFTABLE_STACK_FILE)
-            # The *common* dir stays out of the walk: one bare mirror backs
-            # every worktree of a repo, so its churn is other workspaces'
-            # agents and would report this one as alive whatever it is doing —
-            # and it carries the object store, whose size would burn the walk
-            # budget. Only the paths under it that belong to this worktree —
-            # its branch ref, the reftable stack — are watched, by name.
+        # The *common* dir stays out of the walk, and nothing shared under it is
+        # watched by name either: one bare mirror backs every worktree of a
+        # repo, so its churn is other workspaces' agents and would report this
+        # one as alive whatever it is doing — and it carries the object store,
+        # whose size would burn the walk budget. The common
+        # ``reftable/tables.list`` is shared exactly that way: under the
+        # reftable backend every ref transaction in *any* worktree of the repo
+        # rewrites it, so a neighbouring workspace committing, tagging or
+        # fetching would keep extending this idle agent to the wall cap. Only
+        # the one path under the common dir that belongs to this worktree — the
+        # branch ref HEAD names — is watched, by name; the reftable state that
+        # is this worktree's alone lives in its own git dir, watched above.
         branch_ref = _resolve_head_branch_ref(git_dir, common_dir)
         if branch_ref is not None:
             watched.append(branch_ref)
@@ -881,8 +891,8 @@ def _resolve_head_branch_ref(git_dir: Path, common_dir: Path) -> Path | None:
     The ref file's own *absence* stays complete, handled like ``logs/HEAD``:
     a packed ref has no loose file until the next update writes one. Under the
     ``reftable`` backend it never gets one at all — HEAD is a stub naming
-    ``refs/heads/.invalid`` — which is why the caller watches
-    ``reftable/tables.list`` alongside whatever this resolves to.
+    ``refs/heads/.invalid`` — which is why the caller watches this worktree's
+    own ``reftable/tables.list`` alongside whatever this resolves to.
     """
     try:
         head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace")
