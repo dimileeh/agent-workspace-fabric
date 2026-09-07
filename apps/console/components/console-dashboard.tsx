@@ -477,10 +477,17 @@ const searchParams = useSearchParams();
         setCapabilitiesReady(true);
         return null;
       }
+      // Transient capability-endpoint outage (5xx/network): keep the last successful
+      // negotiation so fleet KPIs and inspector detail retain last-good snapshots
+      // while the error is shown. Auth denial and never-negotiated stay fail-closed.
       setCapabilityError(result.message);
-      setCapabilities(null);
       setCapabilitiesReady(true);
-      return null;
+      const retained = appliedCapabilitiesRef.current;
+      if (retained === null) {
+        setCapabilities(null);
+        return null;
+      }
+      return retained;
     }
 
     const parsed = parseConsoleCapabilities(result.data);
@@ -1068,7 +1075,7 @@ const searchParams = useSearchParams();
       setStreamState("idle");
       return;
     }
-    const { allowStream } = resolveWorkspaceLogStreamAccess(capabilities);
+    const { allowStream, allowStreamLogs } = resolveWorkspaceLogStreamAccess(capabilities);
     if (!allowStream) {
       setStreamState("idle");
       return;
@@ -1118,6 +1125,11 @@ const searchParams = useSearchParams();
         return;
       }
       if (frame.type === "log") {
+        // Without workspace_logs listing the UI cannot pick/surface streams —
+        // ignore log frames rather than silently buffering them.
+        if (!allowStreamLogs) {
+          return;
+        }
         setStreamState("live");
         setLogEntries((current) =>
           trimLogEntries(

@@ -154,6 +154,20 @@ test("loadCapabilities clears authorized feeds when identity is lost to parse fa
   );
 });
 
+test("loadCapabilities outage retains last-successful negotiation", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /if \(result\.status === 401 \|\| result\.status === 403\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
+    "Expected non-auth capability outages to keep appliedCapabilitiesRef rather than nulling negotiated feeds",
+  );
+  assert.match(
+    dashboard,
+    /frame\.type === "log"\) \{[\s\S]*?if \(!allowStreamLogs\) \{\s*return;\s*\}/,
+    "Expected SSE log frames to be ignored when workspace_logs listing is unavailable",
+  );
+});
+
 test("configured context query changes clear authorized state before capability response", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
