@@ -15,7 +15,11 @@ never as idleness.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures.thread
 import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -28,6 +32,10 @@ from awf.adapters.worktree_activity import (
     WorktreeActivityProbe,
     make_worktree_activity_probe,
 )
+
+# The subprocess regression below must exercise the same source tree the rest of
+# this module imports, not whatever ``awf`` a bare interpreter would resolve.
+SRC_ROOT = Path(worktree_activity.__file__).parents[2]
 
 
 def _age(path: Path, *, seconds: float = 3600.0) -> None:
@@ -751,6 +759,120 @@ async def test_scans_never_occupy_the_shared_default_executor(
     # The pools really are distinct: the shared one hands out other threads.
     shared_thread = await asyncio.to_thread(lambda: threading.current_thread().name)
     assert not shared_thread.startswith(prefix)
+
+
+@pytest.mark.unit
+async def test_scans_run_on_threads_that_skip_interpreter_shutdown(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scan threads are daemons, and no executor joins them on the way out.
+
+    An abandoned scan keeps running until the filesystem answers. A
+    ``ThreadPoolExecutor`` worker holding it would be joined at interpreter
+    shutdown — its ``atexit`` hook waits for every worker — so a graceful worker
+    restart after any stalled scan would hang forever, long after the agent's own
+    timeout already gave up. A daemon thread of our own is joined by nobody.
+    """
+    scan_threads: list[threading.Thread] = []
+    real_scan = WorktreeActivityProbe._scan
+
+    def _record_thread(self: WorktreeActivityProbe) -> object:
+        scan_threads.append(threading.current_thread())
+        return real_scan(self)
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _record_thread)
+
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    assert await probe() is False
+
+    assert scan_threads
+    assert all(thread.daemon for thread in scan_threads)
+    # Not an executor worker: those are exactly the threads ``_python_exit``
+    # joins while the interpreter is trying to shut down.
+    assert all(thread not in concurrent.futures.thread._threads_queues for thread in scan_threads)
+
+
+@pytest.mark.unit
+async def test_scan_abandoned_before_its_thread_starts_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that gives up before the thread runs leaves nothing to raise in it.
+
+    ``wrap_future`` cancels the pending result on the way out, so a thread that
+    went on to publish into it would die with ``InvalidStateError`` on a stray
+    scan nobody is waiting for. It skips the walk instead.
+    """
+    pending: list[object] = []
+    monkeypatch.setattr(worktree_activity, "_start_scan_thread", pending.append)
+    walked = False
+
+    def _work() -> str:
+        nonlocal walked
+        walked = True
+        return "scanned"
+
+    scan = asyncio.ensure_future(worktree_activity._run_scan(_work))
+    await asyncio.sleep(0)
+    scan.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await scan
+    await asyncio.sleep(0)
+
+    assert len(pending) == 1
+    deliver = pending[0]
+    assert callable(deliver)
+    deliver()  # The thread the real starter would have run, late.
+    assert walked is False
+
+
+@pytest.mark.unit
+def test_abandoned_scan_does_not_block_interpreter_shutdown(tmp_path: Path) -> None:
+    """A stalled scan the caller gave up on must not wedge process shutdown.
+
+    The control plane owns worker lifecycle: a restart has to complete even when
+    a worktree's filesystem never answers. This runs the abandoned-scan case in a
+    real interpreter and requires it to exit, rather than hanging in the shutdown
+    join a pooled worker would sit in.
+    """
+    worktree = tmp_path / "ws_shutdown"
+    worktree.mkdir()
+    script = textwrap.dedent(
+        f"""
+        import asyncio, sys, threading
+        from pathlib import Path
+        sys.path.insert(0, {str(SRC_ROOT)!r})
+        from awf.adapters.worktree_activity import WorktreeActivityProbe
+
+        stalled = threading.Event()
+
+        def _stalled_scan(_self):
+            stalled.wait(timeout=300.0)
+            return None
+
+        WorktreeActivityProbe._scan = _stalled_scan
+
+        async def main():
+            probe = WorktreeActivityProbe(
+                Path({str(worktree)!r}), prime_timeout_seconds=0.05
+            )
+            assert await probe.prime() is True
+
+        asyncio.run(main())
+        print("abandoned")
+        """,
+    )
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell.
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "abandoned" in completed.stdout
 
 
 @pytest.mark.unit

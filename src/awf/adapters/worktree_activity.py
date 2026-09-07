@@ -41,12 +41,16 @@ Design notes:
   clock-based first probe answers "idle" and the confirming rescan then
   compares two identical post-``chmod`` scans — an idle kill of a run that was
   working.
-* Every scan runs in this module's **own** thread pool, not the process-wide
-  default executor ``asyncio.to_thread`` uses. A stalled filesystem call cannot
-  be cancelled, so the timeouts below only abandon the *wait* — the thread runs
-  on. Sharing the default executor would let those abandoned threads consume the
-  workers the rest of the control plane's ``to_thread`` work needs; isolated,
-  they can only slow other worktree scans, which fail open.
+* Every scan runs on a **daemon thread of this module's own**, not on the
+  process-wide default executor ``asyncio.to_thread`` uses and not in a
+  ``ThreadPoolExecutor``. A stalled filesystem call cannot be cancelled, so the
+  timeouts below only abandon the *wait* — the thread runs on. Sharing the
+  default executor would let those abandoned threads consume the workers the rest
+  of the control plane's ``to_thread`` work needs; any executor at all would also
+  hold up interpreter shutdown, because ``concurrent.futures`` joins every worker
+  on the way out and a worker parked on a stalled ``scandir`` never returns. AWF
+  owns worker lifecycle, so a restart must not hang behind a scan the agent's own
+  timeout already gave up on. A daemon thread is joined by nobody.
 * Priming is best-effort, and *bounded*. It runs before the agent starts, so it
   is outside the run's wall budget: an unbounded wait on a stalled ``scandir``
   would wedge the worker with no timeout to escape through, and an unexpected
@@ -87,12 +91,13 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import os
 import stat as stat_module
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from typing import NamedTuple
 
@@ -122,45 +127,62 @@ _GITDIR_PREFIX = "gitdir:"
 # Files that move when only Git state changed in a linked worktree.
 _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
 
-# Scans run in a pool of their own, never the interpreter-wide default executor
-# behind ``asyncio.to_thread``. A stalled ``scandir`` / ``stat`` cannot be
-# interrupted, and every caller here abandons the wait under a timeout, so the
-# thread keeps running until the filesystem answers. In the shared executor those
-# abandoned threads pile up against the one fixed worker count every other
-# ``asyncio.to_thread`` caller in this process draws from — git, Docker and GC
-# work would end up queued behind a wedged worktree whose own agent timeouts have
-# already given up on it. Isolated, the blast radius of a stalled filesystem is
-# other worktree scans, and those fail open: a scan that cannot get a worker in
-# time is abandoned as "could not tell", which the watchdog counts as activity.
-# Sized like the default executor, so healthy probes are no more serialised than
-# they were before.
+# Each scan gets a daemon thread of its own, never the interpreter-wide default
+# executor behind ``asyncio.to_thread`` and never a pool. A stalled ``scandir`` /
+# ``stat`` cannot be interrupted, and every caller here abandons the wait under a
+# timeout, so the thread keeps running until the filesystem answers.
+#
+# In the shared executor those abandoned threads pile up against the one fixed
+# worker count every other ``asyncio.to_thread`` caller in this process draws
+# from — git, Docker and GC work would end up queued behind a wedged worktree
+# whose own agent timeouts have already given up on it.
+#
+# A private ``ThreadPoolExecutor`` fixes that but not the worse half: executor
+# workers are non-daemon threads registered with ``concurrent.futures``' exit
+# hook, which joins every one of them while the interpreter shuts down. One
+# abandoned scan on a stalled filesystem would therefore hang a graceful worker
+# restart indefinitely — the control plane cannot own lifecycle through a
+# shutdown it cannot complete. Daemon threads participate in no such join: the
+# interpreter leaves them where they are.
+#
+# Unpooled is also what keeps the blast radius at "other worktree scans" rather
+# than "no worktree scans": a fixed pool that stalled scans have filled makes
+# healthy probes on healthy worktrees wait for a worker. Nothing can reclaim a
+# stalled thread anyway, so capping their number only converts leaked threads
+# into stalled probes. Thread count stays small in practice — one scan per idle
+# window per workspace — and the probes themselves fail open, so a scan that
+# never answers is read as activity, not as idleness.
 _SCAN_THREAD_NAME_PREFIX = "awf-worktree-scan"
-_SCAN_EXECUTOR_MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
-_scan_executor_lock = threading.Lock()
-_scan_executor: ThreadPoolExecutor | None = None
-
-
-def _get_scan_executor() -> ThreadPoolExecutor:
-    """The probe's own worker pool, created on first use and kept for the process.
-
-    Lazily built so a control plane that never probes pays no threads for it, and
-    long-lived because the alternative — an executor per probe — would let a
-    stalled scan leak a whole pool per workspace instead of sharing one bound.
-    """
-    global _scan_executor
-    with _scan_executor_lock:
-        if _scan_executor is None:
-            _scan_executor = ThreadPoolExecutor(
-                max_workers=_SCAN_EXECUTOR_MAX_WORKERS,
-                thread_name_prefix=_SCAN_THREAD_NAME_PREFIX,
-            )
-        return _scan_executor
+_scan_sequence = itertools.count()
 
 
 async def _run_scan[ScanResultT](work: Callable[[], ScanResultT]) -> ScanResultT:
-    """Run one blocking scan off the event loop, in the isolated pool above."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_get_scan_executor(), work)
+    """Run one blocking scan off the event loop, on an abandonable daemon thread."""
+    result: Future[ScanResultT] = Future()
+
+    def _deliver() -> None:
+        if not result.set_running_or_notify_cancel():
+            # The caller gave up before this thread was scheduled; nothing to do.
+            return
+        try:
+            result.set_result(work())
+        except BaseException as exc:  # noqa: BLE001 - relayed to the awaiting caller.
+            result.set_exception(exc)
+
+    _start_scan_thread(_deliver)
+    # ``wrap_future`` bridges the thread's result back onto this loop and drops
+    # it if the awaiting caller is already gone, exactly as ``run_in_executor``
+    # did — only the worker underneath it changed.
+    return await asyncio.wrap_future(result)
+
+
+def _start_scan_thread(deliver: Callable[[], None]) -> None:
+    """Start one scan on a fresh daemon thread nothing will ever join."""
+    threading.Thread(
+        target=deliver,
+        name=f"{_SCAN_THREAD_NAME_PREFIX}-{next(_scan_sequence)}",
+        daemon=True,
+    ).start()
 
 
 class _Scan(NamedTuple):
@@ -205,7 +227,7 @@ class WorktreeActivityProbe:
 
         Which is why it also fails **open**, under its own cap. This runs before
         the agent is started, outside the run's wall timeout, and the scan sits
-        in an isolated-pool thread that cannot be interrupted from here — so an
+        on a daemon thread that cannot be interrupted from here — so an
         unbounded await
         on a stalled ``scandir`` / ``stat`` (or on ``.git`` being a pointer to
         somewhere that blocks) would wedge the worker with no deadline to escape
