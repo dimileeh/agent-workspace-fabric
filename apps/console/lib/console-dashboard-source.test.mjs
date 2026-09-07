@@ -158,9 +158,9 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     assert.match(
       dashboard,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current\\s*\\)`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current \\|\\|\\s*generation !== \\w+RequestGenerationRef\\.current\\s*\\)`,
       ),
-      `Expected ${loader} to discard after authorized epoch or gated-detail generation advance`,
+      `Expected ${loader} to discard after authorized epoch, gated-detail, or feed request generation advance`,
     );
   }
   assert.match(
@@ -319,6 +319,63 @@ test("loadMergeQueue clears last-good snapshot on feed-level 401 or 403", () => 
     dashboard,
     /const loadMergeQueue = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setMergeQueue\(\[\]\);\s*setMergeQueueHasMore\(false\);\s*setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);\s*return;\s*\}[\s\S]*?setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);/,
     "Expected loadMergeQueue to drop authorized queue rows on 401/403 rather than retain last-good as a transient outage",
+  );
+});
+
+test("loadResourceSaturation clears last-good snapshot on feed-level 401 or 403", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadResourceSaturation = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setResourceSaturation\(null\);\s*setResourceError\(result\.message\);\s*return;\s*\}[\s\S]*?setResourceError\(result\.message\);/,
+    "Expected loadResourceSaturation to drop authorized saturation on 401/403 rather than retain last-good as a transient outage",
+  );
+  assert.match(
+    dashboard,
+    /const resourceSaturationRequestGenerationRef = useRef\(0\);/,
+    "Expected a resource-saturation request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadResourceSaturation = useCallback\([\s\S]*?const generation = \+\+resourceSaturationRequestGenerationRef\.current;[\s\S]*?generation !== resourceSaturationRequestGenerationRef\.current[\s\S]*?setResourceError/,
+    "Expected loadResourceSaturation to bump generation before fetch and discard mismatched responses before success or error setters",
+  );
+});
+
+test("loadWorkspaceSummary clears last-good snapshot on feed-level 401 or 403", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadWorkspaceSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setWorkspaceSummary\(null\);\s*setWorkspaceSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?setWorkspaceSummaryError\(result\.message\);/,
+    "Expected loadWorkspaceSummary to drop authorized reliability on 401/403 rather than retain last-good as a transient outage",
+  );
+  assert.match(
+    dashboard,
+    /const workspaceSummaryRequestGenerationRef = useRef\(0\);/,
+    "Expected a workspace-summary request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadWorkspaceSummary = useCallback\([\s\S]*?const generation = \+\+workspaceSummaryRequestGenerationRef\.current;[\s\S]*?generation !== workspaceSummaryRequestGenerationRef\.current[\s\S]*?setWorkspaceSummaryError/,
+    "Expected loadWorkspaceSummary to bump generation before fetch and discard mismatched responses before success or error setters",
+  );
+});
+
+test("loadFailureSummary clears last-good snapshot on feed-level 401 or 403", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadFailureSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setFailureSummary\(null\);\s*setFailureSummaryStatus\("error"\);\s*setFailureSummaryError\(result\.message\);\s*return;\s*\}/,
+    "Expected loadFailureSummary to drop authorized failure examples on 401/403 rather than retain last-good as a transient outage",
+  );
+  assert.match(
+    dashboard,
+    /const failureSummaryRequestGenerationRef = useRef\(0\);/,
+    "Expected a failure-summary request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadFailureSummary = useCallback\([\s\S]*?const generation = \+\+failureSummaryRequestGenerationRef\.current;[\s\S]*?generation !== failureSummaryRequestGenerationRef\.current[\s\S]*?setFailureSummaryError/,
+    "Expected loadFailureSummary to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
@@ -509,8 +566,8 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     gatedClearBody,
-    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;/,
-    "Expected 404 gated clear to bump summary/cloud-runtime/merge-queue request generations and gatedDetailFeedGenerationRef so in-flight feeds cannot restore cleared inventories",
+    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;/,
+    "Expected 404 gated clear to bump summary/cloud-runtime/merge-queue/diagnostic request generations and gatedDetailFeedGenerationRef so in-flight feeds cannot restore cleared inventories",
   );
   assert.match(
     dashboard,

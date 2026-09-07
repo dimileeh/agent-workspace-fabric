@@ -176,6 +176,11 @@ export function ConsoleDashboard() {
   // Merge-queue poll generation: feed-level 401/403 clear must not lose to an
   // older in-flight 200 (capabilities may still keep the panel mounted).
   const mergeQueueRequestGenerationRef = useRef(0);
+  // Resource-capacity / reliability / failures poll generations: same feed-level
+  // 401/403 + overlapping-poll contract as merge-queue / dashboard-summary.
+  const resourceSaturationRequestGenerationRef = useRef(0);
+  const workspaceSummaryRequestGenerationRef = useRef(0);
+  const failureSummaryRequestGenerationRef = useRef(0);
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
   const gatedDetailFeedGenerationRef = useRef(0);
@@ -367,6 +372,9 @@ export function ConsoleDashboard() {
     dashboardSummaryRequestGenerationRef.current += 1;
     cloudRuntimeRequestGenerationRef.current += 1;
     mergeQueueRequestGenerationRef.current += 1;
+    resourceSaturationRequestGenerationRef.current += 1;
+    workspaceSummaryRequestGenerationRef.current += 1;
+    failureSummaryRequestGenerationRef.current += 1;
     gatedDetailFeedGenerationRef.current += 1;
     setResourceSaturation(null);
     setResourceError(null);
@@ -585,14 +593,25 @@ export function ConsoleDashboard() {
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
     const gatedGeneration = gatedDetailFeedGenerationRef.current;
+    const generation = ++resourceSaturationRequestGenerationRef.current;
     const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
     if (
       epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
+      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+      generation !== resourceSaturationRequestGenerationRef.current
     ) {
       return;
     }
     if (!result.ok) {
+      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
+      // outage: drop last-good saturation even when capabilities still negotiate
+      // (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
+      // capabilities may still succeed and would thrash overview refill.
+      if (result.status === 401 || result.status === 403) {
+        setResourceSaturation(null);
+        setResourceError(result.message);
+        return;
+      }
       setResourceError(result.message);
       return;
     }
@@ -677,14 +696,25 @@ export function ConsoleDashboard() {
   const loadWorkspaceSummary = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
     const gatedGeneration = gatedDetailFeedGenerationRef.current;
+    const generation = ++workspaceSummaryRequestGenerationRef.current;
     const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
     if (
       epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
+      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+      generation !== workspaceSummaryRequestGenerationRef.current
     ) {
       return;
     }
     if (!result.ok) {
+      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
+      // outage: drop last-good reliability facts even when capabilities still
+      // negotiate (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
+      // capabilities may still succeed and would thrash overview refill.
+      if (result.status === 401 || result.status === 403) {
+        setWorkspaceSummary(null);
+        setWorkspaceSummaryError(result.message);
+        return;
+      }
       setWorkspaceSummaryError(result.message);
       return;
     }
@@ -731,14 +761,26 @@ export function ConsoleDashboard() {
   const loadFailureSummary = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
     const gatedGeneration = gatedDetailFeedGenerationRef.current;
+    const generation = ++failureSummaryRequestGenerationRef.current;
     const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
     if (
       epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
+      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+      generation !== failureSummaryRequestGenerationRef.current
     ) {
       return;
     }
     if (!result.ok) {
+      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
+      // outage: drop last-good failure examples even when capabilities still
+      // negotiate (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
+      // capabilities may still succeed and would thrash overview refill.
+      if (result.status === 401 || result.status === 403) {
+        setFailureSummary(null);
+        setFailureSummaryStatus("error");
+        setFailureSummaryError(result.message);
+        return;
+      }
       if (result.status === 404 || result.status === 503) {
         setFailureSummaryStatus("unavailable");
       } else {

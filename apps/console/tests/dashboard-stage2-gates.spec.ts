@@ -772,6 +772,115 @@ test("in-flight merge-queue success after feed-level 403 does not restore cleare
   await expect(mergePanel.getByText(/Unable to load merge queue/i)).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f8F2B: feed-level
+// 401/403 on failures / resource saturation / reliability must drop last-good
+// snapshots (same contract as dashboard-summary / merge-queue), with request
+// generation so an in-flight 200 cannot restore revoked data.
+test("failures feed-level 403 clears last-good examples while capabilities stay reachable", async ({
+  page,
+}) => {
+  let failuresDenied = false;
+  let delayAuthorizedFailures = false;
+  const failureExample = {
+    workspace_id: "ws_fail_auth_clear",
+    title: "Revoked failure example",
+    repo_url: "https://github.com/example/revoked-fail",
+    agent: "codex",
+    failure_reason: "VALIDATION_FAILED",
+    message: "revoked failure message",
+    timestamp: "2026-09-06T17:00:00Z",
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      if (failuresDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "failures permission revoked" } },
+          403,
+        );
+        return;
+      }
+      if (delayAuthorizedFailures) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      await fulfillJson(route, {
+        total_failures: 1,
+        window_hours: 24,
+        taxonomy: [{ reason: "VALIDATION_FAILED", count: 1 }],
+        latest_examples: [failureExample],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const failuresPanel = page.locator("#awf-failures");
+  await expect(failuresPanel.getByText("Revoked failure example")).toBeVisible();
+  await expect(failuresPanel.getByText("https://github.com/example/revoked-fail")).toBeVisible();
+
+  delayAuthorizedFailures = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  failuresDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/failures permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(failuresPanel.getByText("Revoked failure example")).toHaveCount(0);
+  await expect(failuresPanel.getByText(/Showing last snapshot/i)).toHaveCount(0);
+  await expect(failuresPanel.getByText(/Unable to load failure analysis/i)).toBeVisible();
+  await page.waitForTimeout(1000);
+  await expect(failuresPanel.getByText("Revoked failure example")).toHaveCount(0);
+  await expect(failuresPanel.getByText(/Unable to load failure analysis/i)).toBeVisible();
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f7qt6: feed-level
 // 401/403 on cloud-runtime must drop last-good tenant snapshot (same contract
 // as dashboard-summary / merge-queue), not keep stale queue/quota facts.
