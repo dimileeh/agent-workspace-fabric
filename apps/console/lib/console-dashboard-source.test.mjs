@@ -156,8 +156,13 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
-    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
-    "Expected loadLogTail to discard after epoch/gated-detail generation advance or selection change",
+    /const logTailRequestGenerationRef = useRef<Record<string, number>>\(\{\}\);/,
+    "Expected a per-stream log-tail request-generation ref so overlapping tails stay monotonic",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
+    "Expected loadLogTail to discard after epoch/gated-detail/per-stream generation advance or selection change",
   );
   for (const loader of [
     "loadResourceSaturation",

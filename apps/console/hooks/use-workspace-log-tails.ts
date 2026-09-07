@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useRef,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
@@ -64,10 +65,18 @@ export function useWorkspaceLogTails({
   setFullscreenWorkspaceIds,
   setLogsFullscreen,
 }: UseWorkspaceLogTailsArgs) {
+  // Per-stream tail request generation: overlapping reloads of the same stream
+  // stay monotonic so a newer 401/403 denial cannot lose to an older in-flight
+  // 200 (epoch/gated refs alone do not advance on that path).
+  const logTailRequestGenerationRef = useRef<Record<string, number>>({});
+
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
       const epoch = authorizedFeedEpochRef.current;
       const gatedGeneration = gatedDetailFeedGenerationRef.current;
+      const generationKey = `${workspaceId}:${stream.stream_id}`;
+      const generation = (logTailRequestGenerationRef.current[generationKey] ?? 0) + 1;
+      logTailRequestGenerationRef.current[generationKey] = generation;
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
@@ -79,6 +88,7 @@ export function useWorkspaceLogTails({
       if (
         epoch !== authorizedFeedEpochRef.current ||
         gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+        generation !== logTailRequestGenerationRef.current[generationKey] ||
         selectedIdRef.current !== workspaceId
       ) {
         return;
@@ -143,6 +153,7 @@ export function useWorkspaceLogTails({
       authorizedFeedEpochRef,
       gatedDetailFeedGenerationRef,
       logStreamActivityRef,
+      logTailRequestGenerationRef,
       selectedIdRef,
       setLogEntries,
       setStreamOffsets,

@@ -580,6 +580,182 @@ test("in-flight workspace detail success after feed-level 403 does not restore c
   await expect(page.getByText("Runtime snapshot unavailable.")).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f-kK9: overlapping
+// selected-stream log tails must stamp a per-stream request generation so an
+// older in-flight 200 cannot restore revoked contents after a newer feed-level
+// 403 (epoch/gated-detail refs alone do not advance on that path).
+test("in-flight log tail success after feed-level 403 does not restore revoked stream contents", async ({
+  page,
+}) => {
+  let tailMode: "delay_ok" | "denied" = "delay_ok";
+  let delayedTailStarts = 0;
+  const workspaceId = "ws_log_tail_auth_clear_race";
+  const revokedMarker = "revoked-log-tail-payload-must-not-return";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Log tail auth clear race workspace",
+    repo_url: "https://github.com/example/log-tail-auth-clear-race",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Discard superseded log-tail responses after feed-level 403",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const stream = {
+    stream_id: "agent.stdout",
+    source: "agent",
+    name: "agent.stdout",
+    kind: "stdout",
+    path: "/tmp/agent.stdout",
+    byte_count: 48,
+    line_count: 1,
+    opened_at: "2026-09-06T17:00:00Z",
+    closed_at: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, {
+        workspace_id: workspaceId,
+        compose_project_name: "awf-ws-log-tail-auth-clear-race",
+        stack_state: "running",
+        services: [],
+        app_endpoints: [],
+        logs_available: true,
+        control_available: true,
+        reason: null,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, { items: [stream], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/agent.stdout`) {
+      if (tailMode === "denied") {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "log tail permission revoked" } },
+          403,
+        );
+        return;
+      }
+      delayedTailStarts += 1;
+      // Longer than a Tail click so the newer denial overlaps this success.
+      await new Promise((resolve) => setTimeout(resolve, 6000));
+      await fulfillJson(route, {
+        stream_id: "agent.stdout",
+        offset: 0,
+        next_offset: revokedMarker.length,
+        eof: true,
+        data: revokedMarker,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  const tailButton = page.getByRole("button", { name: "Tail", exact: true });
+  await expect(tailButton).toBeEnabled({ timeout: 10_000 });
+  await expect.poll(() => delayedTailStarts, { timeout: 10_000 }).toBeGreaterThan(0);
+
+  tailMode = "denied";
+  await tailButton.click();
+  await expect(page.getByText(/log tail permission revoked/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByText(revokedMarker, { exact: false })).toHaveCount(0);
+  // Wait past the delayed pre-denial success; it must not restore revoked contents.
+  await page.waitForTimeout(7000);
+  await expect(page.getByText(revokedMarker, { exact: false })).toHaveCount(0);
+  await expect(page.getByText(/log tail permission revoked/i).first()).toBeVisible();
+});
+
 test("dashboard-summary outage keeps last-successful KPIs with stale marker", async ({ page }) => {
   let summaryOutage = false;
   const summary = localDashboardSummary({
