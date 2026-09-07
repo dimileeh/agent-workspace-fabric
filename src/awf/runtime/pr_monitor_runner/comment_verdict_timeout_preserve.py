@@ -74,6 +74,8 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.types import SINK_INFRASTRUCTURE_ERRORS
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
@@ -498,10 +500,12 @@ async def handle_agent_run_error(
 
     ``timeout_preservation_sink`` is how the preserve path tells its caller that
     no rollback floor applies from here on. Every step below awaits, and worker
-    cancellation bypasses all of them — ``CancelledError`` is a
+    cancellation bypasses their handlers — ``CancelledError`` is a
     ``BaseException`` — landing on the caller's cancellation branch, which would
     rewind to ``rollback_floor_head`` and delete the very commits this path
-    exists to keep (PRRT_kwDOSJAM6s6fylWD).
+    exists to keep (PRRT_kwDOSJAM6s6fylWD). The preservation the claim promises
+    is finished under a shield first, so the branch never sees it half-done
+    (PRRT_kwDOSJAM6s6f2gbw).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_VERDICT_PROTOCOL_VIOLATION,
@@ -546,28 +550,36 @@ async def handle_agent_run_error(
     # a worker killed between here and there leaves the salvaged commits on disk
     # with no anchor, so the retry rejects an honest no-change ``FIXED`` as
     # ``AGENT_FIXED_WITHOUT_EVIDENCE`` (PRRT_kwDOSJAM6s6fzBXj).
+    #
+    # Publishing the claim is only the *first* of the three things this path
+    # owes, and the other two await. A cancellation landing in either one used to
+    # escape with the claim already made: the caller skipped the rollback, right,
+    # but its nested guard also skipped ``preserve_cancelled_timeout_work``, which
+    # only runs for timeouts no handler ever saw. The half-finished sequence then
+    # left the edits dirty for the next pass's ``PRE_EXISTING_DIRTY_WORKTREE``
+    # guard, or the anchor in memory only on a worker that may never persist it.
+    # So run both under a shield and hand the cancellation on afterwards
+    # (PRRT_kwDOSJAM6s6f2gbw).
     timeout_preservation_sink.append(exc.reason_code)
-    await remember_item_start_head_durably(
-        runner,
-        workspace_id=workspace_id,
-        state=state,
-        item_id=item_id,
-        head=item_start_head,
-        body_hash=item_body_hash,
-    )
-
-    sink_outcome = await _sink_timeout_dirty_changes(
-        runner,
+    sink_outcome = await _finish_timeout_preservation(
+        _timeout_anchor_and_sink_steps(
+            runner,
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            item_start_head=item_start_head,
+            state=state,
+            item_id=item_id,
+            item_body_hash=item_body_hash,
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            task_tag=task_tag,
+            command_evidence=command_evidence,
+            commit_dirty_changes=commit_dirty_changes,
+        ),
         workspace_id=workspace_id,
         reason_code=exc.reason_code,
         item_start_head=item_start_head,
-        commit_message=commit_message,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        state=state,
-        task_tag=task_tag,
-        command_evidence=command_evidence,
-        commit_dirty_changes=commit_dirty_changes,
     )
     dirty_changes_committed = sink_outcome is TimeoutSinkOutcome.COMMITTED
     # Only a sink that *ran* without committing can be hiding a failed
@@ -644,6 +656,91 @@ async def handle_agent_run_error(
         ),
         preserved_head_sha=preserved_head if work_preserved else None,
     ) from exc
+
+
+async def _timeout_anchor_and_sink_steps(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+    state: MonitorState | None,
+    item_id: str | None,
+    item_body_hash: str | None,
+    commit_message: str,
+    compose_project: str,
+    compose_file: Path,
+    task_tag: str | None | _TaskTagUnset,
+    command_evidence: list[str],
+    commit_dirty_changes: bool,
+) -> TimeoutSinkOutcome:
+    """Record the item's durable anchor, then sink the timed-out agent's edits.
+
+    The two steps the preserve claim owes once it has been published, kept in one
+    coroutine so a cancellation cannot land *between* them either.
+    """
+    await remember_item_start_head_durably(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=item_id,
+        head=item_start_head,
+        body_hash=item_body_hash,
+    )
+    return await _sink_timeout_dirty_changes(
+        runner,
+        workspace_id=workspace_id,
+        reason_code=reason_code,
+        item_start_head=item_start_head,
+        commit_message=commit_message,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        state=state,
+        task_tag=task_tag,
+        command_evidence=command_evidence,
+        commit_dirty_changes=commit_dirty_changes,
+    )
+
+
+async def _finish_timeout_preservation(
+    steps: Coroutine[Any, Any, TimeoutSinkOutcome],
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+) -> TimeoutSinkOutcome:
+    """Run an already-claimed preserve sequence to completion, cancel or not.
+
+    Same shield as ``preserve_cancelled_timeout_work``, for the same reason: the
+    caller has already told its cancellation branch not to rewind, so a truncated
+    sequence is the one state the next pass cannot recover from — dirty edits its
+    pre-existing-dirty guard rejects, or an anchor a dying worker never persists.
+
+    The cancellation itself is *not* swallowed here, unlike in the tagged-
+    cancellation helper: nothing re-raises it for this caller, and the worker is
+    shutting down, so it is delivered onward once the steps have finished. A
+    failure of the steps then has nowhere left to go — ``shield`` may even have
+    consumed it — so it is logged rather than allowed to displace the
+    cancellation (PRRT_kwDOSJAM6s6f2gbw).
+    """
+    preserve_task = asyncio.ensure_future(steps)
+    cancelled: asyncio.CancelledError | None = None
+    while not preserve_task.done():
+        try:
+            await asyncio.shield(preserve_task)
+        except asyncio.CancelledError as cancel_exc:
+            cancelled = cancel_exc
+    if cancelled is None:
+        return preserve_task.result()
+    dropped_exc = None if preserve_task.cancelled() else preserve_task.exception()
+    if dropped_exc is not None:
+        _log_cancelled_timeout_preserve_failure(
+            dropped_exc,
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+        )
+    raise cancelled
 
 
 async def _sink_timeout_dirty_changes(
