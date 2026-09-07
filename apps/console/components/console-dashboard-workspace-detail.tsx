@@ -21,7 +21,6 @@ useState
 } from "react";
 
 import {
-formatAgentEffort,
 formatAgentLabel,
 formatConfirmedExecutionModel,
 formatRequestedEffort,
@@ -169,7 +168,6 @@ export function TaskDetailsModal({
             <Fact label="Requested model" value={formatRequestedModel(workspace)} />
             <Fact label="Requested effort" value={formatRequestedEffort(workspace)} />
             <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace)} />
-            <Fact label="Effort" value={formatAgentEffort(workspace)} />
             <Fact label="Base" value={workspace.base_branch} mono />
             <Fact label="Status" value={workspace.status} />
             <Fact label="Created" value={formatDateTime(workspace.created_at)} />

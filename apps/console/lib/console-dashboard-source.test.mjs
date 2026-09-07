@@ -48,6 +48,19 @@ const dashboardSource = {
   ),
 };
 
+test("task details modal does not render the legacy Effort fact", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f_-KV: requested and
+  // confirmed facts already distinguish policy/default/auto from execution
+  // evidence. A leftover formatAgentEffort "Effort" row restates policy effort
+  // beside the requested value and recreates that mix-up.
+  const modalSource = extractFunctionSource("TaskDetailsModal");
+
+  assert.match(modalSource, /label="Requested effort"/);
+  assert.match(modalSource, /label="Confirmed model"/);
+  assert.doesNotMatch(modalSource, /formatAgentEffort/);
+  assert.doesNotMatch(modalSource, /label="Effort"/);
+});
+
 test("task details modal shows duration when duration_seconds is recorded", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
 
