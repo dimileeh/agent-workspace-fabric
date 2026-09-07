@@ -118,7 +118,8 @@ test("fullscreen logs reload tails after clearing and reselecting the same strea
 // /logs poll that returns 401/403 while workspace_logs stays advertised must
 // drop previously authorized column caches and close the live EventSource.
 // An older overlapping listing 200 must not restore them.
-test("fullscreen logs clear caches and ignore overlapping listing success after authorization denial", async ({
+for (const deniedStatus of [401, 403] as const) {
+test(`fullscreen logs clear caches and ignore overlapping listing success after authorization denial (${deniedStatus})`, async ({
   page,
 }) => {
   test.setTimeout(45_000);
@@ -209,8 +210,13 @@ test("fullscreen logs clear caches and ignore overlapping listing success after 
       if (listingMode === "denied") {
         await fulfillJson(
           route,
-          { detail: { error_code: "FORBIDDEN", message: "log listing permission revoked" } },
-          403,
+          {
+            detail: {
+              error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+              message: "log listing permission revoked",
+            },
+          },
+          deniedStatus,
         );
         return;
       }
@@ -300,6 +306,7 @@ test("fullscreen logs clear caches and ignore overlapping listing success after 
   await expect(modal.getByText(/stream idle/)).toBeVisible();
   await expect(output).toContainText("No log data loaded.");
 });
+}
 
 test("fullscreen logs trap keyboard focus and restore it to the trigger on close", async ({ page }) => {
   await mockAwfApi(page);

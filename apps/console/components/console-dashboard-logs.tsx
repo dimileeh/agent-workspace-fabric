@@ -321,11 +321,16 @@ export function WorkspaceLogColumn({
   const selectedStreamsRef = useRef<string[]>([]);
   const previousTailRefreshKey = useRef("");
   // Listing poll generation: a non-latest 401/403 must not clear caches that a
-  // newer poll still owns. Successes are not discarded solely for overlapping —
-  // the first listing snapshot has to land so activity can observe the next
-  // metadata change. Authorization denial bumps columnEpochRef so an older
-  // in-flight 200 cannot restore cleared caches.
+  // newer poll still owns. Ordinary overlapping successes still apply so the
+  // first listing snapshot can land and activity can observe the next metadata
+  // change. Authorization denial records the denying generation and bumps
+  // columnEpochRef so an older in-flight 200 cannot restore cleared caches.
   const listingGenerationRef = useRef(0);
+  // Generation of the listing poll that applied a 401/403. An older overlapping
+  // 200 (started before that denial) must not restore cleared caches, even if
+  // it later observes a matching epoch. A later poll has a higher generation
+  // and may recover if authorization returns.
+  const revokedListingGenerationRef = useRef(0);
   // Bumped on authorization denial so in-flight listing/tail reads cannot write
   // back previously authorized entries after the column caches are cleared.
   const columnEpochRef = useRef(0);
@@ -391,8 +396,13 @@ export function WorkspaceLogColumn({
     }
     setError(null);
     const byStream = new Map(results.map((result) => [result.entry.streamId, result]));
-    setEntries((current) =>
-      trimLogEntries([
+    setEntries((current) => {
+      // Functional updaters can flush after a denial clear; drop the write so
+      // previously authorized tails cannot reappear.
+      if (epoch !== columnEpochRef.current || listingDeniedRef.current) {
+        return current;
+      }
+      return trimLogEntries([
         ...current.filter((entry) => {
           const result = byStream.get(entry.streamId);
           if (!result) {
@@ -401,9 +411,12 @@ export function WorkspaceLogColumn({
           return entry.kind === "live" && entry.offset >= result.nextOffset;
         }),
         ...results.map((result) => result.entry),
-      ], selectedStreams),
-    );
+      ], selectedStreams);
+    });
     setOffsets((current) => {
+      if (epoch !== columnEpochRef.current || listingDeniedRef.current) {
+        return current;
+      }
       const next = { ...current };
       for (const result of results) {
         next[result.entry.streamId] = result.nextOffset;
@@ -441,6 +454,7 @@ export function WorkspaceLogColumn({
       // even while workspace_logs remains advertised (CONSOLE_BACKEND_CONTRACT).
       if (result.status === 401 || result.status === 403) {
         columnEpochRef.current += 1;
+        revokedListingGenerationRef.current = generation;
         listingDeniedRef.current = true;
         selectedStreamsRef.current = [];
         streamActivityRef.current = {};
@@ -453,6 +467,11 @@ export function WorkspaceLogColumn({
         setStreamState("idle");
         setListingDenied(true);
       }
+      return;
+    }
+    // Older overlapping listing 200: this poll started before the denial that
+    // cleared the column. Do not restore streams/entries or reopen the stream.
+    if (generation <= revokedListingGenerationRef.current) {
       return;
     }
     listingDeniedRef.current = false;
@@ -511,11 +530,12 @@ export function WorkspaceLogColumn({
       }),
     );
     eventSourceRef.current = source;
+    const openedEpoch = columnEpochRef.current;
     let closedByServer = false;
     let terminalError = false;
 
     source.onmessage = (message) => {
-      if (listingDeniedRef.current) {
+      if (listingDeniedRef.current || openedEpoch !== columnEpochRef.current) {
         return;
       }
       const frame = parseFrame(message.data);
@@ -540,8 +560,11 @@ export function WorkspaceLogColumn({
           order: Date.parse(frame.occurred_at ?? "") || Date.now(),
           kind: frame.seq === 0 ? "tail" : "live",
         };
-        setEntries((current) =>
-          trimLogEntries(
+        setEntries((current) => {
+          if (listingDeniedRef.current || openedEpoch !== columnEpochRef.current) {
+            return current;
+          }
+          return trimLogEntries(
             [
             ...current.filter(
               (item) =>
@@ -552,15 +575,20 @@ export function WorkspaceLogColumn({
             entry,
             ],
             selectedStreamsRef.current,
-          ),
-        );
-        setOffsets((current) => ({
-          ...current,
-          [frame.stream_id]: Math.max(
-            current[frame.stream_id] ?? 0,
-            frame.next_offset ?? frame.offset,
-          ),
-        }));
+          );
+        });
+        setOffsets((current) => {
+          if (listingDeniedRef.current || openedEpoch !== columnEpochRef.current) {
+            return current;
+          }
+          return {
+            ...current,
+            [frame.stream_id]: Math.max(
+              current[frame.stream_id] ?? 0,
+              frame.next_offset ?? frame.offset,
+            ),
+          };
+        });
         return;
       }
       if (frame.type === "error") {
@@ -578,6 +606,12 @@ export function WorkspaceLogColumn({
     };
 
     source.onerror = () => {
+      // close() from an authorization denial fires error; do not flip the
+      // cleared column back to connecting or surface a live stream.
+      if (listingDeniedRef.current || openedEpoch !== columnEpochRef.current) {
+        setStreamState("idle");
+        return;
+      }
       if (terminalError) {
         setStreamState("error");
         return;
