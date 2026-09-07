@@ -391,7 +391,8 @@ class ConsoleDashboardWindowResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     anchor: Literal["generated_at"]
-    since_hours: int
+    # Positive integer hours; matches shipped parseDashboardSummary.
+    since_hours: Annotated[StrictInt, Field(gt=0)]
     start: ConsoleTimestamp
 
 

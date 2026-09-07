@@ -241,3 +241,39 @@ def test_dashboard_summary_rejects_coerced_count_values(
     payload["counts"][count_key] = coerced_value
     with pytest.raises(ValidationError):
         ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_normalizes_omitted_coverage_notes() -> None:
+    """notes is optional in OpenAPI; omitted values become []."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    del payload["coverage"]["notes"]
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.coverage.notes == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("notes", [None, "x", [1], [{"text": "x"}], [True]])
+def test_dashboard_summary_rejects_malformed_coverage_notes(notes: object) -> None:
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["coverage"]["notes"] = notes
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("since_hours", [-1, 0, 1.5, "24", True])
+def test_dashboard_summary_rejects_non_positive_since_hours(since_hours: object) -> None:
+    """Match the shipped TS parser: window.since_hours must be a positive integer."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["window"]["since_hours"] = since_hours
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_accepts_positive_integer_since_hours() -> None:
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["window"]["since_hours"] = 1
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.window.since_hours == 1

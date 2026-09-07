@@ -1932,6 +1932,7 @@
             "type": "string"
           },
           "since_hours": {
+            "exclusiveMinimum": 0.0,
             "title": "Since Hours",
             "type": "integer"
           },
