@@ -142,6 +142,25 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
 });
 
+test("loadOverview reads filters via ref so capability polling stays filter-independent", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const overviewQueryRef = useRef\(\{ statusFilters, agentFilters, repoFilter \}\);/,
+    "Expected overview filter values to live in a ref",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?overviewQueryRef\.current;[\s\S]*?\}, \[setSelectedId\]\);/,
+    "Expected loadOverview deps to exclude status/agent/repo filters",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?\}, \[agentFilters, repoFilter, setSelectedId, statusFilters\]\);/,
+    "Expected loadOverview not to recreate when only overview filters change",
+  );
+});
+
 test("loadCapabilities discards stale responses via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
@@ -339,8 +358,13 @@ test("workspace retry button gates on negotiated control capabilities", () => {
 
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
+  const preferencesHook = readFileSync(
+    new URL("../hooks/use-operator-theme-preferences.ts", import.meta.url),
+    "utf8",
+  );
 
-  assert.match(dashboard, /const selectedIdRef = useRef<string \| null>\(selectedId\);/);
+  assert.match(preferencesHook, /const selectedIdRef = useRef<string \| null>\(selectedId\);/);
+  assert.match(dashboard, /const \{ selectedId, selectedIdRef, setSelectedId \} = useWorkspaceSelectionUrl\(/);
   assert.match(dashboard, /const workspaceId = selectedId;/);
   assert.match(dashboard, /operatorIdempotencyKey\(action, workspaceId\)/);
   assert.match(dashboard, /operatorActionPath\(action, workspaceId\)/);

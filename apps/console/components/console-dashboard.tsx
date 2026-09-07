@@ -25,12 +25,8 @@ import {
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
-import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
-import {
-DEFAULT_OPERATOR_PREFERENCES,
-normalizeOperatorPreferences,
-} from "@/lib/operator-preferences";
 import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
+import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
 import type {
   CloudRuntimeSummary,
   ConsoleCapabilities,
@@ -80,7 +76,6 @@ type WorkspaceSortKey,
 ErrorBanner,
 apiGet,
 apiPost,
-applyOperatorPreferenceAttributes,
 compareLogEntries,
 emptyDetail,
 fallbackResourceSaturation,
@@ -92,24 +87,21 @@ operatorActionReason,
 operatorIdempotencyKey,
 parseFrame,
 pollMs,
-readStoredOperatorPreferences,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
 trimLogEntries,
 updateLogStreamActivity,
-writeStoredOperatorPreferences
 } from "./console-dashboard-shared";
 
 export function ConsoleDashboard() {
-  const [operatorPreferences, setOperatorPreferences] = useState<OperatorPreferences>(
-    DEFAULT_OPERATOR_PREFERENCES,
-  );
-  const [operatorPreferencesHydrated, setOperatorPreferencesHydrated] = useState(false);
-  const [systemTheme, setSystemTheme] = useState<ResolvedOperatorTheme>("light");
+  const { operatorPreferences, updateOperatorPreferences } = useOperatorThemePreferences();
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
-const searchParams = useSearchParams();
-  const [selectedId, setSelectedIdState] = useState<string | null>(searchParams.get("workspaceId"));
+  const searchParams = useSearchParams();
+  const { selectedId, selectedIdRef, setSelectedId } = useWorkspaceSelectionUrl(
+    searchParams,
+    searchParams.get("workspaceId"),
+  );
   const [detail, setDetail] = useState<DetailState>(emptyDetail);
   const [selectedStreams, setSelectedStreams] = useState<string[]>([]);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -156,7 +148,6 @@ const searchParams = useSearchParams();
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
-  const selectedIdRef = useRef<string | null>(selectedId);
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
   // Bumped on auth denial / tenant identity clear so in-flight feed responses
@@ -174,32 +165,10 @@ const searchParams = useSearchParams();
   // Last observed configured context query fingerprint (org_id/project_id, …).
   // null = uninitialized; empty string is a valid local / no-keys fingerprint.
   const configuredContextFingerprintRef = useRef<string | null>(null);
-
-  const setSelectedId = useCallback((workspaceId: string | null) => {
-    selectedIdRef.current = workspaceId;
-    setSelectedIdState(workspaceId);
-  }, []);
-
-  useEffect(() => {
-    const urlWorkspaceId = searchParams.get("workspaceId");
-    if (selectedIdRef.current !== urlWorkspaceId) {
-      setSelectedId(urlWorkspaceId);
-    }
-  }, [searchParams, setSelectedId]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const currentParam = params.get("workspaceId");
-    if (selectedId !== currentParam) {
-      if (selectedId) {
-        params.set("workspaceId", selectedId);
-      } else {
-        params.delete("workspaceId");
-      }
-      const newQuery = params.toString();
-      window.history.replaceState(null, "", newQuery ? `?${newQuery}` : window.location.pathname);
-    }
-  }, [selectedId]);
+  // Server-side overview filters are read via ref so loadOverview stays stable
+  // across filter edits (loadCapabilities must not restart on repo/agent/status).
+  const overviewQueryRef = useRef({ statusFilters, agentFilters, repoFilter });
+  overviewQueryRef.current = { statusFilters, agentFilters, repoFilter };
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -225,35 +194,9 @@ const searchParams = useSearchParams();
     return Array.from(new Set([...retainedAgents, ...currentAgents])).sort();
   }, [overview, retainedAgents]);
 
-
   useEffect(() => {
     selectedStreamsRef.current = selectedStreams;
   }, [selectedStreams]);
-
-  useEffect(() => {
-    setOperatorPreferences(readStoredOperatorPreferences());
-    setOperatorPreferencesHydrated(true);
-  }, []);
-
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const updateSystemTheme = () => setSystemTheme(media.matches ? "dark" : "light");
-    updateSystemTheme();
-    media.addEventListener("change", updateSystemTheme);
-    return () => media.removeEventListener("change", updateSystemTheme);
-  }, []);
-
-  useEffect(() => {
-    if (!operatorPreferencesHydrated) {
-      return;
-    }
-    applyOperatorPreferenceAttributes(operatorPreferences, systemTheme);
-    writeStoredOperatorPreferences(operatorPreferences);
-  }, [operatorPreferences, operatorPreferencesHydrated, systemTheme]);
-
-  const updateOperatorPreferences = useCallback((next: Partial<OperatorPreferences>) => {
-    setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));
-  }, []);
 
   const loadOverview = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
@@ -271,16 +214,19 @@ const searchParams = useSearchParams();
 
     // Build per request so hosted context query keys (org_id/project_id) are
     // read from the current page search after client-side tenant switches —
-    // do not memoize on filter state alone.
+    // do not memoize on filter state alone. Filter values come from the ref so
+    // this callback identity stays stable across filter edits.
+    const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
+      overviewQueryRef.current;
     const params: Record<string, string | number> = { limit: 100 };
-    if (statusFilters.length === 1) {
-      params.status = statusFilters[0];
+    if (statuses.length === 1) {
+      params.status = statuses[0];
     }
-    if (agentFilters.length === 1) {
-      params.agent = agentFilters[0];
+    if (agents.length === 1) {
+      params.agent = agents[0];
     }
-    if (repoFilter.trim()) {
-      params.repo_url = repoFilter.trim();
+    if (repo.trim()) {
+      params.repo_url = repo.trim();
     }
     const overviewPath = awfPath("workspaces/overview", params);
 
@@ -308,7 +254,7 @@ const searchParams = useSearchParams();
     if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
-  }, [agentFilters, repoFilter, setSelectedId, statusFilters]);
+  }, [setSelectedId]);
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
     authorizedFeedEpochRef.current += 1;
@@ -959,7 +905,10 @@ const searchParams = useSearchParams();
     void loadOverview();
     const interval = window.setInterval(() => void loadOverview(), pollMs);
     return () => window.clearInterval(interval);
-  }, [loadOverview]);
+    // status/agent/repo are read via overviewQueryRef inside loadOverview; listing
+    // them here refreshes overview on filter edits without recreating loadOverview
+    // (which would restart capability polling through loadCapabilities).
+  }, [statusFilters, agentFilters, repoFilter, loadOverview]);
 
   useEffect(() => {
     void loadCapabilities();
