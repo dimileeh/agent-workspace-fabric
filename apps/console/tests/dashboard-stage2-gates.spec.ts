@@ -479,6 +479,193 @@ test("dashboard-summary feed-level 403 clears last-good KPIs while capabilities 
   await expect(page.getByText(/last snapshot|may be stale/i)).toHaveCount(0);
 });
 
+async function mockMergeQueueAuthClearRoutes(
+  page: Page,
+  options: {
+    denied: () => boolean;
+    status: 401 | 403;
+    errorCode: string;
+    message: string;
+    queueItem: Record<string, unknown>;
+  },
+) {
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      if (options.denied()) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: options.errorCode, message: options.message } },
+          options.status,
+        );
+        return;
+      }
+      await fulfillJson(route, { items: [options.queueItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+}
+
+function mergeQueueAuthClearItem(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    candidate_id: "cand-auth-clear",
+    candidate_status: "open",
+    close_reason: null,
+    attempt_id: "attempt-auth-clear",
+    task_id: "task-auth-clear",
+    workspace_id: "ws_merge_auth_clear",
+    title: "Revoked merge queue candidate",
+    repo_url: "https://github.com/example/awf",
+    base_branch: "main",
+    branch_name: "codex/ws_merge_auth_clear",
+    pr_url: "https://github.com/example/awf/pull/933",
+    status: "monitoring_pr",
+    auto_merge: true,
+    task_class: "console",
+    owned_paths: ["apps/console/**"],
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:05:00Z",
+    merged_at: null,
+    last_event: null,
+    merge_blocker_reason: "workspace_not_terminal",
+    required_next_action: "wait_for_workspace_terminal_state",
+    required_validation_tier: 2,
+    latest_satisfied_validation_tier: 1,
+    validation_freshness_status: "fresh",
+    validation_reason_code: "VALIDATION_SUCCEEDED",
+    readiness: {
+      ready: false,
+      manual_merge_required: false,
+      waiting_for_monitor: false,
+      failed_or_cancelled: false,
+      completed: false,
+      not_canonical: false,
+      stale: false,
+      stale_reason: null,
+    },
+    canonical: true,
+    queue_blockers: [],
+    latest_validation: null,
+    stale_reasons: [],
+    policy_findings: [],
+    ...overrides,
+  };
+}
+
+test("merge-queue feed-level 403 clears last-good rows while capabilities stay reachable", async ({
+  page,
+}) => {
+  let mergeDenied = false;
+  const queueItem = mergeQueueAuthClearItem({});
+  await mockMergeQueueAuthClearRoutes(page, {
+    denied: () => mergeDenied,
+    status: 403,
+    errorCode: "FORBIDDEN",
+    message: "merge queue permission revoked",
+    queueItem,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const mergePanel = page.locator("#awf-merge-queue");
+  await expect(mergePanel.getByText("Revoked merge queue candidate")).toBeVisible();
+  await expect(mergePanel.getByText("ws_merge_auth_clear")).toBeVisible();
+
+  mergeDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/merge queue permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  // Capabilities still advertise merge_queue → panel remains, but rows must not
+  // keep the revoked snapshot (no stale "Showing last merge queue snapshot").
+  await expect(mergePanel.getByText("Revoked merge queue candidate")).toHaveCount(0);
+  await expect(mergePanel.getByText("ws_merge_auth_clear")).toHaveCount(0);
+  await expect(mergePanel.getByText(/Showing last merge queue snapshot/i)).toHaveCount(0);
+  await expect(mergePanel.getByText(/Unable to load merge queue/i)).toBeVisible();
+});
+
+test("merge-queue feed-level 401 clears last-good rows while capabilities stay reachable", async ({
+  page,
+}) => {
+  let mergeDenied = false;
+  const queueItem = mergeQueueAuthClearItem({
+    candidate_id: "cand-auth-clear-401",
+    attempt_id: "attempt-auth-clear-401",
+    task_id: "task-auth-clear-401",
+    workspace_id: "ws_merge_auth_clear_401",
+    title: "Unauthorized merge queue candidate",
+    branch_name: "codex/ws_merge_auth_clear_401",
+  });
+  await mockMergeQueueAuthClearRoutes(page, {
+    denied: () => mergeDenied,
+    status: 401,
+    errorCode: "UNAUTHORIZED",
+    message: "merge queue token rejected",
+    queueItem,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const mergePanel = page.locator("#awf-merge-queue");
+  await expect(mergePanel.getByText("Unauthorized merge queue candidate")).toBeVisible();
+  await expect(mergePanel.getByText("ws_merge_auth_clear_401")).toBeVisible();
+
+  mergeDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/merge queue token rejected|unauthorized|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(mergePanel.getByText("Unauthorized merge queue candidate")).toHaveCount(0);
+  await expect(mergePanel.getByText("ws_merge_auth_clear_401")).toHaveCount(0);
+  await expect(mergePanel.getByText(/Showing last merge queue snapshot/i)).toHaveCount(0);
+  await expect(mergePanel.getByText(/Unable to load merge queue/i)).toBeVisible();
+});
+
 test("dashboard-summary cached outage shows error and last_success_at", async ({ page }) => {
   let summaryOutage = false;
   const summary = localDashboardSummary({

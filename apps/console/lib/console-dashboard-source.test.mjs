@@ -228,6 +228,15 @@ test("loadDashboardSummary clears last-good snapshot on feed-level 401 or 403", 
   );
 });
 
+test("loadMergeQueue clears last-good snapshot on feed-level 401 or 403", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const loadMergeQueue = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setMergeQueue\(\[\]\);\s*setMergeQueueHasMore\(false\);\s*setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);\s*return;\s*\}[\s\S]*?setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);/,
+    "Expected loadMergeQueue to drop authorized queue rows on 401/403 rather than retain last-good as a transient outage",
+  );
+});
+
 test("loadCloudRuntime discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(

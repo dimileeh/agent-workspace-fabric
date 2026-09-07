@@ -667,6 +667,17 @@ export function ConsoleDashboard() {
       return;
     }
     if (!result.ok) {
+      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
+      // outage: drop last-good queue rows even when capabilities still negotiate
+      // (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
+      // capabilities may still succeed and would thrash overview refill.
+      if (result.status === 401 || result.status === 403) {
+        setMergeQueue([]);
+        setMergeQueueHasMore(false);
+        setMergeQueueError(result.message);
+        setMergeQueueStatus("error");
+        return;
+      }
       setMergeQueueError(result.message);
       setMergeQueueStatus("error");
       return;
