@@ -717,13 +717,23 @@ export function WorkspaceLogColumn({
     if (!tailAuthDeniedRef.current) {
       setError(null);
     }
+    const listingItems = result.data.items;
+    // Functional writes re-check the applied generation. A newer 200 can land
+    // and bump the watermark before React flushes an older success that already
+    // passed the early return, and a direct setStreams(items) would still
+    // replace the newer inventory with this stale snapshot.
+    const listingSuccessStillApplied = () =>
+      generation === appliedListingGenerationRef.current &&
+      generation > revokedListingGenerationRef.current;
     streamActivityRef.current = updateLogStreamActivity(
       streamActivityRef.current,
       workspace.workspace_id,
-      result.data.items,
+      listingItems,
     );
-    setStreams(result.data.items);
-    setSelectedStreams((current) => pickWorkspaceLogStreams(result.data.items, current));
+    setStreams((current) => (listingSuccessStillApplied() ? listingItems : current));
+    setSelectedStreams((current) =>
+      listingSuccessStillApplied() ? pickWorkspaceLogStreams(listingItems, current) : current,
+    );
   }, [allowLogs, workspace.workspace_id]);
 
   useEffect(() => {

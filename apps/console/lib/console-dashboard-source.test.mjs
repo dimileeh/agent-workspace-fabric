@@ -1430,6 +1430,21 @@ test("fullscreen listing 200 discards a success older than the last applied gene
     /appliedListingGenerationRef\.current = Math\.max\(\s*appliedListingGenerationRef\.current,\s*generation,\s*\)/,
     "Expected a landed listing 200 to record its generation as applied",
   );
+  assert.match(
+    loadBody,
+    /const listingSuccessStillApplied = \(\) =>\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current;/,
+    "Expected queued listing writes to re-check the applied generation",
+  );
+  assert.match(
+    loadBody,
+    /setStreams\(\(current\) => \(listingSuccessStillApplied\(\) \? listingItems : current\)\);/,
+    "Expected a stale listing 200 not to overwrite streams after a newer success",
+  );
+  assert.match(
+    loadBody,
+    /setSelectedStreams\(\(current\) =>\s*listingSuccessStillApplied\(\) \? pickWorkspaceLogStreams\(listingItems, current\) : current,?\s*\);/,
+    "Expected a stale listing 200 not to overwrite selectedStreams after a newer success",
+  );
 });
 
 test("fullscreen loadSelectedTails retains last-successful tails on transient refresh failure", () => {
