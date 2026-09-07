@@ -124,6 +124,7 @@ async def test_tagged_cancellation_sinks_dirt_and_records_the_anchor(
     assert len(preserved) == 1
     assert preserved[0]["reason_code"] == reason_code
     assert preserved[0]["dirty_changes_committed"] is True
+    assert preserved[0]["item_start_head_persisted"] is True
 
 
 @pytest.mark.unit
@@ -210,8 +211,10 @@ async def test_durable_anchor_failure_still_sinks_the_dirt(
 
     Losing the anchor costs the retry its evidence range; leaving the edits dirty
     wedges the next pass at ``PRE_EXISTING_DIRTY_WORKTREE`` — the state this whole
-    path exists to avoid — so the anchor's failure may not take the sink with it
-    (PRRT_kwDOSJAM6s6f2ckK).
+    path exists to avoid — so the anchor's failure may not take the sink with it.
+    The one record this path emits must not read as an unqualified success either:
+    the durable anchor is gone, and only the in-memory marker a dying worker may
+    never persist is left (PRRT_kwDOSJAM6s6f2ckK).
     """
     runner = _runner(tmp_path, agent_reason_code="AGENT_TIMEOUT")
     sink_calls = _record_sink_calls(runner)
@@ -236,3 +239,5 @@ async def test_durable_anchor_failure_still_sinks_the_dirt(
     ]
     assert len(preserved) == 1
     assert preserved[0]["dirty_changes_committed"] is True
+    assert preserved[0]["item_start_head_persisted"] is False
+    assert "session factory is closed" in str(preserved[0]["item_start_head_error"])

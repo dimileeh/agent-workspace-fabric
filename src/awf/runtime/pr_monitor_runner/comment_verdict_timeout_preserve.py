@@ -879,7 +879,10 @@ async def _cancelled_timeout_preserve_steps(
     abort here would leave the timed-out edits dirty for the next pass to reject as
     ``PRE_EXISTING_DIRTY_WORKTREE`` — the one state this path exists to avoid. The
     failure is still re-raised once the sink has run, so the caller logs the lost
-    anchor rather than silently swallowing it (PRRT_kwDOSJAM6s6f2ckK).
+    anchor rather than silently swallowing it, and the preserved record itself
+    carries whether the anchor survived: only the in-memory marker is left, and the
+    worker this cancellation is shutting down may never persist it, so the record
+    must not read as an unqualified success (PRRT_kwDOSJAM6s6f2ckK).
     """
     anchor_exc: Exception | None = None
     try:
@@ -913,6 +916,8 @@ async def _cancelled_timeout_preserve_steps(
         item_start_head=item_start_head,
         dirty_changes_committed=sink_outcome is TimeoutSinkOutcome.COMMITTED,
         sink_outcome=sink_outcome.value,
+        item_start_head_persisted=anchor_exc is None,
+        item_start_head_error=None if anchor_exc is None else repr(anchor_exc)[:400],
     )
     if anchor_exc is not None:
         raise anchor_exc
