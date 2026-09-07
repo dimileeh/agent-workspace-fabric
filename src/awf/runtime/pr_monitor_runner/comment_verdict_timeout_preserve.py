@@ -777,6 +777,7 @@ async def preserve_timeout_work_and_raise_cleanup_error(
     command_evidence: list[str],
     commit_dirty_changes: bool,
     mirror_path: Path | None,
+    timeout_preservation_sink: list[str],
 ) -> NoReturn:
     """Keep a timed-out agent's work, then escalate the cleanup failure.
 
@@ -794,9 +795,17 @@ async def preserve_timeout_work_and_raise_cleanup_error(
     can leave a live agent behind, and the repair strips a poisoned hooks path.
     A repair failure propagates in place of the cleanup error, again without a
     rollback, so the preserved commits survive either exit.
+
+    ``timeout_preservation_sink`` carries that "no rollback floor applies from
+    here on" claim to the caller, exactly as in ``handle_agent_run_error``. The
+    hook repair and the sink both await, and worker cancellation bypasses this
+    path entirely — ``CancelledError`` is a ``BaseException`` — landing on the
+    caller's cancellation branch, which would rewind to ``rollback_floor_head``
+    and delete the commits this path exists to keep (PRRT_kwDOSJAM6s6fyvd1).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 
+    timeout_preservation_sink.append(timeout_reason_code)
     remember_item_start_head(state, item_id, item_start_head, item_body_hash)
     if mirror_path is not None:
         await _comment_verdict._repair_mirror_hooks_or_raise(

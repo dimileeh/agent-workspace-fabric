@@ -665,6 +665,7 @@ async def _run_item_verdict_protocol(
                         command_evidence=command_evidence,
                         commit_dirty_changes=commit_dirty_changes,
                         mirror_path=mirror_path,
+                        timeout_preservation_sink=timeout_preservation_protected,
                     )
                 # Agent output may exist even when compose cleanup fails. Roll back
                 # before mirror repair, then attempt the dirty-worktree sink before
@@ -1323,8 +1324,9 @@ async def _run_item_verdict_protocol(
             # Exception``. Roll back agent edits/self-commits before re-raising so
             # unaccepted residue cannot be pushed on a later repair cycle — unless
             # the #932 preserve handler already claimed this attempt's work as a
-            # timeout's. Its sink / residue / HEAD / provider-recovery awaits are
-            # all cancellable, and rewinding to the attempt floor here would
+            # timeout's — from either entry, the ordinary one or the failed-
+            # cleanup one. Their sink / residue / HEAD / provider-recovery / hook-
+            # repair awaits are all cancellable, and rewinding to the floor would
             # delete the timed-out agent's commits and any salvaged sink commit,
             # which is the destruction #932 exists to prevent
             # (PRRT_kwDOSJAM6s6fylWD). The edits stay exactly as the uncancelled
