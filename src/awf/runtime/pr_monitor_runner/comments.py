@@ -175,6 +175,7 @@ async def _address_thread(
     from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
+        _sync_agent_failed_reason,
         _sync_needs_human_reason,
     )
 
@@ -244,6 +245,13 @@ async def _address_thread(
         item_start_head=operation_start_head,
         operation_id=operation_id,
     )
+    # Stash the failure reason BEFORE the result is narrowed to a bare verdict:
+    # on the #932 timeout path it carries the watchdog reason code and the
+    # preserved HEAD the re-queued attempt resumes from, and nothing downstream
+    # of this seam can recover either from ``agent_failed`` alone
+    # (PRRT_kwDOSJAM6s6fz-6r).
+    if state is not None:
+        _sync_agent_failed_reason(state, thread.thread_id, result)
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -322,7 +330,10 @@ async def _address_review_comment_result(
 ) -> VerdictResult | MonitorVerdictResult:
     """Resolve a review comment while retaining its full monitor result."""
     del base_branch, remote_branch, operation_type, monitor_log
-    from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _review_comment_body_hash,
+        _sync_agent_failed_reason,
+    )
 
     prompt_owned_paths = (
         owned_paths
@@ -371,6 +382,12 @@ async def _address_review_comment_result(
         item_start_head=operation_start_head,
         operation_id=operation_id,
     )
+    # Same durable record as the thread path: ``_sync_needs_human_reason`` (the
+    # only reason the review-comment caller persists) keeps nothing for
+    # ``agent_failed``, and ``_address_review_comment`` narrows this result to
+    # its verdict.
+    if state is not None:
+        _sync_agent_failed_reason(state, comment.comment_id, result)
     return result
 
 
