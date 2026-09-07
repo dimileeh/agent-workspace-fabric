@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     _clear_published_item_commit_provenance_chain,
+    _complete_pending_item_commit_provenance,
     _settle_pending_item_commit_provenance,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
@@ -291,6 +292,41 @@ async def _run_fix_cycle(
             operation_id=operation_id,
         )
 
+    async def _item_start_head_settling_previous() -> str:
+        """Read this item's start head and settle the previous item from it (#937).
+
+        Reading the start head is itself fallible, and its raise is caught by the
+        item loop's ``_MonitorHeadObjectMissingError`` arm — an early exit. Settling
+        only *after* that read would therefore drop a held record on exactly the
+        path the settle exists to cover, so settle before re-raising: the commit
+        object may be unverifiable while HEAD itself still reads, and then the
+        record is still recoverable (PRRT_kwDOSJAM6s6fv665).
+
+        On the readable path the head just probed *is* the pending item's end head
+        (nothing commits between one item's verdict and the next item's start), so
+        complete the record straight from it. Re-probing HEAD inside the settle
+        would only add a second chance to fail and clear a record already in hand.
+        """
+        try:
+            item_start_head = await _current_item_operation_start_head()
+        except BaseException:
+            await _settle_previous_item_provenance()
+            raise
+        if not worktree_path.exists():
+            # No worktree to probe: the head above is the cycle-start fallback, which
+            # predates the pending item's end head. Completing from it would write a
+            # backwards range, so keep the settle's clearing semantics instead.
+            await _settle_previous_item_provenance()
+            return item_start_head
+        await _complete_pending_item_commit_provenance(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            item_start_head=item_start_head,
+            operation_id=operation_id,
+        )
+        return item_start_head
+
     # Inline thread path/line coords are relative to the remote PR head from the
     # status that supplied the batch — not local worktree HEAD. Non-hosted agents
     # commit locally before push, so local HEAD can advance while settle re-polls
@@ -307,8 +343,7 @@ async def _run_fix_cycle(
         # 1) Address each item in the current batch.
         for t in threads:
             try:
-                item_operation_start_head = await _current_item_operation_start_head()
-                await _settle_previous_item_provenance()
+                item_operation_start_head = await _item_start_head_settling_previous()
                 verdict = await self._address_thread(
                     workspace_id=workspace_id,
                     repo=repo,
@@ -517,8 +552,7 @@ async def _run_fix_cycle(
                         workflow_scope_publish_dependent_ids.append(context.comment_id)
         for c in reviews:
             try:
-                item_operation_start_head = await _current_item_operation_start_head()
-                await _settle_previous_item_provenance()
+                item_operation_start_head = await _item_start_head_settling_previous()
                 verdict_result = await self._address_review_comment_result(
                     workspace_id=workspace_id,
                     repo=repo,

@@ -13,6 +13,7 @@ and before the re-raise.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -95,12 +96,19 @@ def _prepared_runner(
     workspace_id: str,
     worktrees_root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cmd: FakeCommandRunner | None = None,
+    heads: list[str | None] | None = None,
 ) -> object:
-    """A runner whose fix cycle reaches the item loop with a readable HEAD."""
+    """A runner whose fix cycle reaches the item loop with a readable HEAD.
+
+    ``heads`` scripts consecutive ``_rev_parse_head`` answers (falling back to
+    ``_FIRST`` once exhausted) so a test can fail one specific HEAD probe; ``cmd``
+    lets a test script the ``git cat-file`` object probe the same way.
+    """
     (worktrees_root / workspace_id).mkdir(parents=True)
     runner = make_runner(
         factory=factory,
-        cmd=FakeCommandRunner(),
+        cmd=cmd if cmd is not None else FakeCommandRunner(),
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=worktrees_root,
@@ -112,8 +120,10 @@ def _prepared_runner(
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
         return (_BASE, None)
 
+    scripted_heads = list(heads or ())
+
     async def _rev_parse_head(_worktree_path: Path) -> str | None:
-        return _FIRST
+        return scripted_heads.pop(0) if scripted_heads else _FIRST
 
     async def _no_block(**_kwargs: object) -> None:
         return None
@@ -125,11 +135,11 @@ def _prepared_runner(
     return runner
 
 
-def _remember_pending(state: MonitorState, *, item_id: str) -> None:
+def _remember_pending(state: MonitorState, *, item_id: str, item_start_head: str = _BASE) -> None:
     comment_repair_provenance._remember_unrecorded_item_commit(
         state,
         item_id=item_id,
-        item_start_head=_BASE,
+        item_start_head=item_start_head,
         operation_id=_OPERATION_ID,
     )
 
@@ -328,6 +338,178 @@ async def test_settle_before_each_item_leaves_a_clean_batch_untouched(
         operation_id=_OPERATION_ID,
     )
 
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    assert _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY not in (ws.monitor_threads_addressed or {})
+    assert state.pending_item_commit_provenance is None
+
+
+@pytest.mark.unit
+async def test_unreadable_next_item_head_settles_the_pending_record_before_raising(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading the *next* item's start head is itself fallible (#937).
+
+    ``_current_item_operation_start_head`` fails the cycle rather than guess, and
+    that raise is caught by the item loop's ``_MonitorHeadObjectMissingError`` arm
+    — an early exit that used to run *before* the settle, dropping item 1's held
+    record with the memory-only marker. HEAD is still readable here (only the
+    commit-object probe fails), so the record is recoverable and must be written.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cat_file_probes = 0
+
+    def _second_cat_file(args: list[str]) -> bool:
+        nonlocal cat_file_probes
+        if "cat-file" not in args:
+            return False
+        cat_file_probes += 1
+        return cat_file_probes == 2
+
+    cmd = FakeCommandRunner()
+    cmd.respond_when(_second_cat_file, returncode=1, stderr="object missing")
+    cmd.respond_when(lambda args: "cat-file" in args, returncode=0)
+    runner = _prepared_runner(
+        factory=factory,
+        workspace_id=workspace_id,
+        worktrees_root=tmp_path / "worktrees",
+        monkeypatch=monkeypatch,
+        cmd=cmd,
+    )
+    state = MonitorState()
+    addressed: list[str] = []
+
+    async def _address(*, thread: ReviewThread, **_kwargs: object) -> str:
+        addressed.append(thread.thread_id)
+        _remember_pending(state, item_id="PRRT_first")
+        return "fix_committed"
+
+    monkeypatch.setattr(runner, "_address_thread", _address)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=_BASE,
+        initial_threads=(_thread("PRRT_first"), _thread("PRRT_second")),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id=_OPERATION_ID,
+    )
+
+    assert result.failed is True
+    # The second item never ran: its start-head probe failed first.
+    assert addressed == ["PRRT_first"]
+    assert await _persisted_item_ids(factory, workspace_id) == ["PRRT_first"]
+    assert state.pending_item_commit_provenance is None
+
+
+@pytest.mark.unit
+async def test_pending_record_is_completed_from_the_head_already_probed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HEAD probe failing *after* the item's start head was read keeps the record.
+
+    The settle used to re-probe HEAD even though the item's start head had just
+    been read successfully — and nothing commits in between, so the two reads are
+    the same SHA. That redundant probe was a second chance to fail, and a failure
+    dropped a record the first read could already complete. Script the probe
+    following item 2's start head to fail; item 1's record must survive it.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _prepared_runner(
+        factory=factory,
+        workspace_id=workspace_id,
+        worktrees_root=tmp_path / "worktrees",
+        monkeypatch=monkeypatch,
+        # item 1's start head, item 2's start head, then an unreadable probe.
+        heads=[_FIRST, _FIRST, None],
+    )
+    state = MonitorState()
+
+    async def _address(*, thread: ReviewThread, **_kwargs: object) -> str:
+        if thread.thread_id == "PRRT_first":
+            _remember_pending(state, item_id="PRRT_first")
+            return "fix_committed"
+        raise AgentVerdictProtocolError()
+
+    monkeypatch.setattr(runner, "_address_thread", _address)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=_BASE,
+        initial_threads=(_thread("PRRT_first"), _thread("PRRT_second")),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id=_OPERATION_ID,
+    )
+
+    assert result.failed is True
+    assert await _persisted_item_ids(factory, workspace_id) == ["PRRT_first"]
+    assert state.pending_item_commit_provenance is None
+
+
+@pytest.mark.unit
+async def test_a_vanished_worktree_clears_the_marker_without_inventing_a_record(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a worktree the item's start head is the cycle-start fallback.
+
+    That SHA is *not* the pending item's end head — it predates it — so completing
+    the record from it would write a backwards range that
+    ``_item_provenance_chain_covers_range`` would then read as real. Keep the
+    settle's clearing semantics on this path.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktrees_root = tmp_path / "worktrees"
+    runner = _prepared_runner(
+        factory=factory,
+        workspace_id=workspace_id,
+        worktrees_root=worktrees_root,
+        monkeypatch=monkeypatch,
+    )
+    state = MonitorState()
+
+    async def _address(*, thread: ReviewThread, **_kwargs: object) -> str:
+        if thread.thread_id == "PRRT_first":
+            # An item whose start head had already advanced past the cycle start.
+            _remember_pending(state, item_id="PRRT_first", item_start_head=_FIRST)
+            shutil.rmtree(worktrees_root / workspace_id)
+            return "fix_committed"
+        raise AgentVerdictProtocolError()
+
+    monkeypatch.setattr(runner, "_address_thread", _address)
+
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha=_BASE,
+        initial_threads=(_thread("PRRT_first"), _thread("PRRT_second")),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        operation_id=_OPERATION_ID,
+    )
+
+    assert result.failed is True
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
