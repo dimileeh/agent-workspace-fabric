@@ -329,3 +329,43 @@ test("resolveWorkflowFinishedAt falls back to finished_at", async () => {
   );
   assert.equal(resolveWorkflowFinishedAt({}), null);
 });
+
+test("distinctFinishedAt omits finished_at already shown as Workflow finished", async () => {
+  const { distinctFinishedAt } = await import("./agent-format.ts");
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: null,
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    null,
+    "cloud rows that only send finished_at must not render it twice",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    null,
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T17:00:00Z",
+    }),
+    null,
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T16:00:00Z",
+    }),
+    "2026-09-06T16:00:00Z",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: null,
+    }),
+    null,
+  );
+  assert.equal(distinctFinishedAt({}), null);
+});

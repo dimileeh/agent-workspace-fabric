@@ -147,6 +147,19 @@ export function resolveWorkflowFinishedAt(
   return workspace.workflow_finished_at ?? workspace.finished_at ?? null;
 }
 
+/**
+ * Separate "Finished" timestamp. `finished_at` is already the documented
+ * fallback for Workflow finished, so omit it when that fact would repeat the
+ * same value (cloud rows that only send `finished_at`).
+ */
+export function distinctFinishedAt(workspace: WorkflowTimingFields): string | null {
+  const finishedAt = workspace.finished_at;
+  if (!finishedAt || finishedAt === resolveWorkflowFinishedAt(workspace)) {
+    return null;
+  }
+  return finishedAt;
+}
+
 type PresentationModelFields = RequestedModelWorkspace & ConfirmedModelWorkspace;
 
 /**

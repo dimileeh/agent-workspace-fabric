@@ -21,6 +21,7 @@ useState
 } from "react";
 
 import {
+distinctFinishedAt,
 formatAgentLabel,
 formatConfirmedExecutionModel,
 formatRequestedEffort,
@@ -113,6 +114,7 @@ export function TaskDetailsModal({
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
   const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
+  const finishedAt = distinctFinishedAt(workspace);
   const recordedDuration = recordedDurationLabel(workspace.duration_seconds);
 
   useIsomorphicLayoutEffect(() => {
@@ -195,8 +197,8 @@ export function TaskDetailsModal({
                 workflowFinishedAt ? formatDateTime(workflowFinishedAt) : "not recorded"
               }
             />
-            {workspace.finished_at ? (
-              <Fact label="Finished" value={formatDateTime(workspace.finished_at)} />
+            {finishedAt ? (
+              <Fact label="Finished" value={formatDateTime(finishedAt)} />
             ) : null}
             {recordedDuration != null ? (
               <Fact label="Duration" value={recordedDuration} />
@@ -516,10 +518,12 @@ export function WorkspaceSummary({
   const coordinationWarnings =
     workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
   const presentationFields = mergeWorkspacePresentationFields(overview, workspace);
-  const workflowFinishedAt = resolveWorkflowFinishedAt({
+  const workflowTiming = {
     workflow_finished_at: workspace?.workflow_finished_at ?? overview.workflow_finished_at,
     finished_at: workspace?.finished_at ?? overview.finished_at,
-  });
+  };
+  const workflowFinishedAt = resolveWorkflowFinishedAt(workflowTiming);
+  const finishedAt = distinctFinishedAt(workflowTiming);
 
   return (
     <Panel
@@ -629,8 +633,8 @@ export function WorkspaceSummary({
               workflowFinishedAt ? formatDateTime(workflowFinishedAt) : "not recorded"
             }
           />
-          {(workspace?.finished_at ?? overview.finished_at) ? (
-            <Fact label="Finished" value={formatDateTime(workspace?.finished_at ?? overview.finished_at)} />
+          {finishedAt ? (
+            <Fact label="Finished" value={formatDateTime(finishedAt)} />
           ) : null}
           {(workspace?.duration_seconds ?? overview.duration_seconds) != null ? (
             <Fact
