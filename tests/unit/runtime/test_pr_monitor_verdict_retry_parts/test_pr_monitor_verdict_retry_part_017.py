@@ -27,6 +27,11 @@ from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictExecutionError
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    item_start_head_state_key,
+    peek_item_start_body_hash,
+    peek_item_start_head,
+)
 from tests.unit.runtime._verdict_retry_fixtures import _agent_error, _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -533,3 +538,91 @@ async def test_the_dirty_sink_refuses_the_rerun_when_the_residue_probe_raises(
     )
 
     assert verdicts == [False]
+
+
+@pytest.mark.unit
+async def test_a_provider_failure_after_a_recovery_rerun_re_arms_the_item_anchor(
+    tmp_path: Path,
+) -> None:
+    """The preserved commit keeps its evidence anchor when the rerun dies.
+
+    The first timeout was intercepted inside the recovery loop, so the #932
+    preserve handler — the one that remembers the item's original start HEAD —
+    never ran for it. Raising the rollback floor keeps the commit but not its
+    anchor: with no marker the next monitor pass starts the item at the preserved
+    HEAD, so the timeout commit falls outside ``item_start_head``..HEAD and an
+    honest no-change ``FIXED`` retry is rejected (PRRT_kwDOSJAM6s6fwTyP).
+    """
+    runner = _recovery_rerun_runner(tmp_path, outcome=_agent_error())
+    state = MonitorState()
+
+    with pytest.raises(AgentVerdictExecutionError):
+        await _invoke_item(runner, state=state)
+
+    assert peek_item_start_head(state, _ITEM_ID) == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+async def test_a_protocol_violation_after_a_recovery_rerun_re_arms_the_item_anchor(
+    tmp_path: Path,
+) -> None:
+    """A verdict-less returned run owes the anchor just as a provider failure does."""
+    runner = _recovery_rerun_runner(tmp_path, outcome="I had a look at the thread.")
+    state = MonitorState()
+
+    with pytest.raises(comment_verdict.AgentVerdictProtocolError):
+        await _invoke_item(runner, state=state)
+
+    assert peek_item_start_head(state, _ITEM_ID) == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
+async def test_the_re_armed_recovery_rerun_anchor_carries_the_feedback_body_hash(
+    tmp_path: Path,
+) -> None:
+    """The anchor stays bound to the feedback it was written for.
+
+    An edited comment or a new thread reply keeps the item id but poses different
+    feedback, and the entry guard drops an anchor whose body hash no longer
+    matches. A re-armed anchor with no binding could never be dropped that way.
+    """
+    runner = _recovery_rerun_runner(tmp_path, outcome=_agent_error())
+    state = MonitorState()
+
+    with pytest.raises(AgentVerdictExecutionError):
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message=f"fix: address PR review comment {_ITEM_ID}",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+            state=state,
+            operation_start_head=_ITEM_START_HEAD,
+            evidence_item_id=_ITEM_ID,
+            evidence_body_hash="body-hash-1",
+        )
+
+    assert peek_item_start_head(state, _ITEM_ID) == _ITEM_START_HEAD
+    assert peek_item_start_body_hash(state, _ITEM_ID) == "body-hash-1"
+
+
+@pytest.mark.unit
+async def test_a_verdict_after_a_recovery_rerun_leaves_no_anchor_behind(
+    tmp_path: Path,
+) -> None:
+    """Consume-on-verdict still holds: a finished item arms nothing.
+
+    The rerun answered, so the item is done and no later pass over the same item
+    id may inherit an anchor pointing at commits it never made.
+    """
+    runner = _recovery_rerun_runner(
+        tmp_path,
+        outcome="AWF-VERDICT: FALSE POSITIVE: the reviewer misread the diff",
+    )
+    state = MonitorState()
+
+    result = await _invoke_item(runner, state=state)
+
+    assert result.verdict == "false_positive"
+    assert item_start_head_state_key(_ITEM_ID) not in state.threads_addressed_ids

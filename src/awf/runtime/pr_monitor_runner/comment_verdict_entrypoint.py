@@ -95,6 +95,11 @@ async def _invoke_cli_for_verdict_result(
     another attempt, so the anchor is put back: otherwise the next attempt would
     anchor at the preserved HEAD and drop the timed-out attempt's commits from its
     own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it.
+    An item can also *earn* an anchor mid-run without ever having had one: when the
+    service-recovery loop preserves a watchdog timeout and reruns the agent inside
+    the agent run, the #932 preserve handler never sees that timeout and never
+    writes the marker, so the protocol publishes the owed anchor here and the same
+    verdict-less exits re-arm it (PRRT_kwDOSJAM6s6fwTyP).
 
     Because it survives every failed attempt, the anchor is also checked here for
     staleness, in two ways. A ``SyncBase`` rebase between passes rewrites the branch
@@ -138,6 +143,11 @@ async def _invoke_cli_for_verdict_result(
         )
         consume_item_start_head(state, item_id)
         preserved_item_start_head = None
+    # An anchor this item only starts owing mid-run: the service-recovery loop
+    # intercepts a watchdog timeout, preserves its work and reruns the agent, so
+    # the #932 preserve handler that writes the marker never sees that timeout
+    # (PRRT_kwDOSJAM6s6fwTyP).
+    timeout_rerun_anchor_sink: list[str] = []
     try:
         return await _comment_verdict._run_item_verdict_protocol(
             runner,
@@ -156,15 +166,20 @@ async def _invoke_cli_for_verdict_result(
             evidence_item_path=evidence_item_path,
             evidence_item_line=evidence_item_line,
             evidence_anchor_head=evidence_anchor_head,
+            timeout_rerun_anchor_sink=timeout_rerun_anchor_sink,
         )
     except BaseException:
         # Every exit from here — infrastructure repair failure, provider failure,
         # protocol violation, worker cancellation — fails the fix cycle without
         # recording a verdict for the item, so the item is re-addressed later.
-        restore_item_start_head(
-            state,
-            item_id,
-            preserved_item_start_head,
-            preserved_item_body_hash,
-        )
+        anchor_head = preserved_item_start_head
+        anchor_body_hash = preserved_item_body_hash
+        if anchor_head is None and timeout_rerun_anchor_sink:
+            # This attempt had no anchor on entry but earned one: a timeout the
+            # recovery loop reran over left commits behind, and only the item's
+            # own start covers them. Bind it to the feedback this attempt ran on,
+            # exactly as the preserve handler would have.
+            anchor_head = timeout_rerun_anchor_sink[-1]
+            anchor_body_hash = item_body_hash
+        restore_item_start_head(state, item_id, anchor_head, anchor_body_hash)
         raise

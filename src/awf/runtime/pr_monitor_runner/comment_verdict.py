@@ -236,6 +236,7 @@ async def _run_item_verdict_protocol(
     evidence_item_path: str | None = None,
     evidence_item_line: int | None = None,
     evidence_anchor_head: str | None = None,
+    timeout_rerun_anchor_sink: list[str] | None = None,
 ) -> VerdictResult:
     """Run one logical item with at most one protocol-correction attempt.
 
@@ -276,7 +277,10 @@ async def _run_item_verdict_protocol(
     later bad verdict can delete the commits #932 deliberately kept (#934).
     ``evidence_item_id`` keys the #932 timeout marker and ``evidence_body_hash``
     binds it to the feedback body it was written for; no evidence is persisted or
-    salvaged across process restarts.
+    salvaged across process restarts. ``timeout_rerun_anchor_sink`` reports the
+    anchor a timeout the service-recovery loop reran over left owing, so the
+    caller can re-arm it if this item ends without a verdict
+    (PRRT_kwDOSJAM6s6fwTyP).
     """
     # Retained (no longer fully ``del``-ed) purely as the key and body binding for
     # the #932 timeout marker below; no evidence is persisted or salvaged from them.
@@ -512,6 +516,16 @@ async def _run_item_verdict_protocol(
                         if not timeout_rerun_floor_raised:
                             pre_timeout_rerun_floor_head = rollback_floor_head
                             timeout_rerun_floor_raised = True
+                            # The floor keeps the timed-out run's commit; the
+                            # item-start marker is what keeps it inside the next
+                            # attempt's FIXED evidence range. The preserve handler
+                            # that writes that marker never saw this timeout — the
+                            # recovery loop intercepted it — so publish the anchor
+                            # it owes. The caller re-arms it only if this item ends
+                            # without a verdict, which keeps consume-on-verdict
+                            # intact (PRRT_kwDOSJAM6s6fwTyP).
+                            if timeout_rerun_anchor_sink is not None and item_start_head:
+                                timeout_rerun_anchor_sink.append(item_start_head)
                         rollback_floor_head = timeout_rerun_floor_heads[-1]
             except AgentRunError as exc:
                 append_command_evidence(
