@@ -214,8 +214,56 @@ test("loadOverview follows overview pagination beyond the first page", () => {
   );
   assert.match(
     dashboard,
+    /setOverviewTruncationWarning\(\s*collected\.truncated\s*\?[\s\S]*?Workspace list truncated/,
+    "Expected truncation to use a dedicated overview warning state, not the shared error slot",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?setError\(\s*collected\.truncated/,
+    "Expected loadOverview not to write truncation into the shared error state wiped by loadWorkspace",
+  );
+  assert.match(
+    dashboard,
     /collected\.items\.map\(/,
     "Expected loadOverview to consume OverviewPageCollection.items rather than a bare array",
+  );
+});
+
+test("loadWorkspace success clears shared error without clearing overview truncation", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const \[overviewTruncationWarning, setOverviewTruncationWarning\] = useState<string \| null>\(null\);/,
+    "Expected a dedicated overview truncation warning state",
+  );
+  assert.match(
+    dashboard,
+    /const loadWorkspace = useCallback\([\s\S]*?\} else \{\s*setError\(null\);\s*\}/,
+    "Expected loadWorkspace success to clear only the shared error slot",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /const loadWorkspace = useCallback\([\s\S]*?setOverviewTruncationWarning/,
+    "Expected loadWorkspace not to touch overview truncation warning",
+  );
+  assert.match(
+    dashboard,
+    /overviewTruncationWarning \? <ErrorBanner message=\{overviewTruncationWarning\} \/> : null/,
+    "Expected truncation warning to render independently of the shared error banner",
+  );
+});
+
+test("authorized feed clear and overview auth denial wipe truncation with the overview", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
+    "Expected clearAuthorizedConsoleFeeds to wipe truncation with the overview",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);\s*\}/,
+    "Expected overview auth denial to wipe truncation with the overview",
   );
 });
 
@@ -228,7 +276,7 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{\s*setOverview\(\[\]\);\s*\}/,
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{\s*setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);\s*\}/,
     "Expected loadOverview to clear overview only on page auth denial and retain last-good on other page failures",
   );
   assert.doesNotMatch(

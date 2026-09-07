@@ -147,6 +147,10 @@ export function ConsoleDashboard() {
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Overview truncation must not share the inspector/workspace error slot:
+  // loadWorkspace / live-stream clear `error` on success and would otherwise
+  // dismiss the 5k-row prefix warning, flickering against the overview poll.
+  const [overviewTruncationWarning, setOverviewTruncationWarning] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
@@ -262,16 +266,20 @@ export function ConsoleDashboard() {
       }
       if (pageAuthDenied) {
         setOverview([]);
+        setOverviewTruncationWarning(null);
       }
       return;
     }
     // Never treat a capped prefix as a complete fleet: surface truncation so
     // rail/search/log selection cannot silently omit later workspaces.
-    setError(
+    // Keep this off the shared `error` slot so selected-workspace polls cannot
+    // clear it (loadWorkspace setError(null) on success).
+    setOverviewTruncationWarning(
       collected.truncated
         ? "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
         : null,
     );
+    setError(null);
     setOverview(
       collected.items.map((item) => ({
         ...item,
@@ -312,6 +320,7 @@ export function ConsoleDashboard() {
     // wipe them on auth denial or tenant/backend identity change so revocation
     // and cross-context reuse cannot fail open with prior rows still on screen.
     setOverview([]);
+    setOverviewTruncationWarning(null);
     setRetainedAgents([]);
     setRetainedModels([]);
     // Selected agent/model filters are tenant-learned identifiers; WorkspaceFilters
@@ -1393,6 +1402,7 @@ export function ConsoleDashboard() {
 
         <section className="min-w-0">
           {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
+          {overviewTruncationWarning ? <ErrorBanner message={overviewTruncationWarning} /> : null}
           {error ? <ErrorBanner message={error} /> : null}
           <ConsoleDashboardFleetPanels
             showCapacitySection={showCapacitySection}
