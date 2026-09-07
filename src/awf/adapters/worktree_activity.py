@@ -682,24 +682,27 @@ class WorktreeActivityProbe:
         watched = [git_dir]
         watched.extend(git_dir / name for name in _GIT_DIR_ACTIVITY_FILES)
         watched.append(git_dir / _REFTABLE_STACK_FILE)
-        walk_roots: tuple[Path, ...] = ()
+        # The git dir resolved above is this worktree's alone — a linked
+        # worktree's private directory, or the one a ``.git`` symlink / pointer
+        # file names for a checkout of its own — so it is walked whole, not just
+        # stat-ed. Its own mtime only moves when a direct child appears or is
+        # replaced, which leaves every write *inside* it (a rebase advancing
+        # through ``rebase-merge/done``, a ``sequencer`` todo being rewritten, a
+        # ``git tag`` or second branch landing under ``refs/``) and every
+        # in-place rewrite of a file not named above invisible: an interval
+        # whose only work was Git's would read as idleness. A plain ``.git``
+        # *directory* is already walked whole by the worktree walk itself, and
+        # going through a symlink — which the walk never descends — must not
+        # quietly narrow that to the handful of names watched here.
+        walk_roots: tuple[Path, ...] = (git_dir,)
         if common_dir != git_dir:
             watched.append(common_dir / _REFTABLE_STACK_FILE)
-            # A *linked* worktree's git dir is this worktree's alone, and small
-            # — so it is walked whole, not just stat-ed. Its own mtime only
-            # moves when a direct child appears or is replaced, which leaves
-            # every write *inside* one (a rebase advancing through
-            # ``rebase-merge/done``, a ``sequencer`` todo being rewritten) and
-            # every in-place rewrite of a file not named above invisible: an
-            # interval whose only work was Git's would read as idleness.
-            #
-            # The *common* dir is never a walk root: one bare mirror backs
+            # The *common* dir stays out of the walk: one bare mirror backs
             # every worktree of a repo, so its churn is other workspaces'
             # agents and would report this one as alive whatever it is doing —
             # and it carries the object store, whose size would burn the walk
             # budget. Only the paths under it that belong to this worktree —
             # its branch ref, the reftable stack — are watched, by name.
-            walk_roots = (git_dir,)
         branch_ref = _resolve_head_branch_ref(git_dir, common_dir)
         if branch_ref is not None:
             watched.append(branch_ref)

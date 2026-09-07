@@ -76,6 +76,71 @@ async def test_symlinked_git_directory_is_watched_like_a_linked_worktree(
 
 
 @pytest.mark.unit
+async def test_symlinked_git_directory_is_walked_whole(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A symlinked git dir is walked, not just stat-ed at the paths named above.
+
+    ``_git_common_dir`` answers the git dir itself for a plain repo, so keying
+    the walk root off "is this a linked worktree?" left a symlinked ``.git``
+    covered only by ``HEAD`` / ``index`` / ``logs/HEAD`` / the branch ref.
+    Metadata-only work — ``git tag``, a second branch, a ``packed-refs``
+    rewrite — lands under ``refs/`` and moves none of those, so the fingerprint
+    held still and a silent print-mode agent was idle-killed mid-run. A plain
+    ``.git`` *directory* is walked whole by the worktree walk; going through a
+    symlink must not quietly narrow that to a handful of names.
+    """
+    git_dir = tmp_path / "real.git"
+    (git_dir / "refs" / "tags").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (worktree / ".git").symlink_to(git_dir, target_is_directory=True)
+    _age_tree(worktree)
+    _age_tree(git_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (git_dir / "refs" / "tags" / "v1").write_text("deadbeef\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_shared_common_dir_is_still_not_walked(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A linked worktree walks its own git dir and never the shared common one.
+
+    One bare mirror backs every worktree of a repo, so churn under the common
+    dir is other workspaces' agents — counting it would report this worktree as
+    alive whatever it is doing, and its object store would burn the walk budget.
+    """
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    (git_dir / "rebase-merge").mkdir(parents=True)
+    (common_dir / "objects").mkdir(parents=True)
+    (git_dir / "commondir").write_text(f"{common_dir}\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    # Another workspace's agent churning the shared mirror is not this
+    # worktree's activity.
+    (common_dir / "objects" / "pack-other").write_text("x\n", encoding="utf-8")
+    assert await probe() is False
+
+    # This worktree's own git dir still is.
+    (git_dir / "rebase-merge" / "done").write_text("pick\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
 async def test_symlinked_gitfile_pointer_still_resolves(
     tmp_path: Path,
     worktree: Path,
