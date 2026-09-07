@@ -89,6 +89,13 @@ test("parseDashboardSummary rejects contradictory count subset relationships", (
     parseDashboardSummary(validSummary({ counts: { ...fixture.counts, active: 1, executing: 2 } })),
     null,
   );
+  // Domain: monitoring_pr ⊆ active.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({ counts: { ...fixture.counts, active: 1, monitoring_pr: 2, awaiting_human: 0 } }),
+    ),
+    null,
+  );
   // Declared overlap: awaiting_human ⊆ monitoring_pr.
   assert.equal(
     parseDashboardSummary(

@@ -234,6 +234,22 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
       return null;
     }
   }
+  // Immediately after the per-value loop: reject contradictory domain subsets
+  // among related non-null counts so malformed hosted snapshots fail closed and
+  // the console retains the last-good KPI snapshot.
+  const active = counts.active as number | null;
+  const executing = counts.executing as number | null;
+  const monitoringPr = counts.monitoring_pr as number | null;
+  const awaitingHuman = counts.awaiting_human as number | null;
+  const awaitingOperator = counts.awaiting_operator as number | null;
+  const retrying = counts.retrying as number | null;
+  if (active != null && executing != null && executing > active) {
+    return null;
+  }
+  // monitoring_pr is a non-terminal status bucket ⊆ active.
+  if (active != null && monitoringPr != null && monitoringPr > active) {
+    return null;
+  }
   if (!record.overlap || typeof record.overlap !== "object" || Array.isArray(record.overlap)) {
     return null;
   }
@@ -246,17 +262,6 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
     if (typeof overlap[key] !== "boolean") {
       return null;
     }
-  }
-  // Documented subset relationships: enforce when related counts are present so
-  // contradictory hosted snapshots fail closed and the UI keeps last-good data.
-  const active = counts.active as number | null;
-  const executing = counts.executing as number | null;
-  const monitoringPr = counts.monitoring_pr as number | null;
-  const awaitingHuman = counts.awaiting_human as number | null;
-  const awaitingOperator = counts.awaiting_operator as number | null;
-  const retrying = counts.retrying as number | null;
-  if (active != null && executing != null && executing > active) {
-    return null;
   }
   if (
     overlap.awaiting_human_subset_of_monitoring_pr === true &&

@@ -334,6 +334,7 @@ def test_dashboard_summary_accepts_positive_integer_since_hours() -> None:
     "counts_patch,overlap_patch",
     [
         ({"active": 1, "executing": 2}, {}),
+        ({"active": 1, "monitoring_pr": 2, "awaiting_human": 0}, {}),
         (
             {"monitoring_pr": 1, "awaiting_human": 2},
             {"awaiting_human_subset_of_monitoring_pr": True},

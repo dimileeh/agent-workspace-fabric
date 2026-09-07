@@ -478,6 +478,12 @@ class ConsoleDashboardSummaryResponse(BaseModel):
         ):
             raise ValueError("counts.executing must be <= counts.active")
         if (
+            counts.active is not None
+            and counts.monitoring_pr is not None
+            and counts.monitoring_pr > counts.active
+        ):
+            raise ValueError("counts.monitoring_pr must be <= counts.active")
+        if (
             overlap.awaiting_human_subset_of_monitoring_pr
             and counts.awaiting_human is not None
             and counts.monitoring_pr is not None
