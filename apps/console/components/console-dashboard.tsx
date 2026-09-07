@@ -345,7 +345,9 @@ export function ConsoleDashboard() {
       // clear it (loadWorkspace setError(null) on success).
       setOverviewTruncationWarning(
         collected.truncated
-          ? "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
+          ? collected.truncationReason === "missing_cursor"
+            ? "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor, so later workspaces cannot be loaded."
+            : "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
           : null,
       );
       setError(null);

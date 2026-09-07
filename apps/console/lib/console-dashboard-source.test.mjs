@@ -375,8 +375,8 @@ test("loadOverview follows overview pagination beyond the first page", () => {
   );
   assert.match(
     dashboard,
-    /collected\.truncated[\s\S]*?Workspace list truncated/,
-    "Expected loadOverview to surface truncation when the page ceiling stops with has_more",
+    /collected\.truncated[\s\S]*?truncationReason === "missing_cursor"[\s\S]*?omitted a continuation cursor[\s\S]*?Workspace list truncated/,
+    "Expected loadOverview to surface a missing-cursor envelope separately from the page-ceiling warning",
   );
   assert.match(
     dashboard,

@@ -18,6 +18,9 @@ export type OverviewListFilters = {
 
 export type OverviewListPage = ListEnvelope<WorkspaceOverview>;
 
+/** Why a collected prefix is incomplete. Callers must surface this, not treat it as done. */
+export type OverviewTruncationReason = "page_ceiling" | "missing_cursor";
+
 /** Result of accumulating overview pages; never pretend a capped prefix is complete. */
 export type OverviewPageCollection = {
   items: WorkspaceOverview[];
@@ -26,7 +29,25 @@ export type OverviewPageCollection = {
    * stopped with has_more, or has_more was set without a continuation cursor.
    */
   truncated: boolean;
+  /** Set only when ``truncated`` is true. */
+  truncationReason: OverviewTruncationReason | null;
 };
+
+function complete(items: WorkspaceOverview[]): OverviewPageCollection {
+  return { items, truncated: false, truncationReason: null };
+}
+
+function truncated(
+  items: WorkspaceOverview[],
+  truncationReason: OverviewTruncationReason,
+): OverviewPageCollection {
+  return { items, truncated: true, truncationReason };
+}
+
+/** A continuation cursor must be a non-blank string; null, omitted, and whitespace cannot be followed. */
+export function usableContinuationCursor(cursor: string | null | undefined): cursor is string {
+  return typeof cursor === "string" && cursor.trim() !== "";
+}
 
 export function overviewListPath(
   filters: OverviewListFilters,
@@ -59,14 +80,15 @@ export async function collectOverviewPages(
     }
     collected.push(...data.items);
     if (!data.has_more) {
-      return { items: collected, truncated: false };
+      return complete(collected);
     }
     // has_more without a usable cursor cannot be followed. Do not install the
     // prefix as complete — later workspaces would stay unreachable with no warning.
-    if (!data.next_cursor) {
-      return { items: collected, truncated: true };
+    // Blank or whitespace cursors are the same contradictory envelope as null/omitted.
+    if (!usableContinuationCursor(data.next_cursor)) {
+      return truncated(collected, "missing_cursor");
     }
     cursor = data.next_cursor;
   }
-  return { items: collected, truncated: true };
+  return truncated(collected, "page_ceiling");
 }

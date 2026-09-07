@@ -6,6 +6,7 @@ import {
   OVERVIEW_LIST_PAGE_SIZE,
   collectOverviewPages,
   overviewListPath,
+  usableContinuationCursor,
 } from "./overview-list.ts";
 
 function page(items, { has_more = false, next_cursor = null } = {}) {
@@ -37,6 +38,7 @@ test("collectOverviewPages follows next_cursor across pages", async () => {
   });
   assert.deepEqual(calls, [null, "page-2"]);
   assert.equal(collected?.truncated, false);
+  assert.equal(collected?.truncationReason, null);
   assert.deepEqual(
     collected?.items.map((item) => item.workspace_id),
     ["ws_1", "ws_2"],
@@ -59,10 +61,19 @@ test("collectOverviewPages returns null when a page request fails", async () => 
   assert.equal(collected, null);
 });
 
+test("usableContinuationCursor rejects omitted, null, and blank cursors", () => {
+  assert.equal(usableContinuationCursor(null), false);
+  assert.equal(usableContinuationCursor(undefined), false);
+  assert.equal(usableContinuationCursor(""), false);
+  assert.equal(usableContinuationCursor("   "), false);
+  assert.equal(usableContinuationCursor("page-2"), true);
+});
+
 test("collectOverviewPages marks truncated when has_more is true but next_cursor is absent", async () => {
   const envelopes = [
     page([{ workspace_id: "ws_partial" }], { has_more: true, next_cursor: null }),
     page([{ workspace_id: "ws_partial" }], { has_more: true, next_cursor: "" }),
+    page([{ workspace_id: "ws_partial" }], { has_more: true, next_cursor: "  \t" }),
     { items: [{ workspace_id: "ws_partial" }], has_more: true },
   ];
   for (const envelope of envelopes) {
@@ -73,6 +84,7 @@ test("collectOverviewPages marks truncated when has_more is true but next_cursor
     });
     assert.equal(calls, 1);
     assert.equal(collected?.truncated, true);
+    assert.equal(collected?.truncationReason, "missing_cursor");
     assert.deepEqual(
       collected?.items.map((item) => item.workspace_id),
       ["ws_partial"],
@@ -91,5 +103,6 @@ test("collectOverviewPages marks truncated when the page ceiling stops with has_
   });
   assert.equal(calls, OVERVIEW_LIST_MAX_PAGES);
   assert.equal(collected?.truncated, true);
+  assert.equal(collected?.truncationReason, "page_ceiling");
   assert.equal(collected?.items.length, OVERVIEW_LIST_MAX_PAGES);
 });
