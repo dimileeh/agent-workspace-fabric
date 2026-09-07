@@ -42,7 +42,11 @@ already does, and still without a rollback (PRRT_kwDOSJAM6s6fwr71,
 PRRT_kwDOSJAM6s6fxp82).
 
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
-re-exported from there (``X as X``) so monkeypatch seams keep working.
+re-exported from there (``X as X``) so monkeypatch seams keep working. The
+item-start marker helpers and the anchor-reachability probes are split one level
+further out for the same reason — ``comment_verdict_timeout_preserve_anchor`` and
+``comment_verdict_timeout_preserve_reachability`` — and re-exported here the same
+way, so this module stays the single import surface for the whole preserve path.
 """
 
 from __future__ import annotations
@@ -52,23 +56,49 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
-from sqlalchemy.exc import SQLAlchemyError
-
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
-from awf.adapters.worktree_activity import (
-    WorktreeProbeCapacityError,
-    probe_worktree_filesystem,
-)
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
-from awf.db.repositories import WorkspaceRepository
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
     _fingerprint_has_pr_worthy_path_residue,
     read_protocol_attempt_start_head,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_or_classify_failure,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    _decode_item_start_marker as _decode_item_start_marker,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    _encode_item_start_marker as _encode_item_start_marker,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    consume_item_start_head as consume_item_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    item_start_body_hash_changed as item_start_body_hash_changed,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    item_start_head_state_key as item_start_head_state_key,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    peek_item_start_body_hash as peek_item_start_body_hash,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    peek_item_start_head as peek_item_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    remember_item_start_head as remember_item_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    remember_item_start_head_durably as remember_item_start_head_durably,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_anchor import (
+    restore_item_start_head as restore_item_start_head,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve_reachability import (
+    preserved_anchor_is_reachable as preserved_anchor_is_reachable,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
@@ -155,375 +185,10 @@ class TimeoutPreserveOutcome(NamedTuple):
     anchor_persisted: bool
 
 
-_ITEM_START_HEAD_STATE_KEY_PREFIX = "__awf_item_start_head__:"
-_ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
-
-# ``git merge-base --is-ancestor`` answers "no" with exit 1; every other non-zero
-# exit is an error, not an answer. ``git rev-parse --verify --quiet`` likewise
-# uses exit 1 for "this name resolves to nothing".
-_GIT_NOT_AN_ANCESTOR_RETURN_CODE = 1
-_GIT_UNRESOLVABLE_NAME_RETURN_CODE = 1
-
-# Bounds the worktree presence check in front of the anchor probes. Generous
-# next to an ordinary ``stat``, small next to the monitor loop it must never
-# wedge — the bound the recovery loop's own presence probe already uses.
-_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS = 10.0
-
 # Infrastructure exits the dirty-worktree sink already declares. They are logged
 # and swallowed here: the preserved commits must survive a sink failure, and the
 # timeout reason code must still reach the caller.
 _SINK_INFRASTRUCTURE_ERRORS = SINK_INFRASTRUCTURE_ERRORS
-
-
-def item_start_head_state_key(item_id: str) -> str:
-    """Reserved ``MonitorState.threads_addressed_ids`` key for an item's start HEAD."""
-    return f"{_ITEM_START_HEAD_STATE_KEY_PREFIX}{item_id}"
-
-
-def _encode_item_start_marker(head: str, body_hash: str | None) -> str:
-    """Bind a remembered start HEAD to the feedback body it was written for."""
-    if not body_hash:
-        return head
-    return f"{body_hash}{_ITEM_START_HEAD_BODY_HASH_SEPARATOR}{head}"
-
-
-def _decode_item_start_marker(raw: str | None) -> tuple[str | None, str | None]:
-    """Split a stored marker into ``(body_hash, head)``.
-
-    Markers written by callers that carry no body hash — and any written by a
-    parent monitor before the binding existed — are bare SHAs and decode to
-    ``(None, sha)``, which keeps their pre-binding behaviour.
-    """
-    if not raw:
-        return (None, None)
-    body_hash, separator, head = raw.partition(_ITEM_START_HEAD_BODY_HASH_SEPARATOR)
-    if not separator:
-        return (None, raw)
-    return (body_hash or None, head or None)
-
-
-def item_start_body_hash_changed(recorded: str | None, current: str | None) -> bool:
-    """Did the feedback body change since the marker was written?
-
-    Only a definitive mismatch counts. An unknown hash on either side — a legacy
-    bare-SHA marker, or a caller that supplies no body hash — proves nothing, and
-    dropping the anchor on a guess costs the preserved commits their place in the
-    item's own evidence range.
-    """
-    return bool(recorded) and bool(current) and recorded != current
-
-
-def remember_item_start_head(
-    state: MonitorState | None,
-    item_id: str | None,
-    head: str | None,
-    body_hash: str | None = None,
-) -> None:
-    """Persist the item's original start HEAD, bound to its feedback body."""
-    if state is None or not item_id or not head:
-        return
-    state.mark_addressed(
-        item_start_head_state_key(item_id),
-        _encode_item_start_marker(head, body_hash),
-    )
-
-
-async def remember_item_start_head_durably(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    state: MonitorState | None,
-    item_id: str | None,
-    head: str | None,
-    body_hash: str | None = None,
-) -> None:
-    """Remember the item's start HEAD in memory *and* on the workspace row.
-
-    In memory alone is not enough for a preserved timeout. The marker only reaches
-    the DB through ``run()``'s post-``_execute`` ``_persist_state``, and this whole
-    path exists because the worker can die in between — cancellation on shutdown,
-    a crash, a container stop. The salvaged commits are already on disk, so a lost
-    marker is not a lost fix but a wedged one: the retry after the restart anchors
-    at the *preserved* HEAD, and the agent that correctly answers "already fixed"
-    with no new commit is rejected as ``AGENT_FIXED_WITHOUT_EVIDENCE``.
-
-    Only this one key is written, merged onto the row's own map — never the whole
-    ``MonitorState``, which inside a fix cycle still carries unconfirmed addressed
-    verdicts a later failure only rolls back in memory (#305). That is the same
-    single-key shape ``_persist_forge_transient_retry_count`` and the item-commit
-    provenance chain already use mid-``_execute``.
-
-    Best-effort, like every other step of the preserve path: a DB fault must not
-    replace the timeout's reason code, and the in-memory marker plus the ordinary
-    ``_persist_state`` remain the fallback for the non-crash exits.
-    """
-    remember_item_start_head(state, item_id, head, body_hash)
-    if not item_id or not head:
-        return
-    session_factory = getattr(getattr(runner, "_deps", None), "session_factory", None)
-    if not callable(session_factory):
-        return
-    try:
-        async with session_factory() as session:
-            ws = await WorkspaceRepository(session).get_for_update(workspace_id)
-            if ws is None:
-                return
-            threads_addressed = dict(ws.monitor_threads_addressed or {})
-            threads_addressed[item_start_head_state_key(item_id)] = _encode_item_start_marker(
-                head, body_hash
-            )
-            ws.monitor_threads_addressed = threads_addressed
-            await session.commit()
-    except (SQLAlchemyError, OSError) as exc:
-        _log.warning(
-            "monitor.agent_verdict_item_start_head_durable_write_failed",
-            workspace_id=workspace_id,
-            item_id=item_id,
-            item_start_head=head,
-            error=repr(exc)[:400],
-        )
-
-
-def consume_item_start_head(
-    state: MonitorState | None,
-    item_id: str | None,
-) -> str | None:
-    """Read *and clear* the item's remembered start HEAD.
-
-    Consuming on read is what keeps the marker from outliving the retry it was
-    written for: once this attempt produces a verdict the item is finished, and no
-    stale anchor can survive into an unrelated later pass over the same item id.
-    An attempt that ends *without* a verdict is still owed its anchor, so it is
-    re-armed by ``restore_item_start_head`` on the way out (#934 audit).
-    """
-    if state is None or not item_id:
-        return None
-    raw = state.threads_addressed_ids.pop(item_start_head_state_key(item_id), None)
-    return _decode_item_start_marker(raw)[1]
-
-
-def peek_item_start_head(
-    state: MonitorState | None,
-    item_id: str | None,
-) -> str | None:
-    """Read the item's remembered start HEAD without clearing it."""
-    if state is None or not item_id:
-        return None
-    return _decode_item_start_marker(
-        state.threads_addressed_ids.get(item_start_head_state_key(item_id))
-    )[1]
-
-
-def peek_item_start_body_hash(
-    state: MonitorState | None,
-    item_id: str | None,
-) -> str | None:
-    """Read the feedback body hash the remembered start HEAD was written for."""
-    if state is None or not item_id:
-        return None
-    return _decode_item_start_marker(
-        state.threads_addressed_ids.get(item_start_head_state_key(item_id))
-    )[0]
-
-
-def restore_item_start_head(
-    state: MonitorState | None,
-    item_id: str | None,
-    head: str | None,
-    body_hash: str | None = None,
-) -> None:
-    """Re-arm an anchor consumed by an attempt that died before a verdict.
-
-    ``consume_item_start_head`` runs at the top of the item, before the fallible
-    pre-launch ownership/mirror repair, the provider-recovery gate and the agent
-    run. Every failure exit from there aborts the fix cycle without marking the
-    item addressed, so the item is attempted again — and without the marker that
-    attempt would anchor at the *preserved* HEAD and push the timed-out attempt's
-    commits out of its own ``FIXED`` evidence range (#934 audit). Consume-on-read
-    still holds for a returned verdict: the item is finished, and no stale anchor
-    survives into an unrelated later pass. A marker written since — a fresh
-    timeout on this very attempt — is newer and wins.
-
-    ``body_hash`` is the hash the consumed marker carried, so re-arming restores
-    the same body binding rather than silently re-pointing the anchor at whatever
-    feedback the next attempt reads.
-    """
-    if state is None or not item_id or not head:
-        return
-    key = item_start_head_state_key(item_id)
-    if key in state.threads_addressed_ids:
-        return
-    state.mark_addressed(key, _encode_item_start_marker(head, body_hash))
-
-
-async def preserved_anchor_is_reachable(
-    runner: PullRequestMonitorRunner,
-    *,
-    worktree_path: Path,
-    anchor_head: str,
-    attempt_start_head: str | None,
-) -> bool:
-    """Is a preserved anchor still an ancestor of this attempt's start HEAD?
-
-    Re-arming the marker on every attempt that dies before a verdict (#934 audit)
-    lets it outlive several failed passes — long enough for a ``SyncBase`` rebase
-    to rewrite the branch and strand the anchor on a dropped SHA. Anchoring a
-    later attempt there gives an evidence range git cannot resolve, so an honest
-    ``FIXED`` can never be proven and the item wedges. Only a definitive "not an
-    ancestor" answer drops the anchor: an unreadable probe keeps it, because
-    dropping it also costs the preserved commits their place in the item's own
-    evidence range.
-
-    ``merge-base --is-ancestor`` spells that definitive answer as exit 1 alone.
-    Every other non-zero exit is a non-answer — the command runner reports its own
-    timeout as exit 124, and git fatals (a broken worktree, a locked repo, an
-    unreadable object store) exit 128 — so those fall through to a direct
-    existence probe on the anchor rather than being read as "not an ancestor"
-    (#934 audit). A pruned anchor object is the stranding this guard exists for
-    and still drops; anything else keeps it.
-
-    The presence check in front of them is bounded for the same reason they are
-    (PRRT_kwDOSJAM6s6f5q9B).
-    """
-    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
-        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-    )
-    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
-    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
-        _git_env_for_merge_safety_object_lookup,
-    )
-
-    if attempt_start_head is None or anchor_head.lower() == attempt_start_head.lower():
-        return True
-    if not await _worktree_is_definitely_present(worktree_path, anchor_head=anchor_head):
-        return True
-    try:
-        result = await runner._deps.runner.run(
-            git_worktree_command(
-                worktree_path,
-                "merge-base",
-                "--is-ancestor",
-                anchor_head,
-                attempt_start_head,
-            ),
-            env=_git_env_for_merge_safety_object_lookup(),
-            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-        )
-    except (TimeoutError, OSError, RuntimeError) as probe_exc:
-        _log.warning(
-            "monitor.agent_verdict_item_start_head_probe_failed",
-            anchor_head=anchor_head,
-            attempt_start_head=attempt_start_head,
-            exc_type=type(probe_exc).__name__,
-        )
-        return True
-    if result.ok:
-        return True
-    if result.returncode == _GIT_NOT_AN_ANCESTOR_RETURN_CODE:
-        return False
-    _log.warning(
-        "monitor.agent_verdict_item_start_head_probe_inconclusive",
-        anchor_head=anchor_head,
-        attempt_start_head=attempt_start_head,
-        returncode=result.returncode,
-        reason_code=result.reason_code,
-    )
-    return not await _anchor_object_is_missing(
-        runner,
-        worktree_path=worktree_path,
-        anchor_head=anchor_head,
-    )
-
-
-async def _worktree_is_definitely_present(worktree_path: Path, *, anchor_head: str) -> bool:
-    """Is the worktree definitively there — bounded, and never raising.
-
-    ``Path.exists()`` is a synchronous ``stat``, and this one runs on the monitor
-    worker's event-loop thread, ahead of both bounded Git probes, over the
-    worktree a timed-out agent was last touching. Against a wedged FUSE/NFS mount
-    that ``stat`` blocks uninterruptibly and freezes the whole worker — unrelated
-    workspaces included — and it only swallows ENOENT/ENOTDIR/EBADF/ELOOP, so a
-    transient EIO/EACCES escapes this guard as an unrelated exception instead of a
-    verdict (PRRT_kwDOSJAM6s6f5q9B).
-
-    The bound only ends the *wait*, though: a ``stat`` parked in the kernel cannot
-    be cancelled, so the thread underneath it runs on until the filesystem
-    answers. On the process-wide default executor ``asyncio.to_thread`` submits
-    to, enough wedged workspaces would leave every worker the rest of the control
-    plane's ``to_thread`` work — Git, Docker, GC — draws from occupied long after
-    each guard returned, and ``concurrent.futures``' interpreter-exit join would
-    hold a graceful worker restart up behind them. So this borrows the worktree
-    scanner's abandonable daemon-thread mechanism, whose process-wide ceiling
-    keeps the worst case at a fixed number of threads nothing can reclaim — the
-    same mechanism the recovery loop's own presence probe already uses
-    (PRRT_kwDOSJAM6s6f6Co6).
-
-    Anything short of a definitive answer is therefore unknown. Unknown reads as
-    "not definitely present", which keeps the anchor: the same fail-open the
-    unreadable-probe paths above take, and the answer the Git probes themselves
-    reach on a worktree they cannot read.
-    """
-    try:
-        return await asyncio.wait_for(
-            probe_worktree_filesystem(worktree_path.exists, worktree_path=str(worktree_path)),
-            timeout=_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS,
-        )
-    except (OSError, WorktreeProbeCapacityError) as probe_exc:
-        # ``TimeoutError`` is an ``OSError`` subclass, so the stalled-mount and
-        # unreadable-path cases share this handler; a worker already holding every
-        # probe thread it allows is the same "could not tell", and starts no
-        # thread of its own — which is what the ceiling is for.
-        # ``asyncio.CancelledError`` is a ``BaseException`` and still propagates.
-        _log.warning(
-            "monitor.agent_verdict_item_start_head_presence_probe_failed",
-            anchor_head=anchor_head,
-            exc_type=type(probe_exc).__name__,
-        )
-        return False
-
-
-async def _anchor_object_is_missing(
-    runner: PullRequestMonitorRunner,
-    *,
-    worktree_path: Path,
-    anchor_head: str,
-) -> bool:
-    """Is ``anchor_head`` provably absent from this worktree's object store?
-
-    Reached only when the ancestry probe could not answer. ``git rev-parse
-    --verify --quiet <sha>^{commit}`` exits 1 exactly when the name resolves to
-    nothing — the pruned-anchor stranding — while a broken repo or a probe
-    timeout exits 128 / 124 and proves nothing, so anything but that definitive 1
-    keeps the anchor.
-    """
-    from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
-        _RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-    )
-    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
-    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
-        _git_env_for_merge_safety_object_lookup,
-    )
-
-    try:
-        result = await runner._deps.runner.run(
-            git_worktree_command(
-                worktree_path,
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"{anchor_head}^{{commit}}",
-            ),
-            env=_git_env_for_merge_safety_object_lookup(),
-            timeout_seconds=_RESIDUE_ORDINARY_GIT_TIMEOUT_SECONDS,
-        )
-    except (TimeoutError, OSError, RuntimeError) as probe_exc:
-        _log.warning(
-            "monitor.agent_verdict_item_start_head_existence_probe_failed",
-            anchor_head=anchor_head,
-            exc_type=type(probe_exc).__name__,
-        )
-        return False
-    return result.returncode == _GIT_UNRESOLVABLE_NAME_RETURN_CODE
 
 
 async def handle_agent_run_error(

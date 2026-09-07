@@ -26,7 +26,9 @@ from awf.adapters import worktree_activity
 from awf.common.commands import CommandResult
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
-from awf.runtime.pr_monitor_runner import comment_verdict_timeout_preserve as timeout_preserve
+from awf.runtime.pr_monitor_runner import (
+    comment_verdict_timeout_preserve_reachability as timeout_preserve_reachability,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictExecutionError
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
@@ -385,7 +387,9 @@ async def test_a_stalled_presence_probe_does_not_wedge_the_monitor(
         return None
 
     monkeypatch.setattr(Path, "exists", _misbehaving_exists(tmp_path / "ws_protocol", _stall))
-    monkeypatch.setattr(timeout_preserve, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        timeout_preserve_reachability, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05
+    )
 
     try:
         reachable = await preserved_anchor_is_reachable(
@@ -434,7 +438,9 @@ async def test_a_stalled_presence_probe_never_occupies_the_shared_executor(
         return None
 
     monkeypatch.setattr(Path, "exists", _misbehaving_exists(tmp_path / "ws_protocol", _stall))
-    monkeypatch.setattr(timeout_preserve, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        timeout_preserve_reachability, "_WORKTREE_PRESENCE_PROBE_TIMEOUT_SECONDS", 0.05
+    )
 
     try:
         reachable = await preserved_anchor_is_reachable(
