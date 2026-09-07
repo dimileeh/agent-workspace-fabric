@@ -875,12 +875,12 @@ export function ConsoleDashboard() {
         setFailureSummaryError(result.message);
         return;
       }
-      if (result.status === 404 || result.status === 503) {
-        setFailureSummaryStatus("unavailable");
-      } else {
-        setFailureSummaryStatus("error");
-        setFailureSummaryError(result.message);
-      }
+      // Advertised-feed 404/503 are refresh outages, not capability withdrawal.
+      // Withdrawal clears via clearNewlyUnsupportedCapabilityFeeds and bumps
+      // generation so this response cannot restore withdrawn data. Keep the last
+      // snapshot and record the error (CONSOLE_BACKEND_CONTRACT).
+      setFailureSummaryStatus("error");
+      setFailureSummaryError(result.message);
       return;
     }
     setFailureSummary(result.data);

@@ -1700,6 +1700,117 @@ test("failures feed-level 403 clears last-good examples while capabilities stay 
   await expect(failuresPanel.getByText(/Unable to load failure analysis/i)).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f_3Jn: advertised
+// failures 404/503 are refresh outages, not capability withdrawal. Keep the
+// last snapshot and show the error; do not swap in the unavailable placeholder.
+test("failures advertised-feed 404 and 503 retain last-successful snapshot", async ({ page }) => {
+  let failuresOutage: 404 | 503 | null = null;
+  const failureExample = {
+    workspace_id: "ws_fail_outage_keep",
+    title: "Retained failure example",
+    repo_url: "https://github.com/example/fail-outage",
+    agent: "codex",
+    failure_reason: "VALIDATION_FAILED",
+    failure_message: "retained failure message",
+    timestamp: "2026-09-06T17:00:00Z",
+    pr_url: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      if (failuresOutage !== null) {
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: failuresOutage === 404 ? "NOT_FOUND" : "UPSTREAM_UNAVAILABLE",
+              message: failuresOutage === 404 ? "failures feed missing" : "failures feed outage",
+            },
+          },
+          failuresOutage,
+        );
+        return;
+      }
+      await fulfillJson(route, {
+        total_failures: 1,
+        window_hours: 24,
+        taxonomy: [{ reason: "VALIDATION_FAILED", count: 1 }],
+        latest_examples: [failureExample],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const failuresPanel = page.locator("#awf-failures");
+  await expect(failuresPanel.getByText("Retained failure example")).toBeVisible();
+  await expect(failuresPanel.getByText("Failure analysis is currently unavailable.")).toHaveCount(0);
+
+  failuresOutage = 503;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(failuresPanel.getByText(/Showing last snapshot\. Refresh failed: failures feed outage/i)).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(failuresPanel.getByText("Retained failure example")).toBeVisible();
+  await expect(failuresPanel.getByText("Failure analysis is currently unavailable.")).toHaveCount(0);
+  await expect(failuresPanel.locator("[data-awf-stale='true']")).toBeVisible();
+
+  failuresOutage = 404;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(failuresPanel.getByText(/Showing last snapshot\. Refresh failed: failures feed missing/i)).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(failuresPanel.getByText("Retained failure example")).toBeVisible();
+  await expect(failuresPanel.getByText("Failure analysis is currently unavailable.")).toHaveCount(0);
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f7qt6: feed-level
 // 401/403 on cloud-runtime must drop last-good tenant snapshot (same contract
 // as dashboard-summary / merge-queue), not keep stale queue/quota facts.
