@@ -384,6 +384,100 @@ async def test_new_git_dir_metadata_file_reports_activity(
 
 
 @pytest.mark.unit
+async def test_rebase_step_inside_the_linked_git_dir_reports_activity(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A linked worktree's git dir is walked, not just stat-ed by name.
+
+    Its own mtime moves only when a *direct child* appears or is replaced, so a
+    rebase advancing through an already existing ``rebase-merge`` directory —
+    ``msgnum`` rewritten in place, a step appended to ``done`` — moved nothing
+    the named watches or that mtime could see, while the worktree itself sits
+    still between ``git rebase --continue`` invocations. That interval read as
+    idleness and the watchdog killed an agent mid-rebase.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    rebase_merge = git_dir / "rebase-merge"
+    rebase_merge.mkdir()
+    (rebase_merge / "msgnum").write_text("1\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    # Same length, in place: neither the git dir nor ``rebase-merge`` itself
+    # moves, so only walking the git dir can see this.
+    (rebase_merge / "msgnum").write_text("2\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_vanished_linked_git_dir_still_allows_an_idle_answer(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A git dir gone by the time it is stat-ed is walked no further.
+
+    Handing it to the walk anyway would turn its ``FileNotFoundError`` into
+    "could not tell" on this scan and every later one — retiring the watchdog
+    for the rest of the run — where absence is a complete observation the stat
+    already folded in as a stable term.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    real_lstat = Path.lstat
+
+    def _pruned(self: Path) -> os.stat_result:
+        if self == git_dir or git_dir in self.parents:
+            raise FileNotFoundError(2, "no such file", str(self))
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _pruned)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_shared_common_dir_churn_is_not_reported_as_activity(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """The common dir is never walked: its churn is other workspaces' agents.
+
+    One bare mirror backs every worktree of a repo, so objects and remote refs
+    landing there say nothing about *this* agent — walking it would report an
+    idle run as alive whenever a neighbouring workspace fetched, and its object
+    store would burn the walk budget. Only this worktree's own paths under it
+    are watched by name.
+    """
+    _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    common_dir = tmp_path / "mirror.git"
+    (common_dir / "objects" / "pack").mkdir(parents=True)
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (common_dir / "objects" / "pack" / "pack-neighbour.pack").write_bytes(b"PACK")
+    (common_dir / "refs" / "remotes" / "origin").mkdir(parents=True)
+    (common_dir / "refs" / "remotes" / "origin" / "main").write_text(
+        "1" * 40 + "\n",
+        encoding="utf-8",
+    )
+    assert await probe() is False
+
+
+@pytest.mark.unit
 async def test_absent_reftable_stack_stays_a_complete_observation(
     tmp_path: Path,
     worktree: Path,

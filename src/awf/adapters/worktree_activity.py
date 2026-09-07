@@ -24,13 +24,18 @@ Design notes:
   not written when ``core.logAllRefUpdates`` is off, and an index already
   matching the previous probe is not rewritten. Under the ``reftable`` backend
   the branch has no loose ref file to land in either, so ``reftable/tables.list``
-  — rewritten by every ref transaction — is watched too. So are ``FETCH_HEAD``,
+  — rewritten by every ref transaction — is watched too. So is ``FETCH_HEAD``,
   the one path in the worktree's own Git state a quiet ``git fetch`` is
-  guaranteed to move, and the git dir itself, whose mtime covers every remaining
-  per-worktree file (``ORIG_HEAD``, ``MERGE_HEAD``, a ``rebase-merge`` dir)
-  appearing or being replaced. The shared common dir is deliberately not walked
-  wholesale: one bare mirror backs every worktree of a repo, so its churn is
-  other workspaces' agents and would report this one as alive regardless.
+  guaranteed to move. A linked worktree's git dir holds nothing *but* this
+  worktree's state, so it is **walked whole** like a second tree root rather
+  than reduced to a list of names: that is what covers the metadata no name
+  above reaches — an in-place rewrite of ``ORIG_HEAD`` or ``COMMIT_EDITMSG``,
+  and every step a rebase or a cherry-pick sequence writes inside an already
+  existing ``rebase-merge`` / ``sequencer`` directory. The shared common dir is
+  deliberately not walked: one bare mirror backs every worktree of a repo, so
+  its churn is other workspaces' agents and would report this one as alive
+  regardless. Only the paths under it that belong to this worktree — its branch
+  ref, the reftable stack — are watched by name.
 * Change is detected by comparing a **fingerprint of the whole tree** — every
   entry's path, mtime, ctime, size, inode and mode, combined order-independently — against
   the previous probe's, not by tracking one newest mtime. A single maximum
@@ -383,6 +388,19 @@ class _Scan(NamedTuple):
     fingerprint: int
 
 
+class _GitPaths(NamedTuple):
+    """Git state a scan must fold in from outside the worktree.
+
+    ``watched`` paths are stat-ed one by one — shared ones among them, so only
+    the names that belong to this worktree are ever listed. ``walk_roots`` are
+    walked whole, like the worktree itself, and so may only ever hold state
+    this worktree alone writes.
+    """
+
+    watched: tuple[Path, ...]
+    walk_roots: tuple[Path, ...]
+
+
 class WorktreeActivityProbe:
     """Report whether anything under a worktree changed since the last probe."""
 
@@ -563,7 +581,7 @@ class WorktreeActivityProbe:
         newest = 0.0
         fingerprint = 0
         try:
-            git_dir_paths = self._git_dir_paths()
+            git_paths = self._git_dir_paths()
         except OSError as exc:
             # The ``.git`` pointer — or the HEAD / ``commondir`` naming the
             # branch ref behind it — is there but unreadable from here: the
@@ -579,7 +597,8 @@ class WorktreeActivityProbe:
                 error=str(exc),
             )
             return None
-        for path in (self._worktree_path, *git_dir_paths):
+        stack: list[str] = [str(self._worktree_path)]
+        for path in (self._worktree_path, *git_paths.watched):
             try:
                 stat_result = _metadata_stat(path)
             except OSError as exc:
@@ -596,7 +615,13 @@ class WorktreeActivityProbe:
                 )
                 return None
             newest, fingerprint = _absorb(newest, fingerprint, str(path), stat_result)
-        stack: list[str] = [str(self._worktree_path)]
+            if stat_result is not None and path in git_paths.walk_roots:
+                # Walked only once its own stat says it is there. An absent git
+                # dir stays the complete "(path, None)" observation the stat
+                # above folded in, rather than a ``scandir`` raising
+                # ``FileNotFoundError`` and wedging every later scan at "could
+                # not tell" — which would retire the watchdog for the run.
+                stack.append(str(path))
         budget = self._max_entries
         while stack:
             current = stack.pop()
@@ -644,29 +669,41 @@ class WorktreeActivityProbe:
                 return None
         return _Scan(newest_mtime=newest, fingerprint=fingerprint)
 
-    def _git_dir_paths(self) -> tuple[Path, ...]:
+    def _git_dir_paths(self) -> _GitPaths:
         git_dir = _resolve_linked_git_dir(self._worktree_path)
         if git_dir is None:
-            return ()
+            return _GitPaths((), ())
         common_dir = _git_common_dir(git_dir)
         # The git dir itself, so that per-worktree metadata with no watch of its
         # own — ``ORIG_HEAD``, ``MERGE_HEAD``, ``COMMIT_EDITMSG``, a
         # ``rebase-merge`` directory — registers when it appears or is replaced:
         # every one of those is created, renamed or removed inside this
-        # directory, which moves its mtime. The *common* dir gets no such watch:
-        # one bare mirror backs every worktree of a repo, so its churn is other
-        # workspaces' agents and would report this one as alive whatever it is
-        # doing. Only the paths under it that belong to this worktree — its
-        # branch ref, the reftable stack — are watched.
+        # directory, which moves its mtime.
         watched = [git_dir]
         watched.extend(git_dir / name for name in _GIT_DIR_ACTIVITY_FILES)
         watched.append(git_dir / _REFTABLE_STACK_FILE)
+        walk_roots: tuple[Path, ...] = ()
         if common_dir != git_dir:
             watched.append(common_dir / _REFTABLE_STACK_FILE)
+            # A *linked* worktree's git dir is this worktree's alone, and small
+            # — so it is walked whole, not just stat-ed. Its own mtime only
+            # moves when a direct child appears or is replaced, which leaves
+            # every write *inside* one (a rebase advancing through
+            # ``rebase-merge/done``, a ``sequencer`` todo being rewritten) and
+            # every in-place rewrite of a file not named above invisible: an
+            # interval whose only work was Git's would read as idleness.
+            #
+            # The *common* dir is never a walk root: one bare mirror backs
+            # every worktree of a repo, so its churn is other workspaces'
+            # agents and would report this one as alive whatever it is doing —
+            # and it carries the object store, whose size would burn the walk
+            # budget. Only the paths under it that belong to this worktree —
+            # its branch ref, the reftable stack — are watched, by name.
+            walk_roots = (git_dir,)
         branch_ref = _resolve_head_branch_ref(git_dir, common_dir)
         if branch_ref is not None:
             watched.append(branch_ref)
-        return tuple(watched)
+        return _GitPaths(tuple(watched), walk_roots)
 
 
 async def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityProbe | None:
