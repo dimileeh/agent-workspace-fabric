@@ -17,7 +17,12 @@ Design notes:
   ``find(1)`` would add a dependency on the control-plane image's toolchain.
 * A *linked* worktree keeps HEAD/index outside the tree (``.git`` is a
   ``gitdir:`` pointer file), so "the index or HEAD moved" is only observable by
-  also stat-ing the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD``.
+  also stat-ing the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD`` —
+  and the branch ref HEAD names, which lives under the git dir's ``commondir``
+  and is the one path a commit always writes. The other three can all sit still
+  through one: HEAD keeps naming the same branch, ``logs/HEAD`` is not written
+  when ``core.logAllRefUpdates`` is off, and an index already matching the
+  previous probe is not rewritten.
 * Change is detected by comparing a **fingerprint of the whole tree** — every
   entry's path, mtime, ctime, size, inode and mode, combined order-independently — against
   the previous probe's, not by tracking one newest mtime. A single maximum
@@ -145,7 +150,11 @@ _COARSE_CLOCK_TOLERANCE_SECONDS = 0.05
 _FINGERPRINT_MASK = (1 << 64) - 1
 
 _GITDIR_PREFIX = "gitdir:"
-# Files that move when only Git state changed in a linked worktree.
+_HEAD_REF_PREFIX = "ref:"
+_GIT_COMMON_DIR_FILE = "commondir"
+# Per-worktree files that move when only Git state changed in a linked worktree.
+# The branch ref a commit actually lands in lives under the *common* git dir and
+# is resolved per scan, from HEAD, by ``_resolve_head_branch_ref`` below.
 _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
 
 # Each scan gets a daemon thread of its own, never the interpreter-wide default
@@ -532,16 +541,17 @@ class WorktreeActivityProbe:
         try:
             git_dir_paths = self._git_dir_paths()
         except OSError as exc:
-            # The ``.git`` pointer is there but unreadable from here — the
+            # The ``.git`` pointer — or the HEAD / ``commondir`` naming the
+            # branch ref behind it — is there but unreadable from here: the
             # control plane and the agent run as different users. Falling back
-            # to "not a linked worktree" would drop HEAD / index / logs/HEAD
-            # from the scan while still returning a fingerprint that claims to
-            # be complete, so Git-only activity would read as idleness. Same
-            # fail-open rule as any other incomplete observation.
+            # to "not a linked worktree", or to "no branch ref", would drop the
+            # paths Git-only activity shows up in while still returning a
+            # fingerprint that claims to be complete, so a commit would read as
+            # idleness. Same fail-open rule as any other incomplete observation.
             _log.warning(
                 "agent.worktree_activity.git_pointer_unreadable",
                 worktree_path=str(self._worktree_path),
-                path=str(self._worktree_path / ".git"),
+                path=str(exc.filename or self._worktree_path / ".git"),
                 error=str(exc),
             )
             return None
@@ -614,7 +624,11 @@ class WorktreeActivityProbe:
         git_dir = _resolve_linked_git_dir(self._worktree_path)
         if git_dir is None:
             return ()
-        return tuple(git_dir / name for name in _GIT_DIR_ACTIVITY_FILES)
+        watched = [git_dir / name for name in _GIT_DIR_ACTIVITY_FILES]
+        branch_ref = _resolve_head_branch_ref(git_dir)
+        if branch_ref is not None:
+            watched.append(branch_ref)
+        return tuple(watched)
 
 
 async def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityProbe | None:
@@ -685,7 +699,8 @@ def _entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
 def _metadata_stat(path: Path) -> os.stat_result | None:
     """Stat a watched metadata path; ``None`` only when it is positively absent.
 
-    ``logs/HEAD`` exists only once a reflog does, so "not there" has to stay a
+    ``logs/HEAD`` exists only once a reflog does, and a packed branch ref has no
+    loose file until the next update writes one, so "not there" has to stay a
     complete observation folded in as a stable ``(path, None)`` term — otherwise
     the probe would answer "could not tell" forever and the watchdog would never
     fire. Every other error is the opposite: the path may be moving without this
@@ -737,3 +752,57 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
         candidate = Path(raw)
         return candidate if candidate.is_absolute() else worktree_path / candidate
     return None
+
+
+def _resolve_head_branch_ref(git_dir: Path) -> Path | None:
+    """Resolve HEAD's symbolic target to the ref file a commit lands in.
+
+    That file lives under the *common* git dir, not the linked worktree's own,
+    and it is the only thing a commit is guaranteed to move: the worktree's
+    ``HEAD`` keeps naming the same branch, ``core.logAllRefUpdates=false``
+    writes no ``logs/HEAD``, and an index already matching the previous probe —
+    staged during the preceding idle window, say — is not rewritten either. Left
+    out, such a commit reads as idleness and the watchdog kills the agent
+    moments after it committed.
+
+    ``None`` is a *complete* observation: a detached HEAD names no branch, and
+    the commit moves the watched ``HEAD`` file itself; an absent or unparsable
+    HEAD names none either. A HEAD that exists but cannot be read is not — the
+    branch it names may be moving without this process being able to see it — so
+    the ``OSError`` propagates and the caller marks the scan incomplete.
+
+    The ref file's own *absence* stays complete, handled like ``logs/HEAD``:
+    a packed ref has no loose file until the next update writes one.
+    """
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
+    target = head.partition("\n")[0].strip()
+    if not target.startswith(_HEAD_REF_PREFIX):
+        return None
+    ref = target[len(_HEAD_REF_PREFIX) :].strip()
+    if not ref:
+        return None
+    return _git_common_dir(git_dir) / ref
+
+
+def _git_common_dir(git_dir: Path) -> Path:
+    """Resolve ``commondir``, where a linked worktree's refs actually live.
+
+    Absent — a plain git dir, including the one behind a ``.git`` symlink —
+    means the git dir already is the common one. Unreadable propagates, like
+    every other observation this scan cannot complete.
+    """
+    try:
+        content = (git_dir / _GIT_COMMON_DIR_FILE).read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return git_dir
+    raw = content.partition("\n")[0].strip()
+    if not raw:
+        return git_dir
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else git_dir / candidate

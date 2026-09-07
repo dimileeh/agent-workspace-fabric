@@ -237,6 +237,166 @@ async def test_linked_worktree_git_dir_head_and_index_are_watched(
     assert await probe() is True
 
 
+def _linked_git_dir(tmp_path: Path, worktree: Path, *, head: str) -> Path:
+    """Wire ``worktree`` up as a linked worktree of ``tmp_path/mirror.git``."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text(head, encoding="utf-8")
+    (git_dir / "index").write_bytes(b"DIRC")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    return git_dir
+
+
+@pytest.mark.unit
+async def test_commit_moving_only_the_branch_ref_reports_activity(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A commit lands in ``refs/heads/<branch>`` under the *common* git dir.
+
+    With ``core.logAllRefUpdates=false`` no reflog is written, the linked
+    worktree's ``HEAD`` keeps naming the same branch, and an index that already
+    matched the previous probe (staged during the preceding idle window) does
+    not move either — so the three per-worktree files alone would report the
+    commit as idleness and the watchdog would kill the agent moments after it
+    committed.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    branch_ref = tmp_path / "mirror.git" / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("0" * 40 + "\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await probe() is True
+    assert (git_dir / "index").read_bytes() == b"DIRC"
+
+
+@pytest.mark.unit
+async def test_packed_branch_ref_absence_stays_a_complete_observation(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A packed ref has no loose file, and its later appearance is the commit."""
+    _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    branch_ref = tmp_path / "mirror.git" / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head", ["1" * 40 + "\n", "ref:\n", "ref: refs/heads/awf/ws\n"])
+async def test_head_without_a_resolvable_branch_ref_still_answers_idle(
+    tmp_path: Path,
+    worktree: Path,
+    head: str,
+) -> None:
+    """A detached or empty HEAD names no ref — a complete observation, not ``None``.
+
+    The last case keeps a *named* branch whose common dir cannot be reached
+    through a ``commondir`` that is simply absent: the git dir is then the
+    common one, exactly as for a plain checkout behind a ``.git`` symlink.
+    """
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text(head, encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    (git_dir / "HEAD").write_text("ref: refs/heads/other\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("commondir", ["\n", "{absolute}\n"])
+async def test_commondir_forms_resolve_to_the_same_branch_ref(
+    tmp_path: Path,
+    worktree: Path,
+    commondir: str,
+) -> None:
+    """An empty ``commondir`` falls back to the git dir; an absolute one is used as is."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    common = tmp_path / "mirror.git" if "{absolute}" in commondir else git_dir
+    (git_dir / "commondir").write_text(
+        commondir.format(absolute=tmp_path / "mirror.git"),
+        encoding="utf-8",
+    )
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    branch_ref = common / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("denied_name", ["HEAD", "commondir"])
+async def test_unreadable_ref_resolution_input_reports_unknown(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    denied_name: str,
+) -> None:
+    """Which branch a commit lands in is unknowable, so the scan is incomplete.
+
+    Falling back to "no branch ref" would drop the one path a reflog-less commit
+    moves from an otherwise complete-looking fingerprint — an idle kill of an
+    agent mid-commit.
+    """
+    git_dir = _linked_git_dir(tmp_path, worktree, head="ref: refs/heads/awf/ws\n")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    real_read_text = Path.read_text
+    denied = git_dir / denied_name
+
+    def _deny_one(self: Path, *args: object, **kwargs: object) -> str:
+        if self == denied:
+            raise PermissionError(13, "read denied", str(denied))
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _deny_one)
+
+    probe = WorktreeActivityProbe(worktree)
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is None
+
+    unreadable = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.git_pointer_unreadable"
+    ]
+    assert len(unreadable) == 1
+    assert unreadable[0]["path"] == str(denied)
+
+
 @pytest.mark.unit
 async def test_relative_gitdir_pointer_resolves_against_the_worktree(
     tmp_path: Path,
