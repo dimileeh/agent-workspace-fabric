@@ -410,41 +410,48 @@ export function ConsoleDashboard() {
   }, []);
 
   // Same-identity inventory can withdraw a feed without changing the epoch key.
-  // Clear that feed's cache and bump the feed epoch so in-flight responses cannot
-  // restore withdrawn data (FleetHealthStrip / inspector panels would otherwise
-  // keep showing it).
+  // Clear that feed's cache and bump gated/read generations so in-flight responses
+  // cannot restore withdrawn data — without advancing authorizedFeedEpochRef, which
+  // would strand in-flight retry/operator mutations in `submitting`.
   const clearNewlyUnsupportedCapabilityFeeds = useCallback(
     (previous: ConsoleCapabilities, next: ConsoleCapabilities) => {
       const plan = planCapabilityFeedWithdrawal(previous, next);
       if (plan.clearDashboardSummary) {
+        dashboardSummaryRequestGenerationRef.current += 1;
         setDashboardSummary(null);
         setDashboardSummaryError(null);
       }
       if (plan.clearResourceCapacity) {
+        resourceSaturationRequestGenerationRef.current += 1;
         setResourceSaturation(null);
         setResourceError(null);
       }
       if (plan.clearCloudRuntime) {
+        cloudRuntimeRequestGenerationRef.current += 1;
         setCloudRuntime(null);
         setCloudRuntimeError(null);
       }
       if (plan.clearReliability) {
+        workspaceSummaryRequestGenerationRef.current += 1;
         setWorkspaceSummary(null);
         setWorkspaceSummaryError(null);
       }
       if (plan.clearMergeQueue) {
+        mergeQueueRequestGenerationRef.current += 1;
         setMergeQueue([]);
         setMergeQueueHasMore(false);
         setMergeQueueStatus("loading");
         setMergeQueueError(null);
       }
       if (plan.clearFailures) {
+        failureSummaryRequestGenerationRef.current += 1;
         setFailureSummary(null);
         setFailureSummaryStatus("loading");
         setFailureSummaryError(null);
       }
       // Inspector detail feeds: same-identity withdrawal must clear caches and
-      // bump the epoch so in-flight loadWorkspace cannot restore withdrawn data.
+      // bump gated-detail generation so in-flight loadWorkspace cannot restore
+      // withdrawn data (mutations keep their authorized epoch).
       if (plan.clearRuntime || plan.clearEvents || plan.clearOperations || plan.clearLogs) {
         setDetail((current) => ({
           ...current,
@@ -463,7 +470,7 @@ export function ConsoleDashboard() {
         }
       }
       if (capabilityFeedWithdrawalCleared(plan)) {
-        authorizedFeedEpochRef.current += 1;
+        gatedDetailFeedGenerationRef.current += 1;
       }
     },
     [],
@@ -1344,7 +1351,8 @@ export function ConsoleDashboard() {
     () =>
       fleetKpisFromDashboardSummary({
         // Render-time gate: never surface a retained summary after inventory withdraws
-        // fleet_summary (clearNewlyUnsupportedCapabilityFeeds also wipes + bumps epoch).
+        // fleet_summary (clearNewlyUnsupportedCapabilityFeeds also wipes + bumps
+        // dashboard-summary request generation / gated-detail generation).
         // Unsupported/omitted fleet_summary omits summary counters; capacity stays independent.
         summary: fleetSummaryAvailable ? dashboardSummary : null,
         summaryStale: fleetSummaryAvailable && dashboardSummaryStale,

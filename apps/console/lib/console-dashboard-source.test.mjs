@@ -683,6 +683,45 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
 });
 
+test("same-identity feed withdrawal invalidates gated reads without advancing auth epoch", () => {
+  const dashboard = dashboardSource.dashboard;
+  const withdrawStart = dashboard.indexOf(
+    "const clearNewlyUnsupportedCapabilityFeeds = useCallback",
+  );
+  assert.ok(withdrawStart > 0, "Expected clearNewlyUnsupportedCapabilityFeeds helper");
+  const withdrawEnd = dashboard.indexOf(
+    "const invalidateAuthorizedFeedsIfContextChanged = useCallback",
+    withdrawStart,
+  );
+  assert.ok(withdrawEnd > withdrawStart, "Expected withdrawal helper before context invalidation");
+  const withdrawBody = dashboard.slice(withdrawStart, withdrawEnd);
+  assert.equal(
+    withdrawBody.includes("authorizedFeedEpochRef.current +="),
+    false,
+    "Expected same-identity withdrawal not to bump authorizedFeedEpochRef (would strand retry/operator mutations in submitting)",
+  );
+  assert.match(
+    withdrawBody,
+    /if \(capabilityFeedWithdrawalCleared\(plan\)\) \{\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
+    "Expected same-identity withdrawal to bump gatedDetailFeedGenerationRef so in-flight detail/log reads cannot restore withdrawn data",
+  );
+  assert.match(
+    withdrawBody,
+    /if \(plan\.clearDashboardSummary\) \{[\s\S]*?dashboardSummaryRequestGenerationRef\.current \+= 1;/,
+    "Expected fleet_summary withdrawal to bump dashboard-summary request generation",
+  );
+  assert.match(
+    withdrawBody,
+    /if \(plan\.clearFailures\) \{[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;/,
+    "Expected failures withdrawal to bump failure-summary request generation",
+  );
+  assert.match(
+    withdrawBody,
+    /if \(plan\.clearMergeQueue\) \{[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;/,
+    "Expected merge_queue withdrawal to bump merge-queue request generation",
+  );
+});
+
 test("configured context query changes clear authorized state before capability response", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
