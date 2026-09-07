@@ -675,6 +675,15 @@ async def _run_fix_cycle(
                 if verdict == "fix_committed":
                     workflow_scope_publish_dependent_ids.append(c.comment_id)
 
+        # The settle window below is cancellable: a worker stop/timeout raises
+        # ``CancelledError`` out of ``sleep()`` or the re-poll, and a
+        # ``BaseException`` bypasses the ``ForgeClientError`` arm and every settle
+        # after it. Complete the last item's held record here, before the window
+        # opens — nothing commits between that item's verdict and this point, so
+        # live HEAD is still its end head, and the memory-only marker would
+        # otherwise die with the worker and leave the chain holed (#937).
+        await _settle_previous_item_provenance()
+
         # 2) Settle window — small sleep, then re-poll for new activity.
         await self._deps.sleep(self._config.settle_interval_seconds)
         try:
@@ -756,10 +765,9 @@ async def _run_fix_cycle(
     # 3) Push everything we committed.
     # #937: the last item of the batch has no successor to complete a record its
     # end-HEAD probe could not write, and the pending marker only lives in memory.
-    # Settle it here — nothing commits between the last verdict and this point, so
-    # live HEAD is still that item's end head — or a failed push plus a restart
-    # would lose the record and park a resumable batch. Earlier items are settled
-    # before the next item runs, so a later failure cannot skip them.
+    # Each pass now settles before its (cancellable) settle window, so this call is
+    # the one-shot backstop for any exit that reaches the push — free once settled,
+    # and still correct because nothing commits between the last verdict and here.
     await _settle_previous_item_provenance()
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,

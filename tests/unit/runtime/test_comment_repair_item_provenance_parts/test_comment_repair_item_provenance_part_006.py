@@ -12,6 +12,7 @@ and before the re-raise.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from collections.abc import AsyncIterator
@@ -459,6 +460,58 @@ async def test_pending_record_is_completed_from_the_head_already_probed(
 
     assert result.failed is True
     assert await _persisted_item_ids(factory, workspace_id) == ["PRRT_first"]
+    assert state.pending_item_commit_provenance is None
+
+
+@pytest.mark.unit
+async def test_cancellation_in_the_settle_window_keeps_the_last_item_record(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settle window is cancellable, and cancellation skips the pre-push settle.
+
+    ``sleep()`` and the settle re-poll can be interrupted by a worker stop/timeout:
+    ``CancelledError`` is a ``BaseException``, so it bypasses the ``ForgeClientError``
+    arm and never reaches the pre-push settle. With the marker memory-only, the
+    restart would read a chain with a hole and park the accepted commit. Settling
+    right after the items — before the window opens — closes that gap.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _prepared_runner(
+        factory=factory,
+        workspace_id=workspace_id,
+        worktrees_root=tmp_path / "worktrees",
+        monkeypatch=monkeypatch,
+    )
+    state = MonitorState()
+
+    async def _address(*, thread: ReviewThread, **_kwargs: object) -> str:
+        _remember_pending(state, item_id=thread.thread_id)
+        return "fix_committed"
+
+    async def _cancelled_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(runner, "_address_thread", _address)
+    monkeypatch.setattr(runner._deps, "sleep", _cancelled_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._run_fix_cycle(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            pr_head_sha=_BASE,
+            initial_threads=(_thread("PRRT_only"),),
+            initial_reviews=(),
+            state=state,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            operation_id=_OPERATION_ID,
+        )
+
+    assert await _persisted_item_ids(factory, workspace_id) == ["PRRT_only"]
     assert state.pending_item_commit_provenance is None
 
 
