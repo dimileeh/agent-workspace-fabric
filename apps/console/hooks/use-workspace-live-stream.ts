@@ -21,6 +21,7 @@ type UseWorkspaceLiveStreamArgs = {
   authorizedFeedEpochRef: MutableRefObject<number>;
   selectedIdRef: MutableRefObject<string | null>;
   selectedStreamsRef: MutableRefObject<string[]>;
+  logListingAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
@@ -38,6 +39,7 @@ export function useWorkspaceLiveStream({
   authorizedFeedEpochRef,
   selectedIdRef,
   selectedStreamsRef,
+  logListingAuthDeniedRef,
   setStreamState,
   setDetail,
   setLogEntries,
@@ -100,13 +102,18 @@ export function useWorkspaceLiveStream({
       }
       if (frame.type === "log") {
         // Without workspace_logs listing the UI cannot pick/surface streams —
-        // ignore log frames rather than silently buffering them.
-        if (!allowStreamLogs) {
+        // ignore log frames rather than silently buffering them. A later
+        // listing 401/403 leaves the capability gate true; drop frames until
+        // a successful listing clears the denial latch.
+        if (!allowStreamLogs || logListingAuthDeniedRef.current) {
           return;
         }
         setStreamState("live");
-        setLogEntries((current) =>
-          trimLogEntries(
+        setLogEntries((current) => {
+          if (logListingAuthDeniedRef.current) {
+            return current;
+          }
+          return trimLogEntries(
             [
               ...current,
               {
@@ -123,12 +130,17 @@ export function useWorkspaceLiveStream({
               },
             ],
             selectedStreamsRef.current,
-          ),
-        );
-        setStreamOffsets((current) => ({
-          ...current,
-          [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
-        }));
+          );
+        });
+        setStreamOffsets((current) => {
+          if (logListingAuthDeniedRef.current) {
+            return current;
+          }
+          return {
+            ...current,
+            [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
+          };
+        });
         return;
       }
       if (frame.type === "error") {
@@ -158,6 +170,7 @@ export function useWorkspaceLiveStream({
     authorizedFeedEpochRef,
     capabilities,
     selectedId,
+    logListingAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,
     setDetail,

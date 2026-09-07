@@ -26,6 +26,7 @@ import type {
 } from "@/lib/types";
 import {
   type DetailState,
+  type LogEntry,
   type LogStreamActivityMap,
   apiGet,
   updateLogStreamActivity,
@@ -38,9 +39,13 @@ type UseWorkspaceDetailLoaderArgs = {
   authorizedFeedEpochRef: MutableRefObject<number>;
   gatedDetailFeedGenerationRef: MutableRefObject<number>;
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
+  selectedStreamsRef: MutableRefObject<string[]>;
+  logListingAuthDeniedRef: MutableRefObject<boolean>;
   setError: Dispatch<SetStateAction<string | null>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
+  setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
+  setStreamOffsets: Dispatch<SetStateAction<Record<string, number>>>;
 };
 
 /**
@@ -60,9 +65,13 @@ export function useWorkspaceDetailLoader({
   authorizedFeedEpochRef,
   gatedDetailFeedGenerationRef,
   logStreamActivityRef,
+  selectedStreamsRef,
+  logListingAuthDeniedRef,
   setError,
   setDetail,
   setSelectedStreams,
+  setLogEntries,
+  setStreamOffsets,
 }: UseWorkspaceDetailLoaderArgs) {
   // Overlapping explicit refresh / selection / post-mutation loads stay monotonic
   // so a newer feed-level 401/403 clear cannot lose to an older in-flight 200
@@ -189,7 +198,22 @@ export function useWorkspaceDetailLoader({
         };
       });
 
-      if (streams?.ok) {
+      if (allowLogs && feedAuthDenied(streams)) {
+        // Listing 401/403 while workspace_logs stays advertised is auth
+        // revocation for this column, not a transient outage. detail.streams
+        // is already cleared above; also drop retained selection, tail caches,
+        // and the live-log latch so the still-open EventSource cannot keep
+        // appending previously authorized frames (CONSOLE_BACKEND_CONTRACT).
+        if (!logListingAuthDeniedRef.current) {
+          gatedDetailFeedGenerationRef.current += 1;
+        }
+        logListingAuthDeniedRef.current = true;
+        selectedStreamsRef.current = [];
+        setSelectedStreams([]);
+        setLogEntries([]);
+        setStreamOffsets({});
+      } else if (streams?.ok) {
+        logListingAuthDeniedRef.current = false;
         logStreamActivityRef.current = updateLogStreamActivity(
           logStreamActivityRef.current,
           workspaceId,
@@ -210,11 +234,15 @@ export function useWorkspaceDetailLoader({
     authorizedFeedEpochRef,
     capabilities,
     gatedDetailFeedGenerationRef,
+    logListingAuthDeniedRef,
     logStreamActivityRef,
     selectedIdRef,
+    selectedStreamsRef,
     setDetail,
     setError,
+    setLogEntries,
     setSelectedStreams,
+    setStreamOffsets,
   ]);
 
   const loadSelectedWorkspace = useCallback(() => {

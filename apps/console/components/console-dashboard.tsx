@@ -135,6 +135,9 @@ export function ConsoleDashboard() {
   const [isPending, startTransition] = useTransition();
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
+  // Listing 401/403 while workspace_logs stays advertised. Live log frames and
+  // in-flight tails must not refill caches the detail loader just cleared.
+  const logListingAuthDeniedRef = useRef(false);
   // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
@@ -316,6 +319,8 @@ export function ConsoleDashboard() {
           setSearchText("");
           setSelectedId(null);
           setDetail(emptyDetail);
+          logListingAuthDeniedRef.current = false;
+          selectedStreamsRef.current = [];
           setSelectedStreams([]);
           setLogEntries([]);
           setStreamOffsets({});
@@ -401,6 +406,8 @@ export function ConsoleDashboard() {
     setSearchText("");
     setSelectedId(null);
     setDetail(emptyDetail);
+    logListingAuthDeniedRef.current = false;
+    selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
@@ -457,6 +464,8 @@ export function ConsoleDashboard() {
       operations: [],
       streams: [],
     }));
+    logListingAuthDeniedRef.current = false;
+    selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
@@ -520,6 +529,8 @@ export function ConsoleDashboard() {
           streams: plan.clearLogs ? [] : current.streams,
         }));
         if (plan.clearLogs) {
+          logListingAuthDeniedRef.current = false;
+          selectedStreamsRef.current = [];
           setSelectedStreams([]);
           setLogEntries([]);
           setStreamOffsets({});
@@ -915,9 +926,13 @@ export function ConsoleDashboard() {
     authorizedFeedEpochRef,
     gatedDetailFeedGenerationRef,
     logStreamActivityRef,
+    selectedStreamsRef,
+    logListingAuthDeniedRef,
     setError,
     setDetail,
     setSelectedStreams,
+    setLogEntries,
+    setStreamOffsets,
   });
 
   const mutatingCapabilities = useMemo(
@@ -1041,6 +1056,8 @@ export function ConsoleDashboard() {
 
   useLayoutEffect(() => {
     selectedIdRef.current = selectedId;
+    logListingAuthDeniedRef.current = false;
+    selectedStreamsRef.current = [];
     setDetail(emptyDetail);
     setSelectedStreams([]);
     setLogEntries([]);
@@ -1055,6 +1072,7 @@ export function ConsoleDashboard() {
     authorizedFeedEpochRef,
     selectedIdRef,
     selectedStreamsRef,
+    logListingAuthDeniedRef,
     setStreamState,
     setDetail,
     setLogEntries,
@@ -1094,6 +1112,7 @@ export function ConsoleDashboard() {
     authorizedFeedEpochRef,
     gatedDetailFeedGenerationRef,
     logStreamActivityRef,
+    logListingAuthDeniedRef,
     setDetail,
     setSelectedStreams,
     setLogEntries,

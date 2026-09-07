@@ -32,6 +32,7 @@ type UseWorkspaceLogTailsArgs = {
   authorizedFeedEpochRef: MutableRefObject<number>;
   gatedDetailFeedGenerationRef: MutableRefObject<number>;
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
+  logListingAuthDeniedRef: MutableRefObject<boolean>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
   setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
@@ -57,6 +58,7 @@ export function useWorkspaceLogTails({
   authorizedFeedEpochRef,
   gatedDetailFeedGenerationRef,
   logStreamActivityRef,
+  logListingAuthDeniedRef,
   setDetail,
   setSelectedStreams,
   setLogEntries,
@@ -89,13 +91,17 @@ export function useWorkspaceLogTails({
         epoch !== authorizedFeedEpochRef.current ||
         gatedGeneration !== gatedDetailFeedGenerationRef.current ||
         generation !== logTailRequestGenerationRef.current[generationKey] ||
-        selectedIdRef.current !== workspaceId
+        selectedIdRef.current !== workspaceId ||
+        logListingAuthDeniedRef.current
       ) {
         return;
       }
       if (!result.ok) {
-        setLogEntries((current) =>
-          trimLogEntries(
+        setLogEntries((current) => {
+          if (logListingAuthDeniedRef.current) {
+            return current;
+          }
+          return trimLogEntries(
             [
             ...current.filter(
               (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
@@ -114,8 +120,8 @@ export function useWorkspaceLogTails({
             },
             ],
             selectedStreamIds,
-          ),
-        );
+          );
+        });
         return;
       }
       const tailEntry = {
@@ -130,8 +136,11 @@ export function useWorkspaceLogTails({
         order: activity,
         kind: "tail" as const,
       };
-      setLogEntries((current) =>
-        trimLogEntries(
+      setLogEntries((current) => {
+        if (logListingAuthDeniedRef.current) {
+          return current;
+        }
+        return trimLogEntries(
           [
             ...current.filter(
               (entry) =>
@@ -142,16 +151,22 @@ export function useWorkspaceLogTails({
             tailEntry,
           ],
           selectedStreamIds,
-        ),
-      );
-      setStreamOffsets((current) => ({
-        ...current,
-        [stream.stream_id]: result.data.next_offset,
-      }));
+        );
+      });
+      setStreamOffsets((current) => {
+        if (logListingAuthDeniedRef.current) {
+          return current;
+        }
+        return {
+          ...current,
+          [stream.stream_id]: result.data.next_offset,
+        };
+      });
     },
     [
       authorizedFeedEpochRef,
       gatedDetailFeedGenerationRef,
+      logListingAuthDeniedRef,
       logStreamActivityRef,
       logTailRequestGenerationRef,
       selectedIdRef,
