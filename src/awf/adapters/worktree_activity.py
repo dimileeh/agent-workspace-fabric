@@ -152,11 +152,21 @@ _GIT_DIR_ACTIVITY_FILES = (Path("HEAD"), Path("index"), Path("logs") / "HEAD")
 # into stalled probes. Thread count stays small in practice — one scan per idle
 # window per workspace — and the probes themselves fail open, so a scan that
 # never answers is read as activity, not as idleness.
+#
+# Failing open is what makes abandonment *quiet*, though: a worktree whose
+# filesystem never answers looks exactly like a busy agent, one "activity" reply
+# per idle window, while a thread is left behind each time. So each abandoned
+# wait is warned about, naming the worktree — the leak stays bounded in practice
+# only if an operator can see which workspace is producing it.
 _SCAN_THREAD_NAME_PREFIX = "awf-worktree-scan"
 _scan_sequence = itertools.count()
 
 
-async def _run_scan[ScanResultT](work: Callable[[], ScanResultT]) -> ScanResultT:
+async def _run_scan[ScanResultT](
+    work: Callable[[], ScanResultT],
+    *,
+    worktree_path: str,
+) -> ScanResultT:
     """Run one blocking scan off the event loop, on an abandonable daemon thread."""
     result: Future[ScanResultT] = Future()
 
@@ -173,7 +183,19 @@ async def _run_scan[ScanResultT](work: Callable[[], ScanResultT]) -> ScanResultT
     # ``wrap_future`` bridges the thread's result back onto this loop and drops
     # it if the awaiting caller is already gone, exactly as ``run_in_executor``
     # did — only the worker underneath it changed.
-    return await asyncio.wrap_future(result)
+    try:
+        return await asyncio.wrap_future(result)
+    except asyncio.CancelledError:
+        if result.running():
+            # The wait is over; the walk is not, and nothing can interrupt it.
+            # Every caller turns this into "could not tell", which the watchdog
+            # reads as activity — indistinguishable from a healthy run unless
+            # the abandonment itself is on the record.
+            _log.warning(
+                "agent.worktree_activity.scan_abandoned",
+                worktree_path=worktree_path,
+            )
+        raise
 
 
 def _start_scan_thread(deliver: Callable[[], None]) -> None:
@@ -243,7 +265,7 @@ class WorktreeActivityProbe:
         """
         try:
             present, baseline = await asyncio.wait_for(
-                _run_scan(self._prime_scan),
+                _run_scan(self._prime_scan, worktree_path=str(self._worktree_path)),
                 timeout=self._prime_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - priming is best-effort, see above.
@@ -284,7 +306,7 @@ class WorktreeActivityProbe:
         can race the walk — so it is confirmed by a rescan before answering
         ``False``.
         """
-        scan = await _run_scan(self._scan)
+        scan = await _run_scan(self._scan, worktree_path=str(self._worktree_path))
         if scan is None:
             return None
         previous, self._previous = self._previous, scan
@@ -319,7 +341,7 @@ class WorktreeActivityProbe:
         before "nothing moved" is believed. The rescan begins after the raced
         walk finished and therefore stats that entry after the write.
         """
-        confirm = await _run_scan(self._scan)
+        confirm = await _run_scan(self._scan, worktree_path=str(self._worktree_path))
         if confirm is None:
             # Same fail-open rule as any truncated walk: no opinion, and the
             # complete scan stays the baseline for the next probe.

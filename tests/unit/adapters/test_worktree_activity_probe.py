@@ -802,7 +802,8 @@ async def test_scan_abandoned_before_its_thread_starts_is_dropped(
 
     ``wrap_future`` cancels the pending result on the way out, so a thread that
     went on to publish into it would die with ``InvalidStateError`` on a stray
-    scan nobody is waiting for. It skips the walk instead.
+    scan nobody is waiting for. It skips the walk instead. Nothing was left
+    running either, so this is not the leak the warning below is about.
     """
     pending: list[object] = []
     monkeypatch.setattr(worktree_activity, "_start_scan_thread", pending.append)
@@ -813,18 +814,88 @@ async def test_scan_abandoned_before_its_thread_starts_is_dropped(
         walked = True
         return "scanned"
 
-    scan = asyncio.ensure_future(worktree_activity._run_scan(_work))
-    await asyncio.sleep(0)
-    scan.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await scan
-    await asyncio.sleep(0)
+    with structlog.testing.capture_logs() as captured:
+        scan = asyncio.ensure_future(
+            worktree_activity._run_scan(_work, worktree_path="/ws/never-started")
+        )
+        await asyncio.sleep(0)
+        scan.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await scan
+        await asyncio.sleep(0)
 
     assert len(pending) == 1
     deliver = pending[0]
     assert callable(deliver)
     deliver()  # The thread the real starter would have run, late.
     assert walked is False
+    assert not [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.scan_abandoned"
+    ]
+
+
+@pytest.mark.unit
+async def test_abandoning_a_stalled_scan_names_the_worktree_that_leaked_the_thread(
+    worktree: Path,
+) -> None:
+    """Giving up on a running scan is recorded, so the leak is not silent.
+
+    Nothing can reclaim a daemon thread parked on a ``scandir`` the filesystem
+    never answers — abandoning the wait is the only escape, and the thread is
+    left behind. Every caller then reports "could not tell", which the watchdog
+    counts as activity, so a permanently stalled worktree is indistinguishable
+    from a busy agent while it sheds one thread per idle window. The warning
+    naming the worktree is the only thing that tells an operator which workspace
+    is doing it.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def _stalled() -> str:
+        started.set()
+        release.wait(timeout=10.0)
+        return "scanned"
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            scan = asyncio.ensure_future(
+                worktree_activity._run_scan(_stalled, worktree_path=str(worktree))
+            )
+            await asyncio.to_thread(started.wait, 10.0)
+            scan.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await scan
+    finally:
+        release.set()
+
+    abandoned = [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.scan_abandoned"
+    ]
+    assert len(abandoned) == 1
+    assert abandoned[0]["worktree_path"] == str(worktree)
+    assert abandoned[0]["log_level"] == "warning"
+
+
+@pytest.mark.unit
+async def test_a_scan_that_answers_in_time_is_not_reported_as_abandoned(
+    worktree: Path,
+) -> None:
+    """The warning marks leaked threads only; ordinary probes stay quiet."""
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+
+    with structlog.testing.capture_logs() as captured:
+        assert await probe() is False
+
+    assert not [
+        entry
+        for entry in captured
+        if entry.get("event") == "agent.worktree_activity.scan_abandoned"
+    ]
 
 
 @pytest.mark.unit
