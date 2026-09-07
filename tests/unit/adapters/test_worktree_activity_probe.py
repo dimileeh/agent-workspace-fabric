@@ -107,6 +107,22 @@ async def test_created_file_in_nested_directory_reports_activity(worktree: Path)
 
 
 @pytest.mark.unit
+async def test_permission_change_reports_activity(worktree: Path) -> None:
+    """``chmod +x`` moves no timestamp, size or inode — but Git sees the mode."""
+    script = worktree / "script.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    _age(script)
+    _age(worktree)
+
+    probe = WorktreeActivityProbe(worktree)
+    assert await probe() is False
+
+    script.chmod(script.stat().st_mode | 0o111)
+
+    assert await probe() is True
+
+
+@pytest.mark.unit
 async def test_deleted_file_reports_activity(worktree: Path) -> None:
     """A delete only bumps the containing directory's mtime — dirs are stat-ed too."""
     probe = WorktreeActivityProbe(worktree)
