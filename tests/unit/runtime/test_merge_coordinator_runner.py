@@ -189,6 +189,8 @@ class TestMergeCoordinatorRunner:
         cmd.queue_result(returncode=0)  # sync-base git merge --abort
         cmd.queue_result(returncode=0)  # sync-base git fetch origin <base>
         cmd.queue_result(returncode=0)  # sync-base git merge --no-edit origin/<base>
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
 
         observed: list[tuple[list[str], bool]] = []

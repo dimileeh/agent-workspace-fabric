@@ -20,6 +20,9 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    _record_accepted_item_commit_provenance,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdict,
     AgentVerdictExecutionError,
@@ -30,6 +33,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     _owned_paths_for_prompt_or_empty,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
@@ -49,6 +53,7 @@ if TYPE_CHECKING:
     from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewComment, ReviewThread
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner.types import _PostActionPrTerminalState
 
 _log = get_logger(__name__)
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
@@ -75,7 +80,7 @@ async def _address_thread(
     monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
     """Ask the monitor agent to resolve a review thread and return its verdict."""
-    del base_branch, remote_branch, operation_id, operation_type, monitor_log
+    del base_branch, remote_branch, operation_type, monitor_log
     from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -122,7 +127,18 @@ async def _address_thread(
             evidence_anchor_head=cycle_start_head,
         )
     except AgentVerdictExecutionError:
-        return "agent_failed"
+        result = MonitorVerdictResult(verdict="agent_failed")
+    # #935: an accepted item commit must leave a durable audit trail immediately —
+    # the batch's ``comment_repair`` operation row is only finalised on push, so a
+    # restart between items would otherwise strand this commit with no provenance.
+    await _record_accepted_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=thread.thread_id,
+        item_start_head=operation_start_head,
+        operation_id=operation_id,
+    )
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -200,7 +216,7 @@ async def _address_review_comment_result(
     monitor_log: WorkspaceLogSink | None = None,
 ) -> VerdictResult | MonitorVerdictResult:
     """Resolve a review comment while retaining its full monitor result."""
-    del base_branch, remote_branch, operation_id, operation_type, monitor_log
+    del base_branch, remote_branch, operation_type, monitor_log
     from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
 
     prompt_owned_paths = (
@@ -227,7 +243,7 @@ async def _address_review_comment_result(
         task_tag=resolved_task_tag,
     )
     try:
-        return await runner._invoke_cli_for_verdict_result(
+        result: VerdictResult | MonitorVerdictResult = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=prompt,
             commit_message=f"fix: address PR review comment {comment.comment_id}",
@@ -240,7 +256,17 @@ async def _address_review_comment_result(
             evidence_body_hash=_review_comment_body_hash(comment),
         )
     except AgentVerdictExecutionError:
-        return MonitorVerdictResult(verdict="agent_failed")
+        result = MonitorVerdictResult(verdict="agent_failed")
+    # #935: record the accepted item commit before the batch ends (see _address_thread).
+    await _record_accepted_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=str(comment.comment_id),
+        item_start_head=operation_start_head,
+        operation_id=operation_id,
+    )
+    return result
 
 
 def _sync_comment_verdict_dependencies() -> None:
@@ -334,7 +360,9 @@ async def _post_human_notification_once(
     state: MonitorState,
     blocker_reason: str | None = None,
     preserve_full_blocker_reason: bool = False,
-) -> None:
+    workspace_id: str | None = None,
+    recheck_context: str = "human_notification",
+) -> _PostActionPrTerminalState | None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
     The dedupe key is head/reason scoped (``_notification_key``), matching the
@@ -342,6 +370,19 @@ async def _post_human_notification_once(
     pause needs different semantics (epoch-keyed dedupe, ``ForgeClientError``
     swallowing, best-effort skip on missing monitor context) and so posts via its
     own ``_post_protected_block_notification`` rather than through this helper.
+
+    ``workspace_id`` opts this boundary into the #910 post-action terminal guard:
+    the caller's ``status`` can only be checked for what it already says, and every
+    monitor caller hands over a snapshot taken before the action it is escalating
+    (a push, a merge attempt, an agent run). Passing ``workspace_id`` makes the
+    helper re-read PR state from the forge right before posting — including when
+    the comment itself is deduped away — so a PR that merged or closed mid-action
+    gets no stale needs-human comment.
+
+    That fresh read is returned (``None`` when nothing terminal was observed), so a
+    caller whose escalation ends in a terminal failure can run the moot completion
+    path on the observation instead of failing a workspace whose PR merged
+    (PRRT_kwDOSJAM6s6fvGsp). Callers that only notify may ignore it.
     """
     from awf.runtime.pr_monitor_runner.helpers import (
         _notification_key,
@@ -351,6 +392,21 @@ async def _post_human_notification_once(
     )
     from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 
+    if status.merged or status.closed:
+        # #910 defence in depth: never ping a human on a PR that already ended.
+        # Callers can hold a ``PRStatus`` captured before a long agent action, so
+        # this is checked here as well as at the action seams. The dedupe marker is
+        # deliberately left UNSET — nothing was posted, and the workspace is about
+        # to reach terminal handling anyway.
+        _log.info(
+            "monitor.notify_human_skipped_pr_terminal",
+            pr_number=pr_number,
+            head_sha=status.head_sha[:10],
+            merged=status.merged,
+            closed=status.closed,
+            reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+        )
+        return None
     bot_items, human_items = _notify_human_blocker_items(status, state)
     items = bot_items + human_items
     items_digest = _notification_items_digest(items) if items else None
@@ -371,14 +427,38 @@ async def _post_human_notification_once(
         blocker_reason=reason,
         items_digest=items_digest,
     )
-    if state.threads_addressed_ids.get(key) == "notified":
+    already_notified = state.threads_addressed_ids.get(key) == "notified"
+    # Fresh forge read at the notification boundary (#910 follow-up): the
+    # snapshot check above only catches a ``PRStatus`` that ALREADY says terminal,
+    # and callers legitimately hold one captured before a push, a merge attempt or
+    # an agent action. It fails OPEN exactly as at the other seams: an unresolvable
+    # repo or a transient forge fault posts as before. The dedupe marker stays
+    # UNSET on a skip — nothing was posted.
+    #
+    # It runs BEFORE the dedupe short-circuit, not after: an armed caller consumes
+    # the observation, and a repeat workflow-scope rejection at the same
+    # (head, reason) is exactly the case where the earlier attempt already left the
+    # marker. Returning ``None`` there would send the CI / sync-base / comment-repair
+    # failure arm into ``_terminate_failed`` on a PR that merged since, instead of
+    # completing it as moot (PRRT_kwDOSJAM6s6fwG6W). The extra round-trip buys the
+    # armed callers' correctness; unarmed callers still pay none.
+    if workspace_id is not None:
+        terminal = await runner._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=recheck_context,
+            repo=repo,
+        )
+        if terminal is not None:
+            return terminal
+    if already_notified:
         _log.info(
             "monitor.notify_human_already_posted",
             pr_number=pr_number,
             head_sha=status.head_sha[:10],
             reason=reason,
         )
-        return
+        return None
     await runner._deps.gh.post_comment(
         repo=repo,
         pr_number=pr_number,
@@ -391,3 +471,4 @@ async def _post_human_notification_once(
         ),
     )
     state.mark_addressed(key, "notified")
+    return None
