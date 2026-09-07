@@ -785,3 +785,117 @@ def test_snapshot_git_dir_info_exclude_fail_closed_edges(tmp_path: Path) -> None
     assert snap is not None
     assert snap.get(git_manager_ownership._INFO_EXCLUDE_NAME) == "# keep\n"
     assert "config" in snap
+
+
+def _init_committed_repo_around_existing_file(root: Path, *, email: str) -> None:
+    """Commit ``tracked.txt`` without disturbing the stamped mtime it already carries."""
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", email], cwd=root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=root, check=True, capture_output=True
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True, capture_output=True)
+
+
+@pytest.mark.unit
+def test_untrusted_nested_probe_config_snapshot_preserves_index_mtime(
+    tmp_path: Path,
+) -> None:
+    """Issue #942: the snapshot ``index`` must keep the live index file's mtime.
+
+    Git decides whether a tracked entry is *racily clean* by comparing the entry's
+    cached mtime against the mtime of the index file itself; when the entry is not
+    older than the index, ``diff-files`` re-reads the file and compares content
+    instead of trusting stat. Git is built without ``USE_NSEC``, so that comparison
+    is whole-second. Copying the index into the private snapshot git-dir with a
+    fresh mtime moves the index timestamp past every cached entry mtime, disabling
+    the content re-check: a same-size overwrite performed in the same second as the
+    index-recorded mtime then becomes invisible to a snapshot-scoped ``diff-files``
+    once the probe runs a second later, and nested residue silently loses its
+    unstaged component. Preserve the source mtime so the snapshot reproduces the
+    live git-dir's verdict.
+    """
+    nested = tmp_path / "nested"
+    _init_marked_nested_repo(nested, email="mtime@example.com", blob="tracked\n")
+    git_dir = nested / ".git"
+    subprocess.run(
+        ["git", "update-index", "--split-index"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    shared = sorted(git_dir.glob("sharedindex.*"))
+    assert shared, "expected git to materialize a sharedindex.* backing file"
+
+    live_index_mtime_ns = (git_dir / "index").stat().st_mtime_ns
+    live_shared_mtime_ns = {path.name: path.stat().st_mtime_ns for path in shared}
+
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        assert (shadow / "index").stat().st_mtime_ns == live_index_mtime_ns
+        for name, mtime_ns in live_shared_mtime_ns.items():
+            assert (shadow / name).stat().st_mtime_ns == mtime_ns
+
+
+@pytest.mark.unit
+def test_snapshot_scoped_diff_files_matches_live_git_dir_for_racily_clean_entry(
+    tmp_path: Path,
+) -> None:
+    """Issue #942: snapshot-scoped ``diff-files`` must agree with the live git-dir.
+
+    The racily-clean state is built deterministically instead of racing the clock:
+    the tracked file is overwritten with same-size content and then stamped — along
+    with the live index — into one fixed past second, so the entry's cached mtime,
+    the worktree mtime and the index mtime all coincide and git *must* fall back to
+    a content comparison. ``core.trustctime=false`` neutralizes the one stat field
+    ``os.utime`` cannot restore (a content write always bumps ctime); every other
+    field matches by construction, so the racily-clean re-check is the only thing
+    that can still report the path. The live git-dir reports it; before the fix the
+    snapshot's freshly-stamped index copy reported nothing.
+    """
+    nested = tmp_path / "racy"
+    nested.mkdir()
+    tracked = nested / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    # A fixed past second, so the snapshot's copy timestamp is always a *later*
+    # second than the cached entry mtime — the exact state the bug went blind on.
+    stamp_ns = 1_700_000_000_000_000_000
+    os.utime(tracked, ns=(stamp_ns, stamp_ns))
+    _init_committed_repo_around_existing_file(nested, email="racy@example.com")
+    git_dir = nested / ".git"
+
+    tracked.write_text("mutated\n", encoding="utf-8")
+    assert tracked.stat().st_size == len("tracked\n"), "mutation must be same-size"
+    os.utime(tracked, ns=(stamp_ns, stamp_ns))
+    os.utime(git_dir / "index", ns=(stamp_ns, stamp_ns))
+
+    def _changed_paths(probe_git_dir: Path) -> str:
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.trustctime=false",
+                "-c",
+                "core.checkStat=default",
+                "--git-dir",
+                str(probe_git_dir),
+                "--work-tree",
+                str(nested),
+                "diff-files",
+                "--name-only",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    live = _changed_paths(git_dir)
+    assert live.split() == ["tracked.txt"], (
+        f"precondition: live git-dir must report it, got {live!r}"
+    )
+    with git_manager.untrusted_nested_probe_config_snapshot_git_dir(nested) as shadow:
+        assert shadow is not None
+        assert _changed_paths(shadow) == live
