@@ -1666,6 +1666,9 @@
                 "policy_disabled"
               ],
               "type": "string"
+            },
+            "route": {
+              "type": "null"
             }
           },
           "required": [

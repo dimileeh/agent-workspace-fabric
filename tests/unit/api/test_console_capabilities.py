@@ -295,6 +295,51 @@ def test_available_widgets_and_diagnostics_require_route_in_response_model() -> 
 
 
 @pytest.mark.unit
+def test_unsupported_capability_entries_must_omit_route() -> None:
+    """Unsupported widgets/diagnostics with any route must fail closed (TS parity).
+
+    A relative ``/v1/wrong-route`` (or even the inventory route) must not certify
+    through Pydantic/OpenAPI while parseConsoleCapabilities rejects route-on-
+    unsupported and disables negotiation.
+    """
+    openapi_validator = _console_capabilities_openapi_validator()
+    base = _local_capabilities_payload()
+
+    for collection, item_id, wrong_route in (
+        ("widgets", "fleet_summary", "/v1/wrong-route"),
+        ("diagnostics", "reliability", "/v1/wrong-route"),
+        ("widgets", "cloud_runtime", "/v1/console/cloud-runtime"),
+    ):
+        bad = copy.deepcopy(base)
+        # Replace collection with a single unsupported entry carrying a route.
+        reason = "policy_disabled" if collection == "widgets" else "backend_kind_local"
+        bad[collection] = [
+            {
+                "id": item_id,
+                "availability": "unsupported",
+                "reason_code": reason,
+                "message": "withdrawn",
+                "semantics": item_id,
+                "route": wrong_route,
+            }
+        ]
+        if collection == "widgets":
+            # Keep remaining inventory valid so only the unsupported+route fails.
+            bad["diagnostics"] = [
+                item for item in base["diagnostics"] if item["availability"] == "available"
+            ][:1] or base["diagnostics"][:1]
+        with pytest.raises(ValidationError, match="omit route"):
+            ConsoleCapabilitiesResponse.model_validate(bad)
+        assert openapi_validator.is_valid(bad) is False
+
+    item_schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"][
+        "ConsoleCapabilityItemResponse"
+    ]
+    assert item_schema["if"]["properties"]["availability"]["const"] == "unsupported"
+    assert item_schema["then"]["properties"]["route"] == {"type": "null"}
+
+
+@pytest.mark.unit
 def test_available_widget_diagnostic_exact_inventory_routes_match_openapi_and_pydantic() -> None:
     """OpenAPI Draft202012 and Pydantic must agree on exact inventory routes by id.
 

@@ -291,6 +291,69 @@
       }
     },
     {
+      "name": "unsupported_widget_with_wrong_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "fleet_summary",
+            "availability": "unsupported",
+            "reason_code": "policy_disabled",
+            "message": "disabled",
+            "semantics": "fleet",
+            "route": "/v1/wrong-route"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_diagnostic_with_wrong_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [
+          {
+            "id": "reliability",
+            "availability": "unsupported",
+            "reason_code": "backend_kind_local",
+            "message": "withdrawn",
+            "semantics": "reliability",
+            "route": "/v1/wrong-route"
+          }
+        ],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_widget_with_inventory_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "cloud_runtime",
+            "availability": "unsupported",
+            "reason_code": "backend_kind_local",
+            "message": "hosted-only",
+            "semantics": "cloud runtime",
+            "route": "/v1/console/cloud-runtime"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
       "name": "unsupported_unknown_widget_id",
       "expect": "reject",
       "payload": {

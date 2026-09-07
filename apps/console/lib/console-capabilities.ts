@@ -395,6 +395,11 @@ function validateCapabilityEntry(
     if (!isNonEmptyString(record.message)) {
       return "Unsupported console capability entry requires a non-empty message.";
     }
+    // Contract: unsupported entries omit route. A relative wrong route such as
+    // `/v1/wrong-route` must fail closed (same as Pydantic/OpenAPI parity).
+    if (record.route != null && record.route !== "") {
+      return "Unsupported console capability entries must omit route.";
+    }
   }
 
   const expectedRoute = expectedRouteFor(kind, record.id);
@@ -408,7 +413,11 @@ function validateCapabilityEntry(
     if (!routeMatchesInventory(record.route, expectedRoute)) {
       return `Console ${kind} id=${record.id} route must be ${expectedRoute}.`;
     }
-  } else if (record.route != null && record.route !== "") {
+  } else if (
+    record.availability !== "unsupported" &&
+    record.route != null &&
+    record.route !== ""
+  ) {
     if (!isRelativeV1Route(record.route)) {
       return "Console capability routes must be relative /v1/... paths.";
     }

@@ -178,7 +178,7 @@ def _at_most_one_id_constraint(item_id: str) -> dict[str, Any]:
 
 
 def _console_capability_item_schema_extra(schema: dict[str, Any]) -> None:
-    """OpenAPI if/then: unsupported entries need bounded reason_code + message."""
+    """OpenAPI if/then: unsupported entries need bounded reason + omit route."""
     schema["if"] = {
         "properties": {"availability": {"const": "unsupported"}},
         "required": ["availability"],
@@ -191,6 +191,10 @@ def _console_capability_item_schema_extra(schema: dict[str, Any]) -> None:
                 "enum": sorted(CONSOLE_UNSUPPORTED_REASON_CODES),
             },
             "message": {"type": "string", "minLength": 1},
+            # Contract: unsupported entries omit route. Allow absent/null only so
+            # providers cannot certify `/v1/wrong-route` (or any string route) that
+            # parseConsoleCapabilities rejects and disables negotiation.
+            "route": {"type": "null"},
         },
     }
 
@@ -308,7 +312,12 @@ class ConsoleCapabilityItemResponse(BaseModel):
 
     @model_validator(mode="after")
     def unsupported_requires_bounded_reason(self) -> Self:
-        """Unsupported entries must carry inventory reason_code + nonempty message."""
+        """Unsupported entries must carry inventory reason_code + nonempty message.
+
+        Contract also requires ``route`` omitted: a relative but incorrect route
+        such as ``/v1/wrong-route`` must not certify through Pydantic/OpenAPI while
+        the shipped console rejects the mismatch and disables negotiation.
+        """
         if self.availability != "unsupported":
             return self
         if not isinstance(self.reason_code, str) or self.reason_code == "":
@@ -322,6 +331,8 @@ class ConsoleCapabilityItemResponse(BaseModel):
             )
         if not isinstance(self.message, str) or self.message == "":
             raise ValueError("unsupported console capability entries require a non-empty message")
+        if self.route is not None:
+            raise ValueError("unsupported console capability entries must omit route")
         return self
 
 
