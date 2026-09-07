@@ -305,6 +305,34 @@ class AsyncioSubprocessRunner:
                 return None
             return None if observed is None else bool(observed)
 
+        async def _observed_activity_or_child_exit(
+            budget_seconds: float | None, wait_task: asyncio.Task[int]
+        ) -> bool | None:
+            """Race the probe against the child's exit; first one home wins.
+
+            The budget alone bounds a stalled probe, but it is the *wrong* bound
+            once the child is gone: the watchdog is part of the surrounding
+            ``gather``, so awaiting the remainder of that budget holds a
+            completed run — real exit code and all — open for the rest of the
+            wall budget, or for a full idle window (tens of minutes) in
+            idle-only mode. A child that has exited cannot go idle, so its
+            answer is the only one that still matters: the probe wait is
+            abandoned exactly as an over-budget one is, reported as "unknown"
+            so no idle kill can be based on it. The caller re-checks
+            ``wait_task`` and returns.
+            """
+            probe_task = asyncio.create_task(_observed_activity(budget_seconds))
+            try:
+                await asyncio.wait({probe_task, wait_task}, return_when=asyncio.FIRST_COMPLETED)
+                return probe_task.result() if probe_task.done() else None
+            finally:
+                # Also runs when the watchdog itself is cancelled, so the probe
+                # is never left running behind a torn-down run.
+                if not probe_task.done():
+                    probe_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await probe_task
+
         async def _watchdog(wait_task: asyncio.Task[int]) -> None:
             nonlocal timeout_reason, last_output_at
             if wall_timeout_seconds is None and idle_timeout_seconds is None:
@@ -342,10 +370,14 @@ class AsyncioSubprocessRunner:
                         # because the watchdog is part of ``gather`` it also holds
                         # the whole run open after the child has exited.
                         # ``idle_deadline - output_at`` is one full idle window.
-                        observed = await _observed_activity(
+                        # The wait is also raced against the child's exit, so a
+                        # stalled probe cannot hold a finished run for whatever
+                        # is left of that budget.
+                        observed = await _observed_activity_or_child_exit(
                             max(wall_deadline - loop.time(), 0.0)
                             if wall_deadline is not None
-                            else idle_deadline - output_at
+                            else idle_deadline - output_at,
+                            wait_task,
                         )
                     if wait_task.done():
                         # The child can also *finish* while the probe is in

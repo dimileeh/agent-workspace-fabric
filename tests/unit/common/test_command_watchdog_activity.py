@@ -164,6 +164,46 @@ async def test_child_exiting_during_the_probe_keeps_its_own_exit_code() -> None:
 
 
 @pytest.mark.unit
+async def test_child_exit_stops_waiting_on_a_stalled_probe() -> None:
+    """A finished child must not wait out the probe's remaining budget.
+
+    The watchdog sits inside the surrounding ``gather``, so parking it on a
+    stalled probe holds ``run_streaming`` open long after the child is gone:
+    for the whole remaining wall budget here, or a full idle window (tens of
+    minutes in production) in idle-only mode. The probe wait therefore races
+    the child's exit and is abandoned the moment the child wins.
+    """
+    runner = AsyncioSubprocessRunner()
+    probed = asyncio.Event()
+
+    async def _probe() -> bool:
+        probed.set()
+        await asyncio.Event().wait()  # Never resolves: a stalled filesystem walk.
+        raise AssertionError("unreachable")  # pragma: no cover - defensive.
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    result = await asyncio.wait_for(
+        runner.run_streaming(
+            [sys.executable, "-c", _QUICK_SILENT_CHILD],
+            wall_timeout_seconds=30.0,
+            idle_timeout_seconds=0.15,
+            activity_probe=_probe,
+        ),
+        # Guard: without the race this waits out the ~30s wall budget.
+        timeout=5.0,
+    )
+    elapsed = loop.time() - started_at
+
+    assert probed.is_set()
+    assert result.returncode == 0
+    assert result.reason_code is None
+    assert result.stderr == ""
+    # The child exits after ~0.6s; anything near the probe budget is the stall.
+    assert elapsed < 3.0
+
+
+@pytest.mark.unit
 async def test_wall_timeout_is_never_extended_by_the_activity_probe() -> None:
     """The hard cap stays hard even while the probe keeps reporting activity."""
     runner = AsyncioSubprocessRunner()
