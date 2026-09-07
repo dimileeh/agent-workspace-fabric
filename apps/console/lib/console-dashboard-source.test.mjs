@@ -168,6 +168,21 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
 });
 
+test("fullscreen log stream requires listing capability via allowStreamLogs", () => {
+  const dashboard = dashboardSource.dashboard;
+  const logs = dashboardSource.logs;
+  assert.match(
+    dashboard,
+    /allowStreamLogs:\s*allowFullscreenStream/,
+    "Expected fullscreen to pass allowStreamLogs, not bare allowStream, so stream-only caps do not buffer hidden log frames",
+  );
+  assert.match(
+    logs,
+    /if \(!allowStream \|\| !allowLogs\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected WorkspaceLogColumn to open /stream only when both listing and stream diagnostics are allowed",
+  );
+});
+
 test("configured context query changes clear authorized state before capability response", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(

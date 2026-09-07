@@ -1371,7 +1371,9 @@ const searchParams = useSearchParams();
   // Single source for #awf-capacity mount + SectionNav Capacity link so they cannot drift.
   const showCapacitySection =
     showResourceCapacity || showCloudRuntime || showReliability;
-  const { allowLogs: allowFullscreenLogs, allowStream: allowFullscreenStream } =
+  // Fullscreen columns only surface selectable log streams — gate live frames on
+  // listing + stream together (allowStreamLogs), not bare workspace_stream.
+  const { allowLogs: allowFullscreenLogs, allowStreamLogs: allowFullscreenStream } =
     resolveWorkspaceLogStreamAccess(capabilities);
   // Render-time gates: never surface retained inspector caches after inventory
   // withdraws the matching diagnostic (clearNewlyUnsupportedCapabilityFeeds also

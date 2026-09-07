@@ -448,7 +448,9 @@ export function WorkspaceLogColumn({
   }, [loadSelectedTails, tailSignal]);
 
   useEffect(() => {
-    if (!allowStream) {
+    // Listing is required to pick/surface streams; do not open /stream or buffer
+    // frames when workspace_logs is unsupported (even if workspace_stream is up).
+    if (!allowStream || !allowLogs) {
       setStreamState("idle");
       return;
     }
@@ -531,7 +533,7 @@ export function WorkspaceLogColumn({
     };
 
     return () => source.close();
-  }, [allowStream, workspace.workspace_id]);
+  }, [allowLogs, allowStream, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">
