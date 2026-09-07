@@ -260,8 +260,13 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
-    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current\s*\)/,
-    "Expected loadLogTail to discard after epoch/gated-detail/per-stream generation advance, selection change, or listing denial",
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current\s*\)/,
+    "Expected loadLogTail to discard after epoch/per-stream generation advance, selection change, or listing denial",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /const gatedGenerationAdvanced =\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*return;\s*\}/,
+    "Expected a gated-detail generation bump to discard non-auth tail results without dropping sibling 401/403s",
   );
   for (const loader of [
     "loadResourceSaturation",
@@ -688,8 +693,46 @@ test("tail authorization denial closes the inspector live stream", () => {
   );
   assert.match(
     tails,
+    /logTailDeniedStreamKeysRef\.current\.add\(logTailRefreshErrorKey\(workspaceId, stream\.stream_id\)\);/,
+    "Expected each tail 401/403 to record its stream so a sibling 200 cannot clear the workspace latch",
+  );
+  assert.match(
+    tails,
     /setLogEntries\(\(current\) => \{\s*\/\/ Functional updaters can flush after a newer tail or listing 401\/403\.[\s\S]*?if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return current;\s*\}/,
     "Expected a later successful tail write to no-op if tail denial latches again before flush",
+  );
+});
+
+test("sibling tail 401s are recorded after a gated-detail generation bump", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBuRq: the first
+  // tail 401/403 calls noteGatedDetailDrop and advances
+  // gatedDetailFeedGenerationRef. A sibling denial that captured the prior
+  // generation must still join logTailDeniedStreamKeysRef; otherwise a later
+  // 200 for only the recorded stream reopens EventSource.
+  const tails = dashboardSource.logTails;
+  const loadIdx = tails.indexOf("const loadLogTail = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadLogTail callback");
+  const loadEnd = tails.indexOf("const reloadSelectedLogs = useCallback", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadLogTail callback end");
+  const body = tails.slice(loadIdx, loadEnd);
+
+  const hardDiscard = body.indexOf("epoch !== authorizedFeedEpochRef.current");
+  const gatedDiscard = body.indexOf("gatedGenerationAdvanced &&");
+  const authIdx = body.indexOf("if (isLogTailAuthFailure(result.status))");
+  const recordIdx = body.indexOf("logTailDeniedStreamKeysRef.current.add(");
+  assert.ok(hardDiscard > 0, "Expected a hard discard for epoch/generation/selection/listing");
+  assert.ok(gatedDiscard > hardDiscard, "Expected gated-generation discard after the hard discard");
+  assert.ok(authIdx > gatedDiscard, "Expected auth handling after the gated-generation exception");
+  assert.ok(recordIdx > authIdx, "Expected denied-stream recording inside the auth-failure branch");
+  assert.match(
+    body,
+    /if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*return;\s*\}/,
+    "Expected sibling 401/403 to survive a gated-detail generation bump and still be recorded",
+  );
+  assert.doesNotMatch(
+    body.slice(0, authIdx),
+    /gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|/,
+    "Expected gated-detail generation mismatch not to discard sibling 401/403 before they are recorded",
   );
 });
 

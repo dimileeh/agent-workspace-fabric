@@ -167,11 +167,21 @@ export function useWorkspaceLogTails({
       );
       if (
         epoch !== authorizedFeedEpochRef.current ||
-        gatedGeneration !== gatedDetailFeedGenerationRef.current ||
         generation !== logTailRequestGenerationRef.current[generationKey] ||
         selectedIdRef.current !== workspaceId ||
         logListingAuthDeniedRef.current
       ) {
+        return;
+      }
+      // The first tail 401/403 calls noteGatedDetailDrop, which advances
+      // gatedDetailFeedGenerationRef. A sibling denial that already captured
+      // the prior generation must still be recorded; discarding it here lets
+      // a later 200 for only the recorded stream reopen EventSource while
+      // another selected stream is still unauthorized. Epoch, per-stream
+      // generation, selection, and listing denial remain hard discards.
+      const gatedGenerationAdvanced =
+        gatedGeneration !== gatedDetailFeedGenerationRef.current;
+      if (gatedGenerationAdvanced && (result.ok || !isLogTailAuthFailure(result.status))) {
         return;
       }
       if (!result.ok) {
