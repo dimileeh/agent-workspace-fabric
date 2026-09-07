@@ -234,6 +234,15 @@ export function parseDashboardSummary(
   ) {
     return null;
   }
+  // Contract: window.start = generated_at - since_hours (absolute instant).
+  // Reject unrelated but syntactically valid starts so KPI "last Nh" labels
+  // cannot describe a different interval from a hosted snapshot.
+  const generatedAtMs = Date.parse(record.generated_at as string);
+  const expectedStartMs = generatedAtMs - window.since_hours * 3_600_000;
+  // Number.isFinite guards overflow of since_hours * ms/hour before equality.
+  if (!Number.isFinite(expectedStartMs) || Date.parse(window.start) !== expectedStartMs) {
+    return null;
+  }
   if (!record.coverage || typeof record.coverage !== "object" || Array.isArray(record.coverage)) {
     return null;
   }

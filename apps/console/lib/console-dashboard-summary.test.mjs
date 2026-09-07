@@ -76,7 +76,14 @@ test("parseDashboardSummary rejects impossible calendar timestamps", () => {
       `expected reject for generated_at=${JSON.stringify(generated_at)}`,
     );
   }
-  assert.ok(parseDashboardSummary(validSummary({ generated_at: "2024-02-29T12:00:00Z" })));
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        generated_at: "2024-02-29T12:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2024-02-28T12:00:00Z" },
+      }),
+    ),
+  );
 });
 
 test("parseDashboardSummary requires a positive integer since_hours", () => {
@@ -105,10 +112,83 @@ test("parseDashboardSummary requires a positive integer since_hours", () => {
     null,
   );
   const ok = parseDashboardSummary(
-    validSummary({ window: { anchor: "generated_at", since_hours: 1, start: fixture.window.start } }),
+    validSummary({
+      window: { anchor: "generated_at", since_hours: 1, start: "2026-09-06T16:00:00Z" },
+    }),
   );
   assert.ok(ok);
   assert.equal(ok.window.since_hours, 1);
+});
+
+test("parseDashboardSummary rejects window.start that disagrees with generated_at - since_hours", () => {
+  // Contract: window.start = generated_at - since_hours. A valid but unrelated start
+  // must fail closed so KPI "last Nh" hints cannot mislabel a different interval.
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        window: {
+          anchor: "generated_at",
+          since_hours: 24,
+          start: "2026-09-01T17:00:00Z",
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        window: {
+          anchor: "generated_at",
+          since_hours: 24,
+          start: "2026-09-05T16:00:00Z",
+        },
+      }),
+    ),
+    null,
+  );
+  // Same absolute instant via a non-Z offset still matches.
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        window: {
+          anchor: "generated_at",
+          since_hours: 24,
+          start: "2026-09-05T10:00:00-07:00",
+        },
+      }),
+    ),
+  );
+  // Fractional seconds: start must track generated_at - since_hours exactly.
+  assert.ok(
+    parseDashboardSummary(
+      validSummary({
+        generated_at: "2026-09-06T17:00:00.250Z",
+        as_of: "2026-09-06T17:00:00.250Z",
+        last_success_at: "2026-09-06T17:00:00.250Z",
+        window: {
+          anchor: "generated_at",
+          since_hours: 24,
+          start: "2026-09-05T17:00:00.250Z",
+        },
+      }),
+    ),
+  );
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
+        generated_at: "2026-09-06T17:00:00.250Z",
+        as_of: "2026-09-06T17:00:00.250Z",
+        last_success_at: "2026-09-06T17:00:00.250Z",
+        window: {
+          anchor: "generated_at",
+          since_hours: 24,
+          start: "2026-09-05T17:00:00.000Z",
+        },
+      }),
+    ),
+    null,
+  );
 });
 
 test("parseDashboardSummary rejects contradictory count subset relationships", () => {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends
@@ -461,6 +461,22 @@ class ConsoleDashboardSummaryResponse(BaseModel):
     coverage: ConsoleDashboardCoverageResponse
     counts: ConsoleDashboardCountsResponse
     overlap: ConsoleDashboardOverlapResponse
+
+    @model_validator(mode="after")
+    def window_matches_generated_at_anchor(self) -> Self:
+        """Reject window.start that disagrees with generated_at - since_hours.
+
+        Matches the shipped TS ``parseDashboardSummary`` and
+        ``docs/CONSOLE_BACKEND_CONTRACT.md`` so contradictory hosted snapshots
+        fail closed instead of mislabeling terminal KPI windows.
+
+        Aware datetime equality compares absolute instants, matching the
+        console parser's epoch-ms check across equivalent timezone offsets.
+        """
+        expected_start = self.generated_at - timedelta(hours=self.window.since_hours)
+        if self.window.start != expected_start:
+            raise ValueError("window.start must equal generated_at - since_hours")
+        return self
 
     @model_validator(mode="after")
     def counts_respect_documented_subsets(self) -> Self:

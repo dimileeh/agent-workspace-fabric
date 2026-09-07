@@ -325,8 +325,42 @@ def test_dashboard_summary_rejects_non_positive_since_hours(since_hours: object)
 def test_dashboard_summary_accepts_positive_integer_since_hours() -> None:
     payload = copy.deepcopy(_dashboard_summary_payload())
     payload["window"]["since_hours"] = 1
+    payload["window"]["start"] = "2026-09-06T16:00:00Z"
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.window.since_hours == 1
+
+
+@pytest.mark.unit
+def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> None:
+    """Match the shipped TS parser: window.start must equal generated_at - since_hours."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["window"]["start"] = "2026-09-01T17:00:00Z"
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["window"]["start"] = "2026-09-05T16:00:00Z"
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    # Same absolute instant as generated_at - 24h via a non-Z offset.
+    payload["window"]["start"] = "2026-09-05T10:00:00-07:00"
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.window.start == datetime(2026, 9, 5, 17, 0, tzinfo=UTC)
+
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["generated_at"] = "2026-09-06T17:00:00.250Z"
+    payload["as_of"] = "2026-09-06T17:00:00.250Z"
+    payload["last_success_at"] = "2026-09-06T17:00:00.250Z"
+    payload["window"]["start"] = "2026-09-05T17:00:00.250Z"
+    assert ConsoleDashboardSummaryResponse.model_validate(payload).window.start == datetime(
+        2026, 9, 5, 17, 0, 0, 250000, tzinfo=UTC
+    )
+
+    payload["window"]["start"] = "2026-09-05T17:00:00.000Z"
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
 
 
 @pytest.mark.unit
