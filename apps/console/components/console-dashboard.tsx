@@ -630,6 +630,15 @@ export function ConsoleDashboard() {
       return;
     }
     if (!result.ok) {
+      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
+      // outage: drop last-good cloud runtime facts even when capabilities still
+      // negotiate (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
+      // capabilities may still succeed and would thrash overview refill.
+      if (result.status === 401 || result.status === 403) {
+        setCloudRuntime(null);
+        setCloudRuntimeError(result.message);
+        return;
+      }
       setCloudRuntimeError(result.message);
       return;
     }

@@ -666,6 +666,100 @@ test("merge-queue feed-level 401 clears last-good rows while capabilities stay r
   await expect(mergePanel.getByText(/Unable to load merge queue/i)).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6f7qt6: feed-level
+// 401/403 on cloud-runtime must drop last-good tenant snapshot (same contract
+// as dashboard-summary / merge-queue), not keep stale queue/quota facts.
+test("cloud-runtime feed-level 403 clears last-good snapshot while capabilities stay reachable", async ({
+  page,
+}) => {
+  let cloudRuntimeDenied = false;
+  const runtime = loadConsoleFixture<Record<string, unknown>>("cloud-runtime.hosted.json");
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, hostedCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, loadConsoleFixture("dashboard-summary.hosted.json"));
+      return;
+    }
+    if (path === "/api/awf/console/cloud-runtime") {
+      if (cloudRuntimeDenied) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "cloud runtime permission revoked" } },
+          403,
+        );
+        return;
+      }
+      await fulfillJson(route, runtime);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const cloudPanel = page.locator("#awf-capacity");
+  await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+  await expect(cloudPanel.getByText("within_quota")).toBeVisible();
+  await expect(cloudPanel.getByText("12 in use / 50 limit / 38 available")).toBeVisible();
+
+  cloudRuntimeDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/cloud runtime permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  // Capabilities still advertise cloud_runtime → panel remains, but facts must
+  // not keep the revoked snapshot (no stale "Showing last cloud runtime snapshot").
+  await expect(cloudPanel.getByText("within_quota")).toHaveCount(0);
+  await expect(cloudPanel.getByText("12 in use / 50 limit / 38 available")).toHaveCount(0);
+  await expect(cloudPanel.getByText(/Showing last cloud runtime snapshot/i)).toHaveCount(0);
+  await expect(cloudPanel.getByText(/Unable to load cloud runtime/i)).toBeVisible();
+});
+
 test("dashboard-summary cached outage shows error and last_success_at", async ({ page }) => {
   let summaryOutage = false;
   const summary = localDashboardSummary({
