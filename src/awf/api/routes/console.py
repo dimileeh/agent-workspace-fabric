@@ -6,7 +6,15 @@ from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
@@ -395,18 +403,20 @@ class ConsoleDashboardCoverageResponse(BaseModel):
 
 
 class ConsoleDashboardCountsResponse(BaseModel):
+    """Nullable nonnegative fleet counts as strict ints (no string/bool coerce)."""
+
     model_config = ConfigDict(extra="forbid")
 
-    active: int | None = Field(ge=0)
-    executing: int | None = Field(ge=0)
-    monitoring_pr: int | None = Field(ge=0)
-    awaiting_operator: int | None = Field(ge=0)
-    awaiting_human: int | None = Field(ge=0)
-    retrying: int | None = Field(ge=0)
-    queued: int | None = Field(ge=0)
-    completed_last_window: int | None = Field(ge=0)
-    cancelled_last_window: int | None = Field(ge=0)
-    failed_last_window: int | None = Field(ge=0)
+    active: StrictInt | None = Field(ge=0)
+    executing: StrictInt | None = Field(ge=0)
+    monitoring_pr: StrictInt | None = Field(ge=0)
+    awaiting_operator: StrictInt | None = Field(ge=0)
+    awaiting_human: StrictInt | None = Field(ge=0)
+    retrying: StrictInt | None = Field(ge=0)
+    queued: StrictInt | None = Field(ge=0)
+    completed_last_window: StrictInt | None = Field(ge=0)
+    cancelled_last_window: StrictInt | None = Field(ge=0)
+    failed_last_window: StrictInt | None = Field(ge=0)
 
 
 class ConsoleDashboardOverlapResponse(BaseModel):

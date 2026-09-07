@@ -1677,6 +1677,7 @@
       },
       "ConsoleDashboardCountsResponse": {
         "additionalProperties": false,
+        "description": "Nullable nonnegative fleet counts as strict ints (no string/bool coerce).",
         "properties": {
           "active": {
             "anyOf": [

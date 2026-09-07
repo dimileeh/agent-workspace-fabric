@@ -210,3 +210,34 @@ def test_dashboard_summary_accepts_iso_timestamp_strings() -> None:
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.generated_at.year == 2026
     assert model.window.start.year == 2026
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "coerced_value",
+    ["1", True, 1.5, 1.0],
+)
+@pytest.mark.parametrize(
+    "count_key",
+    [
+        "active",
+        "executing",
+        "monitoring_pr",
+        "awaiting_operator",
+        "awaiting_human",
+        "retrying",
+        "queued",
+        "completed_last_window",
+        "cancelled_last_window",
+        "failed_last_window",
+    ],
+)
+def test_dashboard_summary_rejects_coerced_count_values(
+    count_key: str,
+    coerced_value: object,
+) -> None:
+    """Match the shipped TS parser: counts must be JSON numbers (strict ints), not coerced."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["counts"][count_key] = coerced_value
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
