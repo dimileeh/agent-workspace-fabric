@@ -33,20 +33,26 @@ CoverageStatus = Literal["complete", "partial", "unknown"]
 SummaryScope = Literal["local", "tenant"]
 
 
-def _available_item_requires_route_schema() -> dict[str, Any]:
-    """OpenAPI if/then: available widget/diagnostic entries require a /v1/ route."""
+def _available_item_requires_route_schema(inventory_ids: list[str]) -> dict[str, Any]:
+    """OpenAPI if/then: available widget/diagnostic entries need inventory id + /v1/ route.
+
+    Matches Python ``inventory.get`` rejection: an available entry whose id is not
+    in the collection route inventory must fail closed even when ``route`` is a
+    relative ``/v1/...`` string (e.g. ``unknown_audit_id`` + ``/v1/wrong-route``).
+    """
     return {
         "if": {
             "properties": {"availability": {"const": "available"}},
             "required": ["availability"],
         },
         "then": {
-            "required": ["route"],
+            "required": ["id", "route"],
             "properties": {
+                "id": {"enum": sorted(inventory_ids)},
                 "route": {
                     "type": "string",
                     "pattern": r"^/v1/(?!.*://).+$",
-                }
+                },
             },
         },
     }
@@ -94,10 +100,10 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     ``str.strip()``) when ``backend_kind`` is ``hosted``. Local backends keep
     optional identity.
 
-    Available widgets/diagnostics require the exact inventory ``/v1/...`` route for
-    their id (controls intentionally omit route). Encode that per-collection on
-    items so shared-schema validators cannot certify a wrong or route-less
-    available entry the shipped console would reject.
+    Available widgets/diagnostics require an inventory id and that id's exact
+    ``/v1/...`` route (controls intentionally omit route). Encode that
+    per-collection on items so shared-schema validators cannot certify a wrong,
+    unknown-id, or route-less available entry the shipped console would reject.
     """
     nonblank_string = {"type": "string", "pattern": r".*\S.*"}
     schema["if"] = {
@@ -118,7 +124,6 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
             }
         },
     }
-    route_when_available = _available_item_requires_route_schema()
     inventory_by_collection = {
         "widgets": CONSOLE_WIDGET_INVENTORY_ROUTES,
         "diagnostics": CONSOLE_DIAGNOSTIC_INVENTORY_ROUTES,
@@ -134,6 +139,7 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
                 continue
             # Wrap $ref in allOf so Draft 2020-12 (and tooling that drops $ref
             # siblings) still applies available⇒exact-inventory-route constraints.
+            route_when_available = _available_item_requires_route_schema(list(inventory))
             extras: list[dict[str, Any]] = [items, route_when_available]
             for item_id, route in inventory.items():
                 extras.append(_exact_inventory_route_when_available(item_id, route))

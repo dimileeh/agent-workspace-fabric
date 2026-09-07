@@ -767,12 +767,25 @@
                   },
                   "then": {
                     "properties": {
+                      "id": {
+                        "enum": [
+                          "failures",
+                          "merge_queue",
+                          "reliability",
+                          "workspace_events",
+                          "workspace_logs",
+                          "workspace_operations",
+                          "workspace_runtime",
+                          "workspace_stream"
+                        ]
+                      },
                       "route": {
                         "pattern": "^/v1/(?!.*://).+$",
                         "type": "string"
                       }
                     },
                     "required": [
+                      "id",
                       "route"
                     ]
                   }
@@ -1030,12 +1043,20 @@
                   },
                   "then": {
                     "properties": {
+                      "id": {
+                        "enum": [
+                          "cloud_runtime",
+                          "fleet_summary",
+                          "resource_capacity"
+                        ]
+                      },
                       "route": {
                         "pattern": "^/v1/(?!.*://).+$",
                         "type": "string"
                       }
                     },
                     "required": [
+                      "id",
                       "route"
                     ]
                   }

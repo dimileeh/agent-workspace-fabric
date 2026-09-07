@@ -196,6 +196,8 @@ def test_available_widget_diagnostic_exact_inventory_routes_match_openapi_and_py
 
     A relative `/v1/wrong-route` must not certify an available fleet_summary or
     reliability entry — the shipped console rejects non-inventory routes.
+    Available ``unknown_audit_id`` with any `/v1/...` route must also fail closed
+    (OpenAPI id enum matches Python ``inventory.get`` rejection).
     """
     openapi_validator = _console_capabilities_openapi_validator()
     schema = json.loads(OPENAPI_JSON.read_text(encoding="utf-8"))["components"]["schemas"]
@@ -212,6 +214,20 @@ def test_available_widget_diagnostic_exact_inventory_routes_match_openapi_and_py
         assert "allOf" in items, (
             f"published {collection} items must wrap $ref + route rules in allOf"
         )
+        available_gate = next(
+            part
+            for part in items["allOf"]
+            if isinstance(part, dict)
+            and "if" in part
+            and isinstance(part.get("if"), dict)
+            and part["if"].get("properties", {}).get("availability", {}).get("const") == "available"
+            and "id" not in part["if"].get("properties", {})
+        )
+        assert available_gate["then"]["properties"]["id"]["enum"] == sorted(inventory), (
+            f"published {collection} available entries must require an inventory id "
+            f"(matching Python inventory.get rejection)"
+        )
+        assert "id" in available_gate["then"].get("required", [])
         id_route_constraints = [
             part
             for part in items["allOf"]

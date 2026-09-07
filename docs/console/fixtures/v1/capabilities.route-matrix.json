@@ -1,5 +1,5 @@
 {
-  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use the inventory route for their id; omit/null/wrong relative routes fail closed. Available controls omit route. Unsupported entries omit route. Identity/context rules are unchanged (local optional identity).",
+  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route. Unsupported entries omit route. Identity/context rules are unchanged (local optional identity).",
   "inventory": {
     "widgets": {
       "fleet_summary": "/v1/console/dashboard-summary",
@@ -249,6 +249,44 @@
           }
         ],
         "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "available_unknown_widget_id_wrong_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "unknown_audit_id",
+            "availability": "available",
+            "route": "/v1/wrong-route",
+            "semantics": "audit"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "available_unknown_diagnostic_id_wrong_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [
+          {
+            "id": "unknown_audit_id",
+            "availability": "available",
+            "route": "/v1/wrong-route",
+            "semantics": "audit"
+          }
+        ],
         "controls": []
       }
     }

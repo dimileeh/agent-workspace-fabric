@@ -189,11 +189,13 @@ collapsing `hosted|||` epoch key; losing a prior identity key also clears author
 feeds.
 
 ### Widget/diagnostic entry
-- Available: `id`, `availability=available`, `route` (exact inventory relative
-  `/v1/...` for that id — see `console/fixtures/v1/capabilities.route-matrix.json`;
-  may include `{workspace_id}`), `semantics`. Missing, null, or non-inventory
-  route (e.g. `/v1/wrong-route`) ⇒ malformed (fail closed). Widgets without an
-  inventory route (`telemetry`, `allocation`, `cost`) cannot be `available`.
+- Available: `id` (must be in that collection's route inventory),
+  `availability=available`, `route` (exact inventory relative `/v1/...` for that
+  id — see `console/fixtures/v1/capabilities.route-matrix.json`; may include
+  `{workspace_id}`), `semantics`. Unknown inventory id, or missing/null/
+  non-inventory route (e.g. `/v1/wrong-route`) ⇒ malformed (fail closed).
+  Widgets without an inventory route (`telemetry`, `allocation`, `cost`) cannot
+  be `available`.
 - Unsupported: `id`, `availability=unsupported`, `reason_code`, `message` (`route` omitted)
 - Controls: `id`, `availability`, `semantics` required; available controls omit route.
 
