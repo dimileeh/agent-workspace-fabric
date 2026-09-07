@@ -141,6 +141,39 @@ async def test_permission_change_reports_activity(worktree: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_timestamp_preserving_rewrite_reports_activity(worktree: Path) -> None:
+    """A same-length in-place rewrite with the mtime restored still changed the file.
+
+    A timestamp-preserving formatter (or ``rsync --inplace --times``) leaves the
+    path, mtime, size, inode and mode all identical while Git sees new content.
+    ``st_ctime_ns`` is what moves — and the process cannot put it back — so it
+    belongs in the fingerprint; without it a silent agent doing only such edits
+    gets no extension and is killed at the idle deadline.
+    """
+    target = worktree / "README.md"
+    _age(target)
+    _age(worktree)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    before = target.stat()
+    with target.open("r+b") as handle:
+        handle.write(b"HELLO\n")
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = target.stat()
+    assert (after.st_mtime_ns, after.st_size, after.st_ino, after.st_mode) == (
+        before.st_mtime_ns,
+        before.st_size,
+        before.st_ino,
+        before.st_mode,
+    )
+
+    assert await probe() is True
+
+
+@pytest.mark.unit
 async def test_deleted_file_reports_activity(worktree: Path) -> None:
     """A delete only bumps the containing directory's mtime — dirs are stat-ed too."""
     probe = WorktreeActivityProbe(worktree)

@@ -19,7 +19,7 @@ Design notes:
   ``gitdir:`` pointer file), so "the index or HEAD moved" is only observable by
   also stat-ing the resolved git dir's ``HEAD`` / ``index`` / ``logs/HEAD``.
 * Change is detected by comparing a **fingerprint of the whole tree** — every
-  entry's path, mtime, size, inode and mode, combined order-independently — against
+  entry's path, mtime, ctime, size, inode and mode, combined order-independently — against
   the previous probe's, not by tracking one newest mtime. A single maximum
   timestamp is blinded by a single future-dated entry: the first probe would
   adopt that stamp as the floor, and every later write, stamped with the current
@@ -319,11 +319,17 @@ def _absorb(
         # Inode and size make a same-size atomic replace within one coarse
         # clock tick visible, which the timestamp alone would miss. Mode makes a
         # ``chmod`` visible: flipping the executable bit is worktree activity
-        # Git records, yet it moves no timestamp, size or inode.
+        # Git records, yet it moves no timestamp, size or inode. Change time
+        # covers the rest: a same-length in-place rewrite whose mtime is then
+        # restored (a timestamp-preserving formatter, ``rsync --inplace
+        # --times``) moves nothing else in this tuple, and neither does a
+        # ``chown`` or an xattr-only edit. ``st_ctime_ns`` moves for all of
+        # them and a process cannot set it back.
         term = hash(
             (
                 path,
                 stat_result.st_mtime_ns,
+                stat_result.st_ctime_ns,
                 stat_result.st_size,
                 stat_result.st_ino,
                 stat_result.st_mode,
