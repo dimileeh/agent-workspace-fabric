@@ -1724,3 +1724,44 @@ class TestHostedTimeoutSurvivesLogSinkFailures:
             )
 
         assert getattr(exc.value, "agent_reason_code", None) is None
+
+    @pytest.mark.unit
+    async def test_hosted_tag_is_dropped_when_a_reason_is_not_a_watchdog_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only watchdog codes may claim the caller's timeout preservation.
+
+        The hosted timeout vocabulary is owned by ``runtime_executor``; a reason
+        added there that normalizes to an ordinary failure must produce no tag,
+        so a non-timeout failure can never make the verdict protocol preserve a
+        worktree it should rewind. Mirrors the local path's
+        ``_WATCHDOG_TIMEOUT_REASON_CODES`` screen.
+        """
+        monkeypatch.setattr(
+            base_module,
+            "_HOSTED_TIMEOUT_REASONS",
+            frozenset({COMMAND_TIMEOUT_REASON, "COMMAND_NOT_A_TIMEOUT"}),
+        )
+
+        assert (
+            base_module._hosted_watchdog_timeout_reason_code(
+                AgentRuntimeExecResult(
+                    returncode=124,
+                    stdout="",
+                    stderr="",
+                    timeout_reason="COMMAND_NOT_A_TIMEOUT",
+                )
+            )
+            is None
+        )
+        assert (
+            base_module._hosted_watchdog_timeout_reason_code(
+                AgentRuntimeExecResult(
+                    returncode=124,
+                    stdout="",
+                    stderr="",
+                    timeout_reason=COMMAND_TIMEOUT_REASON,
+                )
+            )
+            == "AGENT_TIMEOUT"
+        )

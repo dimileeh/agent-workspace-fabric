@@ -123,13 +123,20 @@ def _hosted_watchdog_timeout_reason_code(hosted_result: AgentRuntimeExecResult) 
     returned verdict's code ahead of the sink close. Mirrors the guards
     ``classify_hosted_result`` applies so the two cannot disagree: a hosted
     ``124`` without a valid timeout reason is an ordinary CLI failure.
+
+    The derived code is then screened against ``_WATCHDOG_TIMEOUT_REASON_CODES``
+    exactly as the local path screens its returned verdict, because the tag makes
+    the caller *preserve* the run's worktree instead of rewinding it. The hosted
+    timeout vocabulary is owned by ``runtime_executor``, so a reason added there
+    that normalizes to something other than a watchdog code must yield no tag at
+    all rather than have a non-timeout failure claim timeout preservation.
     """
     if (
         hosted_result.returncode != _HOSTED_TIMEOUT_RETURN_CODE
         or hosted_result.timeout_reason not in _HOSTED_TIMEOUT_REASONS
     ):
         return None
-    return _failure_reason_for_result(
+    reason_code = _failure_reason_for_result(
         CommandResult(
             returncode=hosted_result.returncode,
             stdout="",
@@ -137,6 +144,7 @@ def _hosted_watchdog_timeout_reason_code(hosted_result: AgentRuntimeExecResult) 
             reason_code=hosted_result.timeout_reason,
         )
     )
+    return reason_code if reason_code in _WATCHDOG_TIMEOUT_REASON_CODES else None
 
 
 @dataclass(frozen=True)
