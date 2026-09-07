@@ -1273,6 +1273,12 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002HostedAdoption:
             ),
         )
 
-        await worker.run_once()
+        # ``run_once`` only *dispatches* the monitor resume as a background task;
+        # ``resume_pr_monitor`` runs several DB round-trips later inside that task.
+        # Assert the dispatch decision from the return value, then drain the task
+        # before inspecting the executor — reading ``resume_calls`` straight after
+        # ``run_once`` races the still-pending task and intermittently sees ``[]``.
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
 
         assert executor.resume_calls == [workspace_id]
