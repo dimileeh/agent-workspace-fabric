@@ -367,6 +367,34 @@ export function parseDashboardSummary(
       return null;
     }
   }
+  // Combined disjoint active status buckets: pairwise subset checks miss cases
+  // like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
+  // executing and monitoring_pr are always distinct statuses; awaiting_operator
+  // / retrying join the sum only when their overlap flags declare them in
+  // active ∉ executing.
+  if (active != null) {
+    let disjointActiveSum = 0;
+    let partCount = 0;
+    if (executing != null) {
+      disjointActiveSum += executing;
+      partCount += 1;
+    }
+    if (monitoringPr != null) {
+      disjointActiveSum += monitoringPr;
+      partCount += 1;
+    }
+    if (overlap.awaiting_operator_in_active_not_executing === true && awaitingOperator != null) {
+      disjointActiveSum += awaitingOperator;
+      partCount += 1;
+    }
+    if (overlap.retrying_in_active_not_executing === true && retrying != null) {
+      disjointActiveSum += retrying;
+      partCount += 1;
+    }
+    if (partCount >= 2 && disjointActiveSum > active) {
+      return null;
+    }
+  }
   return {
     ...(payload as ConsoleDashboardSummary),
     coverage: {

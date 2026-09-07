@@ -405,6 +405,32 @@ def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> Non
             {"active": 2, "executing": 2, "retrying": 1},
             {"retrying_in_active_not_executing": True},
         ),
+        # Combined disjoint buckets exceed active even though each pairwise check passes.
+        (
+            {
+                "active": 3,
+                "executing": 1,
+                "monitoring_pr": 1,
+                "awaiting_operator": 1,
+                "awaiting_human": 0,
+                "retrying": 1,
+            },
+            {
+                "awaiting_operator_in_active_not_executing": True,
+                "retrying_in_active_not_executing": True,
+            },
+        ),
+        (
+            {
+                "active": 2,
+                "executing": 2,
+                "monitoring_pr": 1,
+                "awaiting_human": 0,
+                "awaiting_operator": 0,
+                "retrying": 0,
+            },
+            {},
+        ),
     ],
 )
 def test_dashboard_summary_rejects_contradictory_count_subsets(

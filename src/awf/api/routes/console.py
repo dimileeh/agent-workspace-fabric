@@ -567,6 +567,23 @@ class ConsoleDashboardSummaryResponse(BaseModel):
                 and counts.retrying + counts.executing > counts.active
             ):
                 raise ValueError("counts.retrying + counts.executing must be <= counts.active")
+        # Combined disjoint active status buckets: pairwise checks miss cases
+        # like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
+        if counts.active is not None:
+            disjoint_parts: list[int] = []
+            if counts.executing is not None:
+                disjoint_parts.append(counts.executing)
+            if counts.monitoring_pr is not None:
+                disjoint_parts.append(counts.monitoring_pr)
+            if (
+                overlap.awaiting_operator_in_active_not_executing
+                and counts.awaiting_operator is not None
+            ):
+                disjoint_parts.append(counts.awaiting_operator)
+            if overlap.retrying_in_active_not_executing and counts.retrying is not None:
+                disjoint_parts.append(counts.retrying)
+            if len(disjoint_parts) >= 2 and sum(disjoint_parts) > counts.active:
+                raise ValueError("sum of disjoint active status buckets must be <= counts.active")
         return self
 
 
