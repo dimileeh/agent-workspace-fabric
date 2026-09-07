@@ -171,6 +171,25 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   );
 });
 
+test("loadOverview follows overview pagination beyond the first page", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /import \{ collectOverviewPages, overviewListPath \} from "@\/lib\/overview-list";/,
+    "Expected loadOverview to import overview cursor helpers",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?collectOverviewPages\(async \(cursor\) => \{[\s\S]*?overviewListPath\(filters, cursor\)/,
+    "Expected loadOverview to accumulate pages via collectOverviewPages + overviewListPath",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?awfPath\("workspaces\/overview"/,
+    "Expected loadOverview not to issue a single non-cursor overview request",
+  );
+});
+
 test("loadDashboardSummary discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(

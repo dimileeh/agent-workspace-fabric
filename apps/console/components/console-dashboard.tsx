@@ -26,6 +26,7 @@ import {
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
+import { collectOverviewPages, overviewListPath } from "@/lib/overview-list";
 import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
@@ -220,30 +221,43 @@ export function ConsoleDashboard() {
     // this callback identity stays stable across filter edits.
     const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
       overviewQueryRef.current;
-    const params: Record<string, string | number> = { limit: 100 };
-    if (statuses.length === 1) {
-      params.status = statuses[0];
-    }
-    if (agents.length === 1) {
-      params.agent = agents[0];
-    }
-    if (repo.trim()) {
-      params.repo_url = repo.trim();
-    }
-    const overviewPath = awfPath("workspaces/overview", params);
-
-    const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
+    const filters = {
+      status: statuses.length === 1 ? statuses[0] : undefined,
+      agent: agents.length === 1 ? agents[0] : undefined,
+      repo_url: repo.trim() || undefined,
+    };
+    // Overview is cursor-paginated; accumulate pages so the rail, client search,
+    // multi-value filters, and log selection see every matching workspace.
+    let pageError: string | null = null;
+    const collected = await collectOverviewPages(async (cursor) => {
+      if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+        return null;
+      }
+      const result = await apiGet<ListEnvelope<WorkspaceOverview>>(
+        overviewListPath(filters, cursor),
+      );
+      if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+        return null;
+      }
+      if (!result.ok) {
+        pageError = result.message;
+        return null;
+      }
+      return result.data;
+    });
     if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
       return;
     }
-    if (!result.ok) {
-      setError(result.message);
+    if (collected === null) {
+      if (pageError !== null) {
+        setError(pageError);
+      }
       setOverview([]);
       return;
     }
     setError(null);
     setOverview(
-      result.data.items.map((item) => ({
+      collected.map((item) => ({
         ...item,
         task_prompt: item.task_prompt ?? "",
         lifecycle: item.lifecycle ?? [],
@@ -253,7 +267,7 @@ export function ConsoleDashboard() {
     );
     setLastRefresh(new Date());
     const currentSelectedId = selectedIdRef.current;
-    if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
+    if (currentSelectedId && !collected.some((item) => item.workspace_id === currentSelectedId)) {
       setSelectedId(null);
     }
   }, [setSelectedId]);
