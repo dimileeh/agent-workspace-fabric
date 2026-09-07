@@ -130,8 +130,9 @@ def _mark_referenced_needs_human_feedback_answered(
     ``__operator_decision_at__:<thread id>`` instead: the replay path retires the
     ruling when reviewer activity postdates that stamp, so an untouched
     conversation still quotes it and a replied-to one re-triages from scratch. The
-    residual window is a reply between the operator writing the guide and AWF
-    consuming it, which no locally recorded evidence can order.
+    stamp is the operator's own ``requested_at`` (see
+    :func:`_operator_ruling_issued_at`), not the moment AWF consumed the guide, so
+    a reply that lands while the guide is queued counts as unread too.
     """
     if hint is None:
         return
@@ -163,5 +164,36 @@ def _mark_referenced_needs_human_feedback_answered(
             continue
         state.mark_addressed(
             _operator_decision_issued_at_key(thread_id),
-            datetime.now(UTC).isoformat(),
+            _operator_ruling_issued_at(hint),
         )
+
+
+def _operator_ruling_issued_at(hint: OperatorHint) -> str:
+    """ISO-8601 UTC moment the operator issued ``hint``.
+
+    The stamp answers "which conversation did the operator read?", so it must be
+    the moment they wrote the guide, not the moment AWF consumed it. Hints carry
+    that as ``requested_at`` (stamped by the ``guide``/``remonitor`` controls at
+    request time and preserved verbatim across the ``needs_human`` /
+    ``agent_failed`` re-wraps in :mod:`awf.runtime.operator_hints`), and a guide
+    can sit queued for a whole monitor cycle — long enough for a reply to land in
+    between. Dating the ruling from consumption would silently adopt that reply as
+    something the operator had ruled on (PRRT_kwDOSJAM6s6fxBwT).
+
+    Naive values are read as UTC, matching ``_as_utc`` on the comparison side. A
+    hint with no ``requested_at`` (older persisted payloads, and the direct
+    constructions in tests) or an unparseable one falls back to now: that is the
+    latest the ruling can possibly have been issued, which keeps the pre-existing
+    replay behavior rather than retiring rulings on invented evidence.
+    """
+    requested_at = hint.requested_at
+    if requested_at:
+        try:
+            issued_at = datetime.fromisoformat(requested_at)
+        except ValueError:
+            issued_at = None
+        if issued_at is not None:
+            if issued_at.tzinfo is None:
+                issued_at = issued_at.replace(tzinfo=UTC)
+            return issued_at.astimezone(UTC).isoformat()
+    return datetime.now(UTC).isoformat()

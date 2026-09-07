@@ -54,12 +54,15 @@ SECOND_DIRECTIVE = (
 _REPO = RepoRef(owner="dimileeh", name="agent-workspace-fabric")
 
 
+GUIDE_REQUESTED_AT = "2026-09-06T21:00:00+00:00"
+
+
 def _guide(directive: str) -> OperatorHint:
     return OperatorHint(
         reason="operator guide",
         directive=directive,
         operation_id="op_guide_939",
-        requested_at="2026-09-06T21:00:00+00:00",
+        requested_at=GUIDE_REQUESTED_AT,
         reason_code="OPERATOR_GUIDE",
     )
 
@@ -625,13 +628,57 @@ def _replied_thread(*, at: datetime | None, viewer_did_author: bool = False) -> 
 
 @pytest.mark.unit
 def test_hashless_retirement_stamps_the_ruling_issue_time() -> None:
-    """A ruling with no snapshot to bind it to records when it was issued."""
-    before = datetime.now(UTC)
+    """The stamp is when the operator wrote the guide, not when AWF consumed it.
 
+    A guide can sit queued for a monitor cycle; dating the ruling from consumption
+    would adopt a reply that landed in between as feedback the operator ruled on.
+    """
     state = _hashless_ruling_state()
 
     stamped = datetime.fromisoformat(state.threads_addressed_ids[ISSUED_AT_KEY])
+    assert stamped == datetime.fromisoformat(GUIDE_REQUESTED_AT)
+
+
+@pytest.mark.unit
+def test_naive_requested_at_is_stamped_as_utc() -> None:
+    """An offsetless hint timestamp still orders against forge timestamps."""
+    state = MonitorState(threads_addressed_ids={THREAD_ID: "needs_human"})
+    naive = replace(_guide(DIRECTIVE), requested_at="2026-09-06T21:00:00")
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=naive)
+
+    assert state.threads_addressed_ids[ISSUED_AT_KEY] == GUIDE_REQUESTED_AT
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("requested_at", [None, "", "not-a-timestamp"])
+def test_undatable_guide_stamps_the_consume_time(requested_at: str | None) -> None:
+    """Without a usable request time, now is the latest the ruling can be from."""
+    before = datetime.now(UTC)
+    state = MonitorState(threads_addressed_ids={THREAD_ID: "needs_human"})
+    undatable = replace(_guide(DIRECTIVE), requested_at=requested_at)
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=undatable)
+
+    stamped = datetime.fromisoformat(state.threads_addressed_ids[ISSUED_AT_KEY])
     assert before <= stamped <= datetime.now(UTC)
+
+
+@pytest.mark.unit
+def test_reply_while_the_guide_was_queued_retires_the_ruling() -> None:
+    """The window between writing the guide and consuming it is now covered.
+
+    This reply predates the retirement pass, so a consume-time stamp would have
+    kept the ruling and replayed it over feedback the operator never read
+    (PRRT_kwDOSJAM6s6fxBwT).
+    """
+    state = _hashless_ruling_state()
+    queued_reply = _replied_thread(
+        at=datetime.fromisoformat(GUIDE_REQUESTED_AT) + timedelta(minutes=5)
+    )
+
+    assert comments._operator_decision_for_thread(state, queued_reply) is None
+    assert DECISION_KEY not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -665,7 +712,7 @@ def test_reply_after_a_hashless_ruling_retires_it() -> None:
 def test_unchanged_conversation_keeps_the_hashless_ruling() -> None:
     """Activity the operator already read does not retire their ruling."""
     state = _hashless_ruling_state()
-    unchanged = _replied_thread(at=datetime.now(UTC) - timedelta(hours=1))
+    unchanged = _replied_thread(at=datetime.fromisoformat(GUIDE_REQUESTED_AT) - timedelta(hours=1))
 
     assert comments._operator_decision_for_thread(state, unchanged) == DIRECTIVE
     assert state.threads_addressed_ids[ISSUED_AT_KEY]
