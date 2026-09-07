@@ -1004,9 +1004,9 @@ export interface ConsoleDashboardSummary {
   };
   counts: ConsoleDashboardCounts;
   overlap: {
-    awaiting_human_subset_of_monitoring_pr: boolean;
-    awaiting_operator_in_active_not_executing: boolean;
-    retrying_in_active_not_executing: boolean;
+    awaiting_human_subset_of_monitoring_pr: true;
+    awaiting_operator_in_active_not_executing: true;
+    retrying_in_active_not_executing: true;
   };
 }
 

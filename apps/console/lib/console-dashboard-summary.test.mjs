@@ -414,7 +414,7 @@ test("parseDashboardSummary rejects complete coverage when any count is null", (
   );
 });
 
-test("parseDashboardSummary skips subset checks when related counts are null or flags false", () => {
+test("parseDashboardSummary skips subset checks when related counts are null", () => {
   assert.ok(
     parseDashboardSummary(
       validSummary({
@@ -426,17 +426,28 @@ test("parseDashboardSummary skips subset checks when related counts are null or 
   assert.ok(
     parseDashboardSummary(
       validSummary({
+        coverage: { status: "partial", notes: [] },
+        counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: null },
+      }),
+    ),
+  );
+});
+
+test("parseDashboardSummary rejects false overlap invariant flags", () => {
+  assert.equal(
+    parseDashboardSummary(
+      validSummary({
         counts: {
           ...fixture.counts,
-          // Keep combined disjoint sum within active while skipping the human⊆PR check.
           monitoring_pr: 1,
           awaiting_human: 2,
         },
         overlap: { ...fixture.overlap, awaiting_human_subset_of_monitoring_pr: false },
       }),
     ),
+    null,
   );
-  assert.ok(
+  assert.equal(
     parseDashboardSummary(
       validSummary({
         counts: {
@@ -452,13 +463,14 @@ test("parseDashboardSummary skips subset checks when related counts are null or 
         overlap: { ...fixture.overlap, awaiting_operator_in_active_not_executing: false },
       }),
     ),
+    null,
   );
-  assert.ok(
+  assert.equal(
     parseDashboardSummary(
       validSummary({
-        coverage: { status: "partial", notes: [] },
-        counts: { ...fixture.counts, monitoring_pr: 1, awaiting_human: null },
+        overlap: { ...fixture.overlap, retrying_in_active_not_executing: false },
       }),
     ),
+    null,
   );
 });

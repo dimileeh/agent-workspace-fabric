@@ -344,19 +344,19 @@ export function parseDashboardSummary(
     "awaiting_operator_in_active_not_executing",
     "retrying_in_active_not_executing",
   ] as const) {
-    if (typeof overlap[key] !== "boolean") {
+    // Fixed v1 count-semantics invariants: literal true only (not provider toggles).
+    if (overlap[key] !== true) {
       return null;
     }
   }
   if (
-    overlap.awaiting_human_subset_of_monitoring_pr === true &&
     awaitingHuman != null &&
     monitoringPr != null &&
     awaitingHuman > monitoringPr
   ) {
     return null;
   }
-  if (overlap.awaiting_operator_in_active_not_executing === true && awaitingOperator != null) {
+  if (awaitingOperator != null) {
     if (active != null && awaitingOperator > active) {
       return null;
     }
@@ -364,7 +364,7 @@ export function parseDashboardSummary(
       return null;
     }
   }
-  if (overlap.retrying_in_active_not_executing === true && retrying != null) {
+  if (retrying != null) {
     if (active != null && retrying > active) {
       return null;
     }
@@ -375,8 +375,7 @@ export function parseDashboardSummary(
   // Combined disjoint active status buckets: pairwise subset checks miss cases
   // like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
   // executing, monitoring_pr, and queued are always distinct statuses;
-  // awaiting_operator / retrying join the sum only when their overlap flags
-  // declare them in active ∉ executing.
+  // awaiting_operator / retrying are always in active ∉ executing under v1.
   if (active != null) {
     let disjointActiveSum = 0;
     let partCount = 0;
@@ -392,11 +391,11 @@ export function parseDashboardSummary(
       disjointActiveSum += queued;
       partCount += 1;
     }
-    if (overlap.awaiting_operator_in_active_not_executing === true && awaitingOperator != null) {
+    if (awaitingOperator != null) {
       disjointActiveSum += awaitingOperator;
       partCount += 1;
     }
-    if (overlap.retrying_in_active_not_executing === true && retrying != null) {
+    if (retrying != null) {
       disjointActiveSum += retrying;
       partCount += 1;
     }

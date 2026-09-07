@@ -1847,17 +1847,20 @@
       },
       "ConsoleDashboardOverlapResponse": {
         "additionalProperties": false,
-        "description": "Overlap invariant flags as strict bools (no string/int coerce).",
+        "description": "Fixed v1 count-semantics invariants (literal true; no provider toggles).\n\nUnavailable relationship data uses nullable counts plus partial/unknown\ncoverage \u2014 never ``false`` overlap flags that skip subset checks.",
         "properties": {
           "awaiting_human_subset_of_monitoring_pr": {
+            "const": true,
             "title": "Awaiting Human Subset Of Monitoring Pr",
             "type": "boolean"
           },
           "awaiting_operator_in_active_not_executing": {
+            "const": true,
             "title": "Awaiting Operator In Active Not Executing",
             "type": "boolean"
           },
           "retrying_in_active_not_executing": {
+            "const": true,
             "title": "Retrying In Active Not Executing",
             "type": "boolean"
           }

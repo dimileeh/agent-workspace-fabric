@@ -568,7 +568,8 @@ def test_dashboard_summary_rejects_complete_coverage_with_null_counts() -> None:
 
 
 @pytest.mark.unit
-def test_dashboard_summary_skips_subset_checks_for_null_counts_or_false_flags() -> None:
+def test_dashboard_summary_skips_subset_checks_for_null_counts() -> None:
+    """Null related counts skip subset checks; unavailable data uses partial coverage."""
     payload = copy.deepcopy(_dashboard_summary_payload())
     payload["coverage"]["status"] = "partial"
     payload["counts"]["active"] = None
@@ -576,8 +577,26 @@ def test_dashboard_summary_skips_subset_checks_for_null_counts_or_false_flags() 
     assert ConsoleDashboardSummaryResponse.model_validate(payload).counts.executing == 5
 
     payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["coverage"]["status"] = "partial"
+    payload["coverage"]["notes"] = ["awaiting_human_unavailable"]
     payload["counts"]["monitoring_pr"] = 1
-    payload["counts"]["awaiting_human"] = 2
-    payload["overlap"]["awaiting_human_subset_of_monitoring_pr"] = False
+    payload["counts"]["awaiting_human"] = None
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
-    assert model.counts.awaiting_human == 2
+    assert model.counts.awaiting_human is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overlap_key",
+    [
+        "awaiting_human_subset_of_monitoring_pr",
+        "awaiting_operator_in_active_not_executing",
+        "retrying_in_active_not_executing",
+    ],
+)
+def test_dashboard_summary_rejects_false_overlap_flags(overlap_key: str) -> None:
+    """v1 overlap flags are fixed invariants (literal true), not provider toggles."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    payload["overlap"][overlap_key] = False
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)

@@ -13,7 +13,6 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
-    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -52,6 +51,16 @@ SummaryScope = Literal["local", "tenant"]
 _RFC3339_DATE_TIME = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$"
 )
+
+
+def _require_overlap_invariant_true(value: Any) -> Literal[True]:
+    """Reject coerced truths such as 1 so overlap flags stay JSON boolean true only."""
+    if value is not True:
+        raise ValueError("overlap invariant must be literal true")
+    return True
+
+
+OverlapInvariantFlag = Annotated[Literal[True], BeforeValidator(_require_overlap_invariant_true)]
 
 
 def _require_iso_timestamp_string(value: Any) -> Any:
@@ -474,13 +483,17 @@ class ConsoleDashboardCountsResponse(BaseModel):
 
 
 class ConsoleDashboardOverlapResponse(BaseModel):
-    """Overlap invariant flags as strict bools (no string/int coerce)."""
+    """Fixed v1 count-semantics invariants (literal true; no provider toggles).
+
+    Unavailable relationship data uses nullable counts plus partial/unknown
+    coverage — never ``false`` overlap flags that skip subset checks.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    awaiting_human_subset_of_monitoring_pr: StrictBool
-    awaiting_operator_in_active_not_executing: StrictBool
-    retrying_in_active_not_executing: StrictBool
+    awaiting_human_subset_of_monitoring_pr: OverlapInvariantFlag
+    awaiting_operator_in_active_not_executing: OverlapInvariantFlag
+    retrying_in_active_not_executing: OverlapInvariantFlag
 
 
 class ConsoleDashboardSummaryResponse(BaseModel):
@@ -520,7 +533,6 @@ class ConsoleDashboardSummaryResponse(BaseModel):
         payloads fail closed rather than rendering impossible KPI relationships.
         """
         counts = self.counts
-        overlap = self.overlap
         count_values = (
             counts.active,
             counts.executing,
@@ -554,17 +566,15 @@ class ConsoleDashboardSummaryResponse(BaseModel):
             and counts.queued > counts.active
         ):
             raise ValueError("counts.queued must be <= counts.active")
+        # Overlap flags are Literal[True] fixed v1 invariants; always enforce when
+        # related counts are present (null counts + partial/unknown coverage instead).
         if (
-            overlap.awaiting_human_subset_of_monitoring_pr
-            and counts.awaiting_human is not None
+            counts.awaiting_human is not None
             and counts.monitoring_pr is not None
             and counts.awaiting_human > counts.monitoring_pr
         ):
             raise ValueError("counts.awaiting_human must be <= counts.monitoring_pr")
-        if (
-            overlap.awaiting_operator_in_active_not_executing
-            and counts.awaiting_operator is not None
-        ):
+        if counts.awaiting_operator is not None:
             if counts.active is not None and counts.awaiting_operator > counts.active:
                 raise ValueError("counts.awaiting_operator must be <= counts.active")
             if (
@@ -575,7 +585,7 @@ class ConsoleDashboardSummaryResponse(BaseModel):
                 raise ValueError(
                     "counts.awaiting_operator + counts.executing must be <= counts.active"
                 )
-        if overlap.retrying_in_active_not_executing and counts.retrying is not None:
+        if counts.retrying is not None:
             if counts.active is not None and counts.retrying > counts.active:
                 raise ValueError("counts.retrying must be <= counts.active")
             if (
@@ -595,12 +605,9 @@ class ConsoleDashboardSummaryResponse(BaseModel):
                 disjoint_parts.append(counts.monitoring_pr)
             if counts.queued is not None:
                 disjoint_parts.append(counts.queued)
-            if (
-                overlap.awaiting_operator_in_active_not_executing
-                and counts.awaiting_operator is not None
-            ):
+            if counts.awaiting_operator is not None:
                 disjoint_parts.append(counts.awaiting_operator)
-            if overlap.retrying_in_active_not_executing and counts.retrying is not None:
+            if counts.retrying is not None:
                 disjoint_parts.append(counts.retrying)
             if len(disjoint_parts) >= 2 and sum(disjoint_parts) > counts.active:
                 raise ValueError("sum of disjoint active status buckets must be <= counts.active")

@@ -62,9 +62,9 @@ class ConsoleDashboardCounts:
 
 @dataclass(frozen=True)
 class ConsoleDashboardOverlap:
-    awaiting_human_subset_of_monitoring_pr: bool
-    awaiting_operator_in_active_not_executing: bool
-    retrying_in_active_not_executing: bool
+    awaiting_human_subset_of_monitoring_pr: Literal[True]
+    awaiting_operator_in_active_not_executing: Literal[True]
+    retrying_in_active_not_executing: Literal[True]
 
 
 @dataclass(frozen=True)
