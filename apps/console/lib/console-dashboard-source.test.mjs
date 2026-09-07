@@ -405,17 +405,79 @@ test("loadWorkspace success clears shared error without clearing overview trunca
   assert.match(
     dashboardSource.detailLoader,
     /const loadWorkspace = useCallback\([\s\S]*?\} else \{\s*setError\(null\);\s*\}/,
-    "Expected loadWorkspace success to clear only the shared error slot",
+    "Expected loadWorkspace success to clear only the workspace-detail error setter",
   );
   assert.doesNotMatch(
     dashboardSource.detailLoader,
-    /setOverviewTruncationWarning/,
-    "Expected loadWorkspace not to touch overview truncation warning",
+    /setOverviewError|setOverviewTruncationWarning/,
+    "Expected loadWorkspace not to touch overview error or truncation warning",
   );
   assert.match(
     dashboard,
     /overviewTruncationWarning \? <ErrorBanner message=\{overviewTruncationWarning\} \/> : null/,
-    "Expected truncation warning to render independently of the shared error banner",
+    "Expected truncation warning to render independently of the feed error banners",
+  );
+});
+
+test("overview and workspace-detail errors clear only when their own feed succeeds", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAjDt: a successful
+  // overview poll must not erase a retained runtime/events/operations/logs
+  // warning, and a recovered detail load must not dismiss an overview outage.
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const \[overviewError, setOverviewError\] = useState<string \| null>\(null\);\s*const \[workspaceDetailError, setWorkspaceDetailError\] = useState<string \| null>\(null\);/,
+    "Expected independent overview and workspace-detail error state",
+  );
+  assert.match(
+    dashboard,
+    /setOverviewError\(null\);\s*setOverview\(/,
+    "Expected overview success to clear only the overview error",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /setOverviewError\(null\);[\s\S]{0,160}?setWorkspaceDetailError\(null\);\s*setOverview\(/,
+    "Expected overview success not to clear the workspace-detail error",
+  );
+  assert.match(
+    dashboard,
+    /if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}/,
+    "Expected overview page failure to record only the overview error",
+  );
+  assert.match(
+    dashboard,
+    /setError: setWorkspaceDetailError,/,
+    "Expected detail loader and live stream to write the workspace-detail error slot",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /setError: setOverviewError,/,
+    "Expected detail loader and live stream not to write the overview error slot",
+  );
+  assert.match(
+    dashboard,
+    /overviewError \? <ErrorBanner message=\{overviewError\} \/> : null/,
+    "Expected overview error to render on its own banner",
+  );
+  assert.match(
+    dashboard,
+    /workspaceDetailError \? <ErrorBanner message=\{workspaceDetailError\} \/> : null/,
+    "Expected workspace-detail error to render on its own banner",
+  );
+  assert.match(
+    dashboard,
+    /workspaceDetailError=\{workspaceDetailError\}/,
+    "Expected the inspector to receive the workspace-detail error so the drawer does not hide the warning",
+  );
+  assert.match(
+    dashboardSource.inspector,
+    /workspaceDetailError \? \([\s\S]*?<ErrorBanner message=\{workspaceDetailError\} \/>/,
+    "Expected the inspector drawer to show the workspace-detail error beside retained snapshots",
+  );
+  assert.match(
+    dashboard,
+    /setLogEntries\(\[\]\);\s*setStreamOffsets\(\{\}\);\s*setWorkspaceDetailError\(null\);/,
+    "Expected selection changes to drop the previous workspace-detail error",
   );
 });
 
@@ -581,7 +643,7 @@ test("authorized feed clear and overview auth denial wipe truncation with the ov
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
+    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setOverview\(\[\]\);\s*setOverviewError\(null\);\s*setWorkspaceDetailError\(null\);\s*setOverviewTruncationWarning\(null\);/,
     "Expected clearAuthorizedConsoleFeeds to wipe truncation with the overview",
   );
   assert.match(
@@ -646,12 +708,12 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
     "Expected loadOverview to clear overview and dependent surfaces on page auth denial and retain last-good on other page failures",
   );
   assert.doesNotMatch(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?setError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
+    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?setOverviewError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
     "Expected loadOverview not to blank the authorized overview on every collectOverviewPages null",
   );
 });

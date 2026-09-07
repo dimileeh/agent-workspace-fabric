@@ -136,6 +136,9 @@ export function useWorkspaceDetailLoader({
       const firstFailure = [workspace, runtime, events, operations, streams].find(
         (item) => item != null && !item.ok,
       );
+      // This setter is the workspace-detail slot only. Do not clear overview
+      // errors here — an independent overview success must not clear this
+      // warning either (CONSOLE_BACKEND_CONTRACT).
       if (firstFailure && !firstFailure.ok) {
         setError(firstFailure.message);
       } else {

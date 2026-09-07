@@ -19,6 +19,7 @@ import { LogsPanel } from "./console-dashboard-logs";
 import { WorkspaceSummary } from "./console-dashboard-workspace-detail";
 import { SecretsLeasesPanel, SecurityEgressPanel } from "./console-dashboard-security";
 import {
+  ErrorBanner,
   PanelContext,
   type DetailState,
   type LogEntry,
@@ -48,6 +49,7 @@ type ConsoleDashboardInspectorProps = {
   logSortDirection: SortDirection;
   logTailSignal: number;
   logTailRefreshError: string | null;
+  workspaceDetailError: string | null;
   onClose: () => void;
   onRetry: () => void;
   onOperatorAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
@@ -82,6 +84,7 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
     logSortDirection,
     logTailSignal,
     logTailRefreshError,
+    workspaceDetailError,
   } = props;
 
   return (
@@ -93,6 +96,11 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
       <PanelContext.Provider value="ghost">
         {selectedId && selectedOverview ? (
           <div className="grid min-w-0 gap-4 min-[1700px]:grid-cols-[minmax(0,1fr)_minmax(400px,0.8fr)]">
+            {workspaceDetailError ? (
+              <div className="min-[1700px]:col-span-2">
+                <ErrorBanner message={workspaceDetailError} />
+              </div>
+            ) : null}
             <div className="grid min-w-0 content-start gap-4">
               <WorkspaceSummary
                 overview={selectedOverview}

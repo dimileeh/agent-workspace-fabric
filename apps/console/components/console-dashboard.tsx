@@ -127,10 +127,12 @@ export function ConsoleDashboard() {
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Overview truncation must not share the inspector/workspace error slot:
-  // loadWorkspace / live-stream clear `error` on success and would otherwise
-  // dismiss the 5k-row prefix warning, flickering against the overview poll.
+  // Overview and selected-workspace diagnostic errors are independent feeds.
+  // A successful overview poll must not clear a retained runtime/events/
+  // operations/logs/stream warning, and a recovered detail load must not
+  // dismiss an overview outage. Truncation is a third slot for the same reason.
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [workspaceDetailError, setWorkspaceDetailError] = useState<string | null>(null);
   const [overviewTruncationWarning, setOverviewTruncationWarning] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
@@ -303,7 +305,7 @@ export function ConsoleDashboard() {
         // Transient page failures (5xx/network) retain the last-good authorized
         // overview so rail/inspector stay usable; only 401/403 clears it.
         if (pageError !== null) {
-          setError(pageError);
+          setOverviewError(pageError);
         }
         if (pageAuthDenied) {
           // Overview feed auth denial: drop the rail and close dependent workspace
@@ -315,6 +317,9 @@ export function ConsoleDashboard() {
           gatedDetailFeedGenerationRef.current += 1;
           setOverview([]);
           setOverviewTruncationWarning(null);
+          // Inspector surfaces are wiped with the rail; drop the detail warning
+          // so a retained diagnostic error does not outlive the cleared snapshot.
+          setWorkspaceDetailError(null);
           // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
           // retained agent/model options stay visible on the rail, and an
           // active prior filter can keep a later recovered list empty.
@@ -347,8 +352,7 @@ export function ConsoleDashboard() {
       }
       // Never treat a capped prefix as a complete fleet: surface truncation so
       // rail/search/log selection cannot silently omit later workspaces.
-      // Keep this off the shared `error` slot so selected-workspace polls cannot
-      // clear it (loadWorkspace setError(null) on success).
+      // Keep this off both feed error slots so neither poll can clear it.
       setOverviewTruncationWarning(
         collected.truncated
           ? collected.truncationReason === "missing_cursor"
@@ -356,7 +360,9 @@ export function ConsoleDashboard() {
             : "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
           : null,
       );
-      setError(null);
+      // Clear only the overview warning. A still-failing workspace-detail feed
+      // retains last-good inspector data and must keep its own banner.
+      setOverviewError(null);
       setOverview(
         collected.items.map((item) => ({
           ...item,
@@ -404,6 +410,8 @@ export function ConsoleDashboard() {
     // wipe them on auth denial or tenant/backend identity change so revocation
     // and cross-context reuse cannot fail open with prior rows still on screen.
     setOverview([]);
+    setOverviewError(null);
+    setWorkspaceDetailError(null);
     setOverviewTruncationWarning(null);
     setRetainedAgents([]);
     setRetainedModels([]);
@@ -950,7 +958,7 @@ export function ConsoleDashboard() {
     selectedStreamsRef,
     logListingAuthDeniedRef,
     setLogListingAuthDenied,
-    setError,
+    setError: setWorkspaceDetailError,
     setDetail,
     setSelectedStreams,
     setLogEntries,
@@ -1087,6 +1095,7 @@ export function ConsoleDashboard() {
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
+    setWorkspaceDetailError(null);
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
   }, [selectedId]);
@@ -1105,7 +1114,7 @@ export function ConsoleDashboard() {
     setDetail,
     setLogEntries,
     setStreamOffsets,
-    setError,
+    setError: setWorkspaceDetailError,
   });
 
   const filteredOverview = useMemo(
@@ -1366,7 +1375,8 @@ export function ConsoleDashboard() {
         <section className="min-w-0">
           {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
           {overviewTruncationWarning ? <ErrorBanner message={overviewTruncationWarning} /> : null}
-          {error ? <ErrorBanner message={error} /> : null}
+          {overviewError ? <ErrorBanner message={overviewError} /> : null}
+          {workspaceDetailError ? <ErrorBanner message={workspaceDetailError} /> : null}
           <ConsoleDashboardFleetPanels
             showCapacitySection={showCapacitySection}
             showReliability={showReliability}
@@ -1416,6 +1426,7 @@ export function ConsoleDashboard() {
         logSortDirection={logSortDirection}
         logTailSignal={logTailSignal}
         logTailRefreshError={logTailRefreshError}
+        workspaceDetailError={workspaceDetailError}
         onClose={() => setSelectedId(null)}
         onRetry={() => {
           void retrySelectedWorkspace();
