@@ -190,6 +190,7 @@ export function ConsoleDashboard() {
   const failureSummaryRequestGenerationRef = useRef(0);
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
+  // Optional feeds discard on mismatch; the basic workspace GET still applies.
   const gatedDetailFeedGenerationRef = useRef(0);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
@@ -454,9 +455,11 @@ export function ConsoleDashboard() {
   // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
   // concurrent overview loads and blank legacy-safe navigation
   // (CONSOLE_BACKEND_CONTRACT). Bump gatedDetailFeedGenerationRef so in-flight
-  // loadWorkspace / log-tail / gated inventory responses cannot restore cleared
-  // feeds. Retain lastCapabilityIdentityKeyRef so a later identity switch is not
-  // treated as bootstrap.
+  // optional detail feeds, log-tails, and gated inventories cannot restore
+  // cleared data. The basic workspace GET still applies when only that
+  // generation changed — a persistent 404 poll must not discard overlapping
+  // /workspaces/{id} loads. Retain lastCapabilityIdentityKeyRef so a later
+  // identity switch is not treated as bootstrap.
   const clearCapabilityGatedInventories = useCallback(() => {
     dashboardSummaryRequestGenerationRef.current += 1;
     cloudRuntimeRequestGenerationRef.current += 1;

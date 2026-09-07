@@ -59,6 +59,8 @@ type UseWorkspaceDetailLoaderArgs = {
  * Explicit refresh, selection changes, and post-mutation callers use the
  * returned `loadWorkspace`, which advances generation and supersedes safely.
  * A newer feed-level 401/403 still wins over an older in-flight 200.
+ * A gated-detail generation bump (capabilities 404) drops optional feeds only;
+ * the basic workspace GET still applies.
  */
 export function useWorkspaceDetailLoader({
   selectedId,
@@ -126,10 +128,41 @@ export function useWorkspaceDetailLoader({
 
       if (
         epoch !== authorizedFeedEpochRef.current ||
-        gatedGeneration !== gatedDetailFeedGenerationRef.current ||
         generation !== workspaceDetailRequestGenerationRef.current ||
         selectedIdRef.current !== workspaceId
       ) {
+        return;
+      }
+
+      // Accept the full envelope (including listing success and gated-off null)
+      // so the post-merge listing check can call this without a false-only cast.
+      const feedAuthDenied = (result: ApiEnvelope<unknown> | null | undefined) =>
+        result != null && result.ok === false && (result.status === 401 || result.status === 403);
+
+      // Capabilities 404 / same-identity gated clears bump gatedDetailFeedGenerationRef
+      // so optional diagnostic feeds cannot be restored. The basic /workspaces/{id}
+      // GET is not gated — apply it when only that generation changed. Otherwise a
+      // persistent 404 poll discards every overlapping detail load and the inspector
+      // stays empty (CONSOLE_BACKEND_CONTRACT).
+      if (gatedGeneration !== gatedDetailFeedGenerationRef.current) {
+        if (workspace.ok) {
+          setError(null);
+        } else {
+          setError(workspace.message);
+        }
+        setDetail((current) => ({
+          ...current,
+          workspace: workspace.ok
+            ? {
+                ...workspace.data,
+                lifecycle: workspace.data.lifecycle ?? [],
+                llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
+                recovery: workspace.data.recovery ?? null,
+              }
+            : feedAuthDenied(workspace)
+              ? null
+              : current.workspace,
+        }));
         return;
       }
 
@@ -148,10 +181,6 @@ export function useWorkspaceDetailLoader({
       // Gated-off feeds resolve to null and clear; transient network/5xx keep
       // last-successful inspector snapshots while the error banner stays visible
       // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
-      // Accept the full envelope (including listing success and gated-off null)
-      // so the post-merge listing check can call this without a false-only cast.
-      const feedAuthDenied = (result: ApiEnvelope<unknown> | null | undefined) =>
-        result != null && result.ok === false && (result.status === 401 || result.status === 403);
 
       setDetail((current) => {
         const nextWorkspace = workspace.ok

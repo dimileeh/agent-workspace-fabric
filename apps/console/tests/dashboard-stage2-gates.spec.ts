@@ -937,6 +937,196 @@ test("slow workspace detail poll applies when the request exceeds the poll inter
   await expect(page.getByText(initialProject, { exact: true })).toHaveCount(0);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAqk6: a persistent
+// capabilities 404 bumps gated-detail generation, but that must not discard an
+// overlapping basic /workspaces/{id} load. Optional diagnostic feeds stay gated.
+test("capabilities 404 does not discard an overlapping basic workspace detail load", async ({
+  page,
+}) => {
+  let holdDetail = false;
+  let detailStarts = 0;
+  let capability404sAfterHold = 0;
+  const detailGate: Array<() => void> = [];
+  const workspaceId = "ws_cap_404_detail";
+  const detailBranch = "awf/cap-404-detail-kept";
+  const staleRuntime = "awf-ws-cap-404-stale-runtime";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Capabilities 404 detail workspace",
+    repo_url: "https://github.com/example/cap-404-detail",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Keep basic workspace detail when capabilities stay 404",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  const releaseHeldDetail = () => {
+    const pending = detailGate.splice(0, detailGate.length);
+    for (const release of pending) {
+      release();
+    }
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      const generation = holdDetail ? ++capability404sAfterHold : 0;
+      await fulfillJson(
+        route,
+        {
+          detail: {
+            error_code: "NOT_FOUND",
+            message:
+              generation > 0
+                ? `capabilities negotiation unavailable overlap-${generation}`
+                : "capabilities negotiation unavailable",
+          },
+        },
+        404,
+      );
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      detailStarts += 1;
+      if (holdDetail) {
+        await new Promise<void>((resolve) => {
+          detailGate.push(resolve);
+        });
+      }
+      await fulfillJson(route, {
+        ...overviewItem,
+        id: workspaceId,
+        version: 2,
+        branch_name: detailBranch,
+        task_title: overviewItem.title,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (holdDetail) {
+        await new Promise<void>((resolve) => {
+          detailGate.push(resolve);
+        });
+      }
+      await fulfillJson(route, {
+        workspace_id: workspaceId,
+        compose_project_name: staleRuntime,
+        stack_state: "running",
+        services: [],
+        app_endpoints: [],
+        logs_available: true,
+        control_available: true,
+        reason: null,
+      });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      if (holdDetail) {
+        await new Promise<void>((resolve) => {
+          detailGate.push(resolve);
+        });
+      }
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByText(/capabilities negotiation unavailable/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+
+  // Hold every basic GET so the unique branch can only appear from a load that
+  // overlaps a capabilities 404, not from a fast selection fetch.
+  holdDetail = true;
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect.poll(() => detailStarts, { timeout: 10_000 }).toBeGreaterThan(0);
+  await expect(page.getByText("no branch / main", { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  const startsBeforeRefresh = detailStarts;
+  const capsBeforeRefresh = capability404sAfterHold;
+  // Refresh starts loadWorkspace, then a capabilities 404 that bumps gated-detail
+  // generation. Release the basic GET only after that 404 is on screen so the
+  // response cannot win the race against the generation bump.
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => detailStarts, { timeout: 10_000 }).toBeGreaterThan(startsBeforeRefresh);
+  await expect
+    .poll(async () => {
+      const text = await page
+        .getByText(/capabilities negotiation unavailable overlap-\d+/)
+        .textContent();
+      const match = text?.match(/overlap-(\d+)/);
+      return match ? Number(match[1]) : 0;
+    })
+    .toBeGreaterThan(capsBeforeRefresh);
+  releaseHeldDetail();
+
+  await expect(page.getByText(`${detailBranch} / main`, { exact: true })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByText(staleRuntime, { exact: true })).toHaveCount(0);
+});
+
 // Requests slower than pollMs must still negotiate. A wall-clock interval that
 // calls loadCapabilities every pollMs advances capabilityRequestGenerationRef,
 // so every slower success is discarded and optional feeds stay absent.
