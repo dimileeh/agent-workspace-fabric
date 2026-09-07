@@ -2286,6 +2286,15 @@ test("Finished stays visible when it differs from workflow_finished_at", async (
   await page.getByTestId("workspace-card-ws_presentation_sample").click();
   await expect(page.getByText("Finished", { exact: true })).toBeVisible();
   await expect(page.getByText("Workflow finished", { exact: true })).toBeVisible();
+
+  await page
+    .getByTestId("workspace-card-ws_presentation_sample")
+    .getByRole("button", { name: "Details", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: /Task details/i });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Finished", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Workflow finished", { exact: true })).toBeVisible();
 });
 
 test("capability 403 clears stale summary KPIs", async ({ page }) => {

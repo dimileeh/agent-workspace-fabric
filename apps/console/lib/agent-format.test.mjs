@@ -356,6 +356,21 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
   assert.equal(
     distinctFinishedAt({
       workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T17:00:00.000Z",
+    }),
+    null,
+    "equivalent ISO forms of the same instant must not render twice",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "not-a-timestamp",
+    }),
+    "not-a-timestamp",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
       finished_at: "2026-09-06T16:00:00Z",
     }),
     "2026-09-06T16:00:00Z",

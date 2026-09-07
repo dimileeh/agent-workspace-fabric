@@ -148,13 +148,30 @@ export function resolveWorkflowFinishedAt(
 }
 
 /**
+ * True when two recorded timestamps are the same instant, including equivalent
+ * ISO forms (`Z` vs `.000Z`) that would render as one clock time under both labels.
+ */
+function sameRecordedInstant(left: string, right: string): boolean {
+  if (left === right) {
+    return true;
+  }
+  const leftMs = Date.parse(left);
+  const rightMs = Date.parse(right);
+  return Number.isFinite(leftMs) && leftMs === rightMs;
+}
+
+/**
  * Separate "Finished" timestamp. `finished_at` is already the documented
  * fallback for Workflow finished, so omit it when that fact would repeat the
- * same value (cloud rows that only send `finished_at`).
+ * same instant (cloud rows that only send `finished_at`, or equivalent ISO forms).
  */
 export function distinctFinishedAt(workspace: WorkflowTimingFields): string | null {
   const finishedAt = workspace.finished_at;
-  if (!finishedAt || finishedAt === resolveWorkflowFinishedAt(workspace)) {
+  if (!finishedAt) {
+    return null;
+  }
+  const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
+  if (workflowFinishedAt && sameRecordedInstant(finishedAt, workflowFinishedAt)) {
     return null;
   }
   return finishedAt;
