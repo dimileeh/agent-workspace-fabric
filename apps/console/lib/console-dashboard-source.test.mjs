@@ -22,6 +22,10 @@ const dashboardSource = {
     new URL("../components/console-dashboard-overlays.tsx", import.meta.url),
     "utf8",
   ),
+  rail: readFileSync(
+    new URL("../components/console-dashboard-workspace-rail.tsx", import.meta.url),
+    "utf8",
+  ),
   detail: readFileSync(
     new URL("../components/console-dashboard-workspace-detail.tsx", import.meta.url),
     "utf8",
@@ -443,6 +447,37 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   const idxRetain = dashboard.indexOf("const retained = appliedCapabilitiesRef.current");
   assert.ok(idx404 > 0 && idxRetain > idx404, "Expected 404 clear before 5xx/network retain");
 });
+test("workspace rail omits log actions when showWorkspaceLogs is false", () => {
+  const dashboard = dashboardSource.dashboard;
+  const rail = dashboardSource.rail;
+  const overview = dashboardSource.overview;
+  assert.match(
+    dashboard,
+    /showWorkspaceLogs=\{showWorkspaceLogs\}/,
+    "Expected dashboard to pass showWorkspaceLogs into ConsoleDashboardWorkspaceRail",
+  );
+  assert.match(
+    rail,
+    /\{props\.showWorkspaceLogs \? \(\s*<WorkspaceSelectionToolbar/,
+    "Expected rail to omit WorkspaceSelectionToolbar when workspace_logs is unsupported",
+  );
+  assert.match(
+    rail,
+    /showWorkspaceLogs=\{props\.showWorkspaceLogs\}/,
+    "Expected rail to forward showWorkspaceLogs into WorkspaceList",
+  );
+  assert.match(
+    overview,
+    /\{showWorkspaceLogs \? \(\s*<input[\s\S]*?Select \$\{item\.title\} for fullscreen logs/,
+    "Expected WorkspaceList to omit log-selection checkboxes when logs are unsupported",
+  );
+  assert.match(
+    overview,
+    /\{showWorkspaceLogs \? \(\s*<button[\s\S]*?>\s*<Terminal[\s\S]*?>\s*Logs\s*<\/button>/,
+    "Expected WorkspaceList to omit per-row Logs buttons when logs are unsupported",
+  );
+});
+
 test("fullscreen log stream requires listing capability via allowStreamLogs", () => {
   const dashboard = dashboardSource.dashboard;
   const overlays = dashboardSource.overlays;

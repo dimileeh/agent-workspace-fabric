@@ -1352,6 +1352,7 @@ export function ConsoleDashboard() {
           onSortKey={setSortKey}
           onSortDirection={setSortDirection}
           onToggleExpanded={() => setFiltersExpanded((current) => !current)}
+          showWorkspaceLogs={showWorkspaceLogs}
           workspaceLogSelection={workspaceLogSelection}
           onOpenSelectedLogs={openSelectedWorkspaceLogs}
           onClearLogSelection={() => setWorkspaceLogSelection([])}

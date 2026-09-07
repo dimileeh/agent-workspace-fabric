@@ -1529,12 +1529,13 @@ test("fullscreen logs skip unsupported workspace_logs and workspace_stream", asy
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  // Reviewer path: workspace-selection toolbar → Open logs (not the card Logs button).
-  await page
-    .getByTestId("workspace-card-ws_fullscreen_gate")
-    .getByRole("checkbox", { name: "Select Fullscreen log gate for fullscreen logs" })
-    .check();
-  await page.getByRole("button", { name: "Open logs", exact: true }).click();
+  // Without workspace_logs, omit rail log-selection UI entirely — do not leave
+  // checkboxes / Open logs / Logs buttons that latch state and appear inert.
+  const card = page.getByTestId("workspace-card-ws_fullscreen_gate");
+  await expect(card.getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open logs", exact: true })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Logs", exact: true })).toHaveCount(0);
+  await expect(page.getByText(/selected for logs/i)).toHaveCount(0);
 
   // Without workspace_logs, omit the fullscreen viewer entirely — do not mount
   // columns that would only show "Workspace log listing is unavailable."

@@ -27,6 +27,8 @@ type ConsoleDashboardWorkspaceRailProps = {
   onSortKey: (value: WorkspaceSortKey) => void;
   onSortDirection: (value: SortDirection) => void;
   onToggleExpanded: () => void;
+  /** When false, omit log-selection toolbar, checkboxes, and Logs buttons. */
+  showWorkspaceLogs: boolean;
   workspaceLogSelection: string[];
   onOpenSelectedLogs: () => void;
   onClearLogSelection: () => void;
@@ -65,14 +67,17 @@ export function ConsoleDashboardWorkspaceRail(props: ConsoleDashboardWorkspaceRa
         expanded={props.filtersExpanded}
         onToggleExpanded={props.onToggleExpanded}
       />
-      <WorkspaceSelectionToolbar
-        selectedCount={props.workspaceLogSelection.length}
-        onOpen={props.onOpenSelectedLogs}
-        onClear={props.onClearLogSelection}
-      />
+      {props.showWorkspaceLogs ? (
+        <WorkspaceSelectionToolbar
+          selectedCount={props.workspaceLogSelection.length}
+          onOpen={props.onOpenSelectedLogs}
+          onClear={props.onClearLogSelection}
+        />
+      ) : null}
       <WorkspaceList
         items={props.filteredOverview}
         selectedId={props.selectedId}
+        showWorkspaceLogs={props.showWorkspaceLogs}
         selectedWorkspaceIds={props.workspaceLogSelection}
         onSelect={props.onSelect}
         onToggleWorkspaceSelection={props.onToggleWorkspaceSelection}

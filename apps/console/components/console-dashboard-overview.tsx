@@ -655,6 +655,7 @@ export function WorkspaceSelectionToolbar({
 export function WorkspaceList({
   items,
   selectedId,
+  showWorkspaceLogs = true,
   selectedWorkspaceIds,
   onSelect,
   onToggleWorkspaceSelection,
@@ -663,6 +664,8 @@ export function WorkspaceList({
 }: {
   items: WorkspaceOverview[];
   selectedId: string | null;
+  /** When false, omit per-row log checkboxes and Logs buttons. */
+  showWorkspaceLogs?: boolean;
   selectedWorkspaceIds: string[];
   onSelect: (workspaceId: string) => void;
   onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
@@ -754,13 +757,15 @@ export function WorkspaceList({
           >
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
               <div className="flex min-w-0 items-start gap-2">
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(item.workspace_id)}
-                  onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
-                  aria-label={`Select ${item.title} for fullscreen logs`}
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
-                />
+                {showWorkspaceLogs ? (
+                  <input
+                    type="checkbox"
+                    checked={selectedSet.has(item.workspace_id)}
+                    onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
+                    aria-label={`Select ${item.title} for fullscreen logs`}
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
+                  />
+                ) : null}
                 <div className="relative grid min-w-0 flex-1 gap-2 text-left">
                   <button
                     type="button"
@@ -896,14 +901,16 @@ export function WorkspaceList({
                 <FileText size={12} aria-hidden />
                 Details
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenLogs(item.workspace_id)}
-                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
-              >
-                <Terminal size={12} aria-hidden />
-                Logs
-              </button>
+              {showWorkspaceLogs ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenLogs(item.workspace_id)}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
+                >
+                  <Terminal size={12} aria-hidden />
+                  Logs
+                </button>
+              ) : null}
             </div>
           </div>
         );
