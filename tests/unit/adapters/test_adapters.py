@@ -272,6 +272,37 @@ class _CancelledDuringTimeoutCleanupRunner:
         )
 
 
+class _CancelReRaisingSampleContext:
+    """Sampler context whose ``finalize`` re-raises a *fresh* cancellation.
+
+    Mirrors ``UsageSampleContext.finalize``: it shields the final sample against
+    a run that is being cancelled and then re-raises the ``CancelledError`` it
+    consumed, so the object the adapter's ``finally`` sees is a different one
+    from the cancellation it interrupted.
+    """
+
+    def __init__(self) -> None:
+        """Record the status the adapter finalizes sampling with."""
+        self.finalize_status: str | None = None
+
+    async def finalize(self, *, status: str) -> None:
+        """Re-raise a new cancellation the way the real finalize does."""
+        self.finalize_status = status
+        raise asyncio.CancelledError
+
+
+class _CancelReRaisingSampler:
+    """Usage sampler handing out a :class:`_CancelReRaisingSampleContext`."""
+
+    def __init__(self) -> None:
+        """Initialize the single context this sampler starts."""
+        self.context = _CancelReRaisingSampleContext()
+
+    async def start(self, **_kwargs: Any) -> _CancelReRaisingSampleContext:
+        """Return the cancellation-re-raising sampling context."""
+        return self.context
+
+
 class _SlowCleanupAfterCancelRunner:
     """Runner that blocks cleanup briefly to test cancellation timing."""
 
@@ -723,6 +754,56 @@ services:
         assert any(
             event.get("event") == "agent.run.timeout_cleanup_cancelled" for event in captured
         )
+
+    @pytest.mark.unit
+    async def test_usage_finalize_cancellation_keeps_the_watchdog_tag(self) -> None:
+        """A re-raised finalize cancellation still carries the timeout tag.
+
+        ``run`` finalizes usage sampling in a ``finally``, and that finalize
+        re-raises the cancellation it consumed while shielding the final sample.
+        The fresh ``CancelledError`` replaces the tagged one the post-timeout
+        cleanup raised, so the tag must be carried across the replacement or the
+        verdict handler rolls back the timed-out run's work
+        (PRRT_kwDOSJAM6s6f1F2D).
+        """
+        runner = _CancelledDuringTimeoutCleanupRunner()
+        sampler = _CancelReRaisingSampler()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            usage_sampler=sampler,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout_finalize_cancelled",
+            )
+
+        assert sampler.context.finalize_status == "cancelled"
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_usage_finalize_cancellation_untagged_when_no_timeout(self) -> None:
+        """An ordinary cancellation gains no watchdog tag from the finalize hop."""
+        runner = _CancellingStreamingRunner()
+        sampler = _CancelReRaisingSampler()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            usage_sampler=sampler,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_finalize_cancelled_no_timeout",
+            )
+
+        assert sampler.context.finalize_status == "cancelled"
+        assert getattr(exc.value, "agent_reason_code", None) is None
 
     @pytest.mark.unit
     async def test_successful_agent_run_does_not_invoke_cleanup(self) -> None:

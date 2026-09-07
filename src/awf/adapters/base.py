@@ -287,6 +287,7 @@ class AgentAdapter(ABC):
         )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
+        masked_reason_code: str | None = None
         try:
             invocation = build_tracked_compose_exec(
                 compose_project=compose_project,
@@ -330,13 +331,28 @@ class AgentAdapter(ABC):
         except AgentRunError as exc:
             final_status = self._final_status_for_exception(exc)
             raise
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancel_exc:
             final_status = "cancelled"
+            masked = getattr(cancel_exc, "agent_reason_code", None)
+            masked_reason_code = masked if isinstance(masked, str) else None
             raise
         finally:
-            await self._finalize_usage_sampling(
-                sampler_ctx, status=final_status, workspace_id=workspace_id
-            )
+            try:
+                await self._finalize_usage_sampling(
+                    sampler_ctx, status=final_status, workspace_id=workspace_id
+                )
+            except asyncio.CancelledError as finalize_cancel:
+                # ``UsageSampleContext.finalize`` shields its final sample and
+                # then re-raises the cancellation it consumed, so this ``finally``
+                # can escape with a *different* ``CancelledError`` object than the
+                # one it interrupted — dropping the watchdog tag
+                # ``_run_agent_cli`` attached to that one and sending the verdict
+                # protocol's cancellation handler down the rollback path that
+                # deletes the timed-out run's work. Carry the tag across the
+                # replacement (PRRT_kwDOSJAM6s6f1F2D).
+                if masked_reason_code is not None:
+                    mark_masked_agent_reason_code(finalize_cancel, masked_reason_code)
+                raise
 
     async def _start_usage_sampling(
         self,
