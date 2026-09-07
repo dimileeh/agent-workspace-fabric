@@ -491,8 +491,13 @@ const searchParams = useSearchParams();
         : parsed.capabilities;
 
     // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
+    // Identity clear advances the feed epoch; a concurrent loadOverview that
+    // captured the prior epoch must be restarted or the new tenant list stays
+    // blank until the next poll tick.
+    let identityChanged = false;
     if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
       clearAuthorizedConsoleFeeds();
+      identityChanged = true;
     } else if (previous !== null && nextCapabilities !== previous) {
       clearNewlyUnsupportedCapabilityFeeds(previous, nextCapabilities);
     }
@@ -506,7 +511,7 @@ const searchParams = useSearchParams();
     setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);
     setCapabilitiesReady(true);
-    if (wasAuthDenied) {
+    if (wasAuthDenied || identityChanged) {
       void loadOverview();
     }
     return nextCapabilities;

@@ -152,13 +152,24 @@ test("loadCapabilities reloads overview after clearing a latched auth denial", (
   // recovery follows a prior 401/403.
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?const wasAuthDenied = consoleAuthDeniedRef\.current;[\s\S]*?consoleAuthDeniedRef\.current = false;[\s\S]*?if \(wasAuthDenied\) \{\s*void loadOverview\(\);\s*\}/,
+    /const loadCapabilities = useCallback\([\s\S]*?const wasAuthDenied = consoleAuthDeniedRef\.current;[\s\S]*?consoleAuthDeniedRef\.current = false;[\s\S]*?if \(wasAuthDenied \|\| identityChanged\) \{\s*void loadOverview\(\);\s*\}/,
     "Expected loadCapabilities to refill overview immediately after clearing a latched auth denial",
   );
   assert.match(
     dashboard,
     /const loadCapabilities = useCallback\([\s\S]*?\}, \[[\s\S]*?loadOverview[\s\S]*?\]\);/,
     "Expected loadCapabilities to depend on loadOverview for auth-recovery refill",
+  );
+});
+
+test("loadCapabilities reloads overview after identity-change feed clear", () => {
+  const dashboard = dashboardSource.dashboard;
+  // Concurrent loadOverview can capture an epoch that identity clear advances;
+  // restart overview immediately so the new tenant list is not blank until poll.
+  assert.match(
+    dashboard,
+    /const loadCapabilities = useCallback\([\s\S]*?let identityChanged = false;[\s\S]*?if \(capabilityIdentityKey !== null && parsed\.identityKey !== capabilityIdentityKey\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\);[\s\S]*?identityChanged = true;[\s\S]*?if \(wasAuthDenied \|\| identityChanged\) \{\s*void loadOverview\(\);\s*\}/,
+    "Expected loadCapabilities to refill overview immediately after identity-change clear",
   );
 });
 
