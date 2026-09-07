@@ -360,15 +360,18 @@ export function WorkspaceLogColumn({
   // Listing poll generation. A wall-clock interval can start poll N+1 before
   // poll N returns. Discarding every non-latest 401/403 starves the column
   // when each denial is slower than pollMs: cached private tails and the
-  // EventSource stay open. Ordinary overlapping successes still apply so the
-  // first listing snapshot can land and activity can observe the next metadata
-  // change. A 401/403 is authoritative unless a strictly newer poll has
-  // already applied a success. Denial records a revoke watermark covering
-  // every poll that has already started so an older or queued 200 cannot
-  // restore cleared caches. A poll that starts after that watermark may recover.
+  // EventSource stay open. The first completed 200 still lands even if a
+  // newer poll has started; a later 200 may replace it so activity can observe
+  // the next metadata change. A 200 older than the last applied success is
+  // discarded so a slow poll cannot restore a stale inventory. A 401/403 is
+  // authoritative unless a strictly newer poll has already applied a success.
+  // Denial records a revoke watermark covering every poll that has already
+  // started so an older or queued 200 cannot restore cleared caches. A poll
+  // that starts after that watermark may recover.
   const listingGenerationRef = useRef(0);
   // Highest listing generation that applied a successful 200. An older 401/403
-  // must not clear caches that this newer success already owns.
+  // must not clear caches that this newer success already owns. An older 200
+  // must not overwrite that snapshot either.
   const appliedListingGenerationRef = useRef(0);
   // Highest listing generation covered by an applied 401/403. An older
   // overlapping 200 (started before that denial) must not restore cleared
@@ -693,8 +696,13 @@ export function WorkspaceLogColumn({
       return;
     }
     // Older overlapping listing 200: this poll started before the denial that
-    // cleared the column. Do not restore streams/entries or reopen the stream.
+    // cleared the column, or a newer 200 already applied a later snapshot.
+    // Do not restore streams/entries or overwrite the newer inventory. The
+    // first completed success still lands (applied generation starts at 0).
     if (generation <= revokedListingGenerationRef.current) {
+      return;
+    }
+    if (generation < appliedListingGenerationRef.current) {
       return;
     }
     listingDeniedRef.current = false;

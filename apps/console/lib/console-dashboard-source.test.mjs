@@ -1409,6 +1409,29 @@ test("fullscreen listing 401/403 applies while a newer poll is in flight", () =>
   );
 });
 
+test("fullscreen listing 200 discards a success older than the last applied generation", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCA3J: when two
+  // listing polls overlap and the newer 200 applies first, the older 200 must
+  // not pass the revocation-only guard and overwrite streams. The first
+  // completed success still lands because appliedListingGenerationRef starts
+  // at 0 (strictly older, not equal).
+  const logs = dashboardSource.logs;
+  const loadStart = logs.indexOf("const loadStreams = useCallback");
+  assert.ok(loadStart > 0, "Expected WorkspaceLogColumn.loadStreams");
+  const loadEnd = logs.indexOf("useEffect(() => {", loadStart);
+  const loadBody = logs.slice(loadStart, loadEnd);
+  assert.match(
+    loadBody,
+    /if \(generation < appliedListingGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected an older listing 200 to be rejected after a newer success applied",
+  );
+  assert.match(
+    loadBody,
+    /appliedListingGenerationRef\.current = Math\.max\(\s*appliedListingGenerationRef\.current,\s*generation,\s*\)/,
+    "Expected a landed listing 200 to record its generation as applied",
+  );
+});
+
 test("fullscreen loadSelectedTails retains last-successful tails on transient refresh failure", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAqk-: a network or
   // 5xx tail read must not replace the last fullscreen snapshot with the

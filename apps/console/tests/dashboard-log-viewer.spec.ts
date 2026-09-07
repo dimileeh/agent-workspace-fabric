@@ -318,6 +318,170 @@ test(`fullscreen logs clear caches and ignore overlapping listing success after 
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCA3J: when two
+// fullscreen /logs listing polls overlap and the newer 200 applies first, the
+// older 200 must not overwrite streams with its stale snapshot.
+test("fullscreen logs ignore an older overlapping listing success after a newer 200", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let listingMode: "ok" | "hold_older" | "newer" = "ok";
+  let olderStarted = 0;
+  let olderFinished = 0;
+  const olderHeld = createDeferred();
+  const workspaceId = "ws_fs_log_stale_success";
+  const baselineStream = "baseline.stdout";
+  const discoveredStream = "discovered.stdout";
+  const staleStream = "stale.stdout";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "hold_older" && olderStarted === 0) {
+        olderStarted += 1;
+        await olderHeld.promise;
+        await fulfillJson(route, listEnvelope([logStream(staleStream, 64, 1, now)]));
+        olderFinished += 1;
+        return;
+      }
+      if (listingMode === "newer" || listingMode === "hold_older") {
+        await fulfillJson(
+          route,
+          listEnvelope([
+            logStream(baselineStream, 2_400, 10, quietOpenedAt),
+            logStream(discoveredStream, 2_880, 12, activeOpenedAt),
+          ]),
+        );
+        return;
+      }
+      await fulfillJson(route, listEnvelope([logStream(baselineStream, 2_400, 10, quietOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(baselineStream)}`) {
+      await fulfillJson(route, logRead(baselineStream, "baseline-fullscreen-log-line"));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(discoveredStream)}`) {
+      await fulfillJson(route, logRead(discoveredStream, "discovered-fullscreen-log-line"));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/${encodeURIComponent(staleStream)}`) {
+      await fulfillJson(route, logRead(staleStream, "stale-listing-must-not-restore"));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  await expect(modal.getByRole("checkbox", { name: baselineStream })).toBeVisible();
+  await expect(modal.getByRole("checkbox", { name: discoveredStream })).toHaveCount(0);
+
+  listingMode = "hold_older";
+  await expect.poll(() => olderStarted, { timeout: 12_000 }).toBe(1);
+  listingMode = "newer";
+
+  await expect(modal.getByRole("checkbox", { name: discoveredStream })).toBeVisible({ timeout: 15_000 });
+  await expect(modal.getByRole("checkbox", { name: baselineStream })).toBeVisible();
+
+  olderHeld.resolve();
+  await expect.poll(() => olderFinished, { timeout: 12_000 }).toBe(1);
+  // The stale 200 has been delivered. Give React a chance to apply it so a
+  // missing generation guard fails instead of racing the assertion.
+  await page.waitForTimeout(1_000);
+  await expect(modal.getByRole("checkbox", { name: discoveredStream })).toBeVisible();
+  await expect(modal.getByRole("checkbox", { name: baselineStream })).toBeVisible();
+  await expect(modal.getByRole("checkbox", { name: staleStream })).toHaveCount(0);
+  await expect(modal.getByText("stale-listing-must-not-restore")).toHaveCount(0);
+});
+
 // Regression: start poll1; before it returns 401/403 start poll2; resolve
 // poll1; repeat. Discarding denials with generation !== listingGenerationRef
 // leaves cached private tails and EventSource open when every denial is
