@@ -245,8 +245,13 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== workspaceDetailRequestGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
-    "Expected loadWorkspace to discard after epoch/gated-detail/request generation advance or selection change",
+    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*generation !== workspaceDetailRequestGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
+    "Expected loadWorkspace to discard after epoch/request generation advance or selection change",
+  );
+  assert.match(
+    dashboardSource.detailLoader,
+    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspace\.ok[\s\S]*?\}\)\)[\s\S]*?return;/,
+    "Expected a gated-detail generation bump to apply the basic workspace GET and skip optional feeds",
   );
   assert.match(
     dashboardSource.logTails,
@@ -1157,8 +1162,8 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     gatedClearBody,
-    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?gatedDetailFeedGenerationRef\.current \+= 1;/,
-    "Expected 404 gated clear to bump summary/cloud-runtime/merge-queue/diagnostic request generations and gatedDetailFeedGenerationRef so in-flight feeds cannot restore cleared inventories",
+    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
+    "Expected 404 gated clear to bump inventory request generations always, and gatedDetailFeedGenerationRef only when leaving a negotiated snapshot",
   );
   assert.match(
     dashboard,

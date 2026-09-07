@@ -454,12 +454,15 @@ export function ConsoleDashboard() {
   // gated polls stop, but keep overview/selection/basic detail. Do not bump
   // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
   // concurrent overview loads and blank legacy-safe navigation
-  // (CONSOLE_BACKEND_CONTRACT). Bump gatedDetailFeedGenerationRef so in-flight
-  // optional detail feeds, log-tails, and gated inventories cannot restore
-  // cleared data. The basic workspace GET still applies when only that
-  // generation changed — a persistent 404 poll must not discard overlapping
-  // /workspaces/{id} loads. Retain lastCapabilityIdentityKeyRef so a later
-  // identity switch is not treated as bootstrap.
+  // (CONSOLE_BACKEND_CONTRACT). Bump gatedDetailFeedGenerationRef only when
+  // leaving a negotiated snapshot, so in-flight optional detail feeds,
+  // log-tails, and gated inventories cannot restore cleared data. A persistent
+  // 404 poll must not bump that generation again — doing so discards
+  // overlapping /workspaces/{id} loads whose latency exceeds the capability
+  // interval and leaves the inspector empty. The basic workspace GET still
+  // applies when only that generation changed. Retain
+  // lastCapabilityIdentityKeyRef so a later identity switch is not treated as
+  // bootstrap.
   const clearCapabilityGatedInventories = useCallback(() => {
     dashboardSummaryRequestGenerationRef.current += 1;
     cloudRuntimeRequestGenerationRef.current += 1;
@@ -467,7 +470,12 @@ export function ConsoleDashboard() {
     resourceSaturationRequestGenerationRef.current += 1;
     workspaceSummaryRequestGenerationRef.current += 1;
     failureSummaryRequestGenerationRef.current += 1;
-    gatedDetailFeedGenerationRef.current += 1;
+    // Already-cleared negotiation: another 404/malformed poll has no optional
+    // snapshot left to invalidate. Repeating this bump is what starves the
+    // basic workspace GET.
+    if (appliedCapabilitiesRef.current !== null) {
+      gatedDetailFeedGenerationRef.current += 1;
+    }
     setResourceSaturation(null);
     setResourceError(null);
     setWorkspaceSummary(null);
@@ -547,8 +555,9 @@ export function ConsoleDashboard() {
         setFailureSummaryError(null);
       }
       // Inspector detail feeds: same-identity withdrawal must clear caches and
-      // bump gated-detail generation so in-flight loadWorkspace cannot restore
-      // withdrawn data (mutations keep their authorized epoch).
+      // bump gated-detail generation so in-flight optional feeds cannot restore
+      // withdrawn data. The basic workspace GET still applies (mutations keep
+      // their authorized epoch).
       if (plan.clearRuntime || plan.clearEvents || plan.clearOperations || plan.clearLogs) {
         setDetail((current) => ({
           ...current,
