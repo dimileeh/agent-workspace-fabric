@@ -377,9 +377,11 @@ export function WorkspaceLogColumn({
   const columnEpochRef = useRef(0);
   const listingDeniedRef = useRef(false);
   // Tail 401/403 while listing stays reachable. Listing success must not clear
-  // this latch; only a newer successful tail read may recover /stream.
+  // this latch; only a successful read of each denied stream may recover
+  // /stream. A sibling 200, or a 5xx retry of the denied stream, must not.
   const tailAuthDeniedRef = useRef(false);
   const [tailAuthDenied, setTailAuthDenied] = useState(false);
+  const tailDeniedStreamIdsRef = useRef<Set<string>>(new Set());
   // Overlapping selected-tail reloads stay monotonic so a newer 401/403 cannot
   // lose to an older in-flight 200.
   const tailRequestGenerationRef = useRef(0);
@@ -463,6 +465,11 @@ export function WorkspaceLogColumn({
       // Tail 401/403 while listing stays authorized is still revocation for
       // this column's log output. Do not install the status-erased helper
       // entry or leave /stream open for a later live frame to refill caches.
+      for (const result of results) {
+        if (!result.ok && (result.status === 401 || result.status === 403)) {
+          tailDeniedStreamIdsRef.current.add(result.streamId);
+        }
+      }
       if (!tailAuthDeniedRef.current) {
         columnEpochRef.current += 1;
       }
@@ -501,6 +508,14 @@ export function WorkspaceLogColumn({
     // snapshot the feed-outage contract requires.
     const successes = results.filter((result): result is Extract<LogTailReadResult, { ok: true }> => result.ok);
     const failures = results.filter((result) => !result.ok);
+    for (const success of successes) {
+      tailDeniedStreamIdsRef.current.delete(success.entry.streamId);
+    }
+    // A sibling 200, or a 5xx/hanging retry of a previously denied stream, must
+    // not recover /stream. Only the denied stream's own 200 drops its latch.
+    if (tailDeniedStreamIdsRef.current.size > 0) {
+      return;
+    }
     if (successes.length === 0) {
       if (!tailAuthDeniedRef.current) {
         setTailRefreshErrors((current) => {
@@ -521,7 +536,8 @@ export function WorkspaceLogColumn({
       }
       return;
     }
-    // A later successful tail recovers /stream. Listing 200 must not do this.
+    // Every previously denied stream has now returned 200. Listing 200 must
+    // not do this; a sibling success alone must not either.
     if (tailAuthDeniedRef.current) {
       tailAuthDeniedRef.current = false;
       setTailAuthDenied(false);

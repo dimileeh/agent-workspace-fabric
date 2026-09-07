@@ -31,6 +31,16 @@ function isLogTailAuthFailure(status: number): boolean {
   return status === 401 || status === 403;
 }
 
+function workspaceHasDeniedLogTail(deniedStreamKeys: ReadonlySet<string>, workspaceId: string): boolean {
+  const prefix = `${workspaceId}:`;
+  for (const key of deniedStreamKeys) {
+    if (key.startsWith(prefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function logTailRefreshErrorKey(workspaceId: string, streamId: string): string {
   return `${workspaceId}:${streamId}`;
 }
@@ -123,9 +133,14 @@ export function useWorkspaceLogTails({
   // stay monotonic so a newer 401/403 denial cannot lose to an older in-flight
   // 200 (epoch/gated refs alone do not advance on that path).
   const logTailRequestGenerationRef = useRef<Record<string, number>>({});
+  // A 200 from a sibling stream must not clear a 401/403 latched for another
+  // selected tail. EventSource is workspace-wide, so the latch stays held until
+  // every denied stream itself succeeds (a hang or 5xx retry does not recover).
+  const logTailDeniedStreamKeysRef = useRef<Set<string>>(new Set());
   const [logTailRefreshErrors, setLogTailRefreshErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
+    logTailDeniedStreamKeysRef.current.clear();
     setLogTailRefreshErrors({});
   }, [selectedId]);
 
@@ -172,6 +187,7 @@ export function useWorkspaceLogTails({
               DROP_ALL_GATED_DETAIL_FEEDS,
             );
           }
+          logTailDeniedStreamKeysRef.current.add(logTailRefreshErrorKey(workspaceId, stream.stream_id));
           logTailAuthDeniedRef.current = true;
           setLogTailAuthDenied(true);
           setLogTailRefreshErrors((current) =>
@@ -214,12 +230,16 @@ export function useWorkspaceLogTails({
         }));
         return;
       }
-      // A 200 after tail denial recovers /stream. Functional updaters below
+      // A 200 recovers only the stream that returned it. Clearing the
+      // workspace latch on any sibling success reopens EventSource and lets
+      // frames for a still-denied tail land. Functional updaters below
       // re-check the latch so a newer 401/403 that lands first cannot lose to
       // this in-flight write and refill revoked output.
-      if (logTailAuthDeniedRef.current) {
-        logTailAuthDeniedRef.current = false;
-        setLogTailAuthDenied(false);
+      logTailDeniedStreamKeysRef.current.delete(logTailRefreshErrorKey(workspaceId, stream.stream_id));
+      const stillDenied = workspaceHasDeniedLogTail(logTailDeniedStreamKeysRef.current, workspaceId);
+      if (logTailAuthDeniedRef.current !== stillDenied) {
+        logTailAuthDeniedRef.current = stillDenied;
+        setLogTailAuthDenied(stillDenied);
       }
       setLogTailRefreshErrors((current) => omitLogTailRefreshError(current, workspaceId, stream.stream_id));
       const tailEntry = {
