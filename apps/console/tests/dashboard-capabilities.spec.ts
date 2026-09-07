@@ -518,6 +518,155 @@ test("capability 401 clears retained agent and model filter options", async ({ p
   await expect(modelGroup.getByLabel("tenant-a-only-model")).toHaveCount(0);
 });
 
+// Overview 401/403 while capabilities stay reachable must drop tenant-learned
+// filter metadata, not only the rail rows. An active prior agent/model/search
+// filter would otherwise keep a later recovered list empty.
+test("overview feed-level 403 clears retained filters while capabilities stay reachable", async ({
+  page,
+}) => {
+  let overviewDenied = false;
+  let overviewRecovered = false;
+  const deniedWorkspace = {
+    workspace_id: "ws_overview_filter_denied",
+    title: "Overview-denied workspace",
+    repo_url: "https://github.com/example/overview-denied",
+    base_branch: "main",
+    agent: "tenant-overview-only-agent",
+    agent_model: "tenant-overview-only-model",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Retained filter metadata must clear on overview auth denial",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const recoveredWorkspace = {
+    ...deniedWorkspace,
+    workspace_id: "ws_overview_filter_recovered",
+    title: "Recovered overview workspace",
+    repo_url: "https://github.com/example/overview-recovered",
+    agent: "cursor",
+    agent_model: "gpt-recovered",
+    task_prompt: "Recovered list must not stay empty from a prior filter",
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      if (overviewDenied && !overviewRecovered) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "FORBIDDEN", message: "overview permission revoked" } },
+          403,
+        );
+        return;
+      }
+      await fulfillJson(
+        route,
+        listEnvelope([overviewRecovered ? recoveredWorkspace : deniedWorkspace]),
+      );
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId("workspace-card-ws_overview_filter_denied")).toBeVisible();
+
+  const expandButton = page.getByRole("button", { name: "Filters" });
+  if ((await expandButton.getAttribute("aria-expanded")) === "false") {
+    await expandButton.click();
+  }
+  const agentGroup = page.getByRole("group", { name: "Agent" });
+  await agentGroup.getByRole("button", { name: /Agent/ }).click();
+  await expect(agentGroup.getByLabel("tenant-overview-only-agent")).toBeVisible();
+  await agentGroup.getByLabel("tenant-overview-only-agent").check();
+  const modelGroup = page.getByRole("group", { name: "Model" });
+  await modelGroup.getByRole("button", { name: /Model/ }).click();
+  await expect(modelGroup.getByLabel("tenant-overview-only-model")).toBeVisible();
+  await modelGroup.getByLabel("tenant-overview-only-model").check();
+  await page.getByPlaceholder("Search workspaces").fill("prior-tenant-search");
+  await page.getByPlaceholder("exact repo filter").fill("https://github.com/example/overview-denied");
+  await expect(expandButton).toContainText("agent tenant-overview-only-agent");
+  await expect(expandButton).toContainText("model tenant-overview-only-model");
+  await expect(expandButton).toContainText("repo filtered");
+
+  overviewDenied = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText("overview permission revoked").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId("workspace-card-ws_overview_filter_denied")).toHaveCount(0);
+  // Capabilities remain reachable: denial is feed-local, not a console auth latch.
+  await expect(page.getByText("API: ok")).toBeVisible();
+
+  await expect(expandButton).not.toContainText("tenant-overview-only-agent");
+  await expect(expandButton).not.toContainText("tenant-overview-only-model");
+  await expect(expandButton).not.toContainText("repo filtered");
+  await expect(expandButton).not.toContainText("prior-tenant-search");
+  await expect(page.getByPlaceholder("Search workspaces")).toHaveValue("");
+  await expect(page.getByPlaceholder("exact repo filter")).toHaveValue("");
+
+  if ((await expandButton.getAttribute("aria-expanded")) === "false") {
+    await expandButton.click();
+  }
+  await agentGroup.getByRole("button", { name: /Agent/ }).click();
+  await expect(agentGroup.getByLabel("tenant-overview-only-agent")).toHaveCount(0);
+  await modelGroup.getByRole("button", { name: /Model/ }).click();
+  await expect(modelGroup.getByLabel("tenant-overview-only-model")).toHaveCount(0);
+
+  overviewRecovered = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByTestId("workspace-card-ws_overview_filter_recovered")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByText("overview permission revoked")).toHaveCount(0);
+});
+
 test("in-flight dashboard-summary after capability 401 does not restore cleared KPIs", async ({ page }) => {
   let authDenied = false;
   let delaySummary = false;
