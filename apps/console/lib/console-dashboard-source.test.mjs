@@ -141,8 +141,8 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| consoleAuthDeniedRef\.current\)/,
-    "Expected loadOverview to re-check auth denial after awaits",
+    /const loadOverview = useCallback\([\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*consoleAuthDeniedRef\.current \|\|\s*generation !== overviewRequestGenerationRef\.current\s*\)/,
+    "Expected loadOverview to re-check auth denial and request generation after awaits",
   );
   assert.match(
     dashboard,
@@ -171,6 +171,27 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     dashboard,
     /const loadMergeQueue = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== mergeQueueRequestGenerationRef\.current\s*\)/,
     "Expected loadMergeQueue to discard after authorized epoch, gated-detail, or merge-queue request generation advance",
+  );
+});
+
+test("loadOverview discards responses superseded by a newer filter query", () => {
+  const dashboard = dashboardSource.dashboard;
+  // repoFilter is applied server-side only (filterAndSortOverview does not reapply it),
+  // so overlapping paginated overview loads must stamp a generation like other feeds.
+  assert.match(
+    dashboard,
+    /const overviewRequestGenerationRef = useRef\(0\);/,
+    "Expected an overview request generation ref for overlapping filter/poll loads",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?const generation = \+\+overviewRequestGenerationRef\.current;[\s\S]*?generation !== overviewRequestGenerationRef\.current[\s\S]*?setOverview\(/,
+    "Expected loadOverview to stamp and discard superseded overview responses before apply",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?collectOverviewPages\(async \(cursor\) => \{[\s\S]*?generation !== overviewRequestGenerationRef\.current/,
+    "Expected paginated overview page fetches to abort when a newer request supersedes them",
   );
 });
 

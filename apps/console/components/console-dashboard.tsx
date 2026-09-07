@@ -155,6 +155,10 @@ export function ConsoleDashboard() {
   // Last configured context fingerprint; null = uninitialized ("" is valid locally).
   const configuredContextFingerprintRef = useRef<string | null>(null);
   const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
+  // Overview poll generation: overlapping filter/poll loads stay monotonic.
+  // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
+  // superseded paginated response must not overwrite a newer filtered rail.
+  const overviewRequestGenerationRef = useRef(0);
   // Summary poll generation: older success/error must not replace newer state.
   const dashboardSummaryRequestGenerationRef = useRef(0);
   // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
@@ -207,8 +211,15 @@ export function ConsoleDashboard() {
       setOverview([]);
       return;
     }
+    // Stamp after the auth-denial early return so a denied no-op cannot invalidate
+    // an in-flight recovery load that already cleared the latch and advanced.
+    const generation = ++overviewRequestGenerationRef.current;
     const health = await apiGet<{ status: string }>(awfPath("health"));
-    if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      consoleAuthDeniedRef.current ||
+      generation !== overviewRequestGenerationRef.current
+    ) {
       return;
     }
     setApiState(health.ok ? "ok" : "error");
@@ -229,13 +240,21 @@ export function ConsoleDashboard() {
     let pageError: string | null = null;
     let pageAuthDenied = false;
     const collected = await collectOverviewPages(async (cursor) => {
-      if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current
+      ) {
         return null;
       }
       const result = await apiGet<ListEnvelope<WorkspaceOverview>>(
         overviewListPath(filters, cursor),
       );
-      if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current
+      ) {
         return null;
       }
       if (!result.ok) {
@@ -249,7 +268,11 @@ export function ConsoleDashboard() {
       }
       return result.data;
     });
-    if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      consoleAuthDeniedRef.current ||
+      generation !== overviewRequestGenerationRef.current
+    ) {
       return;
     }
     if (collected === null) {
