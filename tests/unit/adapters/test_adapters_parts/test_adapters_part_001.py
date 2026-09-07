@@ -169,6 +169,54 @@ class _SpawnFailingTimeoutCleanupRunner:
         )
 
 
+class _TeardownFailingAfterTimeoutRunner:
+    """Runner whose post-classification teardown fails in an *ordinary* way.
+
+    ``run_streaming`` classifies the watchdog verdict before it terminates and
+    reaps the child, and that teardown can raise an ``OSError`` — or make the
+    caller's log sink raise on the last flushed line. The runner tags what
+    escapes with the command-level classification
+    (``mark_masked_command_reason_code``) exactly as it tags a cancellation.
+    """
+
+    def __init__(self, *, reason_code: str | None, cleanup: str = "succeeds") -> None:
+        """Initialize cleanup recording, its outcome and the masked classification."""
+        self.cleanup_calls: list[list[str]] = []
+        self._reason_code = reason_code
+        self._cleanup = cleanup
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        **kwargs: object,
+    ) -> CommandResult:
+        """Record the teardown cleanup the adapter runs before escalating."""
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        if self._cleanup == "spawn_error":
+            raise OSError(12, "Cannot allocate memory")
+        if self._cleanup == "cancelled" and len(self.cleanup_calls) == 1:
+            raise asyncio.CancelledError
+        if self._cleanup == "fails":
+            return CommandResult(returncode=1, stdout="", stderr="tagged process still alive")
+        return CommandResult(returncode=0, stdout="awf cleanup: killed", stderr="")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        """Raise the ordinary failure the runner's teardown escapes with."""
+        stream_exc = OSError("Cannot terminate process")
+        if self._reason_code is not None:
+            mark_masked_command_reason_code(stream_exc, self._reason_code)
+        raise stream_exc
+
+
 class _CancelReRaisingSampleContext:
     """Sampler context whose ``finalize`` re-raises a *fresh* cancellation.
 
@@ -554,6 +602,162 @@ class TestCodexAdapterTimeoutClassification:
         )
         assert any(
             event.get("event") == "agent.run.timeout_cleanup_cancelled" for event in captured
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("command_reason_code", "agent_reason_code"),
+        [
+            (COMMAND_TIMEOUT_REASON, "AGENT_TIMEOUT"),
+            (COMMAND_IDLE_TIMEOUT_REASON, "AGENT_IDLE_TIMEOUT"),
+        ],
+    )
+    async def test_timed_out_stream_teardown_failure_escalates_tagged(
+        self,
+        command_reason_code: str,
+        agent_reason_code: str,
+    ) -> None:
+        """An ordinary post-classification teardown failure reaches the preserve path.
+
+        The runner tags ordinary failures out of that window as well as
+        cancellations, but only the cancellation branch republished the tag, so
+        the ``OSError`` escaped as an unclassified failure and the verdict
+        protocol's generic branch rewound the timed-out run's work
+        (PRRT_kwDOSJAM6s6f9RQl).
+        """
+        runner = _TeardownFailingAfterTimeoutRunner(reason_code=command_reason_code)
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_teardown_failed",
+            )
+
+        assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert exc.value.agent_reason_code == agent_reason_code
+        assert isinstance(exc.value.__cause__, OSError)
+        assert "Cannot terminate process" in str(exc.value)
+        # The failed teardown is the one that should have killed the child, so the
+        # tracked exec is still torn down before the escalation is raised.
+        assert len(runner.cleanup_calls) == 1
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_error"
+            and event.get("reason_code") == agent_reason_code
+            and event.get("cleanup_error") == "OSError"
+            and event.get("workspace_id") == "ws_stream_teardown_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_untagged_stream_failure_stays_an_ordinary_failure(self) -> None:
+        """A failure no watchdog classified surfaces unchanged, with no cleanup.
+
+        Without a verdict the exception *is* the run's outcome; inventing a
+        timeout classification for it would preserve work no timeout produced.
+        """
+        runner = _TeardownFailingAfterTimeoutRunner(reason_code=None)
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with pytest.raises(OSError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_failure_untagged",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) is None
+        assert runner.cleanup_calls == []
+
+    @pytest.mark.unit
+    async def test_timed_out_stream_teardown_cleanup_failure_keeps_the_tag(self) -> None:
+        """A cleanup that finds the process alive replaces the escalation, tagged.
+
+        The ``ComposeExecCleanupError`` displaces the escalation this branch would
+        otherwise raise, so it has to carry the classification itself or the
+        timed-out run's work is rewound anyway (PRRT_kwDOSJAM6s6f9RQl).
+        """
+        runner = _TeardownFailingAfterTimeoutRunner(
+            reason_code=COMMAND_TIMEOUT_REASON,
+            cleanup="fails",
+        )
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_teardown_cleanup_failed",
+            )
+
+        assert exc.value.agent_reason_code == "AGENT_TIMEOUT"
+        assert "tagged process still alive" in str(exc.value)
+        assert isinstance(exc.value.__cause__, OSError)
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_stream_teardown_cleanup_failed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_timed_out_stream_teardown_cleanup_spawn_error_escalates_tagged(self) -> None:
+        """A cleanup that cannot spawn here escalates tagged, as the timeout path does."""
+        runner = _TeardownFailingAfterTimeoutRunner(
+            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+            cleanup="spawn_error",
+        )
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with pytest.raises(ComposeExecCleanupError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_teardown_cleanup_error",
+            )
+
+        assert exc.value.agent_reason_code == "AGENT_IDLE_TIMEOUT"
+        assert isinstance(exc.value.__cause__, OSError)
+        assert "Cannot allocate memory" in str(exc.value)
+
+    @pytest.mark.unit
+    async def test_timed_out_stream_teardown_cleanup_cancellation_keeps_the_tag(self) -> None:
+        """Cancellation of that cleanup carries the tag and still finishes the sweep."""
+        runner = _TeardownFailingAfterTimeoutRunner(
+            reason_code=COMMAND_TIMEOUT_REASON,
+            cleanup="cancelled",
+        )
+        adapter = CodexAdapter(runner=runner)  # type: ignore[arg-type]
+
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(asyncio.CancelledError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_stream_teardown_cleanup_cancelled",
+            )
+
+        assert getattr(exc.value, "agent_reason_code", None) == "AGENT_TIMEOUT"
+        assert len(runner.cleanup_calls) == 2
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_cancelled"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_stream_teardown_cleanup_cancelled"
+            for event in captured
         )
 
     @pytest.mark.unit

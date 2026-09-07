@@ -15,7 +15,7 @@ import contextlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from awf.adapters.base_hosted_execution import (
     _HOSTED_CANCEL_DRAIN_TIMEOUT_SECONDS,
@@ -755,6 +755,84 @@ class AgentAdapter(ABC):
                 reason_code=masked_reason_code,
             ) from cleanup_error
 
+    async def _escalate_timed_out_stream_failure(
+        self,
+        *,
+        stream_error: Exception,
+        invocation: TrackedComposeExec,
+        workspace_id: str | None,
+        compose_project: str,
+        reason_code: str,
+    ) -> NoReturn:
+        """Re-raise a classified run's ordinary teardown failure as a tagged one.
+
+        ``run_streaming`` tags *every* exception that escapes after its watchdog
+        classified the run — ordinary failures as much as cancellations
+        (``mark_masked_command_reason_code``): terminating and reaping the timed-out
+        child can raise an ``OSError``, and the last line it flushes can make the
+        caller's log sink raise. Only the cancellation is republished by the caller,
+        so an ordinary failure would reach the verdict protocol as an unclassified
+        error and its generic branch rewinds to the rollback floor, deleting the
+        timed-out run's edits and commits (PRRT_kwDOSJAM6s6f9RQl).
+
+        The teardown that failed is the one that should have killed the child, so the
+        tracked exec is torn down here exactly as the post-result timeout path tears
+        it down — a surviving agent would keep writing into the worktree the caller
+        is about to preserve — and the failure is then escalated as the cleanup AWF
+        could not complete, which is the vocabulary that preserve path reads.
+        """
+        try:
+            await cleanup_compose_exec_invocation(
+                self._runner,
+                invocation,
+                workspace_id=workspace_id,
+            )
+        except ComposeExecCleanupError as cleanup_exc:
+            cleanup_exc.agent_reason_code = reason_code
+            _log.warning(
+                "agent.run.timeout_cleanup_failed",
+                agent=self.name_str,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                reason_code=reason_code,
+                cleanup_reason_code=cleanup_exc.reason_code,
+            )
+            raise cleanup_exc from stream_error
+        except asyncio.CancelledError as cancel_exc:
+            # The cancellation replaces the escalation below, so it carries the
+            # classification out instead, and the interrupted teardown is still
+            # finished under a shield (PRRT_kwDOSJAM6s6f0n6B).
+            mark_masked_agent_reason_code(cancel_exc, reason_code)
+            await self._sweep_cancelled_timeout_cleanup(
+                invocation=invocation,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                reason_code=reason_code,
+            )
+            _log.warning(
+                "agent.run.timeout_cleanup_cancelled",
+                agent=self.name_str,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                reason_code=reason_code,
+            )
+            raise
+        except Exception as cleanup_error:
+            raise self._escalated_timeout_cleanup_error(
+                cleanup_error=cleanup_error,
+                invocation=invocation,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                reason_code=reason_code,
+            ) from cleanup_error
+        raise self._escalated_timeout_cleanup_error(
+            cleanup_error=stream_error,
+            invocation=invocation,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            reason_code=reason_code,
+        ) from stream_error
+
     async def _run_agent_cli(
         self,
         *,
@@ -827,6 +905,26 @@ class AgentAdapter(ABC):
                     masked_reason_code=masked_reason_code,
                 )
                 raise
+            except Exception as stream_exc:
+                # Same masking hazard one exception class over: the runner tags an
+                # *ordinary* failure raised in that same post-classification window
+                # too (a reap that errors, a raising log sink). A cancellation can
+                # be republished in place because the caller has a handler for it;
+                # an untranslated ordinary failure has none, so it reaches the
+                # verdict protocol's generic branch and the timed-out run's work is
+                # rewound. Escalate it into the vocabulary the preserve path reads
+                # (PRRT_kwDOSJAM6s6f9RQl). Without a watchdog verdict the failure is
+                # the run's own outcome and surfaces unchanged.
+                stream_reason_code = masked_agent_timeout_reason_code(stream_exc)
+                if stream_reason_code is None:
+                    raise
+                await self._escalate_timed_out_stream_failure(
+                    stream_error=stream_exc,
+                    invocation=invocation,
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    reason_code=stream_reason_code,
+                )
         finally:
             if sinks is not None:
                 await sinks.close()
