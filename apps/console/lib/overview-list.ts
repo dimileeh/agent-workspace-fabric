@@ -21,7 +21,10 @@ export type OverviewListPage = ListEnvelope<WorkspaceOverview>;
 /** Result of accumulating overview pages; never pretend a capped prefix is complete. */
 export type OverviewPageCollection = {
   items: WorkspaceOverview[];
-  /** True when the page ceiling stopped pagination while has_more was still true. */
+  /**
+   * True when more rows exist but pagination cannot continue: the page ceiling
+   * stopped with has_more, or has_more was set without a continuation cursor.
+   */
   truncated: boolean;
 };
 
@@ -41,8 +44,9 @@ export function overviewListPath(
 // Accumulate overview rows across pages until exhaustion or the page ceiling.
 // ``fetchPage`` returns ``null`` to signal failure or caller abort; that
 // short-circuits to ``null`` so the dashboard can distinguish apply vs discard.
-// Hitting the ceiling with ``has_more`` still true returns ``truncated: true``
-// so callers must surface continuation rather than treat the prefix as complete.
+// Hitting the ceiling with ``has_more`` still true, or a contradictory envelope
+// (has_more without a continuation cursor), returns ``truncated: true`` so
+// callers must surface continuation rather than treat the prefix as complete.
 export async function collectOverviewPages(
   fetchPage: (cursor: string | null) => Promise<OverviewListPage | null>,
 ): Promise<OverviewPageCollection | null> {
@@ -54,8 +58,13 @@ export async function collectOverviewPages(
       return null;
     }
     collected.push(...data.items);
-    if (!data.has_more || !data.next_cursor) {
+    if (!data.has_more) {
       return { items: collected, truncated: false };
+    }
+    // has_more without a usable cursor cannot be followed. Do not install the
+    // prefix as complete — later workspaces would stay unreachable with no warning.
+    if (!data.next_cursor) {
+      return { items: collected, truncated: true };
     }
     cursor = data.next_cursor;
   }

@@ -59,6 +59,27 @@ test("collectOverviewPages returns null when a page request fails", async () => 
   assert.equal(collected, null);
 });
 
+test("collectOverviewPages marks truncated when has_more is true but next_cursor is absent", async () => {
+  const envelopes = [
+    page([{ workspace_id: "ws_partial" }], { has_more: true, next_cursor: null }),
+    page([{ workspace_id: "ws_partial" }], { has_more: true, next_cursor: "" }),
+    { items: [{ workspace_id: "ws_partial" }], has_more: true },
+  ];
+  for (const envelope of envelopes) {
+    let calls = 0;
+    const collected = await collectOverviewPages(async () => {
+      calls += 1;
+      return envelope;
+    });
+    assert.equal(calls, 1);
+    assert.equal(collected?.truncated, true);
+    assert.deepEqual(
+      collected?.items.map((item) => item.workspace_id),
+      ["ws_partial"],
+    );
+  }
+});
+
 test("collectOverviewPages marks truncated when the page ceiling stops with has_more", async () => {
   let calls = 0;
   const collected = await collectOverviewPages(async () => {
