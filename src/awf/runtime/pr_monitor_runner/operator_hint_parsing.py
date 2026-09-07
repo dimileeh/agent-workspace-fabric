@@ -74,6 +74,19 @@ _OPERATOR_DECISION_MAX_CHARS = 1500
 # to carry the sentence that introduces the ruling without pushing the ruling
 # itself out of the tail.
 _OPERATOR_DECISION_ANCHOR_LEAD_CHARS = 200
+# Characters that continue a thread key past the anchor. A plain substring search
+# would let a shorter key (``bb:acme/widgets#12:345``) anchor on a longer sibling
+# (``…:3456``) and stash the sibling's ruling (PRRT_kwDOSJAM6s6fxier), so the
+# anchor only counts where the id actually ends.
+_OPERATOR_DECISION_ANCHOR_TAIL_RE = r"(?![0-9A-Za-z_-])"
+
+
+def _operator_decision_anchor_offset(decision: str, anchor: str | None) -> int:
+    """First mention of the whole ``anchor`` id in ``decision``, or ``-1``."""
+    if not anchor:
+        return -1
+    match = re.search(re.escape(anchor) + _OPERATOR_DECISION_ANCHOR_TAIL_RE, decision)
+    return match.start() if match else -1
 
 
 def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> str:
@@ -89,15 +102,16 @@ def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> s
     name a thread only past the cap, and a plain leading-prefix truncation would
     then stash a ruling meant for a *different* thread while the prompt tells the
     agent to follow it and not re-escalate (PRRT_kwDOSJAM6s6fxBwP). So when the
-    directive overflows, the window is positioned on the anchor's first mention —
-    with a little lead-in context — instead of on the head of the text. Elided
+    directive overflows, the window is positioned on the anchor's first *whole-id*
+    mention — with a little lead-in context — instead of on the head of the text.
+    A mention that merely prefixes a longer sibling id does not count. Elided
     sides are marked with ``…`` so the agent can see the copy is partial. Without
     an anchor (or when the id does not survive redaction) the head window is kept.
     """
     decision = redact_secrets(text).strip()
     if len(decision) <= _OPERATOR_DECISION_MAX_CHARS:
         return decision
-    found = decision.find(anchor) if anchor else -1
+    found = _operator_decision_anchor_offset(decision, anchor)
     start = max(0, found - _OPERATOR_DECISION_ANCHOR_LEAD_CHARS) if found != -1 else 0
     end = min(len(decision), start + _OPERATOR_DECISION_MAX_CHARS)
     start = max(0, end - _OPERATOR_DECISION_MAX_CHARS)

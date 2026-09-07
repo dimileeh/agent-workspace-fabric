@@ -147,6 +147,31 @@ def test_bounded_directive_keeps_each_named_thread_ruling() -> None:
 
 
 @pytest.mark.unit
+def test_bounded_directive_ignores_prefix_sibling_thread_ids() -> None:
+    """Windowing anchors on the whole thread key, not a longer sibling's prefix.
+
+    ``bb:acme/widgets#12:345`` is a substring of ``bb:acme/widgets#12:3456``, so a
+    plain substring search would window the shorter thread's stored copy on the
+    sibling's mention and quote the sibling's ruling under "do not re-escalate"
+    (PRRT_kwDOSJAM6s6fxier).
+    """
+    sibling_id = "bb:acme/widgets#12:3456"
+    thread_id = "bb:acme/widgets#12:345"
+    state = _parked_state(thread_id, sibling_id)
+    sibling_ruling = f"For {sibling_id}: the reviewer is wrong; record FALSE POSITIVE. " + (
+        "x" * (_OPERATOR_DECISION_MAX_CHARS * 2)
+    )
+    ruling = f"For {thread_id}: rework the guard and record FIXED."
+    directive = f"{sibling_ruling}\n{ruling}"
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    stored = state.threads_addressed_ids[_operator_decision_key(thread_id)]
+    assert ruling in stored
+    assert "FALSE POSITIVE" not in stored
+
+
+@pytest.mark.unit
 def test_retirement_leaves_unnamed_threads_untouched() -> None:
     """Only the thread the directive names gains a decision marker."""
     state = _parked_state(THREAD_ID, OTHER_THREAD_ID)
