@@ -235,9 +235,11 @@ test("loadCapabilities reloads overview after identity-change feed clear", () =>
   const dashboard = dashboardSource.dashboard;
   // Concurrent loadOverview can capture an epoch that identity clear advances;
   // restart overview immediately so the new tenant list is not blank until poll.
+  // Compare against lastCapabilityIdentityKeyRef so a 404 gap (null React state)
+  // cannot disguise a backend/tenant switch as bootstrap.
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?let identityChanged = false;[\s\S]*?if \(capabilityIdentityKey !== null && parsed\.identityKey !== capabilityIdentityKey\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\);[\s\S]*?identityChanged = true;[\s\S]*?if \(wasAuthDenied \|\| identityChanged\) \{\s*void loadOverview\(\);\s*\}/,
+    /const loadCapabilities = useCallback\([\s\S]*?let identityChanged = false;[\s\S]*?const priorIdentityKey = lastCapabilityIdentityKeyRef\.current;[\s\S]*?if \(priorIdentityKey !== null && parsed\.identityKey !== priorIdentityKey\) \{[\s\S]*?clearAuthorizedConsoleFeeds\(\);[\s\S]*?identityChanged = true;[\s\S]*?if \(wasAuthDenied \|\| identityChanged\) \{\s*void loadOverview\(\);\s*\}/,
     "Expected loadCapabilities to refill overview immediately after identity-change clear",
   );
 });
@@ -246,11 +248,54 @@ test("loadCapabilities clears authorized feeds when identity is lost to parse fa
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?if \(capabilityIdentityKey !== null\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);/,
+    /const loadCapabilities = useCallback\([\s\S]*?const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?if \(lastCapabilityIdentityKeyRef\.current !== null\) \{\s*clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true,?\s*\}\);/,
     "Expected parse failure after a prior identity key to clear authorized feeds (hosted omit / tenant switch)",
   );
 });
 
+test("capabilities 404 retains last identity key for recovery comparison", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const lastCapabilityIdentityKeyRef = useRef<string \| null>\(null\);/,
+    "Expected a ref that retains the last successful capability identity across 404 gaps",
+  );
+  const gatedClearStart = dashboard.indexOf("const clearCapabilityGatedInventories = useCallback");
+  assert.ok(gatedClearStart > 0, "Expected clearCapabilityGatedInventories helper");
+  const gatedClearEnd = dashboard.indexOf(
+    "// Same-identity inventory can withdraw a feed without changing the epoch key.",
+    gatedClearStart,
+  );
+  const gatedClearBody = dashboard.slice(gatedClearStart, gatedClearEnd);
+  assert.match(
+    gatedClearBody,
+    /appliedCapabilitiesRef\.current = null;[\s\S]*?setCapabilities\(null\);/,
+    "Expected 404 gated clear to drop negotiation inventory/capabilities",
+  );
+  assert.equal(
+    gatedClearBody.includes("lastCapabilityIdentityKeyRef.current = null"),
+    false,
+    "Expected 404 gated clear not to wipe lastCapabilityIdentityKeyRef (needed for post-404 identity change)",
+  );
+  assert.equal(
+    gatedClearBody.includes("setCapabilityIdentityKey"),
+    false,
+    "Expected identity tracking via lastCapabilityIdentityKeyRef only (no React identity state)",
+  );
+  const authClearStart = dashboard.indexOf("const clearAuthorizedConsoleFeeds = useCallback");
+  const authClearEnd = gatedClearStart;
+  const authClearBody = dashboard.slice(authClearStart, authClearEnd);
+  assert.match(
+    authClearBody,
+    /if \(options\?\.clearCapabilities\) \{[\s\S]*?lastCapabilityIdentityKeyRef\.current = null;[\s\S]*?setCapabilities\(null\);/,
+    "Expected clearCapabilities path to drop the retained identity key",
+  );
+  assert.match(
+    dashboard,
+    /lastCapabilityIdentityKeyRef\.current = parsed\.identityKey;[\s\S]*?setCapabilities\(nextCapabilities\);/,
+    "Expected successful negotiation to update the retained identity key",
+  );
+});
 test("loadCapabilities outage retains last-successful negotiation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
@@ -292,7 +337,7 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   const gatedClearBody = dashboard.slice(gatedClearStart, gatedClearEnd);
   assert.match(
     gatedClearBody,
-    /setDashboardSummary\(null\);[\s\S]*?setCloudRuntime\(null\);[\s\S]*?setCapabilities\(null\);[\s\S]*?setCapabilityIdentityKey\(null\);/,
+    /setDashboardSummary\(null\);[\s\S]*?setCloudRuntime\(null\);[\s\S]*?setCapabilities\(null\);/,
     "Expected clearCapabilityGatedInventories to drop optional inventories and negotiation state",
   );
   assert.equal(

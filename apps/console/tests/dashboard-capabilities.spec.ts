@@ -721,6 +721,140 @@ test("in-flight cloud-runtime after tenant switch does not restore prior snapsho
   await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
 });
 
+test("identity change after capabilities 404 clears retained overview", async ({ page }) => {
+  // 404 gated clear keeps overview for legacy-safe nav but drops negotiation state.
+  // Recovery must still compare the retained identity so a different backend/tenant
+  // without URL-context change bumps the feed epoch (discarding in-flight prior rows).
+  type CapPhase = "local" | "missing" | "tenant_b";
+  let phase: CapPhase = "local";
+  let delayPriorOverview = false;
+  const localWorkspace = {
+    workspace_id: "ws_pre_404",
+    title: "Pre-404 retained workspace",
+    repo_url: "https://github.com/example/pre-404",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Must clear when identity changes after 404",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const tenantBCaps = {
+    ...(hostedCapabilities() as Record<string, unknown>),
+    identity: {
+      backend_id: "awf-cloud-tenant-b",
+      scope: "tenant",
+      tenant_id: "tenant_b",
+    },
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (phase === "missing") {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "NOT_FOUND", message: "capabilities negotiation unavailable" } },
+          404,
+        );
+        return;
+      }
+      await fulfillJson(route, phase === "tenant_b" ? tenantBCaps : localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (phase === "tenant_b") {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "tenant summary unavailable" } },
+          503,
+        );
+        return;
+      }
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/console/cloud-runtime") {
+      await fulfillJson(route, loadConsoleFixture("cloud-runtime.hosted.json"));
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      if (delayPriorOverview && phase !== "tenant_b") {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      if (phase === "tenant_b") {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      await fulfillJson(route, { items: [localWorkspace], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId("workspace-card-ws_pre_404")).toBeVisible();
+
+  phase = "missing";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByText(/capabilities negotiation unavailable/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  // Legacy-safe nav: overview retained across the 404 gap.
+  await expect(page.getByTestId("workspace-card-ws_pre_404")).toBeVisible();
+
+  // Start a slow prior-identity overview fetch during the 404 gap, then recover
+  // under a different identity so epoch advancement must discard the in-flight row.
+  delayPriorOverview = true;
+  await page.getByRole("button", { name: /refresh/i }).click();
+  phase = "tenant_b";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect(page.getByTestId("workspace-card-ws_pre_404")).toHaveCount(0, { timeout: 10_000 });
+  await page.waitForTimeout(1000);
+  await expect(page.getByTestId("workspace-card-ws_pre_404")).toHaveCount(0);
+});
+
 test("capability 401 clears workspace list inspector logs and events", async ({ page }) => {
   let authDenied = false;
   const workspaceId = "ws_auth_clear";

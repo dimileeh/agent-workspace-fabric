@@ -138,7 +138,6 @@ export function ConsoleDashboard() {
   const [capabilities, setCapabilities] = useState<ConsoleCapabilities | null>(null);
   const [capabilitiesReady, setCapabilitiesReady] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
-  const [capabilityIdentityKey, setCapabilityIdentityKey] = useState<string | null>(null);
   const [dashboardSummary, setDashboardSummary] = useState<ConsoleDashboardSummary | null>(null);
   const [dashboardSummaryError, setDashboardSummaryError] = useState<string | null>(null);
   const [cloudRuntime, setCloudRuntime] = useState<CloudRuntimeSummary | null>(null);
@@ -160,6 +159,10 @@ export function ConsoleDashboard() {
   const capabilityRequestGenerationRef = useRef(0);
   // Last applied inventory — detect available→unsupported under a stable identity.
   const appliedCapabilitiesRef = useRef<ConsoleCapabilities | null>(null);
+  // Survives capabilities 404 gated clears (React identity state is nulled so
+  // optional polls stop). Recovery compares against this so a backend/tenant
+  // switch without URL-context change is not mistaken for bootstrap.
+  const lastCapabilityIdentityKeyRef = useRef<string | null>(null);
   // Last configured context fingerprint; null = uninitialized ("" is valid locally).
   const configuredContextFingerprintRef = useRef<string | null>(null);
   const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
@@ -304,8 +307,8 @@ export function ConsoleDashboard() {
     logStreamActivityRef.current = {};
     if (options?.clearCapabilities) {
       appliedCapabilitiesRef.current = null;
+      lastCapabilityIdentityKeyRef.current = null;
       setCapabilities(null);
-      setCapabilityIdentityKey(null);
     }
   }, [setSelectedId]);
 
@@ -313,7 +316,8 @@ export function ConsoleDashboard() {
   // gated polls stop, but keep overview/selection/basic detail. Do not bump
   // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
   // concurrent overview loads and blank legacy-safe navigation
-  // (CONSOLE_BACKEND_CONTRACT).
+  // (CONSOLE_BACKEND_CONTRACT). Retain lastCapabilityIdentityKeyRef so a later
+  // identity switch is not treated as bootstrap.
   const clearCapabilityGatedInventories = useCallback(() => {
     dashboardSummaryRequestGenerationRef.current += 1;
     cloudRuntimeRequestGenerationRef.current += 1;
@@ -344,7 +348,6 @@ export function ConsoleDashboard() {
     setStreamOffsets({});
     appliedCapabilitiesRef.current = null;
     setCapabilities(null);
-    setCapabilityIdentityKey(null);
   }, []);
 
   // Same-identity inventory can withdraw a feed without changing the epoch key.
@@ -463,7 +466,8 @@ export function ConsoleDashboard() {
     if (!parsed.ok) {
       // Hosted omit / malformed identity after a prior key must bump the feed
       // epoch so delayed prior-tenant responses cannot repopulate the console.
-      if (capabilityIdentityKey !== null) {
+      // Use the retained ref: React identity state is nulled on capabilities 404.
+      if (lastCapabilityIdentityKeyRef.current !== null) {
         clearAuthorizedConsoleFeeds({ clearCapabilities: true });
       }
       setCapabilityError(parsed.message);
@@ -484,9 +488,11 @@ export function ConsoleDashboard() {
     // Skip bootstrap (null → first key) so the parallel overview fetch is not wiped.
     // Identity clear advances the feed epoch; a concurrent loadOverview that
     // captured the prior epoch must be restarted or the new tenant list stays
-    // blank until the next poll tick.
+    // blank until the next poll tick. Compare the retained ref — not React state —
+    // so a 404 gap cannot disguise a different backend/tenant as bootstrap.
     let identityChanged = false;
-    if (capabilityIdentityKey !== null && parsed.identityKey !== capabilityIdentityKey) {
+    const priorIdentityKey = lastCapabilityIdentityKeyRef.current;
+    if (priorIdentityKey !== null && parsed.identityKey !== priorIdentityKey) {
       clearAuthorizedConsoleFeeds();
       identityChanged = true;
     } else if (previous !== null && nextCapabilities !== previous) {
@@ -498,8 +504,8 @@ export function ConsoleDashboard() {
     const wasAuthDenied = consoleAuthDeniedRef.current;
     consoleAuthDeniedRef.current = false;
     appliedCapabilitiesRef.current = nextCapabilities;
+    lastCapabilityIdentityKeyRef.current = parsed.identityKey;
     setCapabilities(nextCapabilities);
-    setCapabilityIdentityKey(parsed.identityKey);
     setCapabilityError(null);
     setCapabilitiesReady(true);
     if (wasAuthDenied || identityChanged) {
@@ -507,7 +513,6 @@ export function ConsoleDashboard() {
     }
     return nextCapabilities;
   }, [
-    capabilityIdentityKey,
     clearAuthorizedConsoleFeeds,
     clearCapabilityGatedInventories,
     clearNewlyUnsupportedCapabilityFeeds,
