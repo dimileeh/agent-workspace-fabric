@@ -173,13 +173,18 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   const logs = dashboardSource.logs;
   assert.match(
     dashboard,
-    /allowStreamLogs:\s*allowFullscreenStream/,
+    /allowStreamLogs=\{allowFullscreenStreamLogs\}/,
     "Expected fullscreen to pass allowStreamLogs, not bare allowStream, so stream-only caps do not buffer hidden log frames",
   );
   assert.match(
     logs,
-    /if \(!allowStream \|\| !allowLogs\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected WorkspaceLogColumn to open /stream only when both listing and stream diagnostics are allowed",
+    /allowStreamLogs,\s*$/m,
+    "Expected MultiWorkspaceLogsFullscreen/WorkspaceLogColumn to take allowStreamLogs (not bare allowStream)",
+  );
+  assert.match(
+    logs,
+    /if \(!allowStreamLogs\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed",
   );
 });
 

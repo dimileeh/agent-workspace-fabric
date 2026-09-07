@@ -1373,7 +1373,7 @@ const searchParams = useSearchParams();
     showResourceCapacity || showCloudRuntime || showReliability;
   // Fullscreen columns only surface selectable log streams — gate live frames on
   // listing + stream together (allowStreamLogs), not bare workspace_stream.
-  const { allowLogs: allowFullscreenLogs, allowStreamLogs: allowFullscreenStream } =
+  const { allowLogs: allowFullscreenLogs, allowStreamLogs: allowFullscreenStreamLogs } =
     resolveWorkspaceLogStreamAccess(capabilities);
   // Render-time gates: never surface retained inspector caches after inventory
   // withdraws the matching diagnostic (clearNewlyUnsupportedCapabilityFeeds also
@@ -1612,7 +1612,7 @@ const searchParams = useSearchParams();
           sortDirection={logSortDirection}
           tailSignal={fullscreenTailSignal}
           allowLogs={allowFullscreenLogs}
-          allowStream={allowFullscreenStream}
+          allowStreamLogs={allowFullscreenStreamLogs}
           onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
           onToggleSortDirection={() =>
             setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))

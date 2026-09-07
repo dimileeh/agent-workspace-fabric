@@ -145,7 +145,7 @@ export function MultiWorkspaceLogsFullscreen({
   sortDirection,
   tailSignal,
   allowLogs,
-  allowStream,
+  allowStreamLogs,
   onTailAll,
   onToggleSortDirection,
   onRemoveWorkspace,
@@ -155,7 +155,8 @@ export function MultiWorkspaceLogsFullscreen({
   sortDirection: SortDirection;
   tailSignal: number;
   allowLogs: boolean;
-  allowStream: boolean;
+  /** Combined listing+stream gate; never pass bare workspace_stream. */
+  allowStreamLogs: boolean;
   onTailAll: () => void;
   onToggleSortDirection: () => void;
   onRemoveWorkspace: (workspaceId: string) => void;
@@ -282,7 +283,7 @@ export function MultiWorkspaceLogsFullscreen({
                 sortDirection={sortDirection}
                 tailSignal={tailSignal}
                 allowLogs={allowLogs}
-                allowStream={allowStream}
+                allowStreamLogs={allowStreamLogs}
                 onRemove={() => onRemoveWorkspace(workspace.workspace_id)}
               />
             ))}
@@ -298,14 +299,15 @@ export function WorkspaceLogColumn({
   sortDirection,
   tailSignal,
   allowLogs,
-  allowStream,
+  allowStreamLogs,
   onRemove,
 }: {
   workspace: LogWorkspaceTarget;
   sortDirection: SortDirection;
   tailSignal: number;
   allowLogs: boolean;
-  allowStream: boolean;
+  /** Combined listing+stream gate; never pass bare workspace_stream. */
+  allowStreamLogs: boolean;
   onRemove: () => void;
 }) {
   const [streams, setStreams] = useState<WorkspaceLogStream[]>([]);
@@ -450,7 +452,7 @@ export function WorkspaceLogColumn({
   useEffect(() => {
     // Listing is required to pick/surface streams; do not open /stream or buffer
     // frames when workspace_logs is unsupported (even if workspace_stream is up).
-    if (!allowStream || !allowLogs) {
+    if (!allowStreamLogs) {
       setStreamState("idle");
       return;
     }
@@ -533,7 +535,7 @@ export function WorkspaceLogColumn({
     };
 
     return () => source.close();
-  }, [allowLogs, allowStream, workspace.workspace_id]);
+  }, [allowStreamLogs, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">
