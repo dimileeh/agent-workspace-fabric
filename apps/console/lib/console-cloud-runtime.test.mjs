@@ -64,6 +64,14 @@ test("parseCloudRuntimeSummary rejects missing generated_at", () => {
   assert.equal(parseCloudRuntimeSummary(rest), null);
 });
 
+test("parseCloudRuntimeSummary rejects empty or unparseable generated_at", () => {
+  // Nonempty but invalid values must fail closed: relativeTime would otherwise
+  // feed NaN into Intl.RelativeTimeFormat.format and throw RangeError.
+  for (const generated_at of ["", "not-a-date", "   ", "Invalid Date"]) {
+    assert.equal(parseCloudRuntimeSummary({ ...validRuntime, generated_at }), null);
+  }
+});
+
 test("parseCloudRuntimeSummary rejects unknown schema_version when present", () => {
   assert.equal(parseCloudRuntimeSummary({ ...validRuntime, schema_version: 99 }), null);
 });

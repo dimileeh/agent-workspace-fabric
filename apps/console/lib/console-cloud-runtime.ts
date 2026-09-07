@@ -12,6 +12,11 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+/** True only when `value` parses to a finite epoch ms (rejects "", "not-a-date", etc.). */
+function isFiniteTimestampString(value: string): boolean {
+  return value.length > 0 && Number.isFinite(Date.parse(value));
+}
+
 /**
  * Fail closed on hosted cloud-runtime payloads that lack the nested objects
  * CloudRuntimePanel reads. Callers keep the last good snapshot and surface an error.
@@ -23,7 +28,7 @@ export function parseCloudRuntimeSummary(payload: unknown): CloudRuntimeSummary 
   if (payload.schema_version !== 1) {
     return null;
   }
-  if (typeof payload.generated_at !== "string" || payload.generated_at.length === 0) {
+  if (typeof payload.generated_at !== "string" || !isFiniteTimestampString(payload.generated_at)) {
     return null;
   }
   if (
