@@ -1522,8 +1522,8 @@ test("fullscreen listing 200 discards a success older than the last applied gene
   );
   assert.match(
     loadBody,
-    /const listingSuccessStillApplied = \(\) =>\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current;/,
-    "Expected queued listing writes to re-check the applied generation",
+    /const listingSuccessStillApplied = \(\) =>\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current &&\s*generation >= appliedListingFailureGenerationRef\.current;/,
+    "Expected queued listing writes to re-check the applied generation and a newer listing failure",
   );
   assert.match(
     loadBody,
@@ -1534,6 +1534,29 @@ test("fullscreen listing 200 discards a success older than the last applied gene
     loadBody,
     /setSelectedStreams\(\(current\) =>\s*listingSuccessStillApplied\(\) \? pickWorkspaceLogStreams\(listingItems, current\) : current,?\s*\);/,
     "Expected a stale listing 200 not to overwrite selectedStreams after a newer success",
+  );
+});
+
+test("fullscreen listing 200 flush does not rewind streams after a newer failure", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCwZw: the early
+  // return rejects an older /logs 200 only if the newer 5xx has already
+  // applied. A 200 that already passed that check can still flush setStreams
+  // after the failure watermark advances, keeping the error text while
+  // last-good streams rewind to the stale snapshot.
+  const logs = dashboardSource.logs;
+  const loadStart = logs.indexOf("const loadStreams = useCallback");
+  assert.ok(loadStart > 0, "Expected WorkspaceLogColumn.loadStreams");
+  const loadEnd = logs.indexOf("useEffect(() => {", loadStart);
+  const loadBody = logs.slice(loadStart, loadEnd);
+  assert.match(
+    loadBody,
+    /if \(generation < appliedListingFailureGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected an older listing 200 to be rejected after a newer failure applied",
+  );
+  assert.match(
+    loadBody,
+    /const listingSuccessStillApplied = \(\) =>\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current &&\s*generation >= appliedListingFailureGenerationRef\.current;/,
+    "Expected a queued listing 200 to drop its stream write after a newer failure",
   );
 });
 

@@ -761,7 +761,9 @@ export function WorkspaceLogColumn({
       return;
     }
     // A newer network/5xx already applied the outage warning. This older 200
-    // must not clear it or rewind last-good streams.
+    // must not clear it or rewind last-good streams. The same watermark is
+    // re-checked in listingSuccessStillApplied so a 200 that already passed
+    // this return cannot flush after the failure lands.
     if (generation < appliedListingFailureGenerationRef.current) {
       return;
     }
@@ -783,10 +785,13 @@ export function WorkspaceLogColumn({
     // Functional writes re-check the applied generation. A newer 200 can land
     // and bump the watermark before React flushes an older success that already
     // passed the early return, and a direct setStreams(items) would still
-    // replace the newer inventory with this stale snapshot.
+    // replace the newer inventory with this stale snapshot. A newer network/5xx
+    // can also apply after that early return; without the failure watermark
+    // the queued write keeps the error but rewinds last-good streams.
     const listingSuccessStillApplied = () =>
       generation === appliedListingGenerationRef.current &&
-      generation > revokedListingGenerationRef.current;
+      generation > revokedListingGenerationRef.current &&
+      generation >= appliedListingFailureGenerationRef.current;
     streamActivityRef.current = updateLogStreamActivity(
       streamActivityRef.current,
       workspace.workspace_id,
