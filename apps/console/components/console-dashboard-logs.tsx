@@ -788,15 +788,25 @@ export function WorkspaceLogColumn({
     // replace the newer inventory with this stale snapshot. A newer network/5xx
     // can also apply after that early return; without the failure watermark
     // the queued write keeps the error but rewinds last-good streams.
-    const listingSuccessStillApplied = () =>
-      generation === appliedListingGenerationRef.current &&
-      generation > revokedListingGenerationRef.current &&
-      generation >= appliedListingFailureGenerationRef.current;
-    streamActivityRef.current = updateLogStreamActivity(
+    // Activity is last-good state too: committing it before the flush lets the
+    // discarded 200 delete timestamps for streams still on screen.
+    const pendingStreamActivity = updateLogStreamActivity(
       streamActivityRef.current,
       workspace.workspace_id,
       listingItems,
     );
+    let committedListingActivity = false;
+    const listingSuccessStillApplied = () => {
+      const stillApplied =
+        generation === appliedListingGenerationRef.current &&
+        generation > revokedListingGenerationRef.current &&
+        generation >= appliedListingFailureGenerationRef.current;
+      if (stillApplied && !committedListingActivity) {
+        streamActivityRef.current = pendingStreamActivity;
+        committedListingActivity = true;
+      }
+      return stillApplied;
+    };
     setStreams((current) => (listingSuccessStillApplied() ? listingItems : current));
     setSelectedStreams((current) =>
       listingSuccessStillApplied() ? pickWorkspaceLogStreams(listingItems, current) : current,

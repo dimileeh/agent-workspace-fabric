@@ -1522,7 +1522,7 @@ test("fullscreen listing 200 discards a success older than the last applied gene
   );
   assert.match(
     loadBody,
-    /const listingSuccessStillApplied = \(\) =>\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current &&\s*generation >= appliedListingFailureGenerationRef\.current;/,
+    /const listingSuccessStillApplied = \(\) => \{\s*const stillApplied =\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current &&\s*generation >= appliedListingFailureGenerationRef\.current;\s*if \(stillApplied && !committedListingActivity\) \{\s*streamActivityRef\.current = pendingStreamActivity;\s*committedListingActivity = true;\s*\}\s*return stillApplied;\s*\};/,
     "Expected queued listing writes to re-check the applied generation and a newer listing failure",
   );
   assert.match(
@@ -1555,8 +1555,13 @@ test("fullscreen listing 200 flush does not rewind streams after a newer failure
   );
   assert.match(
     loadBody,
-    /const listingSuccessStillApplied = \(\) =>\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current &&\s*generation >= appliedListingFailureGenerationRef\.current;/,
+    /const listingSuccessStillApplied = \(\) => \{\s*const stillApplied =\s*generation === appliedListingGenerationRef\.current &&\s*generation > revokedListingGenerationRef\.current &&\s*generation >= appliedListingFailureGenerationRef\.current;\s*if \(stillApplied && !committedListingActivity\) \{\s*streamActivityRef\.current = pendingStreamActivity;\s*committedListingActivity = true;\s*\}\s*return stillApplied;\s*\};/,
     "Expected a queued listing 200 to drop its stream write after a newer failure",
+  );
+  assert.doesNotMatch(
+    loadBody,
+    /streamActivityRef\.current = updateLogStreamActivity\(/,
+    "Expected a queued listing 200 not to commit stream activity before the failure watermark is re-checked",
   );
 });
 
