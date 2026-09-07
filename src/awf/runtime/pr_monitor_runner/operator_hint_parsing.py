@@ -70,9 +70,13 @@ _OPERATOR_HINT_REVIEW_THREAD_ID_RE = re.compile(
 # Cap on the operator directive stashed under ``__operator_decision__:<thread>``
 # for replay into the thread's next comment-repair prompt (issue #939).
 _OPERATOR_DECISION_MAX_CHARS = 1500
+# Context kept ahead of the named thread id when the cap forces a window: enough
+# to carry the sentence that introduces the ruling without pushing the ruling
+# itself out of the tail.
+_OPERATOR_DECISION_ANCHOR_LEAD_CHARS = 200
 
 
-def _operator_decision_marker_text(text: str) -> str:
+def _operator_decision_marker_text(text: str, *, anchor: str | None = None) -> str:
     """Bound and redact the directive stored for a re-opened thread (issue #939).
 
     The stored copy is replayed verbatim into the next comment-repair prompt, so
@@ -80,11 +84,26 @@ def _operator_decision_marker_text(text: str) -> str:
     feedback the agent has to read (and bloat persisted monitor state). Secrets
     are stripped because this text becomes durable DB state, not just prompt
     input.
+
+    ``anchor`` is the thread id this copy is stored for. A multi-thread guide can
+    name a thread only past the cap, and a plain leading-prefix truncation would
+    then stash a ruling meant for a *different* thread while the prompt tells the
+    agent to follow it and not re-escalate (PRRT_kwDOSJAM6s6fxBwP). So when the
+    directive overflows, the window is positioned on the anchor's first mention —
+    with a little lead-in context — instead of on the head of the text. Elided
+    sides are marked with ``…`` so the agent can see the copy is partial. Without
+    an anchor (or when the id does not survive redaction) the head window is kept.
     """
     decision = redact_secrets(text).strip()
     if len(decision) <= _OPERATOR_DECISION_MAX_CHARS:
         return decision
-    return f"{decision[:_OPERATOR_DECISION_MAX_CHARS]}…"
+    found = decision.find(anchor) if anchor else -1
+    start = max(0, found - _OPERATOR_DECISION_ANCHOR_LEAD_CHARS) if found != -1 else 0
+    end = min(len(decision), start + _OPERATOR_DECISION_MAX_CHARS)
+    start = max(0, end - _OPERATOR_DECISION_MAX_CHARS)
+    head = "…" if start > 0 else ""
+    tail = "…" if end < len(decision) else ""
+    return f"{head}{decision[start:end]}{tail}"
 
 
 def _operator_hint_feedback_body_hash_key(item_id: str) -> str:

@@ -113,6 +113,31 @@ def test_stored_operator_directive_is_bounded() -> None:
 
 
 @pytest.mark.unit
+def test_bounded_directive_keeps_each_named_thread_ruling() -> None:
+    """A capped multi-thread guide stores the slice naming the thread it retires.
+
+    A guide longer than the cap can name a second thread only past the boundary.
+    Storing the leading prefix would tell that thread's agent to follow a ruling
+    the operator gave for a different thread while forbidding re-escalation, so
+    the stored copy is windowed on the thread id (PRRT_kwDOSJAM6s6fxBwP).
+    """
+    state = _parked_state(THREAD_ID, OTHER_THREAD_ID)
+    first_ruling = f"For {THREAD_ID}: rework the guard. " + ("x" * _OPERATOR_DECISION_MAX_CHARS)
+    second_ruling = f"For {OTHER_THREAD_ID}: the reviewer is wrong; record FALSE POSITIVE."
+    directive = f"{first_ruling}\n{second_ruling}"
+
+    _mark_referenced_needs_human_feedback_answered(state, hint=_guide(directive))
+
+    first_stored = state.threads_addressed_ids[DECISION_KEY]
+    second_stored = state.threads_addressed_ids[_operator_decision_key(OTHER_THREAD_ID)]
+    assert first_stored.startswith(f"For {THREAD_ID}: rework the guard.")
+    assert second_ruling in second_stored
+    assert second_stored.startswith("…")
+    for stored in (first_stored, second_stored):
+        assert len(stored) <= _OPERATOR_DECISION_MAX_CHARS + 2
+
+
+@pytest.mark.unit
 def test_retirement_leaves_unnamed_threads_untouched() -> None:
     """Only the thread the directive names gains a decision marker."""
     state = _parked_state(THREAD_ID, OTHER_THREAD_ID)

@@ -80,8 +80,10 @@ def _mark_referenced_needs_human_feedback_answered(
       agent ever re-reading the thread. The directive is also stashed under
       ``__operator_decision__:<thread id>`` so the re-addressed thread's repair
       prompt quotes the ruling instead of replaying only the reviewer text the
-      agent already escalated on (issue #939); ``_mark_review_thread_addressed``
-      drops it once a verdict other than ``agent_failed`` answers it. The stash
+      agent already escalated on (issue #939); the stash is windowed on the
+      thread id so an over-cap multi-thread guide keeps each thread's own ruling
+      (PRRT_kwDOSJAM6s6fxBwP), and ``_mark_review_thread_addressed`` drops it
+      once a verdict other than ``agent_failed`` answers it. The stash
       also survives PR re-adoption: ``__operator_decision__:`` is on the copied
       marker allowlist in :mod:`awf.service.pr_monitor_adoption_seed`, so a
       successor workspace that adopts the PR before the re-queued thread is
@@ -135,5 +137,6 @@ def _mark_referenced_needs_human_feedback_answered(
         state.threads_addressed_ids.pop(thread_id, None)
         state.threads_addressed_ids.pop(f"__needs_human_reason__:{thread_id}", None)
         state.mark_addressed(
-            _operator_decision_key(thread_id), _operator_decision_marker_text(text)
+            _operator_decision_key(thread_id),
+            _operator_decision_marker_text(text, anchor=thread_id),
         )
