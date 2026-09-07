@@ -281,15 +281,14 @@ class AsyncioSubprocessRunner:
             extension is warned about by the caller. ``CancelledError`` is a
             ``BaseException`` and is deliberately not absorbed.
 
-            The call is bounded by ``budget_seconds`` — the wall budget the run
-            has left. A worktree scan runs in a thread and so cannot be
+            The call is bounded by ``budget_seconds`` — the tightest cap the run
+            still has. A worktree scan runs in a thread and so cannot be
             interrupted from here, so an unbounded wait on a stalled ``scandir``
-            would park the watchdog and the wall check would never be re-read,
-            contradicting that hard cap. Abandoning the wait (the thread finishes
-            on its own) and reporting "unknown" hands control straight back to the
-            wall check. ``_probe_answer`` keeps a *synchronous* probe off the
-            loop for the same reason: inline blocking work is unreachable by any
-            budget.
+            would park the watchdog and no deadline would ever be re-read.
+            Abandoning the wait (the thread finishes on its own) and reporting
+            "unknown" hands control straight back to the watchdog loop.
+            ``_probe_answer`` keeps a *synchronous* probe off the loop for the
+            same reason: inline blocking work is unreachable by any budget.
             """
             assert activity_probe is not None
             try:
@@ -336,11 +335,17 @@ class AsyncioSubprocessRunner:
                     observed: bool | None = False
                     if activity_probe is not None:
                         # The probe may not outlive the cap it runs under: it gets
-                        # the remaining wall budget and no more. Without a wall
-                        # timeout the caller asked for no hard cap at all, so the
-                        # probe is unbounded too.
+                        # the remaining wall budget and no more. With no wall
+                        # timeout the idle window is the only cap, and it bounds
+                        # the probe just the same — an unbounded await parks the
+                        # watchdog so the idle deadline is never re-read, and
+                        # because the watchdog is part of ``gather`` it also holds
+                        # the whole run open after the child has exited.
+                        # ``idle_deadline - output_at`` is one full idle window.
                         observed = await _observed_activity(
-                            None if wall_deadline is None else max(wall_deadline - loop.time(), 0.0)
+                            max(wall_deadline - loop.time(), 0.0)
+                            if wall_deadline is not None
+                            else idle_deadline - output_at
                         )
                     if wait_task.done():
                         # The child can also *finish* while the probe is in

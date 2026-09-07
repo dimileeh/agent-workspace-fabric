@@ -281,6 +281,50 @@ async def test_probe_that_never_answers_still_hits_the_wall_deadline() -> None:
 
 
 @pytest.mark.unit
+async def test_probe_is_bounded_when_only_an_idle_timeout_is_configured() -> None:
+    """No wall cap is not "no cap": the idle window still bounds the probe.
+
+    With ``wall_timeout_seconds`` unset there is no remaining-wall budget to hand
+    the probe, but an unbounded await parks the watchdog against the *idle*
+    deadline exactly as it would against the wall one — and because the watchdog
+    is part of ``gather``, it also holds ``run_streaming`` open after the child
+    has already exited. The probe therefore gets one idle window, and exhausting
+    it fails open (``None``) so the run continues on the child's own terms.
+    """
+    runner = AsyncioSubprocessRunner()
+    probed = asyncio.Event()
+
+    async def _probe() -> bool:
+        probed.set()
+        await asyncio.Event().wait()  # Never resolves: a stalled filesystem walk.
+        raise AssertionError("unreachable")  # pragma: no cover - defensive.
+
+    with structlog.testing.capture_logs() as captured:
+        result = await asyncio.wait_for(
+            runner.run_streaming(
+                [sys.executable, "-c", _QUICK_SILENT_CHILD],
+                wall_timeout_seconds=None,
+                idle_timeout_seconds=0.15,
+                activity_probe=_probe,
+            ),
+            # Guard: an unbounded probe would hang here, child exit or not.
+            timeout=10.0,
+        )
+
+    assert probed.is_set()
+    assert result.returncode == 0
+    assert result.reason_code is None
+    over_budget = [
+        entry
+        for entry in captured
+        if entry.get("event") == "command.idle_watchdog.activity_probe_failed"
+    ]
+    assert over_budget
+    assert over_budget[0]["exc_type"] == "TimeoutError"
+    assert over_budget[0]["probe_budget_seconds"] == pytest.approx(0.15, abs=0.05)
+
+
+@pytest.mark.unit
 async def test_blocking_sync_probe_still_hits_the_wall_deadline() -> None:
     """A probe that blocks *inline* must not hold the watchdog past the cap.
 
