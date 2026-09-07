@@ -269,6 +269,10 @@ export function useWorkspaceLogTails({
       try {
         const offset = Math.max(stream.byte_count - 65_536, 0);
         const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
+        // Capture the fingerprint the automatic effect recorded before the
+        // read returns. A later mutation of this stream object must not
+        // prevent a failed attempt from being retried.
+        const scheduledAutomaticPart = automaticLogTailPart(stream);
         const result = await apiGet<WorkspaceLogRead>(
           awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
             offset,
@@ -292,6 +296,20 @@ export function useWorkspaceLogTails({
         // generation, selection, and listing denial remain hard discards.
         const gatedGenerationAdvanced =
           gatedGeneration !== gatedDetailFeedGenerationRef.current;
+        // A sibling 401 advances gated generation and discards this non-auth
+        // result. Forget the recorded part anyway so the next metadata poll
+        // retries a transient 5xx even when byte/line/open/close are unchanged.
+        if (
+          gatedGenerationAdvanced &&
+          !result.ok &&
+          !isLogTailAuthFailure(result.status)
+        ) {
+          forgetRecordedAutomaticTailPart(
+            previousAutomaticTailPartsRef.current,
+            stream.stream_id,
+            scheduledAutomaticPart,
+          );
+        }
         if (gatedGenerationAdvanced && (result.ok || !isLogTailAuthFailure(result.status))) {
           settleInFlight();
           return;
@@ -361,7 +379,7 @@ export function useWorkspaceLogTails({
           forgetRecordedAutomaticTailPart(
             previousAutomaticTailPartsRef.current,
             stream.stream_id,
-            automaticLogTailPart(stream),
+            scheduledAutomaticPart,
           );
           setLogTailRefreshErrors((current) => ({
             ...current,

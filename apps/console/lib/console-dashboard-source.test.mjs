@@ -770,7 +770,11 @@ test("failed automatic inspector tails retry when stream metadata is unchanged",
   // tail effect records previousAutomaticTailPartsRef as soon as it sees
   // metadata, then skips later polls with the same byte/line/open/close.
   // A transient 5xx or network failure must drop that recorded part so the
-  // next poll retries. Auth denials stay latched and must not be forgotten.
+  // next poll retries, including when a sibling denial already advanced
+  // gated-detail generation and discarded this non-auth result. The part is
+  // captured before the read so a later stream mutation cannot miss the
+  // fingerprint the effect recorded. Auth denials stay latched and must not
+  // be forgotten.
   const tails = dashboardSource.logTails;
   assert.match(
     tails,
@@ -785,13 +789,29 @@ test("failed automatic inspector tails retry when stream metadata is unchanged",
   const authIdx = body.indexOf("if (isLogTailAuthFailure(result.status))");
   const transientIdx = body.indexOf("Transient network/5xx", authIdx);
   const successIdx = body.indexOf("const tailEntry", transientIdx);
+  const gatedIdx = body.indexOf("const gatedGenerationAdvanced =");
   assert.ok(authIdx > 0 && transientIdx > authIdx && successIdx > transientIdx, "Expected auth and transient tail paths");
+  assert.ok(gatedIdx > 0 && gatedIdx < authIdx, "Expected gated-generation discard before auth handling");
 
+  const forgetCall =
+    /forgetRecordedAutomaticTailPart\(\s*previousAutomaticTailPartsRef\.current,\s*stream\.stream_id,\s*scheduledAutomaticPart,\s*\);/;
+  assert.match(
+    body,
+    /const scheduledAutomaticPart = automaticLogTailPart\(stream\);[\s\S]*?await apiGet/,
+    "Expected the automatic tail fingerprint to be captured before the read returns",
+  );
+
+  const gatedBody = body.slice(gatedIdx, authIdx);
   const authBody = body.slice(authIdx, transientIdx);
   const transientBody = body.slice(transientIdx, successIdx);
   assert.match(
+    gatedBody,
+    /if \(\s*gatedGenerationAdvanced &&\s*!result\.ok &&\s*!isLogTailAuthFailure\(result\.status\)\s*\) \{\s*forgetRecordedAutomaticTailPart\(\s*previousAutomaticTailPartsRef\.current,\s*stream\.stream_id,\s*scheduledAutomaticPart,\s*\);\s*\}/,
+    "Expected a 5xx discarded after a gated-generation bump to forget the recorded automatic tail part",
+  );
+  assert.match(
     transientBody,
-    /forgetRecordedAutomaticTailPart\(\s*previousAutomaticTailPartsRef\.current,\s*stream\.stream_id,\s*automaticLogTailPart\(stream\),\s*\);/,
+    forgetCall,
     "Expected a transient 5xx or network failure to forget the recorded automatic tail part",
   );
   assert.doesNotMatch(
