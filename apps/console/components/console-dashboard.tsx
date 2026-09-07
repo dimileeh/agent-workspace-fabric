@@ -172,6 +172,9 @@ export function ConsoleDashboard() {
   const dashboardSummaryRequestGenerationRef = useRef(0);
   // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
   const cloudRuntimeRequestGenerationRef = useRef(0);
+  // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
+  // malformed clears without touching authorizedFeedEpochRef (overview stays valid).
+  const gatedDetailFeedGenerationRef = useRef(0);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -331,11 +334,14 @@ export function ConsoleDashboard() {
   // gated polls stop, but keep overview/selection/basic detail. Do not bump
   // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
   // concurrent overview loads and blank legacy-safe navigation
-  // (CONSOLE_BACKEND_CONTRACT). Retain lastCapabilityIdentityKeyRef so a later
-  // identity switch is not treated as bootstrap.
+  // (CONSOLE_BACKEND_CONTRACT). Bump gatedDetailFeedGenerationRef so in-flight
+  // loadWorkspace / log-tail / gated inventory responses cannot restore cleared
+  // feeds. Retain lastCapabilityIdentityKeyRef so a later identity switch is not
+  // treated as bootstrap.
   const clearCapabilityGatedInventories = useCallback(() => {
     dashboardSummaryRequestGenerationRef.current += 1;
     cloudRuntimeRequestGenerationRef.current += 1;
+    gatedDetailFeedGenerationRef.current += 1;
     setResourceSaturation(null);
     setResourceError(null);
     setWorkspaceSummary(null);
@@ -545,8 +551,12 @@ export function ConsoleDashboard() {
 
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
+    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      gatedGeneration !== gatedDetailFeedGenerationRef.current
+    ) {
       return;
     }
     if (!result.ok) {
@@ -615,8 +625,12 @@ export function ConsoleDashboard() {
 
   const loadWorkspaceSummary = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
+    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      gatedGeneration !== gatedDetailFeedGenerationRef.current
+    ) {
       return;
     }
     if (!result.ok) {
@@ -629,10 +643,14 @@ export function ConsoleDashboard() {
 
   const loadMergeQueue = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
+    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const result = await apiGet<ListEnvelope<MergeQueueItem>>(
       awfPath("merge-queue", { limit: mergeQueueLimit }),
     );
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      gatedGeneration !== gatedDetailFeedGenerationRef.current
+    ) {
       return;
     }
     if (!result.ok) {
@@ -648,8 +666,12 @@ export function ConsoleDashboard() {
 
   const loadFailureSummary = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
+    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      gatedGeneration !== gatedDetailFeedGenerationRef.current
+    ) {
       return;
     }
     if (!result.ok) {
@@ -706,6 +728,7 @@ export function ConsoleDashboard() {
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const epoch = authorizedFeedEpochRef.current;
+    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const caps = capabilities;
     // Omitted workspace_* diagnostics stay disabled — do not treat absence as
     // legacy Core support (fail closed for optional detail feeds).
@@ -741,7 +764,11 @@ export function ConsoleDashboard() {
         : Promise.resolve(null),
     ]);
 
-    if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+      selectedIdRef.current !== workspaceId
+    ) {
       return;
     }
 
@@ -945,6 +972,7 @@ export function ConsoleDashboard() {
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
       const epoch = authorizedFeedEpochRef.current;
+      const gatedGeneration = gatedDetailFeedGenerationRef.current;
       const offset = Math.max(stream.byte_count - 65_536, 0);
       const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
       const result = await apiGet<WorkspaceLogRead>(
@@ -953,7 +981,11 @@ export function ConsoleDashboard() {
           limit_bytes: 65536,
         }),
       );
-      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        gatedGeneration !== gatedDetailFeedGenerationRef.current ||
+        selectedIdRef.current !== workspaceId
+      ) {
         return;
       }
       if (!result.ok) {

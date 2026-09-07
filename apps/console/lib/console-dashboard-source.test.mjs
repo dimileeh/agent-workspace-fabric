@@ -137,14 +137,28 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboard,
-    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| selectedIdRef\.current !== workspaceId\)/,
-    "Expected loadWorkspace to discard after epoch advance or selection change",
+    /const loadWorkspace = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
+    "Expected loadWorkspace to discard after epoch/gated-detail generation advance or selection change",
   );
   assert.match(
     dashboard,
-    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?if \(epoch !== authorizedFeedEpochRef\.current \|\| selectedIdRef\.current !== workspaceId\)/,
-    "Expected loadLogTail to discard after epoch advance or selection change",
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
+    "Expected loadLogTail to discard after epoch/gated-detail generation advance or selection change",
   );
+  for (const loader of [
+    "loadResourceSaturation",
+    "loadWorkspaceSummary",
+    "loadMergeQueue",
+    "loadFailureSummary",
+  ]) {
+    assert.match(
+      dashboard,
+      new RegExp(
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current\\s*\\)`,
+      ),
+      `Expected ${loader} to discard after authorized epoch or gated-detail generation advance`,
+    );
+  }
 });
 
 test("loadOverview reads filters via ref so capability polling stays filter-independent", () => {
@@ -374,6 +388,16 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
     gatedClearBody.includes("authorizedFeedEpochRef.current +="),
     false,
     "Expected 404 gated clear not to bump authorizedFeedEpochRef (would invalidate overview loads)",
+  );
+  assert.match(
+    gatedClearBody,
+    /gatedDetailFeedGenerationRef\.current \+= 1;/,
+    "Expected 404 gated clear to bump gatedDetailFeedGenerationRef so in-flight detail/log requests cannot restore cleared feeds",
+  );
+  assert.match(
+    dashboard,
+    /const gatedDetailFeedGenerationRef = useRef\(0\);/,
+    "Expected a gated-detail generation ref separate from authorizedFeedEpochRef",
   );
   assert.equal(
     gatedClearBody.includes("setOverview([])"),
