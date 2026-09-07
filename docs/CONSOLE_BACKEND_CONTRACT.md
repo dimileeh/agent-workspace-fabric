@@ -133,6 +133,7 @@ See:
 - [`console/fixtures/v1/dashboard-summary.hosted.json`](./console/fixtures/v1/dashboard-summary.hosted.json)
 - [`console/fixtures/v1/cloud-runtime.hosted.json`](./console/fixtures/v1/cloud-runtime.hosted.json)
 - [`console/fixtures/v1/dashboard-summary.partial.json`](./console/fixtures/v1/dashboard-summary.partial.json)
+- [`console/fixtures/v1/dashboard-summary.no-prior-success.json`](./console/fixtures/v1/dashboard-summary.no-prior-success.json)
 - [`console/fixtures/v1/workspace-presentation.sample.json`](./console/fixtures/v1/workspace-presentation.sample.json)
 
 ### Hosted Cloud Runtime widget

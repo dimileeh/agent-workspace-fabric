@@ -582,6 +582,9 @@ def test_dashboard_summary_allows_null_last_success_at_without_prior_success(
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.last_success_at is None
     assert model.coverage.status == coverage_status
+    dumped = model.model_dump(mode="json")
+    assert "last_success_at" in dumped
+    assert dumped["last_success_at"] is None
 
 
 @pytest.mark.unit

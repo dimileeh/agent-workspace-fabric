@@ -46,12 +46,19 @@ def test_capabilities_fixtures_validate(name: str) -> None:
         "dashboard-summary.local.json",
         "dashboard-summary.hosted.json",
         "dashboard-summary.partial.json",
+        "dashboard-summary.no-prior-success.json",
     ],
 )
 def test_dashboard_summary_fixtures_validate(name: str) -> None:
     payload = _load(name)
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.schema_version == 1
+    if name.endswith("no-prior-success.json"):
+        assert model.coverage.status == "partial"
+        assert model.last_success_at is None
+        dumped = model.model_dump(mode="json")
+        assert "last_success_at" in dumped
+        assert dumped["last_success_at"] is None
     if name.endswith("partial.json"):
         assert model.coverage.status == "partial"
         assert model.counts.queued is None

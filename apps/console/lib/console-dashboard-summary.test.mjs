@@ -43,6 +43,23 @@ test("parseDashboardSummary accepts the hosted fixture", () => {
   );
 });
 
+test("parseDashboardSummary accepts a first partial snapshot with null last_success_at", () => {
+  const firstPartial = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../docs/console/fixtures/v1/dashboard-summary.no-prior-success.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const parsed = parseDashboardSummary(firstPartial, "hosted");
+  assert.ok(parsed);
+  assert.equal(parsed.scope, "tenant");
+  assert.equal(parsed.last_success_at, null);
+  assert.equal(parsed.coverage.status, "partial");
+});
+
 test("parseDashboardSummary rejects pre-fix hosted active underflow", () => {
   // Bugbot: active=12 with executing+monitoring_pr+queued+retrying=15 must fail closed.
   const hosted = JSON.parse(
