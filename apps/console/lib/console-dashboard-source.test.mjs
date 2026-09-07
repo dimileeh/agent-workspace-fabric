@@ -14,6 +14,10 @@ const dashboardSource = {
     new URL("../hooks/use-serialized-periodic-load.ts", import.meta.url),
     "utf8",
   ),
+  gatedPoll: readFileSync(
+    new URL("../hooks/use-capability-gated-poll.ts", import.meta.url),
+    "utf8",
+  ),
   mutatingControls: readFileSync(
     new URL("../hooks/use-workspace-mutating-controls.ts", import.meta.url),
     "utf8",
@@ -599,6 +603,43 @@ test("loadCloudRuntime discards stale success and error via request generation",
     /const loadCloudRuntime = useCallback\([\s\S]*?const generation = \+\+cloudRuntimeRequestGenerationRef\.current;[\s\S]*?generation !== cloudRuntimeRequestGenerationRef\.current[\s\S]*?setCloudRuntimeError/,
     "Expected loadCloudRuntime to bump generation before fetch and discard mismatched responses before success or error setters",
   );
+});
+
+test("capability-gated feed polls chain after the previous invocation settles", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f-1t6: a wall-clock
+  // interval that calls a gated loader every pollMs advances that feed's
+  // request generation, so every slower-than-interval success is discarded
+  // and dashboard-summary, capacity, cloud-runtime, reliability, merge-queue,
+  // or failures stays empty or permanently stale. The next invocation is
+  // scheduled only after the preceding promise settles. Explicit
+  // reloadAvailableFeeds still calls the loaders directly so a newer request
+  // can supersede.
+  const dashboard = dashboardSource.dashboard;
+  const gated = dashboardSource.gatedPoll;
+  assert.doesNotMatch(
+    gated,
+    /setInterval\(/,
+    "Expected no wall-clock gated-feed interval that can supersede an in-flight request",
+  );
+  assert.match(
+    gated,
+    /const scheduleNext = \(\) => \{[\s\S]*?window\.setTimeout\(\(\) => \{[\s\S]*?start\(\);[\s\S]*?\}, pollMs\);[\s\S]*?\};[\s\S]*?const start = \(\) => \{[\s\S]*?void Promise\.resolve\(load\(\)\)\.finally\(\(\) => \{[\s\S]*?scheduleNext\(\);[\s\S]*?\}\);[\s\S]*?\};[\s\S]*?start\(\);/,
+    "Expected gated feed polls to invoke immediately and chain the next tick only after settle",
+  );
+  for (const loader of [
+    "pollDashboardSummary",
+    "loadResourceSaturation",
+    "pollCloudRuntime",
+    "loadWorkspaceSummary",
+    "loadMergeQueue",
+    "loadFailureSummary",
+  ]) {
+    assert.match(
+      dashboard,
+      new RegExp(`useCapabilityGatedPoll\\([\\s\\S]*?${loader},?\\s*\\)`),
+      `Expected ${loader} to stay on the serialized gated poll`,
+    );
+  }
 });
 
 test("periodic capability polls skip while a request is still in flight", () => {
