@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,27 @@ def test_capabilities_response_accepts_iso_generated_at_string() -> None:
     assert isinstance(payload["generated_at"], str)
     model = ConsoleCapabilitiesResponse.model_validate(payload)
     assert model.generated_at.year == 2026
+    assert model.generated_at.tzinfo is not None
+    assert model.generated_at.utcoffset() is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "naive_value",
+    [
+        "2026-09-07T12:00:00",
+        "2026-09-07T12:00:00.123456",
+        datetime(2026, 9, 7, 12, 0, 0),
+    ],
+)
+def test_capabilities_response_rejects_timezone_less_generated_at(
+    naive_value: object,
+) -> None:
+    """Match the shipped TS parser: generated_at must include a timezone offset."""
+    payload = _local_capabilities_payload()
+    payload["generated_at"] = naive_value
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(payload)
 
 
 @pytest.mark.unit

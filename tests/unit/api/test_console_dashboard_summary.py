@@ -210,6 +210,32 @@ def test_dashboard_summary_accepts_iso_timestamp_strings() -> None:
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.generated_at.year == 2026
     assert model.window.start.year == 2026
+    assert model.generated_at.tzinfo is not None
+    assert model.generated_at.utcoffset() is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field_path", "naive_value"),
+    [
+        (("generated_at",), "2026-09-07T12:00:00"),
+        (("as_of",), "2026-09-07T12:00:00.123"),
+        (("last_success_at",), datetime(2026, 9, 7, 12, 0, 0)),
+        (("window", "start"), datetime(2026, 9, 6, 12, 0, 0)),
+    ],
+)
+def test_dashboard_summary_rejects_timezone_less_timestamps(
+    field_path: tuple[str, ...],
+    naive_value: object,
+) -> None:
+    """Match the shipped TS parser: OpenAPI date-time requires a timezone offset."""
+    payload = copy.deepcopy(_dashboard_summary_payload())
+    target: Any = payload
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = naive_value
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
 
 
 @pytest.mark.unit

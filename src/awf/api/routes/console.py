@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -61,7 +62,23 @@ def _require_iso_timestamp_string(value: Any) -> Any:
     raise ValueError("timestamp must be an ISO-8601 string")
 
 
-ConsoleTimestamp = Annotated[datetime, BeforeValidator(_require_iso_timestamp_string)]
+def _require_timezone_aware_datetime(value: datetime) -> datetime:
+    """Reject timezone-less values so Python matches the shipped RFC 3339 TS parser.
+
+    OpenAPI ``format: date-time`` and the console parsers require ``Z`` or an
+    explicit ±HH:mm offset. Pydantic otherwise accepts naive datetimes and
+    timezone-less ISO strings (e.g. ``2026-09-07T12:00:00``).
+    """
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone offset")
+    return value
+
+
+ConsoleTimestamp = Annotated[
+    datetime,
+    BeforeValidator(_require_iso_timestamp_string),
+    AfterValidator(_require_timezone_aware_datetime),
+]
 
 
 def _available_item_requires_route_schema(inventory_ids: list[str]) -> dict[str, Any]:
