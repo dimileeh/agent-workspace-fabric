@@ -58,16 +58,22 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle_deferred_capture import (
-    _capture_deferred_review_thread as _capture_deferred_review_thread,
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
+    _capture_deferred_review_thread,
+    _requeue_workflow_scope_publish_dependent_items,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle_deferred_capture import (
+
+# Re-exported so ``fix_cycle`` stays the import site these helpers already have
+# across ``outdated_resolution``, the resolution invariant, and the fix-cycle
+# tests. ``_capture_deferred_review_thread`` above is likewise looked up through
+# this module's namespace, which is where those tests monkeypatch it.
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
     _deferred_issue_already_filed as _deferred_issue_already_filed,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle_deferred_capture import (
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
     _deferred_issue_filed_marker as _deferred_issue_filed_marker,
 )
-from awf.runtime.pr_monitor_runner.fix_cycle_deferred_capture import (
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
     _deferred_thread_conversation as _deferred_thread_conversation,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
@@ -101,6 +107,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
@@ -212,6 +220,34 @@ async def _run_fix_cycle(
             result,
             worktree_path=worktree_path,
             operation_start_head=operation_start_head,
+        )
+
+    async def _moot_result_on_provider_recovery() -> _GitPushResult | None:
+        """Re-read PR state when provider recovery aborts a comment repair (#910).
+
+        ``_handle_provider_agent_run_error`` RAISES ``ProviderRecoveryFallbackError``
+        / ``ProviderRecoveryAuthError`` out of the per-item verdict helper, so the
+        repair never reaches the post-loop terminal guard below and ``runner.run()``
+        terminally fails the workspace with ``PROVIDER_FALLBACK`` /
+        ``PROVIDER_AUTH_FAILED`` — even when the PR merged mid-repair. The recheck
+        cannot sit ahead of the handler here (it runs deep inside the verdict
+        helper, which holds no PR context), so it runs on the escaping exception
+        instead; the provider circuit-breaker recording that already happened is
+        real outage telemetry and is kept, exactly as the suppressing handlers in
+        the CI-repair path keep it. Mirrors the CI-repair and sync-base provider
+        paths (PRRT_kwDOSJAM6s6fvT6u). Fails OPEN: ``None`` re-raises as before.
+        """
+        return cast(
+            "_GitPushResult | None",
+            await self._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="comment_repair_provider_recovery",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            ),
         )
 
     owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
@@ -362,6 +398,11 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except (ProviderRecoveryFallbackError, ProviderRecoveryAuthError):
+                provider_moot_result = await _moot_result_on_provider_recovery()
+                if provider_moot_result is not None:
+                    return provider_moot_result
+                raise
             except AgentVerdictProtocolError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -570,6 +611,11 @@ async def _run_fix_cycle(
                     operation_type=operation_type,
                     monitor_log=monitor_log,
                 )
+            except (ProviderRecoveryFallbackError, ProviderRecoveryAuthError):
+                provider_moot_result = await _moot_result_on_provider_recovery()
+                if provider_moot_result is not None:
+                    return provider_moot_result
+                raise
             except AgentVerdictProtocolError as exc:
                 for item_id in publish_dependent_ids:
                     _clear_addressed_state_by_id(state, item_id)
@@ -768,7 +814,24 @@ async def _run_fix_cycle(
     # Each pass now settles before its (cancellable) settle window, so this call is
     # the one-shot backstop for any exit that reaches the push — free once settled,
     # and still correct because nothing commits between the last verdict and here.
+    # It runs BEFORE the moot early return below so that exit keeps the record too
+    # (PRRT_kwDOSJAM6s6fvu7g).
     await _settle_previous_item_provenance()
+    # ...unless the PR ended while we were repairing. ``decide()`` only
+    # short-circuits merged/closed at the START of a poll cycle, so a repair that
+    # outlived its PR would otherwise push, pause into ``blocked``, and ping a
+    # human on an already-merged PR (#910).
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="comment_repair",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -793,6 +856,7 @@ async def _run_fix_cycle(
             operation_type=operation_type,
             monitor_log=monitor_log,
             source_head_sha=operation_start_head,
+            repo=repo,
         )
         if protected_scope_block is not None and protected_scope_block.violations
         else await self._repair_protected_scope_commits_before_push(
@@ -820,8 +884,30 @@ async def _run_fix_cycle(
             remote_url=remote_push_url,
             state=state,
             operation_start_head=operation_start_head,
+            # Re-arm the terminal guard AFTER pre-push validation: the check above
+            # ran before a validation suite (plus its fix passes) that can take
+            # minutes, so the PR can go terminal in between
+            # (PRRT_kwDOSJAM6s6fjOze).
+            pr_number=pr_number,
+            pr_terminal_context="comment_repair",
+            repo=repo,
+            operation_id=operation_id,
+            operation_type=operation_type,
         )
     )
+    # The seam guard above fails OPEN on a transient forge fault, so the PR can
+    # still be observed as terminal by the defence-in-depth re-check inside
+    # ``_pause_monitor_for_protected_scope_block`` or by the post-validation
+    # re-check inside ``_validated_git_push_result``. Its moot envelope is neither
+    # ``failed`` nor ``pushed`` — indistinguishable here from an up-to-date push —
+    # so return it before the resolution/resolve_thread work below. The repair was
+    # deliberately NOT pushed; recording feedback as resolved and resolving threads
+    # on an already-merged/closed PR is the exact post-terminal forge mutation the
+    # #910 guard exists to stop. The other seams (CI fix, sync-base, operator hint)
+    # already return the pause result directly; the loop's shared terminal finisher
+    # runs the handling ``decide()`` would have chosen.
+    if push_result.pr_terminal is not None:
+        return cast(_GitPushResult, push_result)
     pushed_head_sha: str | None = None
     if push_result.failed:
         reason_code = push_result.reason_code
@@ -1236,27 +1322,3 @@ async def _run_fix_cycle(
                 },
             )
     return await _return_failed_fix_cycle_result(push_result)
-
-
-def _requeue_workflow_scope_publish_dependent_items(
-    state: MonitorState,
-    item_ids: list[str],
-    *,
-    resolution_dependent_ids: list[str],
-    reason: str,
-) -> None:
-    """Requeue blocked fixes and inline states needing GitHub resolution.
-
-    GitHub rejects workflow-file pushes before the local commits reach the PR,
-    and retrying the same repair cannot succeed until an operator provides a token
-    with ``workflow`` scope. The failure path already records the permission
-    reason and posts the human notification, so clear state for committed fixes
-    whose publication was blocked. That lets the next monitor pass retry pushing
-    the existing local fix once credentials are repaired. Also clear inline
-    false-positive state that still depends on a later GraphQL ``resolve_thread``
-    call, including captured defers whose durable issue marker survives state
-    cleanup. Preserve durable review-level false-positive resolutions.
-    """
-    del reason
-    for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
-        _clear_addressed_state_by_id(state, item_id)

@@ -5,13 +5,15 @@ module stays within the first-party file-line guardrail
 (``tests/unit/test_core_decomposition_maintainability.py``). Behavior is
 unchanged; this mirrors the ``notify_human_loop.handle_notify_human_action``
 delegation pattern — the caller dispatches on
-``isinstance(action, AddressOperatorHint)`` before invoking this helper.
+``isinstance(action, AddressOperatorHint)`` before invoking this helper. As in
+``sync_base_loop``, the two #910 post-action terminal helpers are closures over
+``_execute``'s per-cycle arguments, so the caller threads them in explicitly.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
@@ -42,6 +44,20 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 
 
+class _FinishIfPrTerminal(Protocol):
+    """``_execute``'s post-action terminal-PR guard for a completed ``_run_*``."""
+
+    async def __call__(self, operation: Any, push_result: Any) -> bool | None: ...
+
+
+class _FinishIfPrTerminalAfterCleanupError(Protocol):
+    """``_execute``'s terminal-PR guard for a ``ComposeExecCleanupError`` escape."""
+
+    async def __call__(
+        self, operation: Any, *, context: str, operation_type: str
+    ) -> bool | None: ...
+
+
 async def handle_operator_hint_action(
     self: Any,
     *,
@@ -57,6 +73,8 @@ async def handle_operator_hint_action(
     compose_file: Path,
     monitor_log: WorkspaceLogSink | None,
     remote_push_url: str | None,
+    finish_if_pr_terminal: _FinishIfPrTerminal,
+    finish_if_pr_terminal_after_cleanup_error: _FinishIfPrTerminalAfterCleanupError,
 ) -> bool:
     """Run one operator-hint repair cycle; return True iff the monitor is terminal."""
     operation = await self._begin_monitor_operation(
@@ -142,6 +160,13 @@ async def handle_operator_hint_action(
         await self._finish_provider_auth_failed_operation(operation)
         raise
     except ComposeExecCleanupError as exc:
+        cleanup_terminal_result = await finish_if_pr_terminal_after_cleanup_error(
+            operation,
+            context="operator_hint_cleanup_failure",
+            operation_type=OperationType.comment_repair.value,
+        )
+        if cleanup_terminal_result is not None:
+            return cleanup_terminal_result
         await self._finish_monitor_operation(
             operation,
             status=OperationStatus.failed,
@@ -158,6 +183,9 @@ async def handle_operator_hint_action(
             reason_code=EXEC_PROCESS_CLEANUP_FAILED,
         )
         return True
+    pr_terminal_result = await finish_if_pr_terminal(operation, push_result)
+    if pr_terminal_result is not None:
+        return pr_terminal_result
     if push_result.paused_into_blocked:
         # A directive-revert / grant resume that still trips the protected
         # gate re-paused the workspace into ``blocked`` (WS-2 §2 re-block).

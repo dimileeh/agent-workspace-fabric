@@ -1,13 +1,9 @@
-"""Durable capture of deferred review threads for ``fix_cycle`` (#305).
+"""Deferred-thread capture helpers for the PR monitor fix cycle.
 
-Kept separate so ``fix_cycle`` stays under the first-party line budget.
-
-When the agent answers ``defer`` on an inline thread, the fix cycle may only
-resolve that thread once the follow-up work exists somewhere durable. This
-module owns that hand-off: the idempotency marker keyed by thread id *and* body
-hash, the rendered conversation that becomes the tracking issue body, and the
-capture itself (file the issue, post the explanatory comment, audit the
-outcome).
+Mechanically extracted from :mod:`awf.runtime.pr_monitor_runner.fix_cycle`;
+behavior is unchanged. Groups the ``defer`` verdict's durable-capture path (#305)
+— the tracking-issue marker, its body rendering, and the capture itself — plus
+the workflow-scope requeue that clears state for fixes GitHub refused to publish.
 """
 
 from __future__ import annotations
@@ -35,6 +31,30 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+
+
+def _requeue_workflow_scope_publish_dependent_items(
+    state: MonitorState,
+    item_ids: list[str],
+    *,
+    resolution_dependent_ids: list[str],
+    reason: str,
+) -> None:
+    """Requeue blocked fixes and inline states needing GitHub resolution.
+
+    GitHub rejects workflow-file pushes before the local commits reach the PR,
+    and retrying the same repair cannot succeed until an operator provides a token
+    with ``workflow`` scope. The failure path already records the permission
+    reason and posts the human notification, so clear state for committed fixes
+    whose publication was blocked. That lets the next monitor pass retry pushing
+    the existing local fix once credentials are repaired. Also clear inline
+    false-positive state that still depends on a later GraphQL ``resolve_thread``
+    call, including captured defers whose durable issue marker survives state
+    cleanup. Preserve durable review-level false-positive resolutions.
+    """
+    del reason
+    for item_id in dict.fromkeys([*resolution_dependent_ids, *item_ids]):
+        _clear_addressed_state_by_id(state, item_id)
 
 
 def _deferred_issue_filed_marker(thread_id: str, body_hash: str) -> str:

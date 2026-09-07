@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +27,6 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
@@ -40,7 +38,10 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
 from awf.runtime.pr_monitor_runner.helpers import _initial_review_grace_started_key
-from tests.postgres import postgres_test_engine
+from tests.integration.runtime.test_pr_monitor_runner_parts._helpers import (
+    _pr_payload,
+    _queue_post_action_recheck,
+)
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
 
@@ -113,51 +114,6 @@ def _git_calls(cmd: FakeCommandRunner, *tokens: str) -> list:
         for call in cmd.calls
         if call.args[:1] == ["git"] and all(token in call.args for token in tokens)
     ]
-
-
-def _pr_payload(
-    *,
-    closed: bool = False,
-    merged: bool = False,
-    merge_commit_sha: str = "mergecommit1234567890",
-    mergeable: str = "MERGEABLE",
-    merge_state_status: str = "CLEAN",
-    check_state: str = "SUCCESS",
-    threads: list[dict] | None = None,
-    reviews: list[dict] | None = None,
-    comments: list[dict] | None = None,
-) -> str:
-    return json.dumps(
-        {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "number": 42,
-                        "headRefOid": "abc123",
-                        "mergeable": mergeable,
-                        "mergeStateStatus": merge_state_status,
-                        "isDraft": False,
-                        "closed": closed,
-                        "merged": merged,
-                        "mergeCommit": {"oid": merge_commit_sha} if merged else None,
-                        "baseRef": {"name": "development", "target": {"oid": "base0"}},
-                        "commits": {
-                            "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
-                        },
-                        "reviewThreads": {"nodes": threads or []},
-                        "reviews": {"nodes": reviews or []},
-                        "comments": {"nodes": comments or []},
-                    }
-                }
-            }
-        }
-    )
-
-
-@pytest.fixture
-async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    async with postgres_test_engine() as engine:
-        yield make_session_factory(engine)
 
 
 @pytest.fixture
@@ -321,6 +277,7 @@ class TestPushRejectRecovery:
         # into the push command as ``HEAD:refs/heads/awf/test-branch``, so
         # there's no ambiguous ``HEAD`` refspec that could be redirected
         # by leaked git config — see the 2026-04-23 aira-web incident.)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(
             returncode=1,
             stderr=(
@@ -410,6 +367,7 @@ class TestPushRejectRecovery:
         cmd.queue_result(returncode=0)  # git merge --abort
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge (clean)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=128, stderr="ssh: Permission denied (publickey)")
         # Iter 2: cap at 1 so it bails fast.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -468,6 +426,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/foo.py")  # git merge fails
         cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
         adapter.queue(stdout="resolved the merge conflict")
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         cmd.queue_result(returncode=0, stdout=("b" * 40) + "\n")  # rev-parse HEAD
         cmd.queue_result(returncode=0, stdout="SYNC-BASE-SHA\n")  # rev-parse origin/<base>
@@ -524,6 +483,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0)  # git merge --abort ← defense
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge (clean)
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
         # Outer iter 2: clean → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -908,6 +868,7 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         # No commits landed — noop push avoids a post-push rev-parse that would
         # steal the next queued poll result and misalign the retry path.
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         # Iter 2: agent_failed re-enters AddressComments (merge must stay blocked).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -962,6 +923,7 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=1, stderr="CONFLICT")  # merge fails
         cmd.queue_result(returncode=0, stdout="UU a\n")  # status
         adapter.queue(returncode=2, raise_error=True)  # CLI dies
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push (still attempted)
         # Iter 2: PR ends up clean, monitor proceeds to Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -1008,6 +970,7 @@ class TestAgentRunErrorResilience:
         )
         cmd.queue_result(returncode=0, stdout="log")  # log fetch
         adapter.queue(returncode=2, raise_error=True)  # CLI dies mid-ci-fix
+        _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # push
         # Iter 2: PR clean, merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
