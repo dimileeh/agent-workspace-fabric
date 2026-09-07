@@ -63,6 +63,8 @@ async def test_monitor_comment_repair_workflow_scope_failure_requeues_fix_withou
         author="reviewer",
     )
     cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -163,6 +165,8 @@ async def test_monitor_comment_repair_workflow_scope_notification_failure_keeps_
         body_excerpt="publish workflow needs the reviewed fix",
         author="reviewer",
     )
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
         returncode=1,
@@ -273,6 +277,8 @@ async def test_monitor_comment_repair_workflow_scope_failure_sets_attention(
         author="reviewer",
     )
     cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=1, stderr=_WORKFLOW_SCOPE_REJECTION)
     runner = make_runner(
         factory=factory,
@@ -362,6 +368,8 @@ async def test_monitor_comment_repair_workflow_scope_attention_survives_requeue(
         # call falls through to the empty-queue default.
         adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
         cmd.queue_result(returncode=0, stdout=pr_payload())
+        # #910: post-action PR re-check before the push.
+        cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=1, stderr=_WORKFLOW_SCOPE_REJECTION)
         await runner._execute(
             action=action,
@@ -439,6 +447,8 @@ async def test_workflow_scope_requeue_keeps_marker_through_abandon_guard(
     state = MonitorState()
     state.mark_awaiting_workflow_scope()
     adapter.queue(stdout="AWF-VERDICT: FIXED: fixed locally")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=1, stderr=_WORKFLOW_SCOPE_REJECTION)
 

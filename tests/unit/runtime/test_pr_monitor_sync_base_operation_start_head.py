@@ -24,6 +24,11 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 
 
+async def _open_pr_post_action_recheck(**_kwargs: object) -> _GitPushResult | None:
+    """#910 post-action PR re-check stub; these sync-base tests model an OPEN PR."""
+    return None
+
+
 class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
     async def _run_monitor_agent_with_service_recovery(
         self,
@@ -100,6 +105,7 @@ async def test_run_sync_base_threads_operation_start_head_to_validated_push(
         _resolve_task_tag=_resolve_task_tag,
         _fetch_base=_fetch_base,
         _protected_scope_push_block=_protected_scope_push_block,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated_git_push_result,
         _deps=SimpleNamespace(runner=_FakeCommandRunner()),
     )
@@ -170,6 +176,7 @@ async def test_run_sync_base_uses_pr_head_sha_only_as_start_head_fallback(
         _resolve_task_tag=_resolve_task_tag,
         _fetch_base=_fetch_base,
         _protected_scope_push_block=_protected_scope_push_block,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated_git_push_result,
         _deps=SimpleNamespace(runner=_FakeCommandRunner()),
     )
@@ -253,6 +260,7 @@ async def test_run_sync_base_repairs_mirror_hooks_before_clean_merge(
         _resolve_task_tag=_resolve_task_tag,
         _fetch_base=_fetch_base,
         _protected_scope_push_block=_protected_scope_push_block,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated_git_push_result,
         _deps=SimpleNamespace(runner=_FakeCommandRunner()),
     )
@@ -343,6 +351,7 @@ async def test_run_sync_base_mirror_hooks_repair_failure_blocks_clean_merge(
         _resolve_task_tag=_resolve_task_tag,
         _fetch_base=_fetch_base,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner()),
     )
@@ -417,6 +426,7 @@ async def test_run_sync_base_strips_git_object_lookup_env_from_worktree_git(
         _resolve_task_tag=_resolve_task_tag,
         _fetch_base=_fetch_base,
         _protected_scope_push_block=_protected_scope_push_block,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated_git_push_result,
         _deps=SimpleNamespace(runner=command_runner),
     )
@@ -518,6 +528,7 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
         _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_protected_scope_push_block,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated_git_push_result,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
@@ -641,6 +652,7 @@ async def test_run_sync_base_repairs_mirror_hooks_before_conflict_agent_launch(
         _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_protected_scope_push_block,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated_git_push_result,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
@@ -764,6 +776,7 @@ async def test_run_sync_base_fails_closed_when_conflict_prelaunch_mirror_repair_
         _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
         _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
@@ -894,6 +907,7 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
         _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
@@ -1030,6 +1044,7 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
         _provider_recovery_suppresses_cli=_provider_recovery_suppresses_cli,
         _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
@@ -1149,6 +1164,7 @@ async def test_run_sync_base_reraises_superseded_recovery_before_commit_sink(
         _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
         _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner()),
     )
@@ -1258,6 +1274,7 @@ async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
         _handle_provider_agent_run_error=_handle_provider_agent_run_error,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner(), adapter=_Adapter()),
     )
@@ -1354,6 +1371,7 @@ async def test_run_sync_base_reraises_provider_retry_before_commit_sink(
         _run_monitor_agent_with_service_recovery=_run_monitor_agent_with_service_recovery,
         _commit_dirty_worktree=_unexpected_commit_dirty_worktree,
         _protected_scope_push_block=_unexpected_protected_scope,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_unexpected_validated_push,
         _deps=SimpleNamespace(runner=_FakeCommandRunner()),
     )

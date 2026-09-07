@@ -198,6 +198,17 @@ class MonitorState:
         repr=False,
         compare=False,
     )
+    # In-memory only: set when a terminal-PR cycle dropped its own workspace
+    # writes because this runner had been superseded as the monitor owner. The
+    # runner loop honors it to skip its unconditional post-action
+    # ``_persist_state`` so the stale state never reaches the live claimant's row
+    # (PRRT_kwDOSJAM6s6fsqcA).
+    monitor_writes_suppressed: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     current_pr_head_ref: str | None = field(
         default=None,
         init=False,

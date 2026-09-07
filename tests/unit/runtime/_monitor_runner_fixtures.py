@@ -240,6 +240,17 @@ def pr_payload(
     )
 
 
+def queue_post_action_pr_recheck(cmd: FakeCommandRunner, **payload_kwargs: Any) -> None:
+    """Queue the #910 post-action PR-status re-check a monitor action now performs.
+
+    Every seam that pushes / pauses / notifies after a long agent action re-reads
+    PR state first, so a FIFO-scripted ``FakeCommandRunner`` needs one extra
+    ``gh api graphql`` result between the action and the push. Defaults to an OPEN
+    PR, which is the "carry on exactly as before" answer.
+    """
+    cmd.queue_result(returncode=0, stdout=pr_payload(**payload_kwargs))
+
+
 def thread_node(
     *,
     tid: str,

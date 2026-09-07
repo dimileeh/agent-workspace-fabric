@@ -518,7 +518,9 @@ async def test_fix_cycle_breaks_settle_when_remote_head_advances_unreconciled(
     )
 
     assert result.failed is False
-    assert settle_calls == 1
+    # One settle re-poll, then the #910 post-action PR re-check (same stub); settle
+    # did NOT continue into a second pass under the advanced tip.
+    assert settle_calls == 2
     assert address_thread_ids == ["T_first"]
     assert cycle_start_heads == [remote_open]
     assert remote_advanced not in cycle_start_heads
