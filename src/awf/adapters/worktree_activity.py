@@ -44,7 +44,12 @@ Design notes:
 * Priming is best-effort. A truncated priming walk leaves nothing to compare
   against, and only then is the first probe clock-based: it asks whether
   anything is newer than a seed taken when the probe was built, with a small
-  tolerance for that coarse-clock lag.
+  tolerance for that coarse-clock lag. A clock is blind to a change that moves
+  no mtime, so that probe can answer "activity" or "could not tell" — never
+  "idle". Answering idleness there would resurrect the very ``chmod`` kill
+  priming exists to prevent, in the one window where priming failed. It costs at
+  most one idle window per run: the complete scan it just took is the baseline
+  every later probe compares fingerprints against.
 * The walk is bounded by an entry budget, and running out fails **open**: the
   probe reports ``None`` ("could not tell"), which the watchdog counts as
   activity. A truncated walk has no opinion about liveness, and any worktree
@@ -146,17 +151,26 @@ class WorktreeActivityProbe:
         if scan is None:
             return None
         previous, self._previous = self._previous, scan
-        if self._observed_change(previous, scan):
+        if previous is None:
+            return self._first_probe_answer(scan)
+        if scan.fingerprint != previous.fingerprint:
             return True
         return await self._confirm_idle(scan)
 
-    def _observed_change(self, previous: _Scan | None, scan: _Scan) -> bool:
-        if previous is None:
-            # Priming was truncated, so nothing has been observed yet and the
-            # construction-time seed is the only reference point this one probe
-            # has.
-            return scan.newest_mtime > self._seed
-        return scan.fingerprint != previous.fingerprint
+    def _first_probe_answer(self, scan: _Scan) -> bool | None:
+        """Answer without a baseline: activity, or "could not tell" — never idle.
+
+        Priming was truncated, so the construction-time seed is the only
+        reference point this one probe has, and a clock only sees changes that
+        move an mtime. A ``chmod`` moves none, and the confirming rescan cannot
+        help — by then both scans are post-change — so "nothing newer than the
+        seed" is not evidence of idleness here. Fail open exactly like a
+        truncated walk: the scan just taken becomes the baseline, so the next
+        probe compares fingerprints like every other one.
+        """
+        if scan.newest_mtime > self._seed:
+            return True
+        return None
 
     async def _confirm_idle(self, scan: _Scan) -> bool | None:
         """Rescan, because a write can race a walk without changing its result.

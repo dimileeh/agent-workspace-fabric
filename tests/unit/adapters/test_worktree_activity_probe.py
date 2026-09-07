@@ -43,6 +43,19 @@ def _age_tree(root: Path) -> None:
     _age(root)
 
 
+def _prime_scan_truncates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make only the priming walk truncate, leaving the probe without a baseline."""
+    real_scan = WorktreeActivityProbe._scan
+    scans = 0
+
+    def _first_scan_truncates(self: WorktreeActivityProbe) -> object:
+        nonlocal scans
+        scans += 1
+        return None if scans == 1 else real_scan(self)
+
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _first_scan_truncates)
+
+
 @pytest.fixture
 def worktree(tmp_path: Path) -> Path:
     root = tmp_path / "ws_probe"
@@ -56,6 +69,7 @@ def worktree(tmp_path: Path) -> Path:
 @pytest.mark.unit
 async def test_quiet_worktree_reports_no_activity(worktree: Path) -> None:
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
 
     assert await probe() is False
     assert await probe() is False
@@ -65,6 +79,7 @@ async def test_quiet_worktree_reports_no_activity(worktree: Path) -> None:
 async def test_modified_file_reports_activity_once(worktree: Path) -> None:
     """A single change is reported once; the baseline then advances."""
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (worktree / "README.md").write_text("hello again\n", encoding="utf-8")
@@ -99,6 +114,7 @@ async def test_future_dated_entry_does_not_blind_later_activity(worktree: Path) 
 @pytest.mark.unit
 async def test_created_file_in_nested_directory_reports_activity(worktree: Path) -> None:
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (worktree / "src" / "nested" / "new_module.py").write_text("y = 2\n", encoding="utf-8")
@@ -115,6 +131,7 @@ async def test_permission_change_reports_activity(worktree: Path) -> None:
     _age(worktree)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     script.chmod(script.stat().st_mode | 0o111)
@@ -126,6 +143,7 @@ async def test_permission_change_reports_activity(worktree: Path) -> None:
 async def test_deleted_file_reports_activity(worktree: Path) -> None:
     """A delete only bumps the containing directory's mtime — dirs are stat-ed too."""
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (worktree / "src" / "nested" / "module.py").unlink()
@@ -149,6 +167,7 @@ async def test_linked_worktree_git_dir_head_and_index_are_watched(
     _age_tree(git_dir)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (git_dir / "index").write_bytes(b"DIRC-updated")
@@ -175,6 +194,7 @@ async def test_relative_gitdir_pointer_resolves_against_the_worktree(
     _age_tree(git_dir)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (git_dir / "index").write_bytes(b"DIRC-updated")
@@ -191,6 +211,7 @@ async def test_unusable_gitfile_falls_back_to_the_worktree_walk(
     _age_tree(worktree)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (worktree / "README.md").write_text("changed\n", encoding="utf-8")
@@ -206,6 +227,7 @@ async def test_git_directory_is_walked_like_any_other_path(worktree: Path) -> No
     _age_tree(worktree)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     (git_dir / "HEAD").write_text("ref: refs/heads/other\n", encoding="utf-8")
@@ -379,6 +401,7 @@ async def test_write_racing_the_walk_is_not_reported_as_idle(
     monkeypatch.setattr(worktree_activity, "_entry_stat", _stat_then_race)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is False
 
     armed = True
@@ -399,14 +422,17 @@ async def test_truncated_confirming_rescan_answers_could_not_tell(
     real_scan = WorktreeActivityProbe._scan
     scans = 0
 
-    def _second_scan_truncates(self: WorktreeActivityProbe) -> object:
+    def _confirming_rescan_truncates(self: WorktreeActivityProbe) -> object:
         nonlocal scans
+        # 1 primes the baseline, 2 is the probe's own scan, 3 is the rescan that
+        # would confirm idleness.
         scans += 1
-        return None if scans == 2 else real_scan(self)
+        return None if scans == 3 else real_scan(self)
 
-    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _second_scan_truncates)
+    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _confirming_rescan_truncates)
 
     probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
     assert await probe() is None
 
     (worktree / "README.md").write_text("changed\n", encoding="utf-8")
@@ -460,20 +486,46 @@ async def test_truncated_priming_walk_falls_back_to_the_construction_seed(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Priming is best-effort: a truncated walk leaves the clock seed in charge."""
-    real_scan = WorktreeActivityProbe._scan
-    scans = 0
+    """Priming is best-effort: a truncated walk leaves the clock seed in charge.
 
-    def _priming_scan_truncates(self: WorktreeActivityProbe) -> object:
-        nonlocal scans
-        scans += 1
-        return None if scans == 1 else real_scan(self)
-
-    monkeypatch.setattr(WorktreeActivityProbe, "_scan", _priming_scan_truncates)
+    Newer-than-the-seed is still activity, and the first probe's own scan becomes
+    the baseline every later probe compares fingerprints against.
+    """
+    _prime_scan_truncates(monkeypatch)
 
     probe = await make_worktree_activity_probe(worktree)
     assert probe is not None
-    assert await probe() is False
 
     (worktree / "README.md").write_text("changed\n", encoding="utf-8")
     assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
+async def test_seedless_first_probe_never_reports_idleness(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a baseline the first probe answers "could not tell", not "idle".
+
+    A truncated priming walk leaves only the construction-time clock seed, and a
+    clock cannot see a change that moves no mtime: a ``chmod`` in the first idle
+    window looks exactly like a quiet worktree, and the confirming rescan cannot
+    break the tie because both of its scans are post-``chmod``. Answering
+    ``False`` there would idle-kill a working run — the #932 defect priming
+    exists to prevent — so uncertainty fails open like any incomplete
+    observation, and the scan just taken becomes the baseline.
+    """
+    script = worktree / "script.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    _age(script)
+    _age(worktree)
+    _prime_scan_truncates(monkeypatch)
+
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+
+    script.chmod(script.stat().st_mode | 0o111)
+
+    assert await probe() is None
+    assert await probe() is False
