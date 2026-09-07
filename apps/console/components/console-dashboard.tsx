@@ -832,6 +832,7 @@ export function ConsoleDashboard() {
         return;
       }
       setOperatorActionState({ status: "submitting", action });
+      const epoch = authorizedFeedEpochRef.current;
       const payload: WorkspaceOperatorRequest = {
         reason: operatorActionReason(action),
         workspace_version: detail.workspace?.version,
@@ -845,10 +846,26 @@ export function ConsoleDashboard() {
         operatorActionPath(action, workspaceId),
         payload,
       );
-      if (!result.ok) {
-        if (selectedIdRef.current !== workspaceId) {
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        selectedIdRef.current !== workspaceId
+      ) {
+        // Auth/tenant epoch advanced or selection changed — do not paint prior
+        // tenant operation state into the current inspector.
+        if (epoch !== authorizedFeedEpochRef.current) {
           return;
         }
+        if (!result.ok) {
+          return;
+        }
+        const caps = await loadCapabilities();
+        await loadOverview();
+        if (caps) {
+          await reloadAvailableFeeds(caps);
+        }
+        return;
+      }
+      if (!result.ok) {
         const failure = summarizeWorkspaceOperatorFailure(result);
         setOperatorActionState({
           status: "error",
@@ -860,14 +877,6 @@ export function ConsoleDashboard() {
       }
 
       const success = summarizeWorkspaceOperatorSuccess(action, result.data);
-      if (selectedIdRef.current !== workspaceId) {
-        const caps = await loadCapabilities();
-        await loadOverview();
-        if (caps) {
-          await reloadAvailableFeeds(caps);
-        }
-        return;
-      }
       setOperatorActionState({
         status: "success",
         action,

@@ -500,6 +500,11 @@ test("operator action state is guarded by current workspace selection", () => {
   assert.match(dashboard, /operatorIdempotencyKey\(action, workspaceId\)/);
   assert.match(dashboard, /operatorActionPath\(action, workspaceId\)/);
   assert.match(dashboard, /selectedIdRef\.current !== workspaceId/);
+  assert.match(
+    dashboard,
+    /const runWorkspaceOperatorAction = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?epoch !== authorizedFeedEpochRef\.current/,
+    "Expected operator actions to capture and discard on authorizedFeedEpochRef advance",
+  );
 });
 
 test("dashboard paths go through the console URL builder", () => {
