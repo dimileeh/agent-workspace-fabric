@@ -180,6 +180,21 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboard,
+    /capabilitiesForMutatingControls\(capabilities, capabilityError\)/,
+    "Expected mutating controls to fail closed while capabilityError is set during retained outages",
+  );
+  assert.match(
+    dashboard,
+    /getWorkspaceOperatorControls\(\{[\s\S]*?capabilities:\s*mutatingCapabilities,/,
+    "Expected operator controls to use mutatingCapabilities, not retained feed capabilities",
+  );
+  assert.match(
+    dashboard,
+    /resolveRetryCapabilityGate\(\{\s*capabilities:\s*mutatingCapabilities,\s*capabilitiesReady,/,
+    "Expected Retry gate to use mutatingCapabilities during capability outages",
+  );
+  assert.match(
+    dashboard,
     /frame\.type === "log"\) \{[\s\S]*?if \(!allowStreamLogs\) \{\s*return;\s*\}/,
     "Expected SSE log frames to be ignored when workspace_logs listing is unavailable",
   );
@@ -269,7 +284,10 @@ test("workspace retry button gates on negotiated control capabilities", () => {
   assert.match(summarySource, /resolveRetryCapabilityGate/);
   assert.match(summarySource, /capabilitiesReady/);
   assert.match(summarySource, /retryDisabled = retrySubmitting \|\| !retryGate\.enabled/);
-  assert.match(dashboard, /resolveRetryCapabilityGate\(\{ capabilities, capabilitiesReady \}\)/);
+  assert.match(
+    dashboard,
+    /resolveRetryCapabilityGate\(\{\s*capabilities:\s*mutatingCapabilities,\s*capabilitiesReady,/,
+  );
   assert.match(dashboard, /if \(!retryGate\.enabled\) \{\s*return;\s*\}/);
 });
 

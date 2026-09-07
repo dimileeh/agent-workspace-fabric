@@ -12,6 +12,7 @@ import {
   isWidgetAvailable,
   parseConsoleCapabilities,
   resolveCapabilityWorkspaceRoute,
+  capabilitiesForMutatingControls,
   resolveRetryCapabilityGate,
   resolveWorkspaceLogStreamAccess,
 } from "./console-capabilities.ts";
@@ -167,6 +168,19 @@ test("widget and control gating helpers", () => {
   assert.equal(isControlAvailable(parsed.capabilities, "remonitor"), false);
   assert.equal(controlUnsupportedReason(parsed.capabilities, "remonitor"), "remonitor disabled");
   assert.equal(isControlAvailable(parsed.capabilities, "retry"), true);
+});
+
+test("capabilitiesForMutatingControls clears inventory while capabilityError is set", () => {
+  const parsed = parseConsoleCapabilities(localCapabilities);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(capabilitiesForMutatingControls(parsed.capabilities, null), parsed.capabilities);
+  assert.equal(capabilitiesForMutatingControls(parsed.capabilities, undefined), parsed.capabilities);
+  assert.equal(
+    capabilitiesForMutatingControls(parsed.capabilities, "capabilities endpoint unavailable"),
+    null,
+  );
+  assert.equal(capabilitiesForMutatingControls(null, "capabilities endpoint unavailable"), null);
 });
 
 test("resolveRetryCapabilityGate fails closed without ready capabilities", () => {

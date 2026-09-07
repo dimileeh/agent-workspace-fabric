@@ -12,6 +12,7 @@ useTransition,
 } from "react";
 import { fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
 import {
+  capabilitiesForMutatingControls,
   capabilityRouteToAwfPath,
   isDiagnosticAvailable,
   isWidgetAvailable,
@@ -453,7 +454,9 @@ const searchParams = useSearchParams();
       }
       // Transient capability-endpoint outage (5xx/network): keep the last successful
       // negotiation so fleet KPIs and inspector detail retain last-good snapshots
-      // while the error is shown. Auth denial and never-negotiated stay fail-closed.
+      // while the error is shown. Mutating controls fail closed via
+      // capabilitiesForMutatingControls(capabilities, capabilityError) until
+      // negotiation succeeds again. Auth denial and never-negotiated stay fail-closed.
       setCapabilityError(result.message);
       setCapabilitiesReady(true);
       const retained = appliedCapabilitiesRef.current;
@@ -735,12 +738,20 @@ const searchParams = useSearchParams();
     }
   }, [capabilities]);
 
+  const mutatingCapabilities = useMemo(
+    () => capabilitiesForMutatingControls(capabilities, capabilityError),
+    [capabilities, capabilityError],
+  );
+
   const retrySelectedWorkspace = useCallback(async () => {
     const workspaceId = selectedId;
     if (!workspaceId) {
       return;
     }
-    const retryGate = resolveRetryCapabilityGate({ capabilities, capabilitiesReady });
+    const retryGate = resolveRetryCapabilityGate({
+      capabilities: mutatingCapabilities,
+      capabilitiesReady,
+    });
     if (!retryGate.enabled) {
       return;
     }
@@ -776,7 +787,14 @@ const searchParams = useSearchParams();
         await reloadAvailableFeeds(caps);
       }
     }
-  }, [capabilities, capabilitiesReady, loadCapabilities, loadOverview, reloadAvailableFeeds, selectedId]);
+  }, [
+    capabilitiesReady,
+    loadCapabilities,
+    loadOverview,
+    mutatingCapabilities,
+    reloadAvailableFeeds,
+    selectedId,
+  ]);
 
   const runWorkspaceOperatorAction = useCallback(
     async (action: WorkspaceOperatorAction, requestedTier?: number) => {
@@ -1196,11 +1214,18 @@ const searchParams = useSearchParams();
             workspace: detail.workspace,
             mergeQueueItem: selectedMergeQueueItem,
             operations: detail.operations,
-            capabilities,
+            capabilities: mutatingCapabilities,
             capabilitiesReady,
           })
         : [],
-    [capabilities, capabilitiesReady, detail.operations, detail.workspace, selectedMergeQueueItem, selectedOverview],
+    [
+      capabilitiesReady,
+      detail.operations,
+      detail.workspace,
+      mutatingCapabilities,
+      selectedMergeQueueItem,
+      selectedOverview,
+    ],
   );
   const selectedLogEntries = useMemo(
     () => {
@@ -1450,7 +1475,7 @@ const searchParams = useSearchParams();
         retryState={retryState}
         operatorControls={operatorControls}
         operatorActionState={operatorActionState}
-        capabilities={capabilities}
+        capabilities={mutatingCapabilities}
         capabilitiesReady={capabilitiesReady}
         showWorkspaceRuntime={showWorkspaceRuntime}
         showWorkspaceEvents={showWorkspaceEvents}

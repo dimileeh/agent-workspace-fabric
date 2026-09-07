@@ -414,6 +414,21 @@ export function controlUnsupportedReason(
   return item.message ?? item.reason_code ?? "unsupported by backend";
 }
 
+/**
+ * Inventory used for mutating operator controls (retry/cancel/remonitor/…).
+ * Read-only feeds may retain last-good capabilities across a capability-endpoint
+ * outage, but mutation stays fail-closed until negotiation succeeds again.
+ */
+export function capabilitiesForMutatingControls(
+  capabilities: ConsoleCapabilities | null | undefined,
+  capabilityError: string | null | undefined,
+): ConsoleCapabilities | null {
+  if (capabilityError) {
+    return null;
+  }
+  return capabilities ?? null;
+}
+
 /** Fail-closed gate for the workspace Retry mutating control. */
 export function resolveRetryCapabilityGate(options: {
   capabilities: ConsoleCapabilities | null | undefined;
