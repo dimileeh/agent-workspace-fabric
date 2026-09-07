@@ -152,6 +152,47 @@ test("mergeWorkspacePresentationFields keeps overview metadata when detail omits
   );
 });
 
+test("mergeWorkspacePresentationFields keeps confirmed model and source atomic", async () => {
+  const { mergeWorkspacePresentationFields, formatConfirmedExecutionModel } = await import(
+    "./agent-format.ts"
+  );
+  const overview = {
+    confirmed_execution_model: "gpt-overview-confirmed",
+    confirmed_execution_model_source: "execution_evidence",
+  };
+
+  const modelOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    confirmed_execution_model: "gpt-detail-confirmed",
+  });
+  assert.equal(
+    formatConfirmedExecutionModel(modelOnlyDetail),
+    "gpt-overview-confirmed (execution_evidence)",
+    "partial detail must not attach a new model to overview provenance",
+  );
+  assert.equal(modelOnlyDetail.confirmed_execution_model, "gpt-overview-confirmed");
+  assert.equal(modelOnlyDetail.confirmed_execution_model_source, "execution_evidence");
+
+  const sourceOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    confirmed_execution_model_source: "adapter_report",
+  });
+  assert.equal(
+    formatConfirmedExecutionModel(sourceOnlyDetail),
+    "gpt-overview-confirmed (execution_evidence)",
+    "partial detail must not attach a new source to the overview model",
+  );
+  assert.equal(sourceOnlyDetail.confirmed_execution_model, "gpt-overview-confirmed");
+  assert.equal(sourceOnlyDetail.confirmed_execution_model_source, "execution_evidence");
+
+  const completeDetail = mergeWorkspacePresentationFields(overview, {
+    confirmed_execution_model: "gpt-detail-confirmed",
+    confirmed_execution_model_source: "adapter_report",
+  });
+  assert.equal(
+    formatConfirmedExecutionModel(completeDetail),
+    "gpt-detail-confirmed (adapter_report)",
+  );
+});
+
 test("resolveWorkflowFinishedAt falls back to finished_at", async () => {
   const { resolveWorkflowFinishedAt } = await import("./agent-format.ts");
   assert.equal(

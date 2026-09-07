@@ -143,6 +143,8 @@ type PresentationModelFields = RequestedModelWorkspace & ConfirmedModelWorkspace
  * Prefer detail fields when present; fall back to overview for optional
  * requested/confirmed metadata so a sparse detail payload cannot blank
  * authoritative overview values already on screen.
+ * Confirmed execution model and source are selected as one pair: detail wins
+ * only when both are present, otherwise the complete overview pair is kept.
  */
 export function mergeWorkspacePresentationFields(
   overview: PresentationModelFields,
@@ -151,6 +153,13 @@ export function mergeWorkspacePresentationFields(
   if (!workspace) {
     return overview;
   }
+  // Confirmed model + provenance must stay a single pair: a sparse detail that
+  // supplies only one field must not cross-wire with overview's other half.
+  const detailConfirmedModel = workspace.confirmed_execution_model;
+  const detailConfirmedSource = workspace.confirmed_execution_model_source;
+  const detailHasConfirmedPair =
+    detailConfirmedModel != null && detailConfirmedSource != null;
+
   return {
     requested_model: workspace.requested_model ?? overview.requested_model,
     requested_effort: workspace.requested_effort ?? overview.requested_effort,
@@ -160,10 +169,12 @@ export function mergeWorkspacePresentationFields(
     agent_effort: workspace.agent_effort ?? overview.agent_effort,
     agent_model_source: workspace.agent_model_source ?? overview.agent_model_source,
     agent_effort_source: workspace.agent_effort_source ?? overview.agent_effort_source,
-    confirmed_execution_model:
-      workspace.confirmed_execution_model ?? overview.confirmed_execution_model,
-    confirmed_execution_model_source:
-      workspace.confirmed_execution_model_source ?? overview.confirmed_execution_model_source,
+    confirmed_execution_model: detailHasConfirmedPair
+      ? detailConfirmedModel
+      : overview.confirmed_execution_model,
+    confirmed_execution_model_source: detailHasConfirmedPair
+      ? detailConfirmedSource
+      : overview.confirmed_execution_model_source,
   };
 }
 
