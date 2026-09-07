@@ -39,6 +39,7 @@ import type {
   FailureSummaryResponse,
 ListEnvelope,
 MergeQueueItem,
+Operation,
 ResourceSaturationSummary,
 Workspace,
 WorkspaceEvent,
