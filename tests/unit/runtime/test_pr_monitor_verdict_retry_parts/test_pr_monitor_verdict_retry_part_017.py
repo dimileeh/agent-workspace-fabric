@@ -332,6 +332,60 @@ async def test_a_protocol_violation_after_a_recovery_rerun_keeps_the_timed_out_c
 
 
 @pytest.mark.unit
+async def test_a_recovery_rerun_sinks_the_timed_out_runs_dirty_edits(
+    tmp_path: Path,
+) -> None:
+    """Uncommitted work the timed-out run left is committed before the rerun.
+
+    That run committed nothing, so the floor the loop can publish is the attempt
+    floor itself and a provider failure on the rerun would ``reset --hard``
+    straight through its dirty edits. The item therefore hands the loop its own
+    dirty-worktree sink — the one the #932 preserve handler runs, anchored at the
+    item start and labelled as preserved timeout work — so those edits become a
+    commit the published floor covers (PRRT_kwDOSJAM6s6fvw8r).
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_TIMED_OUT_RUN_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[False],
+    )
+    runner.current_head = _ITEM_START_HEAD
+    sink_calls: list[dict[str, object]] = []
+
+    async def _commit_dirty(**kwargs: object) -> bool:
+        sink_calls.append(kwargs)
+        runner.current_head = _TIMED_OUT_RUN_HEAD
+        return True
+
+    runner._commit_dirty_worktree = _commit_dirty
+
+    async def _run(**kwargs: object) -> AgentRunResult:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        dirty_sink = kwargs["timeout_rerun_dirty_sink"]
+        assert callable(dirty_sink)
+        assert await dirty_sink("AGENT_IDLE_TIMEOUT") is True
+        floor = kwargs["timeout_rerun_floor_sink"]
+        assert isinstance(floor, list)
+        floor.append(runner.current_head)
+        raise _agent_error()
+
+    runner._run_monitor_agent_with_service_recovery = _run
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_CLI_FAILED"
+    assert [call["operation_start_head"] for call in sink_calls] == [_ITEM_START_HEAD]
+    assert "preserved after agent timeout" in str(sink_calls[0]["message"])
+    assert runner.reset_targets == []
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
+
+
+@pytest.mark.unit
 async def test_a_provider_failure_without_a_rerun_still_rolls_back_to_the_item_start(
     tmp_path: Path,
 ) -> None:

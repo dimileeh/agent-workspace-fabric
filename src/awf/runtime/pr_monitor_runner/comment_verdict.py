@@ -93,6 +93,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_unaccepted_protocol_retry_changes as _rollback_unaccepted_protocol_retry_changes,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    _sink_timeout_dirty_changes as _sink_timeout_dirty_changes,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     cleanup_error_agent_timeout_reason_code as cleanup_error_agent_timeout_reason_code,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
@@ -596,6 +599,32 @@ async def _run_item_verdict_protocol(
     pre_timeout_rerun_floor_head: str | None = None
     timeout_rerun_floor_raised = False
 
+    async def sink_timeout_rerun_dirty_changes(reason_code: str) -> bool:
+        """Commit a reran-over timed-out run's uncommitted edits (#932).
+
+        A published rerun floor is only a SHA, so it cannot hold edits the
+        timed-out run never committed: with no commits of its own that floor
+        equals the attempt's own floor, and the rollback a provider or protocol
+        failure on the rerun performs resets straight through them. Running the
+        preserve handler's own dirty sink first turns them into a commit the
+        published floor does cover (PRRT_kwDOSJAM6s6fvw8r). Reads
+        ``item_start_head`` live: it is the sink anchor as of the run this
+        salvage belongs to.
+        """
+        return await _sink_timeout_dirty_changes(
+            runner,
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+            commit_message=commit_message,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            task_tag=task_tag,
+            command_evidence=command_evidence,
+            commit_dirty_changes=commit_dirty_changes,
+        )
+
     for protocol_attempt in range(2):
         dirty_changes_committed = False
         compose_cleanup_error: ComposeExecCleanupError | None = None
@@ -697,6 +726,7 @@ async def _run_item_verdict_protocol(
                         operation_start_head=item_start_head,
                         state=state,
                         timeout_rerun_floor_sink=timeout_rerun_floor_heads,
+                        timeout_rerun_dirty_sink=sink_timeout_rerun_dirty_changes,
                     )
                 finally:
                     # Raise the floor on *every* exit from the run, raising or

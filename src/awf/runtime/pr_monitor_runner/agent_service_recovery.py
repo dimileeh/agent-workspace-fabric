@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -94,11 +94,13 @@ async def _run_monitor_agent_with_service_recovery(
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
     timeout_rerun_floor_sink: list[str] | None = None,
+    timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures.
 
     Callers that roll the worktree back when this raises pass a list as
-    ``timeout_rerun_floor_sink``; see ``_record_timeout_rerun_floor``.
+    ``timeout_rerun_floor_sink`` and the item's dirty-worktree sink as
+    ``timeout_rerun_dirty_sink``; see ``_record_timeout_rerun_floor``.
     """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
@@ -114,6 +116,7 @@ async def _run_monitor_agent_with_service_recovery(
             state=state,
             git_preparation=git_preparation,
             timeout_rerun_floor_sink=timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink=timeout_rerun_dirty_sink,
         )
 
 
@@ -130,6 +133,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
     timeout_rerun_floor_sink: list[str] | None = None,
+    timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -230,6 +234,8 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 self,
                 workspace_id=workspace_id,
                 sink=timeout_rerun_floor_sink,
+                dirty_sink=timeout_rerun_dirty_sink,
+                timeout_reason_code=exc.reason_code,
             )
             if self._deps.adapter.is_hosted and state is not None:
                 hosted_pr_identity = await _hosted_pr_identity_for_workspace(
@@ -313,6 +319,8 @@ async def _record_timeout_rerun_floor(
     *,
     workspace_id: str,
     sink: list[str] | None,
+    dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
+    timeout_reason_code: str = AGENT_TIMEOUT,
 ) -> None:
     """Publish the HEAD a timed-out run is leaving behind before it is rerun.
 
@@ -336,12 +344,38 @@ async def _record_timeout_rerun_floor(
     unbounded probe would hang the recovery loop, so the rerun would never start
     and the timeout would never reach the #932 preserve handler
     (PRRT_kwDOSJAM6s6fvv27).
+
+    A SHA floor alone cannot hold the timed-out run's *uncommitted* edits, which
+    #932 protects just as much as its commits: a run that committed nothing
+    publishes a HEAD equal to the attempt floor, so a provider or protocol
+    failure on the rerun resets straight through those edits and deletes them.
+    ``dirty_sink`` therefore commits them first — the same dirty-worktree sink
+    the #932 preserve handler runs — and the HEAD published afterwards covers
+    the resulting commit (PRRT_kwDOSJAM6s6fvw8r). Like the probe it never raises
+    into the recovery loop, and it runs before the probe's own capability gate so
+    the edits are salvaged even when no HEAD can be published for them.
     """
     if sink is None:
         return
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
         return
+
+    if dirty_sink is not None:
+        try:
+            await dirty_sink(timeout_reason_code)
+        except Exception as sink_exc:
+            # Broad on purpose, exactly like the HEAD probe below: the sink
+            # spawns Git and touches repository/session state, and losing the
+            # rerun to a failed salvage would be worse than the rollback this
+            # bookkeeping guards against. ``asyncio.CancelledError`` is a
+            # ``BaseException`` and still propagates.
+            _log.warning(
+                "monitor.agent_service_recovery_rerun_dirty_sink_failed",
+                workspace_id=workspace_id,
+                reason_code=timeout_reason_code,
+                exc_type=type(sink_exc).__name__,
+            )
 
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
         item_start_snapshot_covers_outer_git_dir,
