@@ -465,6 +465,13 @@ export function WorkspaceLogColumn({
       if (!tailAuthDeniedRef.current) {
         columnEpochRef.current += 1;
       }
+      // Queued cache clears run after this function returns. Listing denial
+      // can bump the epoch again and recover before React flushes them, and
+      // those updaters must not wipe the recovered snapshot. Compare the
+      // epoch this denial stamped, not the pre-bump captured epoch — the
+      // first denial always increments, so the captured value would never
+      // match and the clear would never apply.
+      const denialEpoch = columnEpochRef.current;
       tailAuthDeniedRef.current = true;
       sawAuthDenial = true;
       setTailAuthDenied(true);
@@ -473,26 +480,13 @@ export function WorkspaceLogColumn({
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
       setStreamState("idle");
-      setEntries((current) => {
-        if (
-          generation !== tailRequestGenerationRef.current ||
-          !tailAuthDeniedRef.current ||
-          listingDeniedRef.current
-        ) {
-          return current;
-        }
-        return [];
-      });
-      setOffsets((current) => {
-        if (
-          generation !== tailRequestGenerationRef.current ||
-          !tailAuthDeniedRef.current ||
-          listingDeniedRef.current
-        ) {
-          return current;
-        }
-        return {};
-      });
+      const denialStillOwnsColumn = () =>
+        denialEpoch === columnEpochRef.current &&
+        generation === tailRequestGenerationRef.current &&
+        tailAuthDeniedRef.current &&
+        !listingDeniedRef.current;
+      setEntries((current) => (denialStillOwnsColumn() ? [] : current));
+      setOffsets((current) => (denialStillOwnsColumn() ? {} : current));
     };
 
     const readSelectedTail = async (stream: (typeof selected)[number]): Promise<LogTailReadResult> => {
