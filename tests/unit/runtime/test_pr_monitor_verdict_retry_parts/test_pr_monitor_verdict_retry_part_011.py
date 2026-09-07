@@ -33,7 +33,10 @@ from awf.db.enums import AgentRuntime
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner import comment_verdict_timeout_preserve as timeout_preserve
-from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictExecutionError
+from awf.runtime.pr_monitor_runner.comment_verdict import (
+    AgentVerdictExecutionError,
+    AgentVerdictProtocolError,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
 )
@@ -676,6 +679,181 @@ def test_preserved_work_reason_wording(
     assert "AGENT_IDLE_TIMEOUT" in reason
     for fragment in expected_fragments:
         assert fragment in reason
+
+
+@pytest.mark.unit
+async def test_a_failed_timeout_sink_escalates_instead_of_re_queueing_a_timeout(
+    tmp_path: Path,
+) -> None:
+    """A sink that FAILED is not a sink that found nothing (PRRT_kwDOSJAM6s6fwr71).
+
+    ``_commit_dirty_worktree`` answers False both ways. Reading the failure as an
+    ordinary preserved timeout records ``agent_failed`` and re-queues the item,
+    but the timed-out edits are still dirty, so the next comment-repair pass is
+    rejected by the pre-existing-dirty guard as ``PRE_EXISTING_DIRTY_WORKTREE``
+    before the agent can resume — the sink failure masked, the preserved work
+    stranded. Surface the commit-sink failure here instead, exactly as the
+    CI-repair path already does.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_TIMEOUT"))
+    state = MonitorState()
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke_item(runner, state=state)
+
+    assert caught.value.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert "AGENT_TIMEOUT" in str(caught.value)
+    # Escalating never licenses a rollback: the preserved commits and the item's
+    # evidence anchor survive the terminal failure.
+    assert runner.reset_targets == []
+    assert runner.current_head == _PRESERVED_HEAD
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    stranded = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_dirty_sink_stranded"
+    ]
+    assert len(stranded) == 1
+    assert stranded[0]["timeout_reason_code"] == "AGENT_TIMEOUT"
+    assert stranded[0]["preserved_head"] == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+async def test_an_empty_timeout_sink_still_reports_an_ordinary_preserved_timeout(
+    tmp_path: Path,
+) -> None:
+    """The ordinary case: nothing to commit is not a commit-sink failure."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_IDLE_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[False],
+    )
+    # The agent self-committed and left the worktree clean before the watchdog.
+    runner.current_head = _PRESERVED_HEAD
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_an_unreadable_residue_probe_keeps_the_preserved_timeout(
+    tmp_path: Path,
+) -> None:
+    """Fail OPEN: an unreadable probe cannot prove the sink stranded anything.
+
+    Guessing the other way turns every timeout whose worktree could not be read
+    into a terminal commit-sink failure, which is a far bigger loss than the one
+    extra pass today's behaviour costs.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+        stranded_status_raises=True,
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_TIMEOUT"))
+
+    with pytest.raises(AgentVerdictExecutionError) as caught:
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_TIMEOUT"
+    assert runner.reset_targets == []
+
+
+@pytest.mark.unit
+async def test_a_raising_residue_probe_keeps_the_preserved_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that raises must not escape and replace the timeout reason code."""
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_TIMEOUT"))
+
+    async def _raising_probe(*_args: object, **_kwargs: object) -> str | None:
+        raise SQLAlchemyError("supply-chain policy refresh lost the session")
+
+    monkeypatch.setattr(
+        comment_verdict,
+        "_read_correction_pr_worthy_residue_fingerprint",
+        _raising_probe,
+    )
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictExecutionError) as caught,
+    ):
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "AGENT_TIMEOUT"
+    probe_failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_dirty_sink_residue_probe_failed"
+    ]
+    assert len(probe_failures) == 1
+    assert probe_failures[0]["exc_type"] == "SQLAlchemyError"
+
+
+@pytest.mark.unit
+async def test_a_stranded_timeout_sink_outranks_provider_recovery(tmp_path: Path) -> None:
+    """Provider recovery is recorded, then suppressed so the sink failure surfaces.
+
+    Letting ``ProviderRecoveryRetryError`` propagate would move the workspace onto
+    the fallback provider and run its next pass straight into the dirty-worktree
+    guard, masking the commit-sink failure all over again — the same reason the
+    CI-repair path suppresses it there.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[_timeout_error("AGENT_IDLE_TIMEOUT")],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[True],
+        provider_error_action=ProviderRecoveryRetryError(),
+    )
+    _commit_then_fail(runner, _timeout_error("AGENT_IDLE_TIMEOUT"))
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke_item(runner, state=MonitorState())
+
+    assert caught.value.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    stranded = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_timeout_dirty_sink_stranded"
+    ]
+    assert stranded[0]["provider_recovery"] == "ProviderRecoveryRetryError"
 
 
 @pytest.mark.unit

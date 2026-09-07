@@ -416,8 +416,15 @@ async def _dirty_sink_verdict_for(
     *,
     monkeypatch: pytest.MonkeyPatch | None = None,
     probe_error: Exception | None = None,
+    expected_error: type[BaseException] = AgentVerdictExecutionError,
+    expected_reason_code: str = "AGENT_IDLE_TIMEOUT",
 ) -> list[bool]:
-    """Answer the loop's ``timeout_rerun_dirty_sink`` gets before it reruns."""
+    """Answer the loop's ``timeout_rerun_dirty_sink`` gets before it reruns.
+
+    The re-raised timeout then reaches the #932 preserve handler, whose own
+    outcome depends on whether the edits are still stranded once its sink has
+    tried too (PRRT_kwDOSJAM6s6fwr71) — hence the caller-supplied expectation.
+    """
     verdicts: list[bool] = []
 
     if probe_error is not None:
@@ -441,10 +448,10 @@ async def _dirty_sink_verdict_for(
 
     runner._run_monitor_agent_with_service_recovery = _run
 
-    with pytest.raises(AgentVerdictExecutionError) as caught:
+    with pytest.raises(expected_error) as caught:
         await _invoke_item(runner, state=MonitorState())
 
-    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert getattr(caught.value, "reason_code", None) == expected_reason_code
     return verdicts
 
 
@@ -458,6 +465,11 @@ async def test_the_dirty_sink_refuses_the_rerun_when_edits_stay_stranded(
     with the timed-out run's edits still dirty. No SHA floor can cover them, so
     rerunning would let the rollback a provider failure or non-FIXED verdict on
     the rerun performs delete work #932 promised to keep (PRRT_kwDOSJAM6s6fwTyO).
+
+    The re-raised timeout then finds those same edits still stranded after the
+    preserve handler's own sink retries, so the item ends on the commit-sink
+    failure rather than an ordinary re-queued timeout (PRRT_kwDOSJAM6s6fwr71).
+    The edits themselves still stay put either way.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -469,7 +481,11 @@ async def test_the_dirty_sink_refuses_the_rerun_when_edits_stay_stranded(
     )
     runner.current_head = _ITEM_START_HEAD
 
-    assert await _dirty_sink_verdict_for(runner) == [False]
+    assert await _dirty_sink_verdict_for(
+        runner,
+        expected_error=comment_verdict.AgentVerdictProtocolError,
+        expected_reason_code="REPAIR_DIRTY_COMMIT_FAILED",
+    ) == [False]
     assert runner.reset_targets == []
 
 

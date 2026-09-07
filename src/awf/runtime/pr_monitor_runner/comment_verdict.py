@@ -111,8 +111,14 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
 from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
     _correction_authored_mutation_vs_start,
     _fingerprint_has_pr_worthy_path_residue,
-    _read_correction_pr_worthy_residue_fingerprint,
     _stranded_residue_is_correction_mutation,
+)
+
+# Re-exported (``X as X``) because the extracted timeout-preserve block resolves
+# the residue probe through this module at call time, so a monkeypatch here still
+# reaches it.
+from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+    _read_correction_pr_worthy_residue_fingerprint as _read_correction_pr_worthy_residue_fingerprint,
 )
 
 # Re-exported (``X as X``) because the extracted pre-launch block resolves the
@@ -148,6 +154,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_unaccepted_protocol_retry_changes as _rollback_unaccepted_protocol_retry_changes,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
+    TimeoutSinkOutcome as TimeoutSinkOutcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     _sink_timeout_dirty_changes as _sink_timeout_dirty_changes,
@@ -359,7 +368,7 @@ async def _run_item_verdict_protocol(
         probe: preserving the timeout costs one rerun, guessing costs the edits
         (PRRT_kwDOSJAM6s6fwTyO).
         """
-        sunk = await _sink_timeout_dirty_changes(
+        sink_outcome = await _sink_timeout_dirty_changes(
             runner,
             workspace_id=workspace_id,
             reason_code=reason_code,
@@ -372,7 +381,7 @@ async def _run_item_verdict_protocol(
             command_evidence=command_evidence,
             commit_dirty_changes=commit_dirty_changes,
         )
-        if sunk:
+        if sink_outcome is TimeoutSinkOutcome.COMMITTED:
             return True
         try:
             residue_fp = await _read_correction_pr_worthy_residue_fingerprint(

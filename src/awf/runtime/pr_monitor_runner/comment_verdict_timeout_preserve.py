@@ -28,12 +28,21 @@ that way.
    so gates that read it as "work survived" (the operator-hint timeout retry)
    are not fooled by an unchanged HEAD (#934 audit).
 
+One timeout does *not* re-queue: a sink that ran, committed nothing and left the
+timed-out edits dirty has FAILED, not found the worktree empty, and re-queueing
+it hands the next comment-repair pass a dirty worktree its pre-existing-dirty
+guard rejects as ``PRE_EXISTING_DIRTY_WORKTREE`` — the sink failure masked and
+the preserved work stranded. That case escalates as ``REPAIR_DIRTY_COMMIT_FAILED``
+instead, exactly as the CI-repair commit sink already does, and still without a
+rollback (PRRT_kwDOSJAM6s6fwr71).
+
 Kept in a sibling module so ``comment_verdict`` stays under the line budget;
 re-exported from there (``X as X``) so monkeypatch seams keep working.
 """
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -42,12 +51,17 @@ from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.logging import get_logger
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    _fingerprint_has_pr_worthy_path_residue,
     read_protocol_attempt_start_head,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_rollback import (
     _rollback_or_classify_failure,
 )
-from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET, _TaskTagUnset
+from awf.runtime.pr_monitor_runner.constants import (
+    _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+    _TASK_TAG_UNSET,
+    _TaskTagUnset,
+)
 from awf.runtime.pr_monitor_runner.types import SINK_INFRASTRUCTURE_ERRORS
 
 if TYPE_CHECKING:
@@ -75,6 +89,32 @@ _TIMEOUT_BASELINE_UNSET = _TimeoutBaselineUnset()
 
 AGENT_TIMEOUT_REASON_CODES = frozenset({AGENT_TIMEOUT, AGENT_IDLE_TIMEOUT})
 """Reason codes that mean "the watchdog fired", not "the agent's work is junk"."""
+
+
+class TimeoutSinkOutcome(Enum):
+    """What the timeout dirty sink did — not merely "did it commit?".
+
+    ``_commit_dirty_worktree`` answers ``False`` for two very different things:
+    there was nothing PR-worthy to commit (the ordinary case), or its own
+    ``git status`` / ``git add`` / ``git commit`` failed after the timed-out
+    agent left repair output dirty. Collapsing them into one bool hands the
+    second case to the caller as an ordinary preserved timeout, which records
+    ``agent_failed`` and re-queues the item — but the edits are still dirty, so
+    the next comment-repair pass is rejected by the pre-existing-dirty guard as
+    ``PRE_EXISTING_DIRTY_WORKTREE`` before the agent can resume, masking the sink
+    failure and stranding the preserved work (PRRT_kwDOSJAM6s6fwr71).
+
+    The sink itself cannot tell the two apart, so ``NO_COMMIT`` is disambiguated
+    by a residue probe at the one call site that must escalate. ``RAISED`` is
+    kept distinct because that failure already carries its own logged reason code
+    and its preserve-the-timeout behaviour is a #932 regression in its own right.
+    """
+
+    COMMITTED = "committed"
+    NO_COMMIT = "no_commit"
+    RAISED = "raised"
+    DISABLED = "disabled"
+
 
 _ITEM_START_HEAD_STATE_KEY_PREFIX = "__awf_item_start_head__:"
 _ITEM_START_HEAD_BODY_HASH_SEPARATOR = ":"
@@ -411,7 +451,7 @@ async def handle_agent_run_error(
         await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
         raise AgentVerdictExecutionError(reason_code=exc.reason_code) from exc
 
-    dirty_changes_committed = await _sink_timeout_dirty_changes(
+    sink_outcome = await _sink_timeout_dirty_changes(
         runner,
         workspace_id=workspace_id,
         reason_code=exc.reason_code,
@@ -423,6 +463,19 @@ async def handle_agent_run_error(
         task_tag=task_tag,
         command_evidence=command_evidence,
         commit_dirty_changes=commit_dirty_changes,
+    )
+    dirty_changes_committed = sink_outcome is TimeoutSinkOutcome.COMMITTED
+    # Only a sink that *ran* and committed nothing can be hiding a failed
+    # ``git status`` / ``git add`` / ``git commit`` behind "nothing to commit"
+    # (PRRT_kwDOSJAM6s6fwr71). A raised sink already reported its own reason
+    # code, and a disabled one never owned the dirt.
+    sink_stranded_dirt = sink_outcome is TimeoutSinkOutcome.NO_COMMIT and (
+        await _timeout_sink_left_pr_worthy_residue(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason_code=exc.reason_code,
+        )
     )
 
     preserved_head = await _preserved_head_sha(
@@ -449,7 +502,20 @@ async def handle_agent_run_error(
         preserved_head=preserved_head,
         dirty_changes_committed=dirty_changes_committed,
         work_preserved=work_preserved,
+        sink_stranded_dirt=sink_stranded_dirt,
     )
+    if sink_stranded_dirt:
+        # The sink failed rather than finding nothing: escalate the commit-sink
+        # failure instead of re-queueing an ordinary timeout the next pass can
+        # only reject as ``PRE_EXISTING_DIRTY_WORKTREE``.
+        await _raise_stranded_timeout_sink_failure(
+            runner,
+            exc=exc,
+            workspace_id=workspace_id,
+            state=state,
+            item_start_head=item_start_head,
+            preserved_head=preserved_head,
+        )
     # Recorded after the work is preserved and the marker is written, so a
     # provider-recovery escalation (retry / fallback / auth) still finds both in
     # place. Those escalations deliberately propagate: they short-circuit the
@@ -482,12 +548,12 @@ async def _sink_timeout_dirty_changes(
     task_tag: str | None | _TaskTagUnset,
     command_evidence: list[str],
     commit_dirty_changes: bool,
-) -> bool:
+) -> TimeoutSinkOutcome:
     """Commit whatever the timed-out agent left uncommitted; never raise."""
     if not commit_dirty_changes:
-        return False
+        return TimeoutSinkOutcome.DISABLED
     try:
-        return await runner._commit_dirty_worktree(
+        committed = await runner._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=f"{commit_message} (preserved after agent timeout)",
             compose_project=compose_project,
@@ -508,6 +574,7 @@ async def _sink_timeout_dirty_changes(
             exc_type=type(sink_exc).__name__,
             sink_reason_code=getattr(sink_exc, "reason_code", None),
         )
+        return TimeoutSinkOutcome.RAISED
     except Exception as sink_exc:
         # The sink can also raise untyped failures — repository/session errors
         # from the supply-chain policy refresh, raw git errors — which the
@@ -524,7 +591,119 @@ async def _sink_timeout_dirty_changes(
             item_start_head=item_start_head,
             exc_type=type(sink_exc).__name__,
         )
-    return False
+        return TimeoutSinkOutcome.RAISED
+    return TimeoutSinkOutcome.COMMITTED if committed else TimeoutSinkOutcome.NO_COMMIT
+
+
+async def _timeout_sink_left_pr_worthy_residue(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    reason_code: str,
+) -> bool:
+    """Did a no-commit timeout sink leave PR-worthy dirt behind?
+
+    That is the "the sink failed" half of ``TimeoutSinkOutcome.NO_COMMIT``: the
+    sink ran ``git status`` / ``git add`` / ``git commit``, reported no commit,
+    and the timed-out agent's edits are still sitting in the worktree.
+
+    Fails OPEN on an unreadable or raising probe, unlike the recovery-rerun sink
+    that shares this probe: there the cost of guessing wrong is one skipped
+    rerun, here it is turning every timeout whose worktree could not be read into
+    a terminal commit-sink failure. An unreadable probe therefore keeps today's
+    preserve-and-re-queue behaviour, and the next pass's dirty guard remains the
+    backstop it already is.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+
+    try:
+        residue_fingerprint = await _comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+    except Exception as probe_exc:
+        # Broad on purpose, like every other residue probe on this path: it
+        # spawns Git and can raise outside the git-spawn error set. Letting one
+        # escape would replace the timeout reason code with an unrelated
+        # exception. ``asyncio.CancelledError`` is a ``BaseException`` and still
+        # propagates.
+        _log.warning(
+            "monitor.agent_verdict_timeout_dirty_sink_residue_probe_failed",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            exc_type=type(probe_exc).__name__,
+        )
+        return False
+    if residue_fingerprint is None:
+        _log.warning(
+            "monitor.agent_verdict_timeout_dirty_sink_residue_probe_unreadable",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+        )
+        return False
+    return _fingerprint_has_pr_worthy_path_residue(residue_fingerprint)
+
+
+async def _raise_stranded_timeout_sink_failure(
+    runner: PullRequestMonitorRunner,
+    *,
+    exc: AgentRunError,
+    workspace_id: str,
+    state: MonitorState | None,
+    item_start_head: str | None,
+    preserved_head: str | None,
+) -> NoReturn:
+    """Escalate a failed timeout sink instead of re-queueing an ordinary timeout.
+
+    Mirrors the CI-repair commit sink (PRRT_kwDOSJAM6s6KY4Wi): surface
+    ``REPAIR_DIRTY_COMMIT_FAILED`` — already a terminal monitor reason — so the
+    stranded edits are attributable now, instead of resurfacing next pass as an
+    unrelated ``PRE_EXISTING_DIRTY_WORKTREE``. Provider recovery is still
+    *recorded* (that outage telemetry is real) but its control-flow exception is
+    suppressed: letting it propagate would send the next pass to the fallback
+    provider and straight into the dirty-worktree guard, masking the sink failure
+    all over again.
+
+    No rollback, ever — the timed-out agent's commits and the item's evidence
+    anchor (both already in place) survive this exit exactly as they survive the
+    ordinary preserve path.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
+    from awf.runtime.pr_monitor_runner.types import (
+        ProviderRecoveryAuthError,
+        ProviderRecoveryFallbackError,
+        ProviderRecoveryRetryError,
+    )
+
+    provider_recovery_exc: BaseException | None = None
+    try:
+        await runner._handle_provider_agent_run_error(workspace_id, exc, state=state)
+    except (
+        ProviderRecoveryRetryError,
+        ProviderRecoveryFallbackError,
+        ProviderRecoveryAuthError,
+    ) as recovery_exc:
+        provider_recovery_exc = recovery_exc
+    _log.warning(
+        "monitor.agent_verdict_timeout_dirty_sink_stranded",
+        workspace_id=workspace_id,
+        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+        timeout_reason_code=exc.reason_code,
+        item_start_head=item_start_head,
+        preserved_head=preserved_head,
+        provider_recovery=(
+            type(provider_recovery_exc).__name__ if provider_recovery_exc is not None else None
+        ),
+    )
+    raise AgentVerdictProtocolError(
+        reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+        message=(
+            f"Agent timed out ({exc.reason_code}) and the dirty-worktree sink could not "
+            "commit the edits it left behind; they are stranded in the repair worktree."
+        ),
+    ) from exc
 
 
 def cleanup_error_agent_timeout_reason_code(exc: ComposeExecCleanupError) -> str | None:
@@ -588,7 +767,7 @@ async def preserve_timeout_work_and_raise_cleanup_error(
             mirror_path=mirror_path,
             stage="after_comment_agent_timeout_cleanup_failure",
         )
-    dirty_changes_committed = await _sink_timeout_dirty_changes(
+    dirty_changes_committed = TimeoutSinkOutcome.COMMITTED is await _sink_timeout_dirty_changes(
         runner,
         workspace_id=workspace_id,
         reason_code=timeout_reason_code,
