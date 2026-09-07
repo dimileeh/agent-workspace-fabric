@@ -15,12 +15,23 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.enums import OperationStatus, OperationType
+from awf.db.models import Operation
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorState, OperatorHint
+from awf.runtime.pr_monitor import (
+    AddressOperatorHint,
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    OperatorHint,
+    PRStatus,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictExecutionError,
     MonitorVerdictResult,
@@ -29,7 +40,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import (
     operator_hint_timeout_retry_key,
     should_retry_timed_out_hint,
+    timeout_retry_reason_code,
 )
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -137,6 +150,10 @@ async def test_timed_out_hint_with_preserved_work_is_retried_once(
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "pending"
     assert state.threads_addressed_ids[operator_hint_timeout_retry_key(hint)] == "retried"
+    # The envelope is flagged and carries the watchdog code, so the monitor loop
+    # cannot record the retry as an indistinguishable succeeded no-op.
+    assert result.operator_hint_timeout_retry is True
+    assert result.reason_code == "AGENT_IDLE_TIMEOUT"
 
 
 @pytest.mark.unit
@@ -251,8 +268,6 @@ async def test_retry_marker_is_cleared_when_the_hint_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
-
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
         factory=factory,
@@ -329,6 +344,106 @@ def test_should_retry_timed_out_hint_gate(
     state = MonitorState(pending_operator_hint=hint)
 
     assert should_retry_timed_out_hint(state, hint, verdict) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        (
+            MonitorVerdictResult(verdict="agent_failed", reason_code="AGENT_IDLE_TIMEOUT"),
+            "AGENT_IDLE_TIMEOUT",
+        ),
+        (MonitorVerdictResult(verdict="agent_failed"), "AGENT_TIMEOUT"),
+        (VerdictResult(verdict="fix_committed"), "AGENT_TIMEOUT"),
+    ],
+)
+def test_timeout_retry_reason_code_carries_the_watchdog_code(
+    verdict: VerdictResult | MonitorVerdictResult,
+    expected: str,
+) -> None:
+    """A granted retry reports the watchdog code; the fallback keeps it total."""
+    assert timeout_retry_reason_code(verdict) == expected
+
+
+@pytest.mark.unit
+async def test_retry_cycle_records_a_failed_operation_with_the_timeout_reason(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry must not be filed as a succeeded ``operator_hint_needs_human``.
+
+    No human wait was entered and the watchdog did fire, so operation history
+    records the attempt as failed with its reason code (AGENTS.md: retries must
+    preserve reason codes).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _retried_cycle(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=False,
+            returncode=0,
+            reason_code="AGENT_IDLE_TIMEOUT",
+            operator_hint_timeout_retry=True,
+        )
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _retried_cycle)
+
+    handled = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=PRStatus(
+            number=42,
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.MERGEABLE,
+            check_state=CheckState.SUCCESS,
+            unresolved_inline_threads=(),
+            unresolved_review_comments=(),
+            base_behind_count=0,
+            merge_state_status=MergeStateStatus.CLEAN,
+        ),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is False
+    async with factory() as session:
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result["outcome"] == "operator_hint_timeout_retry"
+    assert operation.result["reason_code"] == "AGENT_IDLE_TIMEOUT"
+    assert operation.error_code == "AGENT_IDLE_TIMEOUT"
 
 
 @pytest.mark.unit

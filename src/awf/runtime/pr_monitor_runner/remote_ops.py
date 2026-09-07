@@ -172,6 +172,14 @@ class _GitPushResult:
     ``monitoring_pr`` with the awaiting-human attention flag set. Like
     ``paused_into_blocked`` this ends the monitor cycle WITHOUT terminally failing
     the workspace — the preserved commits must survive for the operator."""
+    operator_hint_timeout_retry: bool = False
+    """The operator-hint agent hit the #932 watchdog with its work preserved and
+    the hint spent its single retry: the hint stays ``pending`` so ``decide()``
+    re-issues ``AddressOperatorHint`` next cycle. Nothing was pushed and no human
+    was notified, but the attempt still FAILED — the loop records this envelope's
+    ``reason_code`` (the watchdog code) under an explicit retry outcome instead of
+    a succeeded no-op, so the retry cannot hide the timeout from operation
+    history (AGENTS.md: retries must preserve reason codes)."""
     pr_terminal: _PostActionPrTerminalState | None = None
     """The action finished AFTER its PR merged/closed, so nothing was pushed,
     paused, or notified (#910). Set only on the non-paused, non-failed moot

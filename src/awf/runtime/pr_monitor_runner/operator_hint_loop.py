@@ -202,6 +202,31 @@ async def handle_operator_hint_action(
             },
         )
         return True
+    if push_result.operator_hint_timeout_retry:
+        # The #932 watchdog fired with the agent's work preserved and the hint
+        # spent its single retry: it stays ``pending`` so ``decide()`` re-issues
+        # ``AddressOperatorHint``. Nothing was pushed and no human wait was
+        # entered, so the outcome ladder below would call this a succeeded
+        # ``operator_hint_needs_human`` and drop the watchdog code. Record the
+        # attempt as what it was — a failure that earned a retry — with its
+        # reason code intact (AGENTS.md: retries must preserve reason codes).
+        await self._finish_monitor_operation(
+            operation,
+            status=OperationStatus.failed,
+            result={
+                "status": "failed",
+                "outcome": "operator_hint_timeout_retry",
+                "reason_code": push_result.reason_code,
+                "pushed": False,
+            },
+            error_code=push_result.reason_code,
+            error_message=(
+                f"Operator hint agent timed out ({push_result.reason_code}); "
+                "preserved work is retried once before a human is notified."
+            ),
+        )
+        state.iter_count += 1
+        return False
     if push_result.failed:
         reason_code = push_result.reason_code
         outcome = _git_push_failure_outcome(push_result)

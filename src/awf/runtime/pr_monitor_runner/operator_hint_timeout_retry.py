@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from awf.adapters.provider_failures import AGENT_TIMEOUT
 from awf.runtime.pr_monitor_runner.comment_verdict import MonitorVerdictResult, VerdictResult
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     AGENT_TIMEOUT_REASON_CODES,
@@ -52,6 +53,17 @@ def should_retry_timed_out_hint(
         # Nothing survived the timeout, so a retry resumes from nowhere.
         return False
     return not state.threads_addressed_ids.get(operator_hint_timeout_retry_key(hint))
+
+
+def timeout_retry_reason_code(verdict: VerdictResult | MonitorVerdictResult) -> str:
+    """Return the watchdog reason code a granted retry must carry forward.
+
+    ``should_retry_timed_out_hint`` has already proven the verdict is a
+    ``MonitorVerdictResult`` carrying a code from ``AGENT_TIMEOUT_REASON_CODES``;
+    the fallback only keeps the return type total for other callers.
+    """
+    reason_code = verdict.reason_code if isinstance(verdict, MonitorVerdictResult) else None
+    return reason_code or AGENT_TIMEOUT
 
 
 def mark_timeout_retry_used(state: MonitorState, hint: OperatorHint) -> None:
