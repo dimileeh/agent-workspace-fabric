@@ -172,6 +172,8 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
   if (
     window.anchor !== "generated_at" ||
     typeof window.since_hours !== "number" ||
+    !Number.isInteger(window.since_hours) ||
+    window.since_hours < 1 ||
     typeof window.start !== "string" ||
     !isFiniteTimestampString(window.start)
   ) {
@@ -188,8 +190,15 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
   ) {
     return null;
   }
-  if (!Array.isArray(coverage.notes)) {
+  // OpenAPI/Python mark notes optional (default []); omit → []. Present but
+  // non-array or non-string items are malformed and fail closed.
+  let notes: string[];
+  if (!("notes" in coverage) || coverage.notes === undefined) {
+    notes = [];
+  } else if (!Array.isArray(coverage.notes) || !coverage.notes.every((n) => typeof n === "string")) {
     return null;
+  } else {
+    notes = coverage.notes as string[];
   }
   if (!record.counts || typeof record.counts !== "object" || Array.isArray(record.counts)) {
     return null;
@@ -230,5 +239,11 @@ export function parseDashboardSummary(payload: unknown): ConsoleDashboardSummary
       return null;
     }
   }
-  return payload as ConsoleDashboardSummary;
+  return {
+    ...(payload as ConsoleDashboardSummary),
+    coverage: {
+      status: coverage.status,
+      notes,
+    },
+  };
 }
