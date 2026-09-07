@@ -256,10 +256,17 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_abandoned](#comment_repair_unpublished_abandoned)
 
+### COMMENT_REPAIR_UNPUBLISHED_PRESERVED
+**Problem:** AWF resumed an interrupted PR-comment repair from its unpushed local commits.
+**Likely Cause:** A restart interrupted the repair batch mid-way. The local commits ahead of the PR head carry comment-repair provenance, so AWF kept them and continued the batch instead of discarding accepted review fixes.
+**Operator Fix:** No action is required. The commits are pushed with the next monitor cycle; watch the PR for the repair push.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_preserved](#comment_repair_unpublished_preserved)
+
 ### COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING
-**Problem:** AWF blocked comment repair because unpushed local commits lack comment-repair provenance.
-**Likely Cause:** Local HEAD advanced past the remote PR head without a matching comment-repair operation fingerprint, or with conflicting non-comment repair provenance. AWF refused to reset or push those commits.
-**Operator Fix:** Inspect the worktree for unrelated local commits, preserve or reset them manually if needed, then remonitor the workspace.
+**Problem:** AWF parked comment repair for a human: unpushed local commits could not be attributed to this repair batch. The commits are preserved.
+**Likely Cause:** Local HEAD advanced past the remote PR head without matching comment-repair provenance, or with conflicting non-comment repair provenance. AWF refused to reset or push those commits and left the worktree untouched instead of failing the workspace.
+**Operator Fix:** Inspect the named commits in the workspace worktree, then either keep them (push or let AWF resume) or drop them manually, and remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_provenance_missing](#comment_repair_unpublished_provenance_missing)
 
