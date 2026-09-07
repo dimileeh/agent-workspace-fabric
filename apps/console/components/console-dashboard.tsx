@@ -164,6 +164,8 @@ export function ConsoleDashboard() {
   const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
   // Summary poll generation: older success/error must not replace newer state.
   const dashboardSummaryRequestGenerationRef = useRef(0);
+  // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
+  const cloudRuntimeRequestGenerationRef = useRef(0);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -508,13 +510,17 @@ export function ConsoleDashboard() {
 
   const loadCloudRuntime = useCallback(async (caps?: ConsoleCapabilities | null) => {
     const epoch = authorizedFeedEpochRef.current;
+    const generation = ++cloudRuntimeRequestGenerationRef.current;
     const active = caps ?? capabilities;
     const route = widgetRoute(active, "cloud_runtime");
     if (!route) {
       return;
     }
     const result = await apiGet<CloudRuntimeSummary>(capabilityRouteToAwfPath(route));
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (
+      epoch !== authorizedFeedEpochRef.current ||
+      generation !== cloudRuntimeRequestGenerationRef.current
+    ) {
       return;
     }
     if (!result.ok) {

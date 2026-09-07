@@ -180,6 +180,20 @@ test("loadDashboardSummary discards stale success and error via request generati
   );
 });
 
+test("loadCloudRuntime discards stale success and error via request generation", () => {
+  const dashboard = dashboardSource.dashboard;
+  assert.match(
+    dashboard,
+    /const cloudRuntimeRequestGenerationRef = useRef\(0\);/,
+    "Expected a cloud-runtime request-generation ref so overlapping polls stay monotonic",
+  );
+  assert.match(
+    dashboard,
+    /const loadCloudRuntime = useCallback\([\s\S]*?const generation = \+\+cloudRuntimeRequestGenerationRef\.current;[\s\S]*?generation !== cloudRuntimeRequestGenerationRef\.current[\s\S]*?setCloudRuntimeError/,
+    "Expected loadCloudRuntime to bump generation before fetch and discard mismatched responses before success or error setters",
+  );
+});
+
 test("loadCapabilities discards stale responses via request generation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
