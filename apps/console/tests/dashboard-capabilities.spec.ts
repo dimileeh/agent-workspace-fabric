@@ -1536,9 +1536,10 @@ test("fullscreen logs skip unsupported workspace_logs and workspace_stream", asy
     .check();
   await page.getByRole("button", { name: "Open logs", exact: true }).click();
 
+  // Without workspace_logs, omit the fullscreen viewer entirely — do not mount
+  // columns that would only show "Workspace log listing is unavailable."
   const modal = page.locator(".fixed.inset-0.z-50");
-  await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
-  await expect(modal.getByText("Workspace log listing is unavailable.")).toBeVisible();
+  await expect(modal.getByRole("heading", { name: "Logs" })).toHaveCount(0);
   await page.waitForTimeout(1200);
 
   expect(requested.some((path) => path.endsWith("/logs") || path.includes("/logs/"))).toBe(false);

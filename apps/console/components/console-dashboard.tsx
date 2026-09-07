@@ -367,6 +367,10 @@ export function ConsoleDashboard() {
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
+    // Missing/malformed negotiation drops workspace_logs — close fullscreen so
+    // allowFullscreenLogs false does not leave logsFullscreen latched for remount.
+    setLogsFullscreen(false);
+    setFullscreenWorkspaceIds([]);
     appliedCapabilitiesRef.current = null;
     setCapabilities(null);
   }, []);
@@ -419,6 +423,9 @@ export function ConsoleDashboard() {
           setSelectedStreams([]);
           setLogEntries([]);
           setStreamOffsets({});
+          // Close (not only omit) fullscreen when listing is withdrawn mid-view.
+          setLogsFullscreen(false);
+          setFullscreenWorkspaceIds([]);
         }
       }
       if (capabilityFeedWithdrawalCleared(plan)) {

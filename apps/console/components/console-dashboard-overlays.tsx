@@ -24,7 +24,9 @@ type ConsoleDashboardOverlaysProps = {
 export function ConsoleDashboardOverlays(props: ConsoleDashboardOverlaysProps) {
   return (
     <>
-      {props.logsFullscreen && props.fullscreenWorkspaces.length > 0 ? (
+      {props.logsFullscreen &&
+      props.allowFullscreenLogs &&
+      props.fullscreenWorkspaces.length > 0 ? (
         <MultiWorkspaceLogsFullscreen
           workspaces={props.fullscreenWorkspaces}
           sortDirection={props.logSortDirection}

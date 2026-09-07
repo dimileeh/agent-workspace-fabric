@@ -445,6 +445,32 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
   assert.match(
     overlays,
+    /props\.logsFullscreen &&\s*props\.allowFullscreenLogs &&\s*props\.fullscreenWorkspaces\.length > 0/,
+    "Expected overlays to unmount fullscreen logs when workspace_logs is withdrawn (not leave unsupported columns mounted)",
+  );
+  // Same-identity workspace_logs withdrawal must close fullscreen state — omit alone
+  // leaves logsFullscreen true so the viewer remounts when listing is re-advertised.
+  assert.match(
+    dashboard,
+    /if \(plan\.clearLogs\) \{[\s\S]*?setLogsFullscreen\(false\);[\s\S]*?setFullscreenWorkspaceIds\(\[\]\);/,
+    "Expected clearLogs withdrawal to close the fullscreen log viewer, not only clear inspector tails",
+  );
+  // Missing/malformed negotiation (404 gated clear) also drops allowFullscreenLogs;
+  // close open fullscreen so it does not remount when capabilities recover.
+  const gatedClearStart = dashboard.indexOf("const clearCapabilityGatedInventories = useCallback");
+  assert.ok(gatedClearStart > 0, "Expected clearCapabilityGatedInventories helper");
+  const gatedClearEnd = dashboard.indexOf(
+    "// Same-identity inventory can withdraw a feed without changing the epoch key.",
+    gatedClearStart,
+  );
+  const gatedClearBody = dashboard.slice(gatedClearStart, gatedClearEnd);
+  assert.match(
+    gatedClearBody,
+    /setLogsFullscreen\(false\);[\s\S]*?setFullscreenWorkspaceIds\(\[\]\);/,
+    "Expected missing/malformed capability clear to close an open fullscreen log viewer",
+  );
+  assert.match(
+    overlays,
     /allowStreamLogs=\{props\.allowFullscreenStreamLogs\}/,
     "Expected overlays to pass allowStreamLogs, not bare allowStream, so stream-only caps do not buffer hidden log frames",
   );
