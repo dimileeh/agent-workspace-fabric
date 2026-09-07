@@ -22,6 +22,41 @@ test("parseDashboardSummary accepts the local fixture", () => {
   assert.equal(parsed.window.since_hours, 24);
 });
 
+test("parseDashboardSummary accepts the hosted fixture", () => {
+  const hosted = JSON.parse(
+    readFileSync(
+      new URL("../../../docs/console/fixtures/v1/dashboard-summary.hosted.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  // executing + monitoring_pr + queued + retrying (+ awaiting_operator=0) must stay within active.
+  const parsed = parseDashboardSummary(hosted, "hosted");
+  assert.ok(parsed);
+  assert.equal(parsed.scope, "tenant");
+  assert.equal(parsed.counts.active, 15);
+  assert.equal(
+    parsed.counts.executing +
+      parsed.counts.monitoring_pr +
+      parsed.counts.queued +
+      parsed.counts.retrying,
+    15,
+  );
+});
+
+test("parseDashboardSummary rejects pre-fix hosted active underflow", () => {
+  // Bugbot: active=12 with executing+monitoring_pr+queued+retrying=15 must fail closed.
+  const hosted = JSON.parse(
+    readFileSync(
+      new URL("../../../docs/console/fixtures/v1/dashboard-summary.hosted.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(
+    parseDashboardSummary({ ...hosted, counts: { ...hosted.counts, active: 12 } }, "hosted"),
+    null,
+  );
+});
+
 test("parseDashboardSummary rejects scope that conflicts with backend_kind", () => {
   // Hosted negotiation must not accept node-local counters as tenant fleet totals.
   assert.equal(parseDashboardSummary(validSummary({ scope: "local" }), "hosted"), null);

@@ -56,6 +56,21 @@ def test_dashboard_summary_fixtures_validate(name: str) -> None:
         assert model.coverage.status == "partial"
         assert model.counts.queued is None
         assert model.counts.cancelled_last_window is None
+    if name.endswith("hosted.json"):
+        # Queued joined the combined disjoint active-bucket check; keep the
+        # published golden inside active so Cloud reuse does not fail closed.
+        assert model.counts.active == 15
+        assert model.counts.executing == 7
+        assert model.counts.monitoring_pr == 3
+        assert model.counts.queued == 4
+        assert model.counts.retrying == 1
+        assert (
+            model.counts.executing
+            + model.counts.monitoring_pr
+            + model.counts.queued
+            + model.counts.retrying
+            <= model.counts.active
+        )
 
 
 @pytest.mark.unit

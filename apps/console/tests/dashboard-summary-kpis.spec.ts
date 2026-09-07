@@ -22,7 +22,7 @@ test("KPI values come from dashboard-summary when saturation absent", async ({ p
   await page.goto("/");
   await waitForConsoleReady(page);
 
-  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("12");
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("15");
   await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("7");
   await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("3");
   await expect(kpi(page, "Awaiting human").locator(".kpi-value")).toHaveText("2");
@@ -67,7 +67,8 @@ test("status counters stay consistent for escalation/retry/terminal fixtures", a
   await mockAwfConsoleApi(page, {
     dashboardSummary: localDashboardSummary({
       counts: {
-        active: 8,
+        // executing+monitoring_pr+queued+awaiting_operator+retrying = 9 ⊆ active
+        active: 9,
         executing: 3,
         monitoring_pr: 2,
         awaiting_operator: 1,
@@ -82,6 +83,7 @@ test("status counters stay consistent for escalation/retry/terminal fixtures", a
   });
   await page.goto("/");
   await waitForConsoleReady(page);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9");
   await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("1");
   await expect(kpi(page, "Awaiting human").locator(".kpi-value")).toHaveText("1");
   await expect(kpi(page, "Auto-retrying").locator(".kpi-value")).toHaveText("1");

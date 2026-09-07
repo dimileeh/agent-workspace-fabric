@@ -512,6 +512,23 @@ def test_dashboard_summary_rejects_window_start_mismatching_since_hours() -> Non
             },
             {},
         ),
+        # Hosted golden regression: pre-fix active=12 cannot hold
+        # executing(7)+monitoring_pr(3)+queued(4)+retrying(1)=15.
+        (
+            {
+                "active": 12,
+                "executing": 7,
+                "monitoring_pr": 3,
+                "awaiting_operator": 0,
+                "awaiting_human": 2,
+                "retrying": 1,
+                "queued": 4,
+            },
+            {
+                "awaiting_operator_in_active_not_executing": True,
+                "retrying_in_active_not_executing": True,
+            },
+        ),
     ],
 )
 def test_dashboard_summary_rejects_contradictory_count_subsets(
