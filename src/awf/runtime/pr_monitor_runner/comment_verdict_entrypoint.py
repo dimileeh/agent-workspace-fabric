@@ -198,12 +198,32 @@ async def _invoke_cli_for_verdict_result(
             # Whatever the restore left in state is what gets persisted: a fresh
             # timeout on this very attempt is newer, wins the re-arm, and has
             # already written itself durably.
-            await remember_item_start_head_durably(
-                runner,
-                workspace_id=workspace_id,
-                state=state,
-                item_id=item_id,
-                head=peek_item_start_head(state, item_id),
-                body_hash=peek_item_start_body_hash(state, item_id),
-            )
+            try:
+                await remember_item_start_head_durably(
+                    runner,
+                    workspace_id=workspace_id,
+                    state=state,
+                    item_id=item_id,
+                    head=peek_item_start_head(state, item_id),
+                    body_hash=peek_item_start_body_hash(state, item_id),
+                )
+            except Exception as write_exc:
+                # Broad on purpose, and only here: this is the one durable write
+                # that runs *inside* an exception handler, so anything it raises
+                # replaces the failure on its way out — the recovery-failed or
+                # protocol reason code that ``run()`` classifies the pass by would
+                # be swallowed by a storage error. The helper already degrades on
+                # ``SQLAlchemyError``/``OSError``, but a session factory can fail
+                # outside that set (a closed loop, a repository error), and losing
+                # the anchor is strictly the smaller harm: the in-memory marker it
+                # wrote before the first await still carries it across a clean
+                # exit. ``asyncio.CancelledError`` is a ``BaseException`` and still
+                # propagates.
+                _log.warning(
+                    "monitor.agent_verdict_mid_run_anchor_durable_write_failed",
+                    workspace_id=workspace_id,
+                    item_id=item_id,
+                    item_start_head=anchor_head,
+                    exc_type=type(write_exc).__name__,
+                )
         raise

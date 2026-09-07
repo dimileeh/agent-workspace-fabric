@@ -41,9 +41,10 @@ from awf.db.enums import AgentRuntime
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_entrypoint
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
+    remember_item_start_head,
     remember_item_start_head_durably,
 )
 from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
@@ -335,4 +336,61 @@ async def test_an_anchor_earned_mid_run_is_durable_before_the_recovery_failure_e
     )
     assert await _persisted_anchor(factory, workspace_id) == f"{_BODY_HASH}:{_ITEM_START_HEAD}"
     # The preserved commit itself is untouched: the rollback stops at the floor.
+    assert runner.current_head == _PRESERVED_HEAD
+
+
+@pytest.mark.unit
+async def test_mid_run_anchor_write_failure_keeps_the_recovery_failure_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one write inside an exception handler never becomes the outcome.
+
+    A storage error outside the helper's ``SQLAlchemyError``/``OSError`` degrade
+    set would otherwise replace the failure ``run()`` classifies the pass by, so
+    the anchor is given up instead — the in-memory marker written before the
+    first await still carries it across a clean exit (PRRT_kwDOSJAM6s6f0ft2).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _recovery_failed_after_rerun_runner(
+        tmp_path,
+        workspace_id=workspace_id,
+        session_factory=factory,
+    )
+    state = MonitorState()
+
+    async def _broken_write(*_args: object, **kwargs: object) -> None:
+        # The in-memory marker the real helper writes before its first await.
+        remember_item_start_head(
+            state,
+            _ITEM_ID,
+            str(kwargs["head"]),
+            str(kwargs["body_hash"]),
+        )
+        raise RuntimeError("Event loop is closed")
+
+    monkeypatch.setattr(
+        comment_verdict_entrypoint,
+        "remember_item_start_head_durably",
+        _broken_write,
+    )
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(_MonitorAgentServiceRecoveryFailedError),
+    ):
+        await _invoke_item(runner, workspace_id=workspace_id, state=state)
+
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == (
+        f"{_BODY_HASH}:{_ITEM_START_HEAD}"
+    )
+    assert await _persisted_anchor(factory, workspace_id) is None
+    failures = [
+        entry_log
+        for entry_log in captured
+        if entry_log.get("event") == "monitor.agent_verdict_mid_run_anchor_durable_write_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "RuntimeError"
     assert runner.current_head == _PRESERVED_HEAD
