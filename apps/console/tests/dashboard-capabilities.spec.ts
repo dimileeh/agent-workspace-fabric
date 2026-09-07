@@ -1459,25 +1459,31 @@ test.describe("hosted context query carry", () => {
         return;
       }
       if (path === `${apiPrefix}/workspaces/overview`) {
+        // After the soft switch, do not reintroduce tenant-A rows via the
+        // legacy-safe overview fetch that still runs on capability outage.
         await fulfillJson(
           route,
-          listEnvelope([
-            {
-              workspace_id: "ws_tenant_a",
-              title: "Tenant A workspace",
-              repo_url: "https://github.com/example/tenant",
-              base_branch: "main",
-              agent: "codex",
-              agent_model: "gpt-5.5",
-              status: "running",
-              created_at: "2026-09-06T17:00:00Z",
-              updated_at: "2026-09-06T17:00:00Z",
-              task_prompt: "tenant row",
-              lifecycle: [],
-              llm_usage: null,
-              recovery: null,
-            },
-          ]),
+          listEnvelope(
+            failTenantBCapabilities
+              ? []
+              : [
+                  {
+                    workspace_id: "ws_tenant_a",
+                    title: "Tenant A workspace",
+                    repo_url: "https://github.com/example/tenant",
+                    base_branch: "main",
+                    agent: "codex",
+                    agent_model: "gpt-5.5",
+                    status: "running",
+                    created_at: "2026-09-06T17:00:00Z",
+                    updated_at: "2026-09-06T17:00:00Z",
+                    task_prompt: "tenant row",
+                    lifecycle: [],
+                    llm_usage: null,
+                    recovery: null,
+                  },
+                ],
+          ),
         );
         return;
       }
