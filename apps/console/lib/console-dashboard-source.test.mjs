@@ -188,8 +188,8 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
-    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId\s*\)/,
-    "Expected loadLogTail to discard after epoch/gated-detail/per-stream generation advance or selection change",
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current\s*\)/,
+    "Expected loadLogTail to discard after epoch/gated-detail/per-stream generation advance, selection change, or listing denial",
   );
   for (const loader of [
     "loadResourceSaturation",
@@ -847,6 +847,16 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
     dashboardSource.liveStream,
     /frame\.type === "log"\) \{[\s\S]*?if \(!allowStreamLogs\) \{\s*return;\s*\}/,
     "Expected SSE log frames to be ignored when workspace_logs listing is unavailable",
+  );
+  assert.match(
+    dashboardSource.liveStream,
+    /if \(!selectedId \|\| logListingAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected inspector /stream to close when listing authorization is denied, not only drop frames after they arrive",
+  );
+  assert.match(
+    dashboardSource.detailLoader,
+    /if \(allowLogs && feedAuthDenied\(streams\)\) \{[\s\S]*?logListingAuthDeniedRef\.current = true;[\s\S]*?setLogListingAuthDenied\(true\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);/,
+    "Expected listing 401/403 to clear selection caches and latch denial so the live EventSource closes",
   );
 });
 

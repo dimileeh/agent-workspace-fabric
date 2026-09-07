@@ -723,6 +723,8 @@ test(`inspector logs clear selection caches and ignore live frames after listing
   await expect(inspector.getByText("No log streams recorded.")).toBeVisible();
   await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
   await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toHaveCount(0);
+  // Denial closes the inspector EventSource; the capability gate stays true.
+  await expect(page.getByText("Stream: idle")).toBeVisible();
 
   releaseHeldStream?.();
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);

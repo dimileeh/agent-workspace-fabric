@@ -21,6 +21,7 @@ type UseWorkspaceLiveStreamArgs = {
   authorizedFeedEpochRef: MutableRefObject<number>;
   selectedIdRef: MutableRefObject<string | null>;
   selectedStreamsRef: MutableRefObject<string[]>;
+  logListingAuthDenied: boolean;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
@@ -39,6 +40,7 @@ export function useWorkspaceLiveStream({
   authorizedFeedEpochRef,
   selectedIdRef,
   selectedStreamsRef,
+  logListingAuthDenied,
   logListingAuthDeniedRef,
   setStreamState,
   setDetail,
@@ -47,7 +49,10 @@ export function useWorkspaceLiveStream({
   setError,
 }: UseWorkspaceLiveStreamArgs): void {
   useEffect(() => {
-    if (!selectedId) {
+    // Listing 401/403 while workspace_logs stays advertised must close /stream,
+    // not only drop frames after they arrive. The capability gate stays true
+    // on that path, so the denial latch is what tears the EventSource down.
+    if (!selectedId || logListingAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -104,8 +109,11 @@ export function useWorkspaceLiveStream({
         // Without workspace_logs listing the UI cannot pick/surface streams —
         // ignore log frames rather than silently buffering them. A later
         // listing 401/403 leaves the capability gate true; drop frames until
-        // a successful listing clears the denial latch.
-        if (!allowStreamLogs || logListingAuthDeniedRef.current) {
+        // the denial latch closes this EventSource.
+        if (!allowStreamLogs) {
+          return;
+        }
+        if (logListingAuthDeniedRef.current) {
           return;
         }
         setStreamState("live");
@@ -158,6 +166,12 @@ export function useWorkspaceLiveStream({
     };
 
     source.onerror = () => {
+      // close() from an authorization denial fires error; do not flip the
+      // cleared inspector back to connecting while the latch is held.
+      if (logListingAuthDeniedRef.current) {
+        setStreamState("idle");
+        return;
+      }
       if (terminalError) {
         setStreamState("error");
         return;
@@ -170,6 +184,7 @@ export function useWorkspaceLiveStream({
     authorizedFeedEpochRef,
     capabilities,
     selectedId,
+    logListingAuthDenied,
     logListingAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,

@@ -138,6 +138,9 @@ export function ConsoleDashboard() {
   // Listing 401/403 while workspace_logs stays advertised. Live log frames and
   // in-flight tails must not refill caches the detail loader just cleared.
   const logListingAuthDeniedRef = useRef(false);
+  // Mirrors the ref so the live-stream effect can close EventSource on listing
+  // 401/403. The ref alone does not re-run the effect, so the source stayed open.
+  const [logListingAuthDenied, setLogListingAuthDenied] = useState(false);
   // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
@@ -320,6 +323,7 @@ export function ConsoleDashboard() {
           setSelectedId(null);
           setDetail(emptyDetail);
           logListingAuthDeniedRef.current = false;
+          setLogListingAuthDenied(false);
           selectedStreamsRef.current = [];
           setSelectedStreams([]);
           setLogEntries([]);
@@ -407,6 +411,7 @@ export function ConsoleDashboard() {
     setSelectedId(null);
     setDetail(emptyDetail);
     logListingAuthDeniedRef.current = false;
+    setLogListingAuthDenied(false);
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -465,6 +470,7 @@ export function ConsoleDashboard() {
       streams: [],
     }));
     logListingAuthDeniedRef.current = false;
+    setLogListingAuthDenied(false);
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -530,6 +536,7 @@ export function ConsoleDashboard() {
         }));
         if (plan.clearLogs) {
           logListingAuthDeniedRef.current = false;
+          setLogListingAuthDenied(false);
           selectedStreamsRef.current = [];
           setSelectedStreams([]);
           setLogEntries([]);
@@ -928,6 +935,7 @@ export function ConsoleDashboard() {
     logStreamActivityRef,
     selectedStreamsRef,
     logListingAuthDeniedRef,
+    setLogListingAuthDenied,
     setError,
     setDetail,
     setSelectedStreams,
@@ -1057,6 +1065,7 @@ export function ConsoleDashboard() {
   useLayoutEffect(() => {
     selectedIdRef.current = selectedId;
     logListingAuthDeniedRef.current = false;
+    setLogListingAuthDenied(false);
     selectedStreamsRef.current = [];
     setDetail(emptyDetail);
     setSelectedStreams([]);
@@ -1072,6 +1081,7 @@ export function ConsoleDashboard() {
     authorizedFeedEpochRef,
     selectedIdRef,
     selectedStreamsRef,
+    logListingAuthDenied,
     logListingAuthDeniedRef,
     setStreamState,
     setDetail,

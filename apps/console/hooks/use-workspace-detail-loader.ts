@@ -41,6 +41,7 @@ type UseWorkspaceDetailLoaderArgs = {
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
   selectedStreamsRef: MutableRefObject<string[]>;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
+  setLogListingAuthDenied: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
@@ -67,6 +68,7 @@ export function useWorkspaceDetailLoader({
   logStreamActivityRef,
   selectedStreamsRef,
   logListingAuthDeniedRef,
+  setLogListingAuthDenied,
   setError,
   setDetail,
   setSelectedStreams,
@@ -209,11 +211,16 @@ export function useWorkspaceDetailLoader({
         }
         logListingAuthDeniedRef.current = true;
         selectedStreamsRef.current = [];
+        // State (not only the ref) so the live-stream effect tears down the
+        // still-open EventSource instead of leaving it connected under a true
+        // workspace_logs capability gate.
+        setLogListingAuthDenied(true);
         setSelectedStreams([]);
         setLogEntries([]);
         setStreamOffsets({});
       } else if (streams?.ok) {
         logListingAuthDeniedRef.current = false;
+        setLogListingAuthDenied(false);
         logStreamActivityRef.current = updateLogStreamActivity(
           logStreamActivityRef.current,
           workspaceId,
@@ -236,6 +243,7 @@ export function useWorkspaceDetailLoader({
     gatedDetailFeedGenerationRef,
     logListingAuthDeniedRef,
     logStreamActivityRef,
+    setLogListingAuthDenied,
     selectedIdRef,
     selectedStreamsRef,
     setDetail,
