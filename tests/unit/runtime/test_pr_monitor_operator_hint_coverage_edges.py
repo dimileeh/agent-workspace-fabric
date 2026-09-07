@@ -60,11 +60,13 @@ from awf.runtime.pr_monitor_runner.lifecycle import (
     _operator_hint_matches,
     _refresh_operator_state_from_workspace,
 )
+from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
+    _operator_hint_feedback_id_candidates,
+)
 from awf.runtime.pr_monitor_runner.operator_hints import (
     _finalize_processed_operator_hint,
     _mark_referenced_needs_human_feedback_answered,
     _operator_hint_block_reason,
-    _operator_hint_feedback_id_candidates,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine

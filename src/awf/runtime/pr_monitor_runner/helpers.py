@@ -66,7 +66,13 @@ from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_started_prefix as _non_check_reviewer_settle_started_prefix,
 )
 from awf.runtime.monitor_state_keys import (
+    _operator_decision_key as _operator_decision_key,
+)
+from awf.runtime.monitor_state_keys import (
     _outdated_resolve_requeued_key as _outdated_resolve_requeued_key,
+)
+from awf.runtime.monitor_state_keys import (
+    _retired_operator_decision_key as _retired_operator_decision_key,
 )
 from awf.runtime.pr_monitor import (
     CheckFailure,
@@ -285,14 +291,51 @@ def _mark_review_comment_addressed(
     )
 
 
-def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
-    """Clear verdict, body, and reason markers for ``item_id``."""
+def _clear_addressed_state_by_id(
+    state: MonitorState,
+    item_id: str,
+    *,
+    restore_operator_decision: bool = True,
+) -> None:
+    """Clear verdict, body, and reason markers for ``item_id``.
+
+    Callers use this to roll back an *unconfirmed* verdict so the item re-enters
+    ``AddressComments``. When that verdict had answered an operator ruling
+    (issue #939), the rollback un-answers it too, so the parked ruling is
+    restored with it — otherwise the re-opened thread's repair prompt carries
+    only the reviewer text the agent already escalated on and it can repeat the
+    rejected approach and re-park. Pass ``restore_operator_decision=False``
+    where the clear means "superseded by fresh reviewer feedback" rather than
+    "rolled back": that feedback is not what the operator ruled on. A ruling the
+    operator has since re-issued likewise wins over the parked copy.
+    """
+    body_snapshot = state.threads_addressed_ids.get(_review_thread_body_state_key(item_id))
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+    retired_decision = state.threads_addressed_ids.pop(
+        _retired_operator_decision_key(item_id), None
+    )
+    if (
+        retired_decision is not None
+        and restore_operator_decision
+        # A live ruling is the operator's latest word on this thread — it was
+        # issued after the parked one was answered, so restoring the parked copy
+        # over it would quote superseded guidance in the repair prompt.
+        and _operator_decision_key(item_id) not in state.threads_addressed_ids
+    ):
+        state.mark_addressed(_operator_decision_key(item_id), retired_decision)
+    if body_snapshot is not None and _operator_decision_key(item_id) in state.threads_addressed_ids:
+        # A ruling that survives this clear — restored above, or the live one kept
+        # over it — keeps the body snapshot it was bound to. The clear deleted that
+        # hash, and ``_operator_decision_for_thread`` retains rulings it cannot
+        # compare, so a reviewer reply landing before the retry would otherwise
+        # replay stale guidance while telling the agent not to re-escalate. The
+        # verdict stays cleared, so the thread still re-enters ``AddressComments``.
+        state.mark_addressed(_review_thread_body_state_key(item_id), body_snapshot)
 
 
 def _drop_stale_review_thread_addressed_state(
@@ -307,7 +350,9 @@ def _drop_stale_review_thread_addressed_state(
         recorded = state.threads_addressed_ids.get(_review_thread_body_state_key(thread.thread_id))
         if recorded_review_thread_body_matches(recorded, thread):
             continue
-        _clear_addressed_state_by_id(state, thread.thread_id)
+        # Fresh reviewer feedback supersedes the answered operator ruling rather
+        # than rolling its verdict back, so the parked ruling retires for good.
+        _clear_addressed_state_by_id(state, thread.thread_id, restore_operator_decision=False)
         changed = True
     return changed
 

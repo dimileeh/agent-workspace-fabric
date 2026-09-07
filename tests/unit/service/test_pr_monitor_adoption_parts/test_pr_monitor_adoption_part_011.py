@@ -16,6 +16,8 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_prompts import address_thread_prompt
+from awf.runtime.monitor_state_keys import _operator_decision_key
 from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY, operator_hint_from_threads
 from awf.runtime.pr_monitor import (
     AddressOperatorHint,
@@ -27,7 +29,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     decide,
 )
-from awf.runtime.pr_monitor_models import ReviewComment
+from awf.runtime.pr_monitor_models import ReviewComment, ReviewThread
 from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.pr_monitor_adoption_helpers import PR_ADOPTION_REQUESTED_EVENT_TYPE
 from awf.service.pr_monitor_adoption_seed import (
@@ -40,6 +42,12 @@ from tests.postgres import postgres_test_engine
 REPO_SLUG = "dimileeh/aira-infra"
 PR_NUMBER = 229
 
+# A thread whose ``needs_human`` an operator guide retired: the guide clears the
+# verdict and stashes its ruling, so the thread is owed an answer when the
+# predecessor goes terminal.
+_UNPARKED_THREAD_ID = "PRRT_kwDOSJAM6s6fvFdY"
+_OPERATOR_DECISION = "take the anchored fix, not the rename"
+
 # The aira-infra PR #229 shape: verdicts the predecessor already dispositioned,
 # their evidence markers, plus run-local bookkeeping that must stay behind.
 _SEEDABLE_PREDECESSOR_STATE: dict[str, str] = {
@@ -51,6 +59,12 @@ _SEEDABLE_PREDECESSOR_STATE: dict[str, str] = {
     "issue:5549805026": "defer",
     "__review_comment_body_hash__:5120013294": "a" * 64,
     "__deferred_issue_filed__:PRRT_kwDOSJAM6s6fNhZo:abc123": f"{REPO_SLUG}#42",
+    # A thread an operator guide un-parked (issues #938/#939): its verdict was
+    # cleared, so it crosses as a body hash with no verdict and the successor
+    # re-queues it. The ruling has to cross with it or the re-queued thread is
+    # re-prompted with the reviewer text the agent already escalated on.
+    f"__review_thread_body_hash__:{_UNPARKED_THREAD_ID}": "b" * 64,
+    f"__operator_decision__:{_UNPARKED_THREAD_ID}": _OPERATOR_DECISION,
 }
 _NEVER_COPIED_PREDECESSOR_STATE: dict[str, str] = {
     "__awf_protected_block_preserved_head__": "d" * 40,
@@ -237,6 +251,50 @@ class TestPullRequestMonitorAdoptionSeedingPart011:
         assert await _monitor_state(factory, fresh_id) == expected
         events = await _events(factory, fresh_id, PR_ADOPTION_SEEDED_EVENT_TYPE)
         assert (events[0].payload or {})["copied_keys"] == sorted(expected)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("head_sha", ["a" * 40, "f" * 40])
+    async def test_re_queued_thread_inherits_its_operator_decision_into_the_prompt(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        head_sha: str,
+    ) -> None:
+        """A thread the operator un-parked crosses re-adoption with its ruling.
+
+        The guide clears the thread's ``needs_human`` and stashes the directive,
+        so the thread reaches the successor as a body hash with no verdict and is
+        re-queued into ``AddressComments``. If the ruling stayed behind, the
+        successor would rebuild the repair prompt from the reviewer text alone
+        (``operator_decision=None``) and the agent could repeat the rejected
+        approach and re-park on the same question — the loop issue #939 exists to
+        break. The ruling disposes of the *feedback*, never suppresses it nor
+        unblocks the merge gate, so it crosses a moved head too.
+        """
+        previous_id = await _adopt(factory)
+        await _fail_with_monitor_state(factory, previous_id, _SEEDABLE_PREDECESSOR_STATE)
+
+        fresh_id = await _adopt(factory, head_sha=head_sha)
+
+        state = await _monitor_state(factory, fresh_id)
+        assert _UNPARKED_THREAD_ID not in state
+        assert state[f"__review_thread_body_hash__:{_UNPARKED_THREAD_ID}"] == "b" * 64
+        assert state[_operator_decision_key(_UNPARKED_THREAD_ID)] == _OPERATOR_DECISION
+
+        thread = ReviewThread(
+            thread_id=_UNPARKED_THREAD_ID,
+            path="src/awf/service/pr_monitor_adoption_seed.py",
+            line=120,
+            body_excerpt="rename the marker helper",
+            author="chatgpt-codex-connector",
+        )
+        prompt = address_thread_prompt(
+            pr_number=PR_NUMBER,
+            repo_slug=REPO_SLUG,
+            thread=thread,
+            operator_decision=state.get(_operator_decision_key(thread.thread_id)),
+        )
+
+        assert _OPERATOR_DECISION in prompt
 
     @pytest.mark.unit
     async def test_first_adoption_seeds_nothing_and_emits_no_seeded_event(
