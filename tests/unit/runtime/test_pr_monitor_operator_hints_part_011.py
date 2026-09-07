@@ -160,6 +160,39 @@ async def test_durable_marker_write_failure_keeps_the_in_memory_budget() -> None
 
 
 @pytest.mark.unit
+async def test_unexpected_write_failure_degrades_instead_of_raising() -> None:
+    """A fault the write itself does not classify still must not escape this helper.
+
+    ``_write_timeout_retry_marker`` degrades on ``SQLAlchemyError``/``OSError``; anything
+    else used to reach ``write_task.result()`` and propagate out of the retry branch, so
+    the caller never returned the ``operator_hint_timeout_retry`` envelope and a storage
+    error replaced the watchdog reason code (PRRT_kwDOSJAM6s6f_brh).
+    """
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    def _broken_factory() -> object:
+        raise RuntimeError("session factory is gone")
+
+    with structlog.testing.capture_logs() as captured:
+        await mark_timeout_retry_used_durably(
+            SimpleNamespace(_deps=SimpleNamespace(session_factory=_broken_factory)),  # type: ignore[arg-type]
+            workspace_id="ws_retry_unexpected_fault",
+            state=state,
+            hint=hint,
+        )
+
+    assert state.threads_addressed_ids[operator_hint_timeout_retry_key(hint)] == "retried"
+    failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.operator_hint_timeout_retry_durable_write_failed"
+    ]
+    assert len(failures) == 1
+    assert "session factory is gone" in failures[0]["error"]
+
+
+@pytest.mark.unit
 async def test_durable_marker_write_skips_a_workspace_row_that_is_gone(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

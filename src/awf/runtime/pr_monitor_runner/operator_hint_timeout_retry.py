@@ -105,8 +105,10 @@ async def mark_timeout_retry_used_durably(
     verdicts a later failure only rolls back in memory (#305). That is the same
     single-key shape ``remember_item_start_head_durably`` already uses.
 
-    Best-effort, like the preserve path it belongs to: a DB fault degrades to the
-    in-memory marker and must not replace the timeout's reason code. The clearing
+    Best-effort, like the preserve path it belongs to: any write fault — a DB error,
+    a broken session factory, anything the write itself did not classify — degrades
+    to the in-memory marker and must not replace the timeout's reason code, which is
+    why nothing raises out of here but the cancellation itself. The clearing
     side needs no durable twin — a crash that loses ``clear_timeout_retry`` also
     loses the terminal hint park, and the surviving marker only makes the next
     resume escalate sooner.
@@ -136,19 +138,23 @@ async def mark_timeout_retry_used_durably(
             cancelled = cancel_exc
         except Exception:
             # The write's own failure, handed over by the shield. Read it off the
-            # task below so it is treated the same either way — re-raised when no
-            # cancellation is pending, logged when one is.
+            # task below so it is treated the same either way — logged whether or
+            # not a cancellation is pending.
             break
-    if cancelled is None:
-        write_task.result()
-        return
     # Read the failure off the task, not off the await: a cancellation delivered in
     # the same loop step the write failed in makes ``shield`` retrieve the exception
     # itself, so it would otherwise vanish.
     dropped_exc = None if write_task.cancelled() else write_task.exception()
     if dropped_exc is not None:
+        # Best-effort, as documented: a fault the write did not classify itself
+        # (anything outside ``SQLAlchemyError``/``OSError`` — a broken session
+        # factory, a repository raising something else) degrades to the in-memory
+        # marker. Raised on, it would leave the caller's retry branch without its
+        # ``operator_hint_timeout_retry`` envelope and replace the watchdog reason
+        # code with a storage error (PRRT_kwDOSJAM6s6f_brh).
         _log_durable_write_failure(dropped_exc, workspace_id=workspace_id, hint=hint)
-    raise cancelled
+    if cancelled is not None:
+        raise cancelled
 
 
 async def _write_timeout_retry_marker(
