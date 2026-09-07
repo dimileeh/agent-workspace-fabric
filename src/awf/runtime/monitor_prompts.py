@@ -158,8 +158,15 @@ def address_thread_prompt(
     workspace_runtime_context: str = "",
     owned_paths: Sequence[str] = (),
     task_tag: str | None = None,
+    operator_decision: str | None = None,
 ) -> str:
-    """Prompt the CLI to address a single inline review thread."""
+    """Prompt the CLI to address a single inline review thread.
+
+    ``operator_decision`` carries the guide directive that un-parked a
+    ``needs_human`` verdict on this thread (issue #939). Without it the
+    re-addressed thread reads exactly like the first attempt and the agent can
+    repeat the fix the operator already rejected, then re-park.
+    """
     line_hint = (
         f"line {thread.line} of {thread.path}"
         if thread.path and thread.line
@@ -193,6 +200,7 @@ def address_thread_prompt(
         "Decide whether the current feedback is actionable, already fixed, a "
         "false positive, or genuinely needs human input:\n\n"
         f"{evidence}\n\n"
+        f"{_operator_decision_section(thread_id=thread.thread_id, decision=operator_decision)}"
         f"{_SAFETY_POLICY}\n"
         f"{_protected_file_policy(owned_paths)}\n"
         f"{_COMMENT_VERDICT_GUIDANCE}\n"
@@ -216,6 +224,35 @@ def address_thread_prompt(
         "PR.\n"
         "Do not write any PR comment for verdict bookkeeping.\n"
         f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
+    )
+
+
+def _operator_decision_section(*, thread_id: str, decision: str | None) -> str:
+    """Quote the operator ruling that re-opened this thread, or nothing.
+
+    An operator guide is the only thing that clears a thread's ``needs_human``
+    without the agent recording a verdict, so this section exists exactly on the
+    re-addressed pass after such a guide. The directive is still external text —
+    render it through the untrusted-evidence envelope like every other operator
+    hint rather than splicing it into AWF's own instructions.
+    """
+    text = (decision or "").strip()
+    if not text:
+        return ""
+    evidence = render_untrusted_evidence(
+        UntrustedEvidence(
+            source_kind="operator_decision",
+            source_name="AWF operator decision",
+            source_id=thread_id,
+            text=text,
+        )
+    )
+    return (
+        "Operator decision for this thread: an operator already ruled on this "
+        "feedback and un-parked the thread for you. Follow that ruling — do not "
+        "repeat an approach it rejected, and do not escalate the same question "
+        "back to a human:\n\n"
+        f"{evidence}\n\n"
     )
 
 

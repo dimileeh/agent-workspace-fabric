@@ -34,7 +34,12 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThread,
 )
-from awf.runtime.pr_monitor_runner import ci_ops, comments, operator_hints
+from awf.runtime.pr_monitor_runner import (
+    ci_ops,
+    comments,
+    operator_hint_retirement,
+    operator_hints,
+)
 from awf.runtime.pr_monitor_runner import remote_ops as pr_remote_ops
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -945,7 +950,12 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         return "PROMPT"
 
     monkeypatch.setattr(operator_hints, "operator_hint_prompt", _operator_hint_prompt)
-    monkeypatch.setattr(operator_hints, "mark_operator_hint_processed", lambda _state: None)
+    # ``_finalize_processed_operator_hint`` (and the marker call it makes) now lives in
+    # the sibling ``operator_hint_retirement`` module, so the stub must target the
+    # binding that module resolves.
+    monkeypatch.setattr(
+        operator_hint_retirement, "mark_operator_hint_processed", lambda _state: None
+    )
 
     self = SimpleNamespace(
         _worktrees_root=tmp_path,

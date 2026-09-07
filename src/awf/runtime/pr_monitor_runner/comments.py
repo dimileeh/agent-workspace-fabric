@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,10 +12,18 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
+from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
+    review_thread_body_state_key,
+)
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
     ready_to_merge_comment,
+)
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_issued_at_key,
+    _operator_decision_key,
 )
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
@@ -57,6 +66,88 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
+
+
+def _operator_decision_for_thread(
+    state: MonitorState | None,
+    thread: ReviewThread,
+) -> str | None:
+    """Return the operator ruling to quote for ``thread``, or ``None``.
+
+    A live ruling (issue #939) only speaks to the conversation the operator read.
+    When a reviewer replies afterwards — after a guide cleared the verdict but
+    before the next attempt, or after an attempt recorded ``agent_failed`` — the
+    recorded body hash diverges and the ruling is stale for the updated thread.
+    ``_drop_stale_review_thread_addressed_state`` already retires an *answered*
+    ruling on such a body change, but it skips threads whose verdict still needs
+    attention (missing / ``agent_failed``), which is exactly the state a live
+    ruling sits in. Quoting it anyway would tell the agent to follow guidance the
+    operator never gave for this feedback and not to re-escalate it.
+
+    The stale marker is dropped rather than merely skipped: left in place,
+    ``_mark_review_thread_addressed`` would park it in the retired sidecar and a
+    later verdict rollback would restore it into a subsequent repair prompt.
+    A thread with no recorded body hash cannot be compared that way, so it falls
+    back to the ruling's issue-time stamp (see
+    :func:`_operator_ruling_superseded_by_reply`) and, failing that, keeps the
+    ruling (mirroring ``_mark_review_thread_addressed``'s supersede check).
+    """
+    if state is None:
+        return None
+    decision_key = _operator_decision_key(thread.thread_id)
+    decision = state.threads_addressed_ids.get(decision_key)
+    if decision is None:
+        return None
+    recorded = state.threads_addressed_ids.get(review_thread_body_state_key(thread.thread_id))
+    if recorded is not None and not recorded_review_thread_body_matches(recorded, thread):
+        _drop_stale_operator_decision(state, thread.thread_id)
+        return None
+    if recorded is None and _operator_ruling_superseded_by_reply(state, thread):
+        _drop_stale_operator_decision(state, thread.thread_id)
+        return None
+    return decision
+
+
+def _drop_stale_operator_decision(state: MonitorState, thread_id: str) -> None:
+    """Retire a ruling the live conversation has outrun, stamp included."""
+    state.threads_addressed_ids.pop(_operator_decision_key(thread_id), None)
+    state.threads_addressed_ids.pop(_operator_decision_issued_at_key(thread_id), None)
+
+
+def _operator_ruling_superseded_by_reply(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when reviewer activity postdates an unbindable ruling's issue time.
+
+    The guide retirement path clears ``needs_human`` rows that carry no body-hash
+    snapshot — the ones outdated-thread hygiene seeds — so their ruling has nothing
+    to compare against and the hash check above cannot see a reply that arrived
+    after the operator ruled. Those rulings are stamped with their issue time
+    instead (``__operator_decision_at__:``), and any reviewer comment created or
+    edited after that moment is feedback the operator never read
+    (PRRT_kwDOSJAM6s6fxBwT).
+
+    Only non-viewer activity counts (``_latest_reviewer_comment_at``): AWF's own
+    replies are not new feedback for the agent to re-triage. A missing stamp (the
+    pre-stamp rows an in-flight monitor carries, and every hash-bound ruling), an
+    unparseable one, or a thread whose comments carry no timestamps proves nothing
+    about ordering, so the ruling is kept — the same fail-open the rest of this
+    module takes when evidence is unavailable.
+    """
+    # Imported here, not at module scope: both modules sit downstream of
+    # ``comments`` in the runner's import graph.
+    from awf.runtime.pr_monitor_runner.helpers import _as_utc
+    from awf.runtime.pr_monitor_runner.outdated_resolution import _latest_reviewer_comment_at
+
+    stamped = state.threads_addressed_ids.get(_operator_decision_issued_at_key(thread.thread_id))
+    if not stamped:
+        return False
+    try:
+        issued_at = datetime.fromisoformat(stamped)
+    except ValueError:
+        return False
+    latest_reply_at = _latest_reviewer_comment_at(thread)
+    if latest_reply_at is None:
+        return False
+    return _as_utc(latest_reply_at) > _as_utc(issued_at)
 
 
 async def _address_thread(
@@ -102,6 +193,10 @@ async def _address_thread(
         if isinstance(task_tag, _TaskTagUnset)
         else task_tag
     )
+    # An operator guide that retired this thread's ``needs_human`` stashed its
+    # directive here (issue #939). Replay it so the re-addressed thread carries
+    # the operator's ruling instead of reading like the first attempt.
+    operator_decision = _operator_decision_for_thread(state, thread)
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -109,6 +204,7 @@ async def _address_thread(
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
         task_tag=resolved_task_tag,
+        operator_decision=operator_decision,
     )
     try:
         result = await runner._invoke_cli_for_verdict_result(
