@@ -923,6 +923,23 @@ async def _cancelled_timeout_preserve_steps(
         raise anchor_exc
 
 
+def _log_cancelled_timeout_preserve_failure(
+    exc: BaseException,
+    *,
+    workspace_id: str,
+    reason_code: str,
+    item_start_head: str | None,
+) -> None:
+    """Record a preserve sequence that died, however its failure surfaced."""
+    _log.warning(
+        "monitor.agent_verdict_cancelled_timeout_preserve_failed",
+        workspace_id=workspace_id,
+        reason_code=reason_code,
+        item_start_head=item_start_head,
+        exc_type=type(exc).__name__,
+    )
+
+
 async def preserve_cancelled_timeout_work(
     runner: PullRequestMonitorRunner,
     *,
@@ -990,14 +1007,26 @@ async def preserve_cancelled_timeout_work(
             # durable marker write can still fail outside its own error set (a
             # closed loop, a repository fault), and losing the anchor must not
             # cost the cancellation its watchdog classification.
-            _log.warning(
-                "monitor.agent_verdict_cancelled_timeout_preserve_failed",
+            _log_cancelled_timeout_preserve_failure(
+                preserve_exc,
                 workspace_id=workspace_id,
                 reason_code=reason_code,
                 item_start_head=item_start_head,
-                exc_type=type(preserve_exc).__name__,
             )
             return
+    # A cancellation delivered in the same loop step the sequence failed in makes
+    # ``shield`` retrieve the exception itself and never hand it to the awaiter:
+    # the loop then just sees a finished task and would return as if preservation
+    # had succeeded. Read the outcome off the task so a lost anchor is still
+    # reported (PRRT_kwDOSJAM6s6f2ckS).
+    dropped_exc = None if preserve_task.cancelled() else preserve_task.exception()
+    if dropped_exc is not None:
+        _log_cancelled_timeout_preserve_failure(
+            dropped_exc,
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            item_start_head=item_start_head,
+        )
 
 
 async def preserve_timeout_work_and_raise_cleanup_error(

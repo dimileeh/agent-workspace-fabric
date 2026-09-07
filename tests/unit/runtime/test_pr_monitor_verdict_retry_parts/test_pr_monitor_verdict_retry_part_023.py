@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import structlog
 
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import comment_verdict
+from awf.runtime.pr_monitor_runner import comment_verdict_timeout_preserve as _preserve
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
 )
@@ -201,6 +203,60 @@ async def test_failed_preservation_does_not_displace_the_cancellation(
         for entry in captured
         if entry.get("event") == "monitor.agent_verdict_cancelled_timeout_preserve_failed"
     ]
+
+
+@pytest.mark.unit
+async def test_preserve_failure_racing_the_cancellation_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure landing in the same step as the cancel must not read as success.
+
+    ``asyncio.shield`` retrieves the inner exception itself once its outer future
+    has been cancelled, so the awaiter is handed the ``CancelledError`` and never
+    the failure. Treating that as "keep waiting" then finds a finished task and
+    returns as if the anchor and the sink had both run, with the lost anchor
+    neither logged nor retrievable anywhere else (PRRT_kwDOSJAM6s6f2ckS).
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _steps(*args: object, **kwargs: object) -> None:
+        started.set()
+        await release.wait()
+        raise RuntimeError("session factory is closed")
+
+    monkeypatch.setattr(_preserve, "_cancelled_timeout_preserve_steps", _steps)
+
+    with structlog.testing.capture_logs() as captured:
+        call = asyncio.ensure_future(
+            _preserve.preserve_cancelled_timeout_work(
+                cast(Any, object()),
+                workspace_id="ws_protocol",
+                reason_code="AGENT_TIMEOUT",
+                item_start_head=_ITEM_START_HEAD,
+                state=MonitorState(),
+                item_id=_ITEM_ID,
+                commit_message=f"fix: address PR review comment {_ITEM_ID}",
+                compose_project="awf_ws_protocol",
+                compose_file=Path("compose.yml"),
+                command_evidence=[],
+                commit_dirty_changes=True,
+            )
+        )
+        await started.wait()
+        # The preserve steps fail in the very step this cancellation is
+        # delivered in, so ``shield`` swallows the ``RuntimeError``.
+        release.set()
+        call.cancel()
+        await call
+
+    failures = [
+        entry
+        for entry in captured
+        if entry.get("event") == "monitor.agent_verdict_cancelled_timeout_preserve_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["exc_type"] == "RuntimeError"
 
 
 @pytest.mark.unit
