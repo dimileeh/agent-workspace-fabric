@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     peek_item_start_body_hash,
     peek_item_start_head,
     preserved_anchor_is_reachable,
+    remember_item_start_head_durably,
     restore_item_start_head,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -174,6 +175,7 @@ async def _invoke_cli_for_verdict_result(
         # recording a verdict for the item, so the item is re-addressed later.
         anchor_head = preserved_item_start_head
         anchor_body_hash = preserved_item_body_hash
+        anchor_earned_mid_run = False
         if anchor_head is None and timeout_rerun_anchor_sink:
             # This attempt had no anchor on entry but earned one: a timeout the
             # recovery loop reran over left commits behind, and only the item's
@@ -181,5 +183,27 @@ async def _invoke_cli_for_verdict_result(
             # exactly as the preserve handler would have.
             anchor_head = timeout_rerun_anchor_sink[-1]
             anchor_body_hash = item_body_hash
+            anchor_earned_mid_run = True
         restore_item_start_head(state, item_id, anchor_head, anchor_body_hash)
+        if anchor_earned_mid_run:
+            # An anchor restored from entry is already on the workspace row —
+            # consuming it only cleared the in-memory copy. A newly earned one
+            # has never been written there, and the exits that lose it are real:
+            # ``run()``'s service-recovery-failed and superseded arms return
+            # without ``_persist_state``. The timed-out commit stays on disk, so
+            # the next invocation would anchor the item at that preserved HEAD
+            # and reject an honest no-change ``FIXED`` as
+            # ``AGENT_FIXED_WITHOUT_EVIDENCE`` — the same wedge the preserve
+            # handler's durable write exists to prevent (PRRT_kwDOSJAM6s6f0ft2).
+            # Whatever the restore left in state is what gets persisted: a fresh
+            # timeout on this very attempt is newer, wins the re-arm, and has
+            # already written itself durably.
+            await remember_item_start_head_durably(
+                runner,
+                workspace_id=workspace_id,
+                state=state,
+                item_id=item_id,
+                head=peek_item_start_head(state, item_id),
+                body_hash=peek_item_start_body_hash(state, item_id),
+            )
         raise

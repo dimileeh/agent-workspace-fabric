@@ -13,6 +13,13 @@ no-change ``FIXED`` as ``AGENT_FIXED_WITHOUT_EVIDENCE`` (PRRT_kwDOSJAM6s6fzBXj).
 These tests pin the durable write: the anchor is on the workspace row before the
 first cancellable step of the preserve sequence, and a DB fault there degrades to
 today's in-memory behaviour instead of replacing the timeout's reason code.
+
+The same durability is owed to an anchor an item only *earns* mid-run. When the
+service-recovery loop preserves a watchdog timeout and then gives up, the #932
+preserve handler never sees that timeout, so the protocol publishes the owed
+anchor itself — and the recovery-failed exit in ``run()`` returns without
+``_persist_state``, so an in-memory re-arm alone dies with the cycle
+(PRRT_kwDOSJAM6s6f0ft2).
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     item_start_head_state_key,
     remember_item_start_head_durably,
 )
+from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import seed_monitoring_workspace
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
@@ -257,3 +265,74 @@ async def test_durable_anchor_write_needs_both_an_item_and_a_head(
     )
 
     assert opened == []
+
+
+def _recovery_failed_after_rerun_runner(
+    tmp_path: Path,
+    *,
+    workspace_id: str,
+    session_factory: object,
+) -> _VerdictRunner:
+    """A timeout the recovery loop preserved, then gave the recovery up on.
+
+    The loop publishes the floor it would have rerun over — so the item earns an
+    evidence anchor it never had on entry — and raises the recovery failure.
+    """
+    (tmp_path / workspace_id).mkdir(parents=True)
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[],
+        heads_after_attempt=[_PRESERVED_HEAD],
+        dirty_after_attempt=[False],
+        stranded_dirty_after_attempt=[False],
+    )
+    runner.current_head = _ITEM_START_HEAD
+    runner._deps.session_factory = session_factory
+
+    async def _run(**kwargs: object) -> None:
+        runner.prompts.append(str(kwargs["prompt"]))
+        runner.attempt += 1
+        # The timed-out run self-committed before the watchdog fired.
+        runner.current_head = _PRESERVED_HEAD
+        floor_sink = kwargs["timeout_rerun_floor_sink"]
+        assert isinstance(floor_sink, list)
+        floor_sink.append(_PRESERVED_HEAD)
+        preservation_sink = kwargs["timeout_preservation_sink"]
+        assert isinstance(preservation_sink, list)
+        preservation_sink.append("AGENT_TIMEOUT")
+        raise _MonitorAgentServiceRecoveryFailedError("agent service never came back")
+
+    runner._run_monitor_agent_with_service_recovery = _run
+    return runner
+
+
+@pytest.mark.unit
+async def test_an_anchor_earned_mid_run_is_durable_before_the_recovery_failure_exit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The mid-run anchor survives the one exit that never persists the state.
+
+    ``run()``'s ``_MonitorAgentServiceRecoveryFailedError`` arm returns without
+    ``_persist_state``, so the in-memory re-arm dies with the cycle while the
+    timed-out commit stays on disk — and the next invocation anchors the item at
+    that preserved HEAD, rejecting an honest no-change ``FIXED`` as
+    ``AGENT_FIXED_WITHOUT_EVIDENCE`` (PRRT_kwDOSJAM6s6f0ft2).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _recovery_failed_after_rerun_runner(
+        tmp_path,
+        workspace_id=workspace_id,
+        session_factory=factory,
+    )
+    state = MonitorState()
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError):
+        await _invoke_item(runner, workspace_id=workspace_id, state=state)
+
+    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == (
+        f"{_BODY_HASH}:{_ITEM_START_HEAD}"
+    )
+    assert await _persisted_anchor(factory, workspace_id) == f"{_BODY_HASH}:{_ITEM_START_HEAD}"
+    # The preserved commit itself is untouched: the rollback stops at the floor.
+    assert runner.current_head == _PRESERVED_HEAD
