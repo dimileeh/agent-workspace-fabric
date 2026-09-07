@@ -415,6 +415,14 @@ function validateCapabilityEntry(
     if (!routeMatchesInventory(record.route, expectedRoute)) {
       return `Console ${kind} id=${record.id} route must be ${expectedRoute}.`;
     }
+  } else if (kind === "control") {
+    // Contract: controls omit route for every availability. Mutations use
+    // hardcoded operatorActionPath and never call an advertised control route.
+    // This is the branch that otherwise certifies a relative /v1/... route
+    // (controls have no expectedRoute) and skips empty-string fallthrough.
+    if (record.route != null) {
+      return "Console control entries must omit route.";
+    }
   } else if (
     record.availability !== "unsupported" &&
     record.route != null &&

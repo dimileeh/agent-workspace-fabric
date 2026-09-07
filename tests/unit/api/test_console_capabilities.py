@@ -295,6 +295,106 @@ def test_available_widgets_and_diagnostics_require_route_in_response_model() -> 
 
 
 @pytest.mark.unit
+def test_available_controls_must_omit_route() -> None:
+    """Available controls with any non-null route must fail closed (TS parity).
+
+    Mutations use hardcoded operatorActionPath and ignore advertised control
+    routes, so certifying a relative ``/v1/...``, empty string, or absolute URL
+    on an available control would advertise an endpoint that is never called.
+    Absent and explicit null retain the documented omit semantics.
+    """
+    openapi_validator = _console_capabilities_openapi_validator()
+    base = _local_capabilities_payload()
+
+    relative = copy.deepcopy(base)
+    for item in relative["controls"]:
+        if item["availability"] == "available" and item["id"] == "retry":
+            item["route"] = "/v1/workspaces/{workspace_id}/retry"
+            break
+    else:
+        relative["controls"] = [
+            {
+                "id": "retry",
+                "availability": "available",
+                "route": "/v1/workspaces/{workspace_id}/retry",
+                "semantics": "retry",
+            }
+        ]
+    with pytest.raises(ValidationError, match="omit route"):
+        ConsoleCapabilitiesResponse.model_validate(relative)
+    assert openapi_validator.is_valid(relative) is False
+
+    empty = copy.deepcopy(base)
+    for item in empty["controls"]:
+        if item["availability"] == "available" and item["id"] == "cancel":
+            item["route"] = ""
+            break
+    else:
+        empty["controls"] = [
+            {
+                "id": "cancel",
+                "availability": "available",
+                "route": "",
+                "semantics": "cancel",
+            }
+        ]
+    # Empty string must fail the omit-route contract (not only relative-route).
+    with pytest.raises(ValidationError, match="omit route"):
+        ConsoleCapabilitiesResponse.model_validate(empty)
+    assert openapi_validator.is_valid(empty) is False
+
+    absolute = copy.deepcopy(base)
+    for item in absolute["controls"]:
+        if item["availability"] == "available" and item["id"] == "refresh":
+            item["route"] = "https://example.invalid/v1/workspaces/ws/refresh"
+            break
+    else:
+        absolute["controls"] = [
+            {
+                "id": "refresh",
+                "availability": "available",
+                "route": "https://example.invalid/v1/workspaces/ws/refresh",
+                "semantics": "refresh",
+            }
+        ]
+    with pytest.raises(ValidationError, match="omit route"):
+        ConsoleCapabilitiesResponse.model_validate(absolute)
+    assert openapi_validator.is_valid(absolute) is False
+
+    omitted = copy.deepcopy(base)
+    for item in omitted["controls"]:
+        item.pop("route", None)
+    assert ConsoleCapabilitiesResponse.model_validate(omitted)
+    assert openapi_validator.is_valid(omitted) is True
+
+    explicit_null = copy.deepcopy(base)
+    for item in explicit_null["controls"]:
+        item["route"] = None
+    validated = ConsoleCapabilitiesResponse.model_validate(explicit_null)
+    assert openapi_validator.is_valid(explicit_null) is True
+
+    # Non-list controls still fail closed after the omit-route pre-check.
+    not_a_list = copy.deepcopy(base)
+    not_a_list["controls"] = "retry"
+    with pytest.raises(ValidationError):
+        ConsoleCapabilitiesResponse.model_validate(not_a_list)
+
+    class _RoutedControl:
+        def __init__(self, route: object) -> None:
+            self.route = route
+
+    object_route = copy.deepcopy(base)
+    object_route["controls"] = [_RoutedControl("/v1/workspaces/ws/retry")]
+    with pytest.raises(ValidationError, match="omit route"):
+        ConsoleCapabilitiesResponse.model_validate(object_route)
+
+    # After-validator remains the second omit-route gate if a control route is set.
+    validated.controls[0].route = "/v1/workspaces/{workspace_id}/retry"
+    with pytest.raises(ValueError, match="omit route"):
+        validated.controls_must_omit_route()
+
+
+@pytest.mark.unit
 def test_unsupported_capability_entries_must_omit_route() -> None:
     """Unsupported widgets/diagnostics with any route must fail closed (TS parity).
 
@@ -430,8 +530,13 @@ def test_available_widget_diagnostic_exact_inventory_routes_match_openapi_and_py
         and "if" in part
         and part.get("then") not in (False, None)
         and "route" in (part.get("then") or {}).get("properties", {})
+        and part.get("then", {}).get("properties", {}).get("route", {}).get("const") is not None
         for part in controls_items["allOf"]
-    ), "controls must not require route when available"
+    ), "controls must not require a non-null inventory route when available"
+    assert any(
+        isinstance(part, dict) and part.get("properties", {}).get("route") == {"type": "null"}
+        for part in controls_items["allOf"]
+    ), "published controls must encode omit-route (route type null) for all availability states"
 
     base = _local_capabilities_payload()
     assert _pydantic_accepts(base) is True

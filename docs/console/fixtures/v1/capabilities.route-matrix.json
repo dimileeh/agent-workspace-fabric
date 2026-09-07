@@ -1,5 +1,5 @@
 {
-  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route. Unsupported entries omit route (null/absent only — empty string \"\" is reject, matching Python/OpenAPI). Identity/context rules are unchanged (local optional identity).",
+  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route (any non-null route, including relative /v1/..., empty string, or absolute URL, rejects; absent/null accept). Unsupported entries omit route (null/absent only — empty string \"\" is reject, matching Python/OpenAPI). Identity/context rules are unchanged (local optional identity).",
   "inventory": {
     "widgets": {
       "fleet_summary": "/v1/console/dashboard-summary",
@@ -189,6 +189,82 @@
             "id": "cancel",
             "availability": "available",
             "semantics": "cancel"
+          }
+        ]
+      }
+    },
+    {
+      "name": "available_control_route_null",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "refresh",
+            "availability": "available",
+            "route": null,
+            "semantics": "refresh"
+          }
+        ]
+      }
+    },
+    {
+      "name": "available_control_with_relative_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "retry",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/retry",
+            "semantics": "retry"
+          }
+        ]
+      }
+    },
+    {
+      "name": "available_control_with_empty_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "cancel",
+            "availability": "available",
+            "route": "",
+            "semantics": "cancel"
+          }
+        ]
+      }
+    },
+    {
+      "name": "available_control_with_absolute_route",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "refresh",
+            "availability": "available",
+            "route": "https://example.invalid/v1/workspaces/ws/refresh",
+            "semantics": "refresh"
           }
         ]
       }

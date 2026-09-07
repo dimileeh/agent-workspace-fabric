@@ -661,6 +661,70 @@ test("capabilityRouteToAwfPath routes through hosted API base and context keys",
   }
 });
 
+test("parseConsoleCapabilities rejects available control with any route", () => {
+  const withRelative = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "retry",
+        availability: "available",
+        route: "/v1/workspaces/{workspace_id}/retry",
+        semantics: "retry",
+      },
+    ],
+  });
+  assert.equal(withRelative.ok, false);
+  if (withRelative.ok) return;
+  assert.equal(withRelative.kind, "malformed");
+  assert.match(withRelative.message, /omit route/i);
+
+  const withEmpty = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "cancel",
+        availability: "available",
+        route: "",
+        semantics: "cancel",
+      },
+    ],
+  });
+  assert.equal(withEmpty.ok, false);
+  if (withEmpty.ok) return;
+  assert.equal(withEmpty.kind, "malformed");
+  assert.match(withEmpty.message, /omit route/i);
+
+  // Absolute URLs must also omit — do not fall through to relative-route checks.
+  const withAbsolute = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "refresh",
+        availability: "available",
+        route: "https://example.invalid/v1/workspaces/ws/refresh",
+        semantics: "refresh",
+      },
+    ],
+  });
+  assert.equal(withAbsolute.ok, false);
+  if (withAbsolute.ok) return;
+  assert.equal(withAbsolute.kind, "malformed");
+  assert.match(withAbsolute.message, /omit route/i);
+
+  const withNull = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "refresh",
+        availability: "available",
+        route: null,
+        semantics: "refresh",
+      },
+    ],
+  });
+  assert.equal(withNull.ok, true);
+});
+
 test("parseConsoleCapabilities rejects available widget without route", () => {
   const parsed = parseConsoleCapabilities({
     ...localCapabilities,

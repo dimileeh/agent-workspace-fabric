@@ -839,6 +839,13 @@
                   "required": [
                     "id"
                   ]
+                },
+                {
+                  "properties": {
+                    "route": {
+                      "type": "null"
+                    }
+                  }
                 }
               ]
             },

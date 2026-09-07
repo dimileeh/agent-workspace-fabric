@@ -220,9 +220,11 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
     optional identity.
 
     Available widgets/diagnostics require an inventory id and that id's exact
-    ``/v1/...`` route (controls intentionally omit route). Encode that
-    per-collection on items so shared-schema validators cannot certify a wrong,
-    unknown-id, or route-less available entry the shipped console would reject.
+    ``/v1/...`` route. Controls encode ``route: {type: null}`` so advertised
+    control endpoints cannot certify (mutations ignore them and use hardcoded
+    operator paths); absent/null remain valid. Encode that per-collection on
+    items so shared-schema validators cannot certify a wrong, unknown-id, or
+    route-less available entry the shipped console would reject.
 
     Duplicate ids are rejected via per-id ``contains`` + ``maxContains=1``
     (``minContains=0``) on each collection array, matching Python/TS uniqueness.
@@ -283,11 +285,13 @@ def _console_capabilities_schema_extra(schema: dict[str, Any]) -> None:
                         extras.append(_available_forbidden_for_id(item_id))
                 collection_schema["items"] = {"allOf": extras}
             else:
-                # Controls: no route rules; still bound id for all availability states.
-                if "$ref" in items:
-                    collection_schema["items"] = {"allOf": [items, id_bound]}
-                else:
-                    collection_schema["items"] = {"allOf": [items, id_bound]}
+                # Controls: omit route for all availability states; still bound id.
+                # Advertised control routes are never called (mutations use
+                # hardcoded operator paths), so certifying a relative /v1/...,
+                # empty, or absolute route would misrepresent the contract.
+                # Absent/null remain valid.
+                omit_route = {"properties": {"route": {"type": "null"}}}
+                collection_schema["items"] = {"allOf": [items, id_bound, omit_route]}
             # Per-id uniqueness for Cloud/OpenAPI consumers (Python/TS already reject).
             collection_schema["allOf"] = [
                 _at_most_one_id_constraint(item_id) for item_id in sorted(known_ids)
@@ -425,6 +429,34 @@ class ConsoleCapabilitiesResponse(BaseModel):
                     raise ValueError(
                         f"available console {collection_name} id={item.id} route must be {expected}"
                     )
+        return self
+
+    @field_validator("controls", mode="before")
+    @classmethod
+    def controls_forbid_non_null_routes_before(cls, value: object) -> object:
+        """Reject non-null control routes before per-item relative-route checks.
+
+        Available controls with a relative ``/v1/...``, empty string, or absolute
+        URL must fail with the omit-route contract error — not certify via the
+        shared item route field validator — because mutations ignore advertised
+        control routes. Absent and null retain the documented omit semantics.
+        """
+        if not isinstance(value, list):
+            return value
+        for item in value:
+            route: object | None = (
+                item.get("route") if isinstance(item, dict) else getattr(item, "route", None)
+            )
+            if route is not None:
+                raise ValueError("console control entries must omit route")
+        return value
+
+    @model_validator(mode="after")
+    def controls_must_omit_route(self) -> Self:
+        """Controls omit route for every availability (mutations ignore advertised routes)."""
+        for item in self.controls:
+            if item.route is not None:
+                raise ValueError("console control entries must omit route")
         return self
 
     @model_validator(mode="after")
