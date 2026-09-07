@@ -753,9 +753,15 @@ export function WorkspaceLogColumn({
         return;
       }
       appliedListingFailureGenerationRef.current = generation;
+      // A latched tail 401/403 owns this banner. Listing success refuses to
+      // clear it, so a transient listing failure must not replace the
+      // authorization reason — a later listing 200 would otherwise leave a
+      // recovered 503 on screen indefinitely. Re-check the latch in the
+      // updater: a denial can settle after this failure is queued.
       setError((current) =>
         generation < appliedListingGenerationRef.current ||
-        generation < appliedListingFailureGenerationRef.current
+        generation < appliedListingFailureGenerationRef.current ||
+        tailAuthDeniedRef.current
           ? current
           : result.message,
       );

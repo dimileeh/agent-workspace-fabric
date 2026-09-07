@@ -3417,6 +3417,174 @@ test(`fullscreen logs retain last-successful tails on transient tail refresh fai
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCxO0: a latched
+// tail 401/403 shares the column error banner with listing failures. A later
+// transient /logs outage must not replace that authorization reason, and a
+// subsequent listing 200 must not leave the recovered outage on screen —
+// listing success refuses to clear the banner while the tail denial remains.
+test("fullscreen logs keep latched tail denial through a listing outage", async ({ page }) => {
+  test.setTimeout(45_000);
+  let tailMode: "ok" | "denied" = "ok";
+  let listingMode: "ok" | "outage" = "ok";
+  let listingOutages = 0;
+  let listingRecoveries = 0;
+  const workspaceId = "ws_fs_tail_auth_listing_outage";
+  const authorizedMarker = "authorized-fullscreen-tail-before-denial";
+  const denialMessage = "log tail permission revoked";
+  const outageMessage = "transient log listing outage";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "outage") {
+        listingOutages += 1;
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+          503,
+        );
+        return;
+      }
+      if (listingOutages > 0) {
+        listingRecoveries += 1;
+      }
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      if (tailMode === "denied") {
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: "FORBIDDEN",
+              message: denialMessage,
+            },
+          },
+          403,
+        );
+        return;
+      }
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+  await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
+
+  tailMode = "denied";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect(modal.getByText(denialMessage)).toBeVisible({ timeout: 12_000 });
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect(output).toContainText("No log data loaded.");
+
+  listingMode = "outage";
+  await expect.poll(() => listingOutages, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByText(denialMessage)).toBeVisible();
+  await expect(modal.getByText(outageMessage)).toHaveCount(0);
+  await expect(output).toContainText("No log data loaded.");
+
+  listingMode = "ok";
+  await expect.poll(() => listingRecoveries, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
+  await expect(modal.getByText(denialMessage)).toBeVisible();
+  await expect(modal.getByText(outageMessage)).toHaveCount(0);
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect(output).toContainText("No log data loaded.");
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
