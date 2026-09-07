@@ -26,6 +26,7 @@ formatAgentLabel,
 formatConfirmedExecutionModel,
 formatRequestedEffort,
 formatRequestedModel,
+mergeWorkspacePresentationFields,
 } from "@/lib/agent-format";
 import {
 artifactDownloadPath,
@@ -506,6 +507,7 @@ export function WorkspaceSummary({
   const recovery = workspace?.recovery ?? overview.recovery ?? null;
   const coordinationWarnings =
     workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
+  const presentationFields = mergeWorkspacePresentationFields(overview, workspace);
 
   return (
     <Panel
@@ -582,9 +584,9 @@ export function WorkspaceSummary({
             <Fact label="Task key" value={workspace?.task_key ?? overview.task_key ?? "—"} mono />
           ) : null}
           <Fact label="Agent" value={formatAgentLabel(overview)} />
-          <Fact label="Requested model" value={formatRequestedModel(workspace ?? overview)} />
-          <Fact label="Requested effort" value={formatRequestedEffort(workspace ?? overview)} />
-          <Fact label="Confirmed model" value={formatConfirmedExecutionModel(workspace ?? overview)} />
+          <Fact label="Requested model" value={formatRequestedModel(presentationFields)} />
+          <Fact label="Requested effort" value={formatRequestedEffort(presentationFields)} />
+          <Fact label="Confirmed model" value={formatConfirmedExecutionModel(presentationFields)} />
           <Fact label="Branch" value={workspace?.branch_name ?? overview.branch_name ?? "—"} mono />
           <Fact label="Base" value={overview.base_branch} mono />
           <Fact label="Phase" value={overview.current_phase} />

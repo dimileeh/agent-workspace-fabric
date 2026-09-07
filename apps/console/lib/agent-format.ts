@@ -121,6 +121,36 @@ export function formatConfirmedExecutionModel(workspace: ConfirmedModelWorkspace
   return `${compact} (${source})`;
 }
 
+type PresentationModelFields = RequestedModelWorkspace & ConfirmedModelWorkspace;
+
+/**
+ * Prefer detail fields when present; fall back to overview for optional
+ * requested/confirmed metadata so a sparse detail payload cannot blank
+ * authoritative overview values already on screen.
+ */
+export function mergeWorkspacePresentationFields(
+  overview: PresentationModelFields,
+  workspace: PresentationModelFields | null | undefined,
+): PresentationModelFields {
+  if (!workspace) {
+    return overview;
+  }
+  return {
+    requested_model: workspace.requested_model ?? overview.requested_model,
+    requested_effort: workspace.requested_effort ?? overview.requested_effort,
+    requested_model_source: workspace.requested_model_source ?? overview.requested_model_source,
+    requested_effort_source: workspace.requested_effort_source ?? overview.requested_effort_source,
+    agent_model: workspace.agent_model ?? overview.agent_model,
+    agent_effort: workspace.agent_effort ?? overview.agent_effort,
+    agent_model_source: workspace.agent_model_source ?? overview.agent_model_source,
+    agent_effort_source: workspace.agent_effort_source ?? overview.agent_effort_source,
+    confirmed_execution_model:
+      workspace.confirmed_execution_model ?? overview.confirmed_execution_model,
+    confirmed_execution_model_source:
+      workspace.confirmed_execution_model_source ?? overview.confirmed_execution_model_source,
+  };
+}
+
 function displayAgentModel(workspace: AgentLabelWorkspace): string | null {
   if (workspace.agent === "cursor" && workspace.cursor_auto_mode) {
     const mode = workspace.cursor_auto_mode;

@@ -128,3 +128,26 @@ test("never labels default/task_policy/auto as confirmed execution model", async
     "gpt-5.5-2026-08-07 (execution_evidence)",
   );
 });
+
+test("mergeWorkspacePresentationFields keeps overview metadata when detail omits fields", async () => {
+  const { mergeWorkspacePresentationFields, formatConfirmedExecutionModel, formatRequestedModel } =
+    await import("./agent-format.ts");
+  const overview = {
+    requested_model: "gpt-overview",
+    requested_model_source: "task_policy",
+    requested_effort: "high",
+    confirmed_execution_model: "gpt-confirmed",
+    confirmed_execution_model_source: "execution_evidence",
+  };
+  const sparseDetail = {
+    agent_model: "legacy-detail",
+  };
+  const merged = mergeWorkspacePresentationFields(overview, sparseDetail);
+  assert.equal(formatRequestedModel(merged), "gpt-overview (task_policy)");
+  assert.equal(formatConfirmedExecutionModel(merged), "gpt-confirmed (execution_evidence)");
+  assert.equal(
+    formatConfirmedExecutionModel(sparseDetail),
+    "not recorded",
+    "detail-only sparse object would blank confirmed model without merge",
+  );
+});
