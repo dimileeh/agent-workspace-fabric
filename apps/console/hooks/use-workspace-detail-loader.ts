@@ -51,6 +51,8 @@ type UseWorkspaceDetailLoaderArgs = {
   selectedStreamsRef: MutableRefObject<string[]>;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
   setLogListingAuthDenied: Dispatch<SetStateAction<boolean>>;
+  workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
+  setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
@@ -67,6 +69,9 @@ type UseWorkspaceDetailLoaderArgs = {
  * Explicit refresh, selection changes, and post-mutation callers use the
  * returned `loadWorkspace`, which advances generation and supersedes safely.
  * A newer feed-level 401/403 still wins over an older in-flight 200.
+ * A 401/403 on the basic /workspaces/{id} GET latches denial and closes the
+ * live stream until a successful detail read recovers it. Snapshot frames
+ * must not write revoked workspace metadata back while that latch is held.
  * A gated-detail generation bump drops the union of every stamp recorded after
  * this load captured generation (all of them on capabilities 404). The basic
  * workspace GET still applies. Failures from diagnostics that remain advertised
@@ -83,6 +88,8 @@ export function useWorkspaceDetailLoader({
   selectedStreamsRef,
   logListingAuthDeniedRef,
   setLogListingAuthDenied,
+  workspaceDetailAuthDeniedRef,
+  setWorkspaceDetailAuthDenied,
   setError,
   setDetail,
   setSelectedStreams,
@@ -155,6 +162,15 @@ export function useWorkspaceDetailLoader({
       const feedAuthDenied = (result: ApiEnvelope<unknown> | null | undefined) =>
         result != null && result.ok === false && (result.status === 401 || result.status === 403);
 
+      // Base-detail 401/403 clears detail.workspace but the inspector EventSource
+      // stays authorized unless we latch it. Snapshot frames write frame.workspace
+      // straight back. State (not only the ref) re-runs the live-stream effect
+      // so the source is closed until a successful GET recovers it.
+      const publishWorkspaceDetailAuthDenied = (denied: boolean) => {
+        workspaceDetailAuthDeniedRef.current = denied;
+        setWorkspaceDetailAuthDenied(denied);
+      };
+
       // Capabilities 404 / auth revocation bump gatedDetailFeedGenerationRef and
       // drop every optional inspector feed. The basic /workspaces/{id} GET is not
       // gated — apply it when that full drop is the only change. Otherwise a
@@ -170,8 +186,12 @@ export function useWorkspaceDetailLoader({
         if (allGatedDetailFeedsDropped(dropped)) {
           if (workspace.ok) {
             setError(null);
+            publishWorkspaceDetailAuthDenied(false);
           } else {
             setError(workspace.message);
+            if (feedAuthDenied(workspace)) {
+              publishWorkspaceDetailAuthDenied(true);
+            }
           }
           setDetail((current) => ({
             ...current,
@@ -221,6 +241,13 @@ export function useWorkspaceDetailLoader({
       // Gated-off feeds resolve to null and clear; transient network/5xx keep
       // last-successful inspector snapshots while the error banner stays visible
       // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
+      // Latch before setDetail so a snapshot frame cannot restore workspace
+      // between this apply and the live-stream effect cleanup.
+      if (workspace.ok) {
+        publishWorkspaceDetailAuthDenied(false);
+      } else if (feedAuthDenied(workspace)) {
+        publishWorkspaceDetailAuthDenied(true);
+      }
 
       setDetail((current) => {
         const nextWorkspace = workspace.ok
@@ -322,6 +349,8 @@ export function useWorkspaceDetailLoader({
     gatedDetailDroppedFeedsRef,
     gatedDetailFeedGenerationRef,
     logListingAuthDeniedRef,
+    setWorkspaceDetailAuthDenied,
+    workspaceDetailAuthDeniedRef,
     logStreamActivityRef,
     setLogListingAuthDenied,
     selectedIdRef,

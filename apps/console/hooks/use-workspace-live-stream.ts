@@ -25,6 +25,8 @@ type UseWorkspaceLiveStreamArgs = {
   logListingAuthDeniedRef: MutableRefObject<boolean>;
   logTailAuthDenied: boolean;
   logTailAuthDeniedRef: MutableRefObject<boolean>;
+  workspaceDetailAuthDenied: boolean;
+  workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
@@ -46,6 +48,8 @@ export function useWorkspaceLiveStream({
   logListingAuthDeniedRef,
   logTailAuthDenied,
   logTailAuthDeniedRef,
+  workspaceDetailAuthDenied,
+  workspaceDetailAuthDeniedRef,
   setStreamState,
   setDetail,
   setLogEntries,
@@ -53,11 +57,13 @@ export function useWorkspaceLiveStream({
   setError,
 }: UseWorkspaceLiveStreamArgs): void {
   useEffect(() => {
-    // Listing or tail 401/403 while workspace_logs stays advertised must close
-    // /stream, not only drop frames after they arrive. The capability gate
-    // stays true on that path, so the denial latch tears the EventSource down.
-    // Tail denial is separate: a later listing 200 must not reopen /stream.
-    if (!selectedId || logListingAuthDenied || logTailAuthDenied) {
+    // Listing, tail, or base-detail 401/403 while workspace_stream stays
+    // advertised must close /stream, not only drop frames after they arrive.
+    // The capability gate stays true on those paths, so the denial latch tears
+    // the EventSource down. Tail and base-detail denial are separate: a later
+    // listing 200 must not reopen /stream, and a snapshot must not write
+    // revoked workspace metadata back until a successful detail GET recovers.
+    if (!selectedId || logListingAuthDenied || logTailAuthDenied || workspaceDetailAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -77,8 +83,17 @@ export function useWorkspaceLiveStream({
     let closedByServer = false;
     let terminalError = false;
 
+    const streamAuthDenied = () =>
+      workspaceDetailAuthDeniedRef.current ||
+      logListingAuthDeniedRef.current ||
+      logTailAuthDeniedRef.current;
+
     source.onmessage = (message) => {
-      if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== selectedId) {
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        selectedIdRef.current !== selectedId ||
+        streamAuthDenied()
+      ) {
         return;
       }
       const frame = parseFrame(message.data);
@@ -91,23 +106,35 @@ export function useWorkspaceLiveStream({
       }
       if (frame.type === "snapshot") {
         setStreamState("live");
-        setDetail((current) => ({
-          ...current,
-          workspace: {
-            ...frame.workspace,
-            lifecycle: frame.workspace.lifecycle ?? [],
-            llm_usage: fallbackLlmUsage(frame.workspace.llm_usage),
-            recovery: frame.workspace.recovery ?? null,
-          },
-        }));
+        setDetail((current) => {
+          // A base-detail 401/403 may land between the frame check and this
+          // updater. Do not write revoked workspace metadata back.
+          if (workspaceDetailAuthDeniedRef.current) {
+            return current;
+          }
+          return {
+            ...current,
+            workspace: {
+              ...frame.workspace,
+              lifecycle: frame.workspace.lifecycle ?? [],
+              llm_usage: fallbackLlmUsage(frame.workspace.llm_usage),
+              recovery: frame.workspace.recovery ?? null,
+            },
+          };
+        });
         return;
       }
       if (frame.type === "event") {
         setStreamState("live");
-        setDetail((current) => ({
-          ...current,
-          events: mergeEvent(current.events, frame.event),
-        }));
+        setDetail((current) => {
+          if (workspaceDetailAuthDeniedRef.current) {
+            return current;
+          }
+          return {
+            ...current,
+            events: mergeEvent(current.events, frame.event),
+          };
+        });
         return;
       }
       if (frame.type === "log") {
@@ -118,12 +145,12 @@ export function useWorkspaceLiveStream({
         if (!allowStreamLogs) {
           return;
         }
-        if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
+        if (streamAuthDenied()) {
           return;
         }
         setStreamState("live");
         setLogEntries((current) => {
-          if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
+          if (streamAuthDenied()) {
             return current;
           }
           return trimLogEntries(
@@ -146,7 +173,7 @@ export function useWorkspaceLiveStream({
           );
         });
         setStreamOffsets((current) => {
-          if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
+          if (streamAuthDenied()) {
             return current;
           }
           return {
@@ -173,7 +200,7 @@ export function useWorkspaceLiveStream({
     source.onerror = () => {
       // close() from an authorization denial fires error; do not flip the
       // cleared inspector back to connecting while the latch is held.
-      if (logListingAuthDeniedRef.current || logTailAuthDeniedRef.current) {
+      if (streamAuthDenied()) {
         setStreamState("idle");
         return;
       }
@@ -193,6 +220,8 @@ export function useWorkspaceLiveStream({
     logListingAuthDeniedRef,
     logTailAuthDenied,
     logTailAuthDeniedRef,
+    workspaceDetailAuthDenied,
+    workspaceDetailAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,
     setDetail,

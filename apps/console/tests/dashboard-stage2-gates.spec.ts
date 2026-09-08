@@ -769,6 +769,215 @@ test("in-flight workspace detail success after feed-level 403 does not restore c
   await expect(page.getByText("Runtime snapshot unavailable.")).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gDKfP: /workspaces/{id}
+// 401/403 clears detail.workspace but must also latch the denial and close the
+// inspector EventSource. A later snapshot must not write frame.workspace back
+// while workspace_stream stays advertised. A successful detail read recovers it.
+for (const deniedStatus of [401, 403] as const) {
+  test(`base workspace detail ${deniedStatus} closes live stream until a successful detail read`, async ({
+    page,
+  }) => {
+    test.setTimeout(45_000);
+    let detailMode: "ok" | "denied" = "ok";
+    let streamConnections = 0;
+    let releaseHeldStream: () => void = () => undefined;
+    const heldStream = new Promise<void>((resolve) => {
+      releaseHeldStream = resolve;
+    });
+    const workspaceId = "ws_base_detail_stream_denial";
+    const overviewBranch = "overview-keep-branch";
+    const authorizedBranch = "authorized-detail-branch";
+    const revokedSnapshotBranch = "revoked-snapshot-branch-must-not-appear";
+    const overviewItem = {
+      workspace_id: workspaceId,
+      title: "Base detail stream denial workspace",
+      repo_url: "https://github.com/example/base-detail-stream-denial",
+      base_branch: "main",
+      branch_name: overviewBranch,
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: "Close the inspector stream when base workspace detail is denied",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    };
+    const authorizedWorkspace = {
+      ...overviewItem,
+      id: workspaceId,
+      version: 3,
+      branch_name: authorizedBranch,
+    };
+
+    await page.route("**/api/awf/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/awf/health") {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === "/api/awf/console/capabilities") {
+        await fulfillJson(route, localCapabilities());
+        return;
+      }
+      if (path === "/api/awf/console/dashboard-summary") {
+        await fulfillJson(route, localDashboardSummary());
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}`) {
+        if (detailMode === "denied") {
+          await fulfillJson(
+            route,
+            {
+              detail: {
+                error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+                message: "workspace detail permission revoked",
+              },
+            },
+            deniedStatus,
+          );
+          return;
+        }
+        await fulfillJson(route, authorizedWorkspace);
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+        await fulfillJson(route, {
+          workspace_id: workspaceId,
+          compose_project_name: "awf-ws-base-detail-stream",
+          stack_state: "running",
+          services: [],
+          app_endpoints: [],
+          logs_available: true,
+          control_available: true,
+          reason: null,
+        });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (
+        path === `/api/awf/workspaces/${workspaceId}/operations` ||
+        path === `/api/awf/workspaces/${workspaceId}/logs`
+      ) {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+        streamConnections += 1;
+        if (streamConnections === 1) {
+          // Hold the already-open inspector EventSource until base-detail denial
+          // is applied, then deliver a snapshot. workspace_stream stays advertised.
+          await heldStream;
+          const snapshot = {
+            type: "snapshot",
+            workspace: {
+              ...authorizedWorkspace,
+              branch_name: revokedSnapshotBranch,
+              task_prompt: revokedSnapshotBranch,
+            },
+          };
+          await route.fulfill({
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream; charset=utf-8",
+              "cache-control": "no-cache",
+            },
+            body: `data: ${JSON.stringify(snapshot)}\n\n`,
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+        });
+        return;
+      }
+      if (path === "/api/awf/metrics/resources/saturation") {
+        await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+        return;
+      }
+      if (path === "/api/awf/metrics/workspaces/summary") {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === "/api/awf/merge-queue") {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === "/api/awf/metrics/failures/summary") {
+        await fulfillJson(route, {
+          total_failures: 0,
+          since_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).click();
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(0);
+
+    detailMode = "denied";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stream: idle")).toBeVisible();
+
+    const connectionsAtDenial = streamConnections;
+    releaseHeldStream();
+    await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+    await page.waitForTimeout(1_500);
+    await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stream: idle")).toBeVisible();
+    expect(streamConnections).toBe(connectionsAtDenial);
+
+    detailMode = "ok";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByText(/workspace detail permission revoked/i)).toHaveCount(0);
+    await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(connectionsAtDenial);
+    await expect(page.getByText("Stream: idle")).toHaveCount(0);
+    await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+  });
+}
+
 // Requests slower than pollMs must still apply. A wall-clock interval that
 // calls loadWorkspace every pollMs advances the detail generation, so four
 // overlapping successes produce zero setDetail writes until overlap ends.

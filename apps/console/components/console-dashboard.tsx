@@ -150,6 +150,11 @@ export function ConsoleDashboard() {
   // listing latch, so this separate latch is what keeps /stream closed.
   const logTailAuthDeniedRef = useRef(false);
   const [logTailAuthDenied, setLogTailAuthDenied] = useState(false);
+  // Base /workspaces/{id} 401/403 while workspace_stream stays advertised.
+  // Listing/tail latches do not cover this path. Snapshot frames must not
+  // write revoked workspace metadata back until a successful detail GET.
+  const workspaceDetailAuthDeniedRef = useRef(false);
+  const [workspaceDetailAuthDenied, setWorkspaceDetailAuthDenied] = useState(false);
   // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
@@ -339,6 +344,8 @@ export function ConsoleDashboard() {
           // Inspector surfaces are wiped with the rail; drop the detail warning
           // so a retained diagnostic error does not outlive the cleared snapshot.
           setWorkspaceDetailError(null);
+          workspaceDetailAuthDeniedRef.current = false;
+          setWorkspaceDetailAuthDenied(false);
           // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
           // retained agent/model options stay visible on the rail, and an
           // active prior filter can keep a later recovered list empty.
@@ -431,6 +438,8 @@ export function ConsoleDashboard() {
     setOverview([]);
     setOverviewError(null);
     setWorkspaceDetailError(null);
+    workspaceDetailAuthDeniedRef.current = false;
+    setWorkspaceDetailAuthDenied(false);
     setOverviewTruncationWarning(null);
     setRetainedAgents([]);
     setRetainedModels([]);
@@ -1031,6 +1040,8 @@ export function ConsoleDashboard() {
     selectedStreamsRef,
     logListingAuthDeniedRef,
     setLogListingAuthDenied,
+    workspaceDetailAuthDeniedRef,
+    setWorkspaceDetailAuthDenied,
     setError: setWorkspaceDetailError,
     setDetail,
     setSelectedStreams,
@@ -1163,6 +1174,8 @@ export function ConsoleDashboard() {
     setLogListingAuthDenied(false);
     logTailAuthDeniedRef.current = false;
     setLogTailAuthDenied(false);
+    workspaceDetailAuthDeniedRef.current = false;
+    setWorkspaceDetailAuthDenied(false);
     selectedStreamsRef.current = [];
     setDetail(emptyDetail);
     setSelectedStreams([]);
@@ -1183,6 +1196,8 @@ export function ConsoleDashboard() {
     logListingAuthDeniedRef,
     logTailAuthDenied,
     logTailAuthDeniedRef,
+    workspaceDetailAuthDenied,
+    workspaceDetailAuthDeniedRef,
     setStreamState,
     setDetail,
     setLogEntries,
