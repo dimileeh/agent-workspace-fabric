@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
@@ -17,6 +17,7 @@ from awf.db.session import make_session_factory
 from awf.service.console_dashboard_summary import (
     _count_fleet_snapshot,
     summarize_console_dashboard,
+    summarize_console_dashboard_for_session,
 )
 from tests.unit.helpers import create_workspace
 
@@ -89,7 +90,6 @@ async def test_fleet_snapshot_pairs_live_and_windowed_counts(
     """Live status, awaiting_human, and windowed terminals share one statement."""
 
     now = datetime(2026, 9, 6, 17, 0, tzinfo=UTC)
-    window_start = now - timedelta(hours=24)
     flagged = await create_workspace(
         session_factory, status=WorkspaceStatus.monitoring_pr, updated_at=now
     )
@@ -117,10 +117,11 @@ async def test_fleet_snapshot_pairs_live_and_windowed_counts(
         await session.commit()
 
     async with session_factory() as session:
-        status_counts, awaiting_human, windowed = await _count_fleet_snapshot(
-            session, window_start=window_start, generated_at=now
+        status_counts, awaiting_human, windowed, generated_at = await _count_fleet_snapshot(
+            session, now=now
         )
 
+    assert generated_at == now
     assert status_counts[WorkspaceStatus.monitoring_pr.value] == 2
     assert status_counts[WorkspaceStatus.running.value] == 1
     assert awaiting_human == 1
@@ -139,13 +140,13 @@ async def test_summary_uses_one_fleet_snapshot_for_live_and_window_counters(
 
     import awf.service.console_dashboard_summary as summary_mod
 
-    calls: list[tuple[dict[str, int], int, dict[str, int]]] = []
+    calls: list[tuple[dict[str, int], int, dict[str, int], datetime]] = []
     original = summary_mod._count_fleet_snapshot
 
     async def _spy(
-        session: AsyncSession, *, window_start: datetime, generated_at: datetime
-    ) -> tuple[dict[str, int], int, dict[str, int]]:
-        result = await original(session, window_start=window_start, generated_at=generated_at)
+        session: AsyncSession, *, now: datetime | None, since_hours: int
+    ) -> tuple[dict[str, int], int, dict[str, int], datetime]:
+        result = await original(session, now=now, since_hours=since_hours)
         calls.append(result)
         return result
 
@@ -168,7 +169,8 @@ async def test_summary_uses_one_fleet_snapshot_for_live_and_window_counters(
         since_hours=24,
     )
     assert len(calls) == 1
-    status_counts, awaiting_human, windowed = calls[0]
+    status_counts, awaiting_human, windowed, generated_at = calls[0]
+    assert summary.generated_at == generated_at
     assert summary.counts.queued == status_counts[WorkspaceStatus.requested.value]
     assert summary.counts.monitoring_pr == status_counts[WorkspaceStatus.monitoring_pr.value]
     assert summary.counts.awaiting_human == awaiting_human
@@ -314,3 +316,52 @@ async def test_service_summary_counts_whole_control_plane_fleet_not_capacity_nod
     assert summary.counts.active == 3
     assert summary.counts.queued == 1
     assert summary.counts.completed_last_window == 1
+
+
+@pytest.mark.unit
+async def test_summary_anchor_includes_transition_committed_before_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await create_workspace(
+        session_factory, status=WorkspaceStatus.running, updated_at=datetime.now(UTC)
+    )
+    transition_at: datetime | None = None
+    async with session_factory() as session:
+        execute = session.execute
+
+        async def transition_before_execute(statement, *args, **kwargs):
+            nonlocal transition_at
+            async with session_factory() as writer:
+                transition_at = (
+                    await writer.execute(
+                        update(Workspace)
+                        .where(Workspace.id == workspace_id)
+                        .values(status=WorkspaceStatus.completed, updated_at=func.clock_timestamp())
+                        .returning(Workspace.updated_at)
+                    )
+                ).scalar_one()
+                await writer.commit()
+            return await execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", transition_before_execute)
+        summary = await summarize_console_dashboard_for_session(
+            session, settings=Settings(_env_file=None)
+        )
+
+    assert summary.counts.active == 0
+    assert summary.counts.completed_last_window == 1
+    assert transition_at is not None
+    assert summary.generated_at >= transition_at
+    assert summary.as_of == summary.last_success_at == summary.generated_at
+    assert summary.window.start == summary.generated_at - timedelta(hours=24)
+
+
+@pytest.mark.unit
+async def test_summary_empty_fleet_uses_database_statement_anchor(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    summary = await summarize_console_dashboard(session_factory, settings=Settings(_env_file=None))
+    assert summary.generated_at.tzinfo is not None
+    assert summary.window.start == summary.generated_at - timedelta(hours=24)
+    assert summary.counts.active == summary.counts.completed_last_window == 0

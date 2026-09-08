@@ -66,6 +66,10 @@ function isNullableNonNegativeInteger(value: unknown): value is number | null {
   return value === null || isNonNegativeInteger(value);
 }
 
+function hasOnlyKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(record).every((key) => keys.includes(key));
+}
+
 export type SummaryFleetKpi = {
   id: string;
   label: string;
@@ -254,6 +258,12 @@ export function parseDashboardSummary(
     return null;
   }
   const record = payload as Record<string, unknown>;
+  if (!hasOnlyKeys(record, [
+    "schema_version", "scope", "generated_at", "as_of", "last_success_at",
+    "window", "coverage", "counts", "overlap",
+  ])) {
+    return null;
+  }
   if (record.schema_version !== 1) {
     return null;
   }
@@ -287,6 +297,9 @@ export function parseDashboardSummary(
     return null;
   }
   const window = record.window as Record<string, unknown>;
+  if (!hasOnlyKeys(window, ["anchor", "since_hours", "start"])) {
+    return null;
+  }
   if (
     window.anchor !== "generated_at" ||
     typeof window.since_hours !== "number" ||
@@ -310,6 +323,9 @@ export function parseDashboardSummary(
     return null;
   }
   const coverage = record.coverage as Record<string, unknown>;
+  if (!hasOnlyKeys(coverage, ["status", "notes"])) {
+    return null;
+  }
   if (
     coverage.status !== "complete" &&
     coverage.status !== "partial" &&
@@ -347,6 +363,9 @@ export function parseDashboardSummary(
     "cancelled_last_window",
     "failed_last_window",
   ] as const;
+  if (!hasOnlyKeys(counts, requiredCountKeys)) {
+    return null;
+  }
   let anyCountNull = false;
   for (const key of requiredCountKeys) {
     if (!(key in counts)) {
@@ -392,11 +411,15 @@ export function parseDashboardSummary(
     return null;
   }
   const overlap = record.overlap as Record<string, unknown>;
-  for (const key of [
+  const overlapKeys = [
     "awaiting_human_subset_of_monitoring_pr",
     "awaiting_operator_in_active_not_executing",
     "retrying_in_active_not_executing",
-  ] as const) {
+  ] as const;
+  if (!hasOnlyKeys(overlap, overlapKeys)) {
+    return null;
+  }
+  for (const key of overlapKeys) {
     // Fixed v1 count-semantics invariants: literal true only (not provider toggles).
     if (overlap[key] !== true) {
       return null;

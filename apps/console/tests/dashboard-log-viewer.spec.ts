@@ -3,6 +3,7 @@ import { expect, type Page, test } from "@playwright/test";
 import type { AwfStreamFrame } from "@/lib/types";
 
 import { fulfillJson, localCapabilities, localDashboardSummary } from "./fixtures/console-api";
+import { streamTest } from "./fixtures/open-event-stream";
 
 const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
@@ -30,6 +31,7 @@ test("fullscreen logs default to ascending, preserve manual scroll, and order ta
   page,
 }) => {
   const api = await mockAwfApi(page);
+  api.activeMetadataAdvanced = false;
 
   await page.goto("/");
   await waitForConsoleReady(page);
@@ -43,6 +45,10 @@ test("fullscreen logs default to ascending, preserve manual scroll, and order ta
   const output = modal.getByTestId("log-output");
   await expect(output).toBeVisible();
   await expect(output).toContainText("active.stdout");
+  await expect(output).toContainText("quiet.stdout");
+  // The inspector also lists streams. Advance only after fullscreen has its
+  // own baseline, not after an arbitrary shared request count.
+  api.activeMetadataAdvanced = true;
 
   await expect
     .poll(
@@ -5824,12 +5830,16 @@ test("fullscreen logs restore listing outage after stream probe recovery", async
 // after authorization recovers. A later heartbeat or log on the failed
 // connection must not accept the probe.
 for (const terminal of ["error", "closed"] as const) {
-test(`inspector reschedules a stream probe after a non-auth ${terminal} frame`, async ({ page }) => {
+streamTest(`inspector reschedules a stream probe after a non-auth ${terminal} frame`, async ({ page, openEventStream }) => {
   test.setTimeout(90_000);
   let streamPhase: "deny" | "probe-fail" | "recover" = "deny";
   let streamOpens = 0;
   const heldStream = createDeferred();
   const workspaceId = `ws_inspector_stream_probe_${terminal}`;
+  const recoveryStreamUrl = await openEventStream([
+    { type: "connected", workspace_id: workspaceId },
+    { type: "heartbeat", workspace_id: workspaceId },
+  ]);
   const liveSecret = "inspector-probe-log-after-terminal-frame-must-not-appear";
   const denialMessage = "Workspace stream authorization denied.";
 
@@ -5915,18 +5925,7 @@ test(`inspector reschedules a stream probe after a non-auth ${terminal} frame`, 
         return;
       }
       if (streamPhase === "recover") {
-        const frames: AwfStreamFrame[] = [
-          { type: "connected", workspace_id: workspaceId },
-          { type: "heartbeat", workspace_id: workspaceId },
-        ];
-        await route.fulfill({
-          status: 200,
-          headers: {
-            "content-type": "text/event-stream; charset=utf-8",
-            "cache-control": "no-cache",
-          },
-          body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
-        });
+        await route.continue({ url: recoveryStreamUrl });
         return;
       }
       const terminalFrame: AwfStreamFrame =
@@ -6349,7 +6348,7 @@ async function waitForConsoleReady(page: Page) {
 
 async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
   const { advanceActiveTailAfterFirstRead, quietTailBytes, streamNoiseBytes, streamResponseDelayMs } = options;
-  const state: { activeTailPoll: number | null; activeTailReads: number; streamPolls: number } = {
+  const state: { activeTailPoll: number | null; activeTailReads: number; streamPolls: number; activeMetadataAdvanced?: boolean } = {
     activeTailPoll: null,
     activeTailReads: 0,
     streamPolls: 0,
@@ -6431,7 +6430,8 @@ async function mockAwfApi(page: Page, options: MockAwfApiOptions = {}) {
     }
     if (path === "/api/awf/workspaces/ws_logs/logs") {
       state.streamPolls += 1;
-      const activeMetadataAdvanced = advanceActiveTailAfterFirstRead ? state.activeTailReads > 0 : undefined;
+      const activeMetadataAdvanced = state.activeMetadataAdvanced ??
+        (advanceActiveTailAfterFirstRead ? state.activeTailReads > 0 : undefined);
       await fulfillJson(route, listEnvelope(logStreams(state.streamPolls, activeMetadataAdvanced)));
       return;
     }

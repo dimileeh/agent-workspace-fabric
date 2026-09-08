@@ -1250,6 +1250,24 @@ export function ConsoleDashboard() {
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
 
+  const refreshDashboard = () => {
+    startTransition(() => {
+      void (async () => {
+        const selectedWorkspaceId = selectedIdRef.current;
+        // Supersede periodic detail loads before waiting for capabilities.
+        const detailReload = selectedWorkspaceId
+          ? loadWorkspace(selectedWorkspaceId)
+          : Promise.resolve();
+        const caps = await loadCapabilities();
+        // Capability failures must not skip the list refresh.
+        await Promise.all([loadOverview(), detailReload]);
+        if (caps) {
+          await reloadAvailableFeeds(caps);
+        }
+      })();
+    });
+  };
+
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
@@ -1259,24 +1277,7 @@ export function ConsoleDashboard() {
         selectedId={selectedId}
         preferences={operatorPreferences}
         onPreferencesChange={updateOperatorPreferences}
-        onRefresh={() =>
-          startTransition(() => {
-            void (async () => {
-              const selectedWorkspaceId = selectedIdRef.current;
-              // Supersede an in-flight periodic detail load immediately. Waiting
-              // for capabilities would let a slow poll apply before this refresh.
-              const detailReload = selectedWorkspaceId
-                ? loadWorkspace(selectedWorkspaceId)
-                : Promise.resolve();
-              const caps = await loadCapabilities();
-              // Always reload overview; capability errors must not skip the list refresh.
-              await Promise.all([loadOverview(), detailReload]);
-              if (caps) {
-                await reloadAvailableFeeds(caps);
-              }
-            })();
-          })
-        }
+        onRefresh={refreshDashboard}
         isPending={isPending}
       />
 
@@ -1391,6 +1392,7 @@ export function ConsoleDashboard() {
         logTailRefreshError={logTailRefreshError}
         workspaceDetailError={workspaceDetailError}
         onClose={() => setSelectedId(null)}
+        onRefresh={refreshDashboard}
         onRetry={() => {
           void retrySelectedWorkspace();
         }}

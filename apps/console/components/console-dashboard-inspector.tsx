@@ -51,6 +51,7 @@ type ConsoleDashboardInspectorProps = {
   logTailRefreshError: string | null;
   workspaceDetailError: string | null;
   onClose: () => void;
+  onRefresh: () => void;
   onRetry: () => void;
   onOperatorAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
   onToggleStream: (streamId: string, checked: boolean) => void;
@@ -91,6 +92,7 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
     <WorkspaceInspector
       isOpen={!!(selectedId && selectedOverview)}
       onClose={props.onClose}
+      onRefresh={props.onRefresh}
       title={selectedOverview ? selectedOverview.title : "Workspace Details"}
     >
       <PanelContext.Provider value="ghost">

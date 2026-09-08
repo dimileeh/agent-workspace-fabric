@@ -18,6 +18,15 @@ function validSummary(overrides = {}) {
   return structuredClone({ ...fixture, ...overrides });
 }
 
+for (const level of [null, "window", "coverage", "counts", "overlap"]) {
+  test(`parseDashboardSummary rejects unknown ${level ?? "envelope"} properties`, () => {
+    const payload = validSummary();
+    const target = level === null ? payload : payload[level];
+    target.unpublished_field = "not part of schema v1";
+    assert.equal(parseDashboardSummary(payload, "local"), null);
+  });
+}
+
 test("parseDashboardSummary accepts the local fixture", () => {
   const parsed = parseDashboardSummary(fixture);
   assert.ok(parsed);

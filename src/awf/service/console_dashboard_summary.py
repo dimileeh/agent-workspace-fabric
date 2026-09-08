@@ -9,10 +9,10 @@ instance — not the capacity worker node filter used by Docker saturation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import DateTime, and_, case, func, literal, select, true
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
@@ -90,15 +90,13 @@ async def summarize_console_dashboard_for_session(
     """Build fleet-wide local-scope dashboard summary without Docker/capacity probes."""
 
     del settings  # Settings retained for call-site symmetry; fleet scope is DB-wide.
-    generated_at = _to_utc(now or datetime.now(UTC))
-    window_start = generated_at - timedelta(hours=since_hours)
-
     # One statement so live status, awaiting_human, and windowed terminals share
     # a READ COMMITTED snapshot (a workspace cannot be both executing and
     # completed_last_window under the published as_of).
-    status_counts, awaiting_human, windowed = await _count_fleet_snapshot(
-        session, window_start=window_start, generated_at=generated_at
+    status_counts, awaiting_human, windowed, generated_at = await _count_fleet_snapshot(
+        session, now=now, since_hours=since_hours
     )
+    window_start = generated_at - timedelta(hours=since_hours)
     saturation = _workspace_saturation_counts(status_counts, awaiting_human=awaiting_human)
 
     executing = saturation.running + saturation.validating + saturation.pushing
@@ -154,18 +152,34 @@ async def summarize_console_dashboard(
 async def _count_fleet_snapshot(
     session: AsyncSession,
     *,
-    window_start: datetime,
-    generated_at: datetime,
-) -> tuple[dict[str, int], int, dict[str, int]]:
+    now: datetime | None = None,
+    since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+) -> tuple[dict[str, int], int, dict[str, int], datetime]:
     """Count live fleet status, awaiting_human, and windowed terminals in one SELECT.
 
     Separate SELECTs under READ COMMITTED can observe different committed states
     (e.g. awaiting_human=1 with monitoring_pr=0, or the same row as both running
     and completed_last_window). One statement keeps the published snapshot coherent.
 
-    Windowed terminals are the closed interval ``[window_start, generated_at]``.
-    A lower bound alone includes rows committed after the published anchor.
+    Sample the database clock once, after the statement snapshot is acquired.
+    An application-side anchor (or transaction-start time) can precede a visible
+    terminal transition and omit that workspace from both live and terminal counts.
+    Explicit ``now`` remains available for deterministic historical-window tests.
     """
+
+    clock = (
+        select(
+            (
+                literal(_to_utc(now), type_=DateTime(timezone=True))
+                if now is not None
+                else func.clock_timestamp(type_=DateTime(timezone=True))
+            ).label("generated_at")
+        )
+        .cte("snapshot_clock")
+        .prefix_with("MATERIALIZED")
+    )
+    generated_at = clock.c.generated_at
+    window_start = generated_at - timedelta(hours=since_hours)
 
     status_exprs = [
         func.coalesce(
@@ -210,7 +224,9 @@ async def _count_fleet_snapshot(
     ]
     row = (
         await session.execute(
-            select(*status_exprs, awaiting_expr, *windowed_exprs).select_from(Workspace)
+            select(generated_at, *status_exprs, awaiting_expr, *windowed_exprs)
+            .select_from(clock.outerjoin(Workspace, true()))
+            .group_by(generated_at)
         )
     ).one()
     status_counts = {
@@ -220,4 +236,4 @@ async def _count_fleet_snapshot(
         status.value: int(getattr(row, f"window_{status.value}") or 0)
         for status in _WINDOWED_TERMINAL_STATUSES
     }
-    return status_counts, int(row.awaiting_human or 0), windowed
+    return status_counts, int(row.awaiting_human or 0), windowed, _to_utc(row.generated_at)

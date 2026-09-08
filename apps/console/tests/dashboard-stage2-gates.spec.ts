@@ -3295,23 +3295,20 @@ test("later runtime and operations 401 does not block a newer in-flight refresh"
   await expect(inspector.getByText(initialOperation, { exact: true })).toBeVisible();
 
   detailPhase = "first-deny";
-  await page.locator("header").getByRole("button", { name: "Refresh" }).click({ force: true });
-  await expect(inspector.getByText("runtime permission revoked")).toBeVisible({ timeout: 10_000 });
+  await inspector.getByRole("button", { name: "Reload workspace", exact: true }).click();
+  // Both requests are denied concurrently; whichever settles last owns the banner.
+  await expect(inspector.getByText(/^(runtime|operations) permission revoked$/)).toBeVisible({ timeout: 10_000 });
   await expect(inspector.getByText("Runtime snapshot unavailable.")).toBeVisible();
   await expect(inspector.getByText("No operations recorded.")).toBeVisible();
   await expect(inspector.getByText(initialRuntime, { exact: true })).toHaveCount(0);
 
   detailPhase = "hold-recovery-deny";
-  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
-    (button as HTMLButtonElement).click();
-  });
+  await inspector.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => recoveryRuntime.length, { timeout: 10_000 }).toBe(1);
   await expect.poll(() => recoveryOperations.length, { timeout: 10_000 }).toBe(1);
 
   detailPhase = "hold-newer-success";
-  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
-    (button as HTMLButtonElement).click();
-  });
+  await inspector.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => newerRuntime.length, { timeout: 10_000 }).toBe(1);
   await expect.poll(() => newerOperations.length, { timeout: 10_000 }).toBe(1);
 

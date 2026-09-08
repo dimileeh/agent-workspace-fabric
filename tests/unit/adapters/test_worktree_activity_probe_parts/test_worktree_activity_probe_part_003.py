@@ -17,6 +17,7 @@ import sys
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -255,6 +256,12 @@ async def test_probe_starts_no_second_thread_while_a_scan_is_still_running(
 
         with structlog.testing.capture_logs() as captured:
             assert await probe() is None
+        fresh = [
+            thread
+            for thread in threading.enumerate()
+            if thread not in before and thread.name.startswith("awf-worktree-scan")
+        ]
+        assert len(fresh) == 1
     finally:
         release.set()
 
@@ -267,12 +274,6 @@ async def test_probe_starts_no_second_thread_while_a_scan_is_still_running(
     assert len(gated) == 1
     assert gated[0]["worktree_path"] == str(worktree)
     assert gated[0]["log_level"] == "warning"
-    fresh = [
-        thread
-        for thread in threading.enumerate()
-        if thread not in before and thread.name.startswith("awf-worktree-scan")
-    ]
-    assert len(fresh) == 1
 
 
 @pytest.mark.unit
@@ -364,7 +365,9 @@ async def test_probe_starts_no_thread_once_the_worker_wide_ceiling_is_full(
 
 
 @pytest.mark.unit
-async def test_finished_scans_return_their_worker_wide_slot(worktree: Path) -> None:
+async def test_finished_scans_return_their_worker_wide_slot(
+    worktree: Path, settle_scan_threads: Callable[[], None]
+) -> None:
     """The ceiling counts *live* threads, so ordinary probing cannot drain it.
 
     A slot leaked per completed scan would wedge every worktree on the worker
@@ -377,6 +380,7 @@ async def test_finished_scans_return_their_worker_wide_slot(worktree: Path) -> N
     assert await probe() is False
     assert await probe() is False
 
+    settle_scan_threads()
     assert worktree_activity._live_scan_threads._live == 0
 
 
@@ -414,6 +418,7 @@ async def test_priming_without_a_worker_wide_slot_still_starts_the_run(
 async def test_a_thread_that_cannot_start_frees_the_slot_it_reserved(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
+    settle_scan_threads: Callable[[], None],
 ) -> None:
     """``Thread.start`` can still fail below the ceiling; that must not latch.
 
@@ -424,6 +429,7 @@ async def test_a_thread_that_cannot_start_frees_the_slot_it_reserved(
     """
     probe = await make_worktree_activity_probe(worktree)
     assert probe is not None
+    settle_scan_threads()
 
     def _cannot_start(_deliver: object) -> None:
         raise RuntimeError("can't start new thread")

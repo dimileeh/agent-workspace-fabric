@@ -2379,11 +2379,11 @@ test("superseded capability outage applies while a newer refresh hangs", async (
   await expect(cancel).toBeEnabled();
 
   capabilityMode = "hold";
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => held.length).toBe(1);
 
   capabilityMode = "hang";
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => hanging.length).toBe(1);
 
   await held[0]("outage");
@@ -2560,11 +2560,11 @@ test("superseded capability 404 applies while a newer refresh hangs", async ({ p
   await expect(cancel).toBeEnabled();
 
   capabilityMode = "hold";
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => held.length).toBe(1);
 
   capabilityMode = "hang";
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => hanging.length).toBe(1);
 
   await held[0]("missing");
@@ -2584,12 +2584,12 @@ test("superseded capability 404 applies while a newer refresh hangs", async ({ p
 
   // A 404 that settles after a newer success has applied must not clear recovery.
   capabilityMode = "hold";
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => held.length).toBe(2);
 
   const successesBeforeRecovery = settledCapabilitySuccesses;
   capabilityMode = "ok";
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Reload workspace", exact: true }).click();
   await expect.poll(() => settledCapabilitySuccesses).toBeGreaterThan(successesBeforeRecovery);
   await held[1]("missing");
   await page.waitForTimeout(500);
@@ -3105,14 +3105,16 @@ test.describe("hosted context query carry", () => {
 
     // Soft-switch page search (client-side) then bump capability identity so
     // authorized feeds clear and overview reloads under the new context.
+    // replaceState synchronously triggers the context listener. Install the new
+    // tenant response first, so that request cannot receive tenant A's identity.
+    useTenantB = true;
+    const before = overviewUrls.length;
     await page.evaluate(() => {
       const next = new URL(window.location.href);
       next.searchParams.set("org_id", "org_b");
       next.searchParams.set("project_id", "proj_b");
       window.history.replaceState(null, "", `${next.pathname}?${next.searchParams.toString()}`);
     });
-    useTenantB = true;
-    const before = overviewUrls.length;
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect.poll(() => overviewUrls.length).toBeGreaterThan(before);
     const afterSwitch = overviewUrls.slice(before);
