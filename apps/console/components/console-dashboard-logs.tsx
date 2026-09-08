@@ -404,6 +404,13 @@ export function WorkspaceLogColumn({
   const tailAuthDeniedRef = useRef(false);
   const [tailAuthDenied, setTailAuthDenied] = useState(false);
   const tailDeniedStreamIdsRef = useRef<Set<string>>(new Set());
+  // Streams whose last selected-tail read failed with network/5xx. The
+  // 401/403 denial set stays empty, and a static or closed listing does not
+  // change selectedTailRefreshKey, so the refresh-key effect must still retry
+  // these on the next listing poll or the stale snapshot warning sticks until
+  // Tail all. Kept in sync with tailRefreshErrors; a ref so recording the
+  // warning does not immediately re-enter the effect.
+  const tailRefreshErrorStreamIdsRef = useRef<Set<string>>(new Set());
   // Overlapping selected-tail reloads stay monotonic so a newer 401/403 cannot
   // lose to an older in-flight 200. A 401/403 is authoritative unless a
   // strictly newer successful tail response has already been applied. Denial
@@ -519,6 +526,7 @@ export function WorkspaceLogColumn({
       sawAuthDenial = true;
       setTailAuthDenied(true);
       appliedTailFailureGenerationRef.current = {};
+      tailRefreshErrorStreamIdsRef.current.clear();
       setTailRefreshErrors({});
       setError(denied.message ?? "Unable to load log stream.");
       eventSourceRef.current?.close();
@@ -562,6 +570,7 @@ export function WorkspaceLogColumn({
         return;
       }
       appliedTailFailureGenerationRef.current[failure.streamId] = generation;
+      tailRefreshErrorStreamIdsRef.current.add(failure.streamId);
       const message = fullscreenTailRefreshMessage(failure.message);
       setTailRefreshErrors((current) => {
         if (
@@ -644,11 +653,19 @@ export function WorkspaceLogColumn({
         tailDeniedStreamIdsRef.current.delete(streamId);
       }
     }
+    for (const streamId of tailRefreshErrorStreamIdsRef.current) {
+      if (!activeStreamIds.has(streamId)) {
+        tailRefreshErrorStreamIdsRef.current.delete(streamId);
+      }
+    }
     if (tailDeniedStreamIdsRef.current.size > 0) {
       return;
     }
     if (successes.length === 0) {
       if (!tailAuthDeniedRef.current) {
+        for (const failure of failures) {
+          tailRefreshErrorStreamIdsRef.current.add(failure.streamId);
+        }
         setTailRefreshErrors((current) => {
           if (
             epoch !== columnEpochRef.current ||
@@ -684,6 +701,10 @@ export function WorkspaceLogColumn({
       if (stamped != null && stamped <= generation) {
         delete appliedTailFailureGenerationRef.current[success.entry.streamId];
       }
+      tailRefreshErrorStreamIdsRef.current.delete(success.entry.streamId);
+    }
+    for (const failure of failures) {
+      tailRefreshErrorStreamIdsRef.current.add(failure.streamId);
     }
     setTailRefreshErrors((current) => {
       if (
@@ -755,6 +776,7 @@ export function WorkspaceLogColumn({
       setStreams([]);
       setSelectedStreams([]);
       appliedTailFailureGenerationRef.current = {};
+      tailRefreshErrorStreamIdsRef.current.clear();
       setTailRefreshErrors({});
       return;
     }
@@ -780,6 +802,7 @@ export function WorkspaceLogColumn({
       }
       setError(message);
       appliedTailFailureGenerationRef.current = {};
+      tailRefreshErrorStreamIdsRef.current.clear();
       setTailRefreshErrors({});
       columnEpochRef.current += 1;
       revokedListingGenerationRef.current = Math.max(
@@ -918,13 +941,20 @@ export function WorkspaceLogColumn({
       return;
     }
     // Static listing metadata must not restart tails that already landed.
-    // A stream still latched for 401/403 is the exception: listing 200 does
-    // not change this fingerprint, and only that stream's own 200 clears
-    // the latch. Retry it on the next listing refresh, but do not start a
-    // second reload while one is already in flight.
+    // Two failures still retry on the next listing refresh: a 401/403 latch
+    // (only that stream's own 200 clears it) and a network/5xx
+    // tailRefreshError (the denial set stays empty, so a static or closed
+    // stream would otherwise keep the stale snapshot until Tail all). Do not
+    // start a second reload while one is already in flight — a newer
+    // generation would discard the slower success.
+    const retryOutstandingTailFailure =
+      tailDeniedStreamIdsRef.current.size > 0 ||
+      selectedStreamsRef.current.some((streamId) =>
+        tailRefreshErrorStreamIdsRef.current.has(streamId),
+      );
     if (
       previousTailRefreshKey.current === selectedTailRefreshKey &&
-      (tailDeniedStreamIdsRef.current.size === 0 || tailReloadInFlightCountRef.current > 0)
+      (!retryOutstandingTailFailure || tailReloadInFlightCountRef.current > 0)
     ) {
       return;
     }

@@ -2180,8 +2180,13 @@ test("fullscreen listing refresh retries denied tails when metadata is unchanged
 
   assert.match(
     effectBody,
-    /previousTailRefreshKey\.current === selectedTailRefreshKey &&\s*\(\s*tailDeniedStreamIdsRef\.current\.size === 0 \|\|\s*tailReloadInFlightCountRef\.current > 0\s*\)/,
-    "Expected unchanged stream metadata to skip a new fullscreen tail read unless a denied stream can be retried",
+    /previousTailRefreshKey\.current === selectedTailRefreshKey &&\s*\(\s*!retryOutstandingTailFailure \|\|\s*tailReloadInFlightCountRef\.current > 0\s*\)/,
+    "Expected unchanged stream metadata to skip a new fullscreen tail read unless a denied or refresh-failed stream can be retried",
+  );
+  assert.match(
+    effectBody,
+    /tailDeniedStreamIdsRef\.current\.size > 0 \|\|[\s\S]*?tailRefreshErrorStreamIdsRef\.current\.has\(streamId\)/,
+    "Expected a static listing to retry both a 401/403 latch and a network/5xx tailRefreshError",
   );
   assert.doesNotMatch(
     effectBody,
@@ -2198,6 +2203,48 @@ test("fullscreen listing refresh retries denied tails when metadata is unchanged
     loadBody,
     /tailReloadInFlightCountRef\.current \+= 1;[\s\S]*?finally \{\s*tailReloadInFlightCountRef\.current -= 1;\s*\}/,
     "Expected a fullscreen tail reload to stay marked in flight until it settles",
+  );
+});
+
+test("fullscreen listing refresh retries network/5xx tail errors when metadata is unchanged", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gIJVJ: a network/5xx
+  // tail read does not enter the 401/403 denial set, and a static or closed
+  // listing keeps selectedTailRefreshKey equal, so the fingerprint return
+  // skipped every later poll. The stale snapshot and warning then persisted
+  // until Tail all. Retry streams recorded in tailRefreshErrors on the next
+  // listing refresh, without starting a second reload while one is in flight.
+  const logs = dashboardSource.logs;
+  const effectStart = logs.indexOf("if (!selectedTailRefreshKey) {");
+  assert.ok(effectStart > 0, "Expected the fullscreen tail refresh-key effect");
+  const effectEnd = logs.indexOf("}, [loadSelectedTails, selectedTailRefreshKey]);", effectStart);
+  assert.ok(effectEnd > effectStart, "Expected the fullscreen tail refresh-key effect to end");
+  const effectBody = logs.slice(effectStart, effectEnd);
+
+  assert.match(
+    effectBody,
+    /selectedStreamsRef\.current\.some\(\(streamId\) =>\s*tailRefreshErrorStreamIdsRef\.current\.has\(streamId\),\s*\)/,
+    "Expected unchanged stream metadata to retry a stream that still has a tailRefreshError",
+  );
+  assert.doesNotMatch(
+    effectBody,
+    /if \(previousTailRefreshKey\.current === selectedTailRefreshKey\) \{\s*return;\s*\}/,
+    "Expected a static listing fingerprint not to block a retry of a tailRefreshError",
+  );
+
+  const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
+  const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadSelectedTails callback end");
+  const loadBody = logs.slice(loadIdx, loadEnd);
+  assert.match(
+    loadBody,
+    /tailRefreshErrorStreamIdsRef\.current\.add\(failure\.streamId\)/,
+    "Expected a network/5xx tail failure to record the stream for listing-triggered retry",
+  );
+  assert.match(
+    loadBody,
+    /tailRefreshErrorStreamIdsRef\.current\.delete\(success\.entry\.streamId\)/,
+    "Expected a recovered tail 200 to drop the stream from the refresh-error retry set",
   );
 });
 

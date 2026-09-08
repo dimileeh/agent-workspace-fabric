@@ -4601,6 +4601,150 @@ test(`fullscreen logs retain last-successful tails on transient tail refresh fai
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gIJVJ: a network/5xx
+// tail read leaves the 401/403 denial set empty. A static or closed listing
+// does not change the tail fingerprint, so later polls used to skip the
+// refresh and the stale snapshot warning persisted until Tail all.
+for (const outageStatus of [0, 503] as const) {
+test(`fullscreen logs retry a static tail refresh failure on unchanged listing and recover (${outageStatus === 0 ? "network" : outageStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  let tailMode: "ok" | "outage" | "recover" = "ok";
+  let listingPolls = 0;
+  let tailReads = 0;
+  const workspaceId = "ws_fs_tail_outage_static_retry";
+  const retainedMarker = "retained-static-fullscreen-tail-line";
+  const recoveredMarker = "recovered-static-fullscreen-tail-line";
+  const outageMessage = "static fullscreen tail feed outage";
+  const closedAt = "2026-05-21T10:05:00.000Z";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      listingPolls += 1;
+      await fulfillJson(route, listEnvelope([{
+        ...logStream("closed.stdout", 2_880, 120, activeOpenedAt),
+        closed_at: closedAt,
+      }]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/closed.stdout`) {
+      tailReads += 1;
+      if (tailMode === "outage") {
+        if (outageStatus === 0) {
+          await route.abort("failed");
+          return;
+        }
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+          outageStatus,
+        );
+        return;
+      }
+      await fulfillJson(
+        route,
+        logRead("closed.stdout", tailMode === "recover" ? recoveredMarker : retainedMarker),
+      );
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(retainedMarker);
+
+  tailMode = "outage";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+
+  const refreshWarning = modal.getByRole("alert");
+  await expect(refreshWarning).toContainText(outageStatus === 0 ? /unable to load log stream/i : outageMessage, {
+    timeout: 12_000,
+  });
+  await expect(output).toContainText(retainedMarker);
+  await expect(modal.locator("[data-awf-stale='true']")).toBeVisible();
+
+  const readsAtOutage = tailReads;
+  const listingAtOutage = listingPolls;
+  expect(readsAtOutage).toBeGreaterThan(0);
+
+  await page.waitForTimeout(400);
+  expect(tailReads - readsAtOutage).toBeLessThanOrEqual(1);
+
+  tailMode = "recover";
+  await expect.poll(() => listingPolls, { timeout: 20_000 }).toBeGreaterThan(listingAtOutage);
+  await expect.poll(() => tailReads, { timeout: 20_000 }).toBeGreaterThan(readsAtOutage);
+  await expect(output).toContainText(recoveredMarker, { timeout: 12_000 });
+  await expect(refreshWarning).toHaveCount(0);
+  await expect(modal.locator("[data-awf-stale='true']")).toHaveCount(0);
+});
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gIJVF: a fullscreen
 // network/5xx tail failure must copy into the refresh warning as soon as that
 // read settles. Promise.all never reaches the batch copy while a sibling tail
