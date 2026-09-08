@@ -10,6 +10,14 @@ const dashboardSource = {
     new URL("../hooks/use-workspace-detail-loader.ts", import.meta.url),
     "utf8",
   ),
+  capabilities: readFileSync(
+    new URL("../hooks/use-console-capabilities.ts", import.meta.url),
+    "utf8",
+  ),
+  feedSettlement: readFileSync(
+    new URL("../hooks/workspace-detail-feed-settlement.ts", import.meta.url),
+    "utf8",
+  ),
   serializedPoll: readFileSync(
     new URL("../hooks/use-serialized-periodic-load.ts", import.meta.url),
     "utf8",
@@ -51,6 +59,11 @@ const dashboardSource = {
     "utf8",
   ),
 };
+
+// Source assertions follow the extracted modules. Keep the original dashboard
+// and detail-loader searches working without weakening the behavioral checks.
+dashboardSource.dashboard = `${dashboardSource.dashboard}\n${dashboardSource.capabilities}`;
+dashboardSource.detailLoader = `${dashboardSource.detailLoader}\n${dashboardSource.feedSettlement}`;
 
 test("task details modal does not render the legacy Effort fact", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f_-KV: requested and
@@ -778,7 +791,13 @@ test("recovered detail success clears a settled outage without waiting for sibli
   for (const [handler, feed] of successHandlers) {
     const start = dashboard.indexOf(`const ${handler} = `);
     assert.ok(start > 0, `Expected ${handler}`);
-    const end = dashboard.indexOf("\n      const ", start + 1);
+    const endCandidates = [
+      dashboard.indexOf("\n      const ", start + 1),
+      dashboard.indexOf("\nconst ", start + 1),
+      dashboard.indexOf("\n  return {", start + 1),
+    ].filter((idx) => idx > start);
+    const end = endCandidates.length === 0 ? -1 : Math.min(...endCandidates);
+    assert.ok(end > start, `Expected ${handler} body to end before the next helper`);
     const body = dashboard.slice(start, end);
     assert.match(
       body,
@@ -1614,10 +1633,10 @@ test("loadCapabilities applies superseded 401/403 unless a newer success recover
   // one. Discarding the older 401/403 only because the newer request started
   // leaves authorized feeds up if that newer request hangs or fails
   // transiently. A newer successful negotiation is the recovery that wins.
-  const dashboard = dashboardSource.dashboard;
+  const dashboard = dashboardSource.capabilities;
   const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
   assert.ok(loadStart > 0, "Expected loadCapabilities");
-  const loadEnd = dashboard.indexOf("useConsoleFleetFeeds({", loadStart);
+  const loadEnd = dashboard.indexOf("return { loadCapabilities };", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before loadResourceSaturation");
   const loadBody = dashboard.slice(loadStart, loadEnd);
   assert.match(
@@ -1653,14 +1672,14 @@ test("loadCapabilities applies superseded network/5xx until a newer success land
   // a newer request. Discarding that outage because generation !== current
   // leaves capabilityError null if the newer request hangs, so retained
   // capabilities keep enabling mutating controls.
-  const dashboard = dashboardSource.dashboard;
+  const dashboard = dashboardSource.capabilities;
   const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
   assert.ok(loadStart > 0, "Expected loadCapabilities");
-  const loadEnd = dashboard.indexOf("useConsoleFleetFeeds({", loadStart);
+  const loadEnd = dashboard.indexOf("return { loadCapabilities };", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before loadResourceSaturation");
   const loadBody = dashboard.slice(loadStart, loadEnd);
   assert.match(
-    dashboard,
+    dashboardSource.dashboard,
     /const appliedCapabilityFailureGenerationRef = useRef\(0\);/,
     "Expected a capability failure-generation watermark so a newer start is not recovery",
   );
@@ -1688,10 +1707,10 @@ test("loadCapabilities applies superseded 404 and malformed payloads until a new
   // response because generation !== current leaves capabilityError null if
   // the newer request hangs, so retained capabilities keep enabling mutating
   // controls. Suppress only after a newer successful negotiation has applied.
-  const dashboard = dashboardSource.dashboard;
+  const dashboard = dashboardSource.capabilities;
   const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
   assert.ok(loadStart > 0, "Expected loadCapabilities");
-  const loadEnd = dashboard.indexOf("useConsoleFleetFeeds({", loadStart);
+  const loadEnd = dashboard.indexOf("return { loadCapabilities };", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before fleet feeds");
   const loadBody = dashboard.slice(loadStart, loadEnd);
   const generationDiscardAt = loadBody.indexOf("generation !== capabilityRequestGenerationRef.current");
@@ -2627,12 +2646,12 @@ test("withdrawn runtime or operations outage yields the inspector banner", () =>
   );
   assert.match(
     loader,
-    /if \(feed === "runtime"\) \{\s*return \(\s*!allowRuntime \|\|\s*\(dropped != null && dropped\.runtime\) \|\|\s*generation < appliedRuntimeGenerationRef\.current \|\|\s*generation <= revokedRuntimeGenerationRef\.current \|\|\s*generation <= runtimeDenialReleasedThroughRef\.current/,
+    /if \(feed === "runtime"\) \{\s*return \(\s*!access\.allowRuntime \|\|\s*\(dropped != null && dropped\.runtime\) \|\|\s*generation < appliedRuntimeGenerationRef\.current \|\|\s*generation <= revokedRuntimeGenerationRef\.current \|\|\s*generation <= runtimeDenialReleasedThroughRef\.current/,
     "Expected an in-flight runtime 5xx started before withdrawal not to re-record the stale reason",
   );
   assert.match(
     loader,
-    /if \(feed === "operations"\) \{\s*return \(\s*!allowOperations \|\|\s*\(dropped != null && dropped\.operations\) \|\|\s*generation < appliedOperationsGenerationRef\.current \|\|\s*generation <= revokedOperationsGenerationRef\.current \|\|\s*generation <= operationsDenialReleasedThroughRef\.current/,
+    /if \(feed === "operations"\) \{\s*return \(\s*!access\.allowOperations \|\|\s*\(dropped != null && dropped\.operations\) \|\|\s*generation < appliedOperationsGenerationRef\.current \|\|\s*generation <= revokedOperationsGenerationRef\.current \|\|\s*generation <= operationsDenialReleasedThroughRef\.current/,
     "Expected an in-flight operations 5xx started before withdrawal not to re-record the stale reason",
   );
   assert.match(
@@ -2682,7 +2701,7 @@ test("withdrawn events outage yields the inspector banner", () => {
   );
   assert.match(
     loader,
-    /if \(feed === "events"\) \{\s*return \(\s*!allowEvents \|\|\s*\(dropped != null && dropped\.events\) \|\|\s*generation < appliedEventFeedGenerationRef\.current \|\|\s*generation <= revokedEventFeedGenerationRef\.current \|\|\s*generation <= eventsOutageReleasedThroughRef\.current/,
+    /if \(feed === "events"\) \{\s*return \(\s*!access\.allowEvents \|\|\s*\(dropped != null && dropped\.events\) \|\|\s*generation < appliedEventFeedGenerationRef\.current \|\|\s*generation <= revokedEventFeedGenerationRef\.current \|\|\s*generation <= eventsOutageReleasedThroughRef\.current/,
     "Expected an in-flight events 5xx started before withdrawal not to re-record the stale reason",
   );
   assert.match(
