@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type Dispatch,
@@ -268,11 +269,11 @@ export function useWorkspaceLogTails({
   const previousAutomaticTailPartsRef = useRef<Map<string, string>>(new Map());
   const pendingAutomaticTailsRef = useRef<Map<string, PendingAutomaticLogTail>>(new Map());
   const automaticSelectedStreamsRef = useRef(selectedStreams);
-  // Latest listing, assigned during render so an in-flight 401/200 sees a
-  // stream that just left the listing even before the selection effect runs.
+  // Latest listing. Synced in a layout effect so an in-flight 401/200 sees a
+  // stream that just left the listing before the passive selection effect runs.
+  // Render assignment is forbidden (react-hooks/refs) and can be discarded if
+  // this render is thrown away. Initial useRef values cover the first commit.
   const automaticListedStreamIdsRef = useRef(detailStreams.map((stream) => stream.stream_id));
-  automaticSelectedStreamsRef.current = selectedStreams;
-  automaticListedStreamIdsRef.current = detailStreams.map((stream) => stream.stream_id);
   const loadLogTailRef = useRef<
     (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => Promise<void>
   >(async () => undefined);
@@ -608,11 +609,17 @@ export function useWorkspaceLogTails({
     ],
   );
 
-  useEffect(() => {
+  // Before paint, and before the passive automatic-tail effect below, so a
+  // fetch microtask that settles after this commit still prunes against the
+  // listing that just rendered.
+  useLayoutEffect(() => {
     automaticSelectedStreamsRef.current = selectedStreams;
     automaticListedStreamIdsRef.current = detailStreams.map((stream) => stream.stream_id);
+  }, [detailStreams, selectedStreams]);
+
+  useEffect(() => {
     loadLogTailRef.current = loadLogTail;
-  }, [detailStreams, loadLogTail, selectedStreams]);
+  }, [loadLogTail]);
 
   useEffect(() => {
     // Intersect denials with selected∩listed before the empty-selection
