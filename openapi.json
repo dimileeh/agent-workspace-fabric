@@ -11246,6 +11246,17 @@
             "title": "Task Prompt",
             "type": "string"
           },
+          "task_tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Tag"
+          },
           "title": {
             "title": "Title",
             "type": "string"

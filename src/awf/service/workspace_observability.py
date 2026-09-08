@@ -406,6 +406,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         workspace_id=ws.id,
         task_id=ws.task_external_id or ws.id,
         task_key=ws.task_tag,
+        task_tag=ws.task_tag,
         title=ws.task_title,
         task_prompt=getattr(ws, "task_prompt", ""),
         repo_url=ws.repo_url,

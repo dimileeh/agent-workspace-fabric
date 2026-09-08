@@ -1123,6 +1123,9 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     # ``task_tag``; hosted payloads may supply this field directly. Absent
     # when the workspace has no task tag (do not substitute ``task_id``).
     task_key: str | None = None
+    # Same persisted identifier as detail ``task_tag``, emitted so console
+    # cards can fall back when a payload only carries the Core field name.
+    task_tag: str | None = None
     title: str
     task_prompt: str
     repo_url: str

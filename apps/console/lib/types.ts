@@ -200,7 +200,9 @@ export interface WorkspaceOverview {
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
   // Additive console presentation (optional; missing = not recorded).
+  // Core persists the Jira-style key as task_tag; hosted payloads use task_key.
   task_key?: string | null;
+  task_tag?: string | null;
   requested_model?: string | null;
   requested_effort?: string | null;
   requested_model_source?: AgentIdentitySource | string | null;
@@ -545,7 +547,9 @@ export interface Workspace {
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
   // Additive console presentation (optional; missing = not recorded).
+  // Core persists the Jira-style key as task_tag; hosted payloads use task_key.
   task_key?: string | null;
+  task_tag?: string | null;
   requested_model?: string | null;
   requested_effort?: string | null;
   requested_model_source?: AgentIdentitySource | string | null;

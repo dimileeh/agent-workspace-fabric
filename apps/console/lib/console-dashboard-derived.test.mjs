@@ -9,6 +9,7 @@ import {
   gatedDetailDropsSince,
   inspectorDetailFeedWithdrawn,
   noteGatedDetailDrop,
+  displayedTaskKey,
   filterAndSortOverview,
   overviewSearchText,
   orderFullscreenWorkspaceIds,
@@ -327,6 +328,45 @@ test("filterAndSortOverview matches task_key shown on workspace cards", () => {
   );
   assert.equal(overviewSearchText(overview[1]).includes("awf-key-137"), true);
   assert.equal(overviewSearchText(overview[2]).includes("awf-key-137"), false);
+});
+
+test("displayedTaskKey falls back to Core task_tag when task_key is absent", () => {
+  assert.equal(displayedTaskKey({ task_key: "HOST-1", task_tag: "CORE-9" }), "HOST-1");
+  assert.equal(displayedTaskKey({ task_key: null, task_tag: "PROJ-123" }), "PROJ-123");
+  assert.equal(displayedTaskKey({ task_tag: "PROJ-123" }), "PROJ-123");
+  assert.equal(displayedTaskKey({ task_key: null, task_tag: null }), null);
+  assert.equal(displayedTaskKey(null), null);
+
+  const overview = [
+    {
+      workspace_id: "w-tag",
+      task_id: "t-tag",
+      title: "Core only",
+      task_key: null,
+      task_tag: "PROJ-123",
+      repo_url: "https://example.com/tag",
+      base_branch: "main",
+      agent: "cursor",
+      agent_model: null,
+      agent_effort: null,
+      status: "ready",
+      created_at: "2026-09-06T16:00:00Z",
+      updated_at: "2026-09-06T17:30:00Z",
+      recovery: null,
+    },
+  ];
+  const matched = filterAndSortOverview(overview, {
+    searchText: "proj-123",
+    statusFilters: [],
+    agentFilters: [],
+    modelFilters: [],
+    sortKey: "updated_at",
+    sortDirection: "desc",
+  });
+  assert.deepEqual(
+    matched.map((item) => item.workspace_id),
+    ["w-tag"],
+  );
 });
 
 function forgetRecordedAutomaticTailPart(parts, streamId, part) {

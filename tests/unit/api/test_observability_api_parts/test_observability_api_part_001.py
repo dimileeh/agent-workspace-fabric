@@ -260,6 +260,7 @@ class TestConsoleViews:
         assert item["workspace_id"] == workspace_id
         assert item["task_id"] == "TICKET-456"
         assert item["task_key"] == "PROJ-123"
+        assert item["task_tag"] == "PROJ-123"
         assert detail.json()["task_tag"] == "PROJ-123"
         assert detail.json()["task_key"] == "PROJ-123"
 
@@ -270,6 +271,7 @@ class TestConsoleViews:
             row for row in untagged_overview.json()["items"] if row["workspace_id"] == untagged_id
         )
         assert untagged_item["task_key"] is None
+        assert untagged_item["task_tag"] is None
         assert untagged_detail.json()["task_key"] is None
 
     @pytest.mark.unit

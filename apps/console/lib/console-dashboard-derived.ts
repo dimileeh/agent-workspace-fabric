@@ -12,12 +12,23 @@ import type { ConsoleCapabilities, WorkspaceOverview } from "./types.ts";
 export type WorkspaceSortKey = "created_at" | "updated_at";
 export type SortDirection = "asc" | "desc";
 
+type DisplayedTaskKeySource = {
+  task_key?: string | null;
+  task_tag?: string | null;
+};
+
+/** Key shown on cards and details. Prefer ``task_key``, else Core ``task_tag``. */
+export function displayedTaskKey(item: DisplayedTaskKeySource | null | undefined): string | null {
+  const key = item?.task_key || item?.task_tag;
+  return key ? key : null;
+}
+
 /** Fields the overview card shows or operators already search, including task_key. */
 export function overviewSearchText(item: WorkspaceOverview): string {
   return [
     item.workspace_id,
     item.task_id,
-    item.task_key ?? "",
+    displayedTaskKey(item) ?? "",
     item.title,
     item.repo_url,
     item.base_branch,

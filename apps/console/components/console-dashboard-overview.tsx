@@ -35,6 +35,7 @@ useState
 } from "react";
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
+import { displayedTaskKey } from "@/lib/console-dashboard-derived";
 import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
@@ -771,6 +772,7 @@ export function WorkspaceList({
         const awaitingHumanFor = isAwaitingHuman(item)
           ? attentionAgeSeconds(attentionSince(item))
           : null;
+        const taskKey = displayedTaskKey(item);
         return (
           <div
             key={item.workspace_id}
@@ -804,12 +806,12 @@ export function WorkspaceList({
                     >
                       {item.title}
                     </span>
-                    {item.task_key ? (
+                    {taskKey ? (
                       <span
                         className="mono text-[11px] text-slate-500"
                         data-testid={`workspace-task-key-${item.workspace_id}`}
                       >
-                        {item.task_key}
+                        {taskKey}
                       </span>
                     ) : null}
                     <span className="relative inline-flex min-w-0 items-center gap-1.5">

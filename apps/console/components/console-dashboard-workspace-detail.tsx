@@ -30,6 +30,7 @@ formatRequestedModel,
 mergeWorkspacePresentationFields,
 resolveWorkflowFinishedAt,
 } from "@/lib/agent-format";
+import { displayedTaskKey } from "@/lib/console-dashboard-derived";
 import {
 artifactDownloadPath,
 artifactListPath,
@@ -117,6 +118,7 @@ export function TaskDetailsModal({
   const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
   const finishedAt = distinctFinishedAt(workspace);
   const recordedDuration = recordedDurationLabel(workspace.duration_seconds);
+  const taskKey = displayedTaskKey(workspace);
 
   useIsomorphicLayoutEffect(() => {
     const scrollY = window.scrollY;
@@ -166,7 +168,7 @@ export function TaskDetailsModal({
           tabIndex={0}
         >
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {workspace.task_key ? <Fact label="Task key" value={workspace.task_key} mono /> : null}
+            {taskKey ? <Fact label="Task key" value={taskKey} mono /> : null}
             <Fact
               label="Agent"
               value={formatAgentLabel({ ...workspace, agent_effort: null })}
@@ -525,6 +527,7 @@ export function WorkspaceSummary({
   };
   const workflowFinishedAt = resolveWorkflowFinishedAt(workflowTiming);
   const finishedAt = distinctFinishedAt(workflowTiming);
+  const taskKey = displayedTaskKey(workspace) ?? displayedTaskKey(overview);
 
   return (
     <Panel
@@ -597,9 +600,7 @@ export function WorkspaceSummary({
         </div>
         <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
-          {(workspace?.task_key ?? overview.task_key) ? (
-            <Fact label="Task key" value={workspace?.task_key ?? overview.task_key ?? "—"} mono />
-          ) : null}
+          {taskKey ? <Fact label="Task key" value={taskKey} mono /> : null}
           <Fact
             label="Agent"
             value={formatAgentIdentityLabel({
