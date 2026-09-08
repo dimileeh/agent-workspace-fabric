@@ -250,7 +250,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const dropped = gatedDetailDropsSince\(gatedDetailDroppedFeedsRef\.current, gatedGeneration\);[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspace\.ok[\s\S]*?\}\)\)[\s\S]*?return;/,
+    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const dropped = gatedDetailDropsSince\(gatedDetailDroppedFeedsRef\.current, gatedGeneration\);[\s\S]*?if \(allGatedDetailFeedsDropped\(dropped\)\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspaceFromDetailResult\(current\.workspace, workspace\),[\s\S]*?\}\)\)[\s\S]*?return;/,
     "Expected a gated-detail generation bump to union drops since capture, then apply the basic workspace GET and skip optional feeds",
   );
   assert.match(
@@ -463,8 +463,8 @@ test("loadWorkspace success clears shared error without clearing overview trunca
   );
   assert.match(
     dashboardSource.detailLoader,
-    /const loadWorkspace = useCallback\([\s\S]*?\} else \{\s*setError\(null\);\s*\}/,
-    "Expected loadWorkspace success to clear only the workspace-detail error setter",
+    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(!workspaceDetailAuthDeniedRef\.current\) \{\s*setError\(null\);\s*\}/,
+    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail denial still owns the banner",
   );
   assert.doesNotMatch(
     dashboardSource.detailLoader,
@@ -617,8 +617,13 @@ test("loadLogTail retains last-successful tails on transient refresh failure", (
   const authBody = body.slice(authIdx, transientIdx);
   assert.match(
     authBody,
-    /logTailAuthDeniedRef\.current = true;[\s\S]*?setLogTailAuthDenied\(true\);/,
-    "Expected 401/403 to latch tail denial so the inspector EventSource closes",
+    /logTailDeniedStreamKeysRef\.current\.add\(logTailRefreshErrorKey\(workspaceId, stream\.stream_id\)\);[\s\S]*?syncWorkspaceLogTailAuthDenied\(\s*logTailDeniedStreamKeysRef\.current,\s*workspaceId,\s*logTailAuthDeniedRef,\s*setLogTailAuthDenied,\s*\)/,
+    "Expected 401/403 to record the denied stream, then sync the tail-denial latch so the inspector EventSource closes",
+  );
+  assert.match(
+    tails,
+    /function syncWorkspaceLogTailAuthDenied\([\s\S]*?const stillDenied = workspaceHasDeniedLogTail\(deniedStreamKeys, workspaceId\);[\s\S]*?if \(logTailAuthDeniedRef\.current !== stillDenied\) \{\s*logTailAuthDeniedRef\.current = stillDenied;\s*setLogTailAuthDenied\(stillDenied\);\s*\}/,
+    "Expected tail-denial latch updates to follow remaining denied streams rather than a direct true assignment",
   );
   assert.match(
     authBody,
@@ -677,8 +682,8 @@ test("tail authorization denial closes the inspector live stream", () => {
   const authBody = tails.slice(authIdx, authEnd);
   assert.match(
     authBody,
-    /noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?logTailAuthDeniedRef\.current = true;[\s\S]*?setLogTailAuthDenied\(true\);[\s\S]*?setStreamOffsets\(\{\}\)/,
-    "Expected tail 401/403 to invalidate in-flight tails, latch denial, and clear offsets",
+    /if \(!logTailAuthDeniedRef\.current\) \{\s*noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);\s*\}[\s\S]*?syncWorkspaceLogTailAuthDenied\(\s*logTailDeniedStreamKeysRef\.current,\s*workspaceId,\s*logTailAuthDeniedRef,\s*setLogTailAuthDenied,\s*\);[\s\S]*?setStreamOffsets\(\{\}\)/,
+    "Expected tail 401/403 to invalidate in-flight tails, sync the denial latch, and clear offsets",
   );
   assert.doesNotMatch(
     authBody,
@@ -688,8 +693,8 @@ test("tail authorization denial closes the inspector live stream", () => {
 
   assert.match(
     dashboardSource.liveStream,
-    /if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return;\s*\}/,
-    "Expected live log frames to be dropped while tail authorization is denied",
+    /const streamAuthDenied = \(\) =>\s*workspaceDetailAuthDeniedRef\.current \|\|\s*logListingAuthDeniedRef\.current \|\|\s*logTailAuthDeniedRef\.current;[\s\S]*?if \(frame\.type === "log"\) \{[\s\S]*?if \(streamAuthDenied\(\)\) \{\s*return;\s*\}/,
+    "Expected live log frames to be dropped while listing, tail, or base-detail authorization is denied",
   );
   assert.match(
     tails,
@@ -716,8 +721,13 @@ test("recovered inspector tails apply while a sibling denial holds the latch", (
 
   assert.match(
     successBody,
-    /logTailDeniedStreamKeysRef\.current\.delete\(recoveredKey\);[\s\S]*?workspaceHasDeniedLogTail\(logTailDeniedStreamKeysRef\.current, workspaceId\)/,
-    "Expected a 200 to recover only its own stream and leave the workspace latch held for siblings",
+    /logTailDeniedStreamKeysRef\.current\.delete\(recoveredKey\);[\s\S]*?syncWorkspaceLogTailAuthDenied\(\s*logTailDeniedStreamKeysRef\.current,\s*workspaceId,\s*logTailAuthDeniedRef,\s*setLogTailAuthDenied,\s*\)/,
+    "Expected a 200 to recover only its own stream and resync the latch from remaining denied siblings",
+  );
+  assert.match(
+    tails,
+    /function syncWorkspaceLogTailAuthDenied\([\s\S]*?const stillDenied = workspaceHasDeniedLogTail\(deniedStreamKeys, workspaceId\);/,
+    "Expected the latch sync to keep EventSource closed while a sibling denial remains",
   );
   assert.match(
     successBody,
@@ -884,8 +894,8 @@ test("sibling tail 401s are recorded after a gated-detail generation bump", () =
   );
   assert.match(
     body,
-    /recordDeniedLogTailAndInFlightSiblings\(\s*logTailDeniedStreamKeysRef\.current,\s*logTailInFlightStreamKeysRef\.current,\s*workspaceId,\s*stream\.stream_id,\s*\);/,
-    "Expected a tail 401/403 to latch in-flight siblings so a later 200 cannot recover the workspace early",
+    /recordDeniedLogTailAndInFlightSiblings\(\s*logTailDeniedStreamKeysRef\.current,\s*logTailInFlightStreamKeysRef\.current,\s*workspaceId,\s*stream\.stream_id,\s*activeNow,\s*\);/,
+    "Expected a tail 401/403 to latch still-active in-flight siblings so a later 200 cannot recover the workspace early",
   );
   const successDelete = body.indexOf("logTailDeniedStreamKeysRef.current.delete(");
   assert.ok(successDelete > recordIdx, "Expected a 200 to clear only its own denied key after siblings are latched");
@@ -900,8 +910,8 @@ test("authorized feed clear and overview auth denial wipe truncation with the ov
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setOverview\(\[\]\);\s*setOverviewError\(null\);\s*setWorkspaceDetailError\(null\);\s*setOverviewTruncationWarning\(null\);/,
-    "Expected clearAuthorizedConsoleFeeds to wipe truncation with the overview",
+    /const clearAuthorizedConsoleFeeds = useCallback\([\s\S]*?setOverview\(\[\]\);\s*setOverviewError\(null\);\s*setWorkspaceDetailError\(null\);[\s\S]*?workspaceDetailAuthDeniedRef\.current = false;[\s\S]*?setWorkspaceDetailAuthDenied\(false\);[\s\S]*?setOverviewTruncationWarning\(null\);/,
+    "Expected clearAuthorizedConsoleFeeds to wipe truncation with the overview after clearing the base-detail denial latch",
   );
   assert.match(
     dashboard,
@@ -1411,8 +1421,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.liveStream,
-    /if \(!selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected inspector /stream to close when listing or tail authorization is denied, not only drop frames after they arrive",
+    /if \(!selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied \|\| workspaceDetailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected inspector /stream to close when listing, tail, or base-detail authorization is denied, not only drop frames after they arrive",
   );
   assert.match(
     dashboardSource.detailLoader,
