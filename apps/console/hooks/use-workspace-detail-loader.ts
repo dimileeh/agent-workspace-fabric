@@ -76,7 +76,9 @@ type UseWorkspaceDetailLoaderArgs = {
  * request merely starting, hanging, or failing transiently is not recovery.
  * The same is true of a /logs 401/403: both are applied as soon as that
  * request settles, even if a sibling runtime/events/operations request hangs.
- * apiGet has no timeout, so waiting for every sibling would leave the
+ * A base-detail denial also drops cached listing and tail text immediately;
+ * a later sibling 200 must not write that log data back while the latch is
+ * held. apiGet has no timeout, so waiting for every sibling would leave the
  * inspector EventSource and cached workspace or log data available after
  * authorization was revoked.
  * Snapshot frames must not write revoked workspace metadata back while that
@@ -268,6 +270,14 @@ export function useWorkspaceDetailLoader({
         );
         publishWorkspaceDetailAuthDenied(true);
         setError(message);
+        // Authorization for this workspace is revoked. Drop cached listing and
+        // tail text now — a hanging runtime/events/operations sibling must not
+        // leave previously authorized log data on screen, and a later sibling
+        // 200 must not write it back while this latch is held.
+        selectedStreamsRef.current = [];
+        setSelectedStreams([]);
+        setLogEntries([]);
+        setStreamOffsets({});
         setDetail((current) => {
           // A recovery GET may land between this denial and the updater.
           if (!workspaceDetailAuthDeniedRef.current) {
@@ -276,6 +286,7 @@ export function useWorkspaceDetailLoader({
           return {
             ...current,
             workspace: null,
+            streams: [],
           };
         });
         return true;
@@ -534,11 +545,13 @@ export function useWorkspaceDetailLoader({
 
         const nextStreams = !allowLogs
           ? []
-          : streams != null && streams.ok
-            ? streams.data.items
-            : feedAuthDenied(streams)
-              ? []
-              : current.streams;
+          : workspaceDetailAuthDeniedRef.current
+            ? []
+            : streams != null && streams.ok
+              ? streams.data.items
+              : feedAuthDenied(streams)
+                ? []
+                : current.streams;
 
         return {
           workspace: nextWorkspace,
@@ -555,7 +568,7 @@ export function useWorkspaceDetailLoader({
         // the settlement handler already latched it, so a sibling 200 cannot
         // restore selection or leave /stream open (CONSOLE_BACKEND_CONTRACT).
         applyLogListingAuthDenial(streams);
-      } else if (streams?.ok) {
+      } else if (streams?.ok && !workspaceDetailAuthDeniedRef.current) {
         logListingAuthDeniedRef.current = false;
         setLogListingAuthDenied(false);
         logStreamActivityRef.current = updateLogStreamActivity(

@@ -1298,6 +1298,7 @@ export function ConsoleDashboard() {
     logStreamActivityRef,
     logListingAuthDenied,
     logListingAuthDeniedRef,
+    workspaceDetailAuthDeniedRef,
     logTailAuthDeniedRef,
     setLogTailAuthDenied,
     setDetail,

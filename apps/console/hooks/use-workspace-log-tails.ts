@@ -204,6 +204,7 @@ type UseWorkspaceLogTailsArgs = {
   logStreamActivityRef: MutableRefObject<LogStreamActivityMap>;
   logListingAuthDenied: boolean;
   logListingAuthDeniedRef: MutableRefObject<boolean>;
+  workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   logTailAuthDeniedRef: MutableRefObject<boolean>;
   setLogTailAuthDenied: Dispatch<SetStateAction<boolean>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
@@ -234,6 +235,7 @@ export function useWorkspaceLogTails({
   logStreamActivityRef,
   logListingAuthDenied,
   logListingAuthDeniedRef,
+  workspaceDetailAuthDeniedRef,
   logTailAuthDeniedRef,
   setLogTailAuthDenied,
   setDetail,
@@ -355,7 +357,8 @@ export function useWorkspaceLogTails({
           epoch !== authorizedFeedEpochRef.current ||
           generation !== logTailRequestGenerationRef.current[generationKey] ||
           selectedIdRef.current !== workspaceId ||
-          logListingAuthDeniedRef.current
+          logListingAuthDeniedRef.current ||
+          workspaceDetailAuthDeniedRef.current
         ) {
           settleInFlight();
           return;
@@ -467,7 +470,7 @@ export function useWorkspaceLogTails({
               omitLogTailRefreshError(current, workspaceId, stream.stream_id),
             );
             setLogEntries((current) => {
-              if (logListingAuthDeniedRef.current) {
+              if (logListingAuthDeniedRef.current || workspaceDetailAuthDeniedRef.current) {
                 return current;
               }
               return trimLogEntries(
@@ -555,7 +558,9 @@ export function useWorkspaceLogTails({
         // this stream is denied again. A sibling latch must not discard the
         // snapshot; only a denial that still includes this stream does.
         const recoveredTailStillAuthorized = () =>
-          !logListingAuthDeniedRef.current && !logTailDeniedStreamKeysRef.current.has(recoveredKey);
+          !logListingAuthDeniedRef.current &&
+          !workspaceDetailAuthDeniedRef.current &&
+          !logTailDeniedStreamKeysRef.current.has(recoveredKey);
         setLogEntries((current) => {
           if (!recoveredTailStillAuthorized()) {
             return current;
@@ -592,6 +597,7 @@ export function useWorkspaceLogTails({
       gatedDetailDroppedFeedsRef,
       gatedDetailFeedGenerationRef,
       logListingAuthDeniedRef,
+      workspaceDetailAuthDeniedRef,
       logStreamActivityRef,
       logTailAuthDeniedRef,
       logTailRequestGenerationRef,

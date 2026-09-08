@@ -1468,6 +1468,200 @@ test(`inspector logs apply listing denial without waiting for a hanging sibling 
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD08-: a /workspaces/{id}
+// 401/403 must also drop cached inspector log text without waiting for a
+// sibling runtime/events/operations request. Closing EventSource alone leaves
+// the previous tail available indefinitely while that sibling hangs.
+for (const deniedStatus of [401, 403] as const) {
+test(`inspector drops cached logs on base-detail denial without waiting for a hanging sibling (${deniedStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let detailMode: "ok" | "split" = "ok";
+  let streamOpens = 0;
+  const hangingSibling = createDeferred();
+  const heldStream = createDeferred();
+  const workspaceId = "ws_inspector_detail_hanging_sibling_logs";
+  const authorizedMarker = "authorized-inspector-log-before-detail-denial";
+  const liveSecret = "inspector-live-frame-after-detail-denial-must-not-appear";
+  const siblingAfterDenial = "hanging-runtime-must-not-restore-detail-logs";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z", active: 1, failed: 0 });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (detailMode === "split") {
+        await hangingSibling.promise;
+        await fulfillJson(route, {
+          stack_state: "running",
+          services: [],
+          app_endpoints: [],
+          compose_project_name: siblingAfterDenial,
+        });
+        return;
+      }
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      if (detailMode === "split") {
+        await fulfillJson(
+          route,
+          {
+            detail: {
+              error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+              message: "workspace detail permission revoked",
+            },
+          },
+          deniedStatus,
+        );
+        return;
+      }
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      await heldStream.promise;
+      const frames: AwfStreamFrame[] = [
+        { type: "connected", workspace_id: workspaceId },
+        {
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          offset: 0,
+          next_offset: liveSecret.length,
+          data: liveSecret,
+          occurred_at: now,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
+  const output = inspector.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+  await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
+
+  detailMode = "split";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+
+  // Runtime is still pending. Workspace denial must already have cleared log
+  // caches and closed /stream; waiting for Promise.all would leave the tail.
+  await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  await expect(inspector.getByText("No log streams recorded.")).toBeVisible();
+  await expect(output).toContainText("No log data loaded.");
+  await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toHaveCount(0);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  const opensAtDenial = streamOpens;
+
+  hangingSibling.resolve();
+  await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible();
+  await expect(output).toContainText("No log data loaded.");
+  await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toHaveCount(0);
+  await expect.poll(() => streamOpens, { timeout: 3_000 }).toBe(opensAtDenial);
+
+  heldStream.resolve();
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await page.waitForTimeout(2_000);
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(output).toContainText("No log data loaded.");
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+});
+}
+
 // Regression for PR #933 review 5135360306: a detail poll installs a new
 // streams array even when metadata is unchanged. Restarting the inspector
 // tail on that identity change discards a /logs/{stream} read slower than
