@@ -177,11 +177,44 @@ export function useWorkspaceDetailLoader({
       };
 
       const publishWorkspaceDetailRecovered = () => {
+        // A denial that landed after this 200 passed the generation check owns
+        // the inspector. Clearing the latch here would reopen /stream for a
+        // request that started before that revocation.
+        if (
+          generation <= revokedWorkspaceDetailGenerationRef.current ||
+          generation < appliedWorkspaceDetailGenerationRef.current
+        ) {
+          return;
+        }
         appliedWorkspaceDetailGenerationRef.current = Math.max(
           appliedWorkspaceDetailGenerationRef.current,
           generation,
         );
         publishWorkspaceDetailAuthDenied(false);
+      };
+
+      const workspaceFromDetailResult = (
+        current: Workspace | null,
+        result: ApiEnvelope<Workspace>,
+      ): Workspace | null => {
+        if (result.ok) {
+          // A base-detail 401/403 may latch between this apply and the updater.
+          // Do not write revoked workspace metadata back, and do not treat a
+          // newer request that only hung or failed as recovery.
+          if (workspaceDetailAuthDeniedRef.current) {
+            return current;
+          }
+          return {
+            ...result.data,
+            lifecycle: result.data.lifecycle ?? [],
+            llm_usage: fallbackLlmUsage(result.data.llm_usage),
+            recovery: result.data.recovery ?? null,
+          };
+        }
+        if (feedAuthDenied(result)) {
+          return workspaceDetailAuthDeniedRef.current ? null : current;
+        }
+        return current;
       };
 
       // Apply even if a newer request has started but has not yet established
@@ -262,8 +295,10 @@ export function useWorkspaceDetailLoader({
         const dropped = gatedDetailDropsSince(gatedDetailDroppedFeedsRef.current, gatedGeneration);
         if (allGatedDetailFeedsDropped(dropped)) {
           if (workspace.ok) {
-            setError(null);
             publishWorkspaceDetailRecovered();
+            if (!workspaceDetailAuthDeniedRef.current) {
+              setError(null);
+            }
           } else if (feedAuthDenied(workspace)) {
             setError(workspace.message);
             publishWorkspaceDetailAuthDenied(true);
@@ -274,16 +309,7 @@ export function useWorkspaceDetailLoader({
           }
           setDetail((current) => ({
             ...current,
-            workspace: workspace.ok
-              ? {
-                  ...workspace.data,
-                  lifecycle: workspace.data.lifecycle ?? [],
-                  llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
-                  recovery: workspace.data.recovery ?? null,
-                }
-              : feedAuthDenied(workspace)
-                ? null
-                : current.workspace,
+            workspace: workspaceFromDetailResult(current.workspace, workspace),
           }));
           return;
         }
@@ -328,24 +354,18 @@ export function useWorkspaceDetailLoader({
         if (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) {
           setError(firstFailure.message);
         }
-      } else {
+      } else if (!workspaceDetailAuthDeniedRef.current) {
         setError(null);
       }
 
       // Gated-off feeds resolve to null and clear; transient network/5xx keep
       // last-successful inspector snapshots while the error banner stays visible
       // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
+      // Re-read the latch in the updater: a superseded /workspaces/{id} 401/403
+      // can apply after this request passed the generation check, and must not
+      // lose to this write or to a newer hang/5xx.
       setDetail((current) => {
-        const nextWorkspace = workspace.ok
-          ? {
-              ...workspace.data,
-              lifecycle: workspace.data.lifecycle ?? [],
-              llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
-              recovery: workspace.data.recovery ?? null,
-            }
-          : feedAuthDenied(workspace)
-            ? null
-            : current.workspace;
+        const nextWorkspace = workspaceFromDetailResult(current.workspace, workspace);
 
         const nextRuntime = !allowRuntime
           ? null

@@ -990,6 +990,10 @@ test("superseded base workspace detail 403 closes live stream while a newer refr
   test.setTimeout(45_000);
   let detailMode: "ok" | "hold-deny" | "hang" = "ok";
   let streamConnections = 0;
+  let releaseHeldStream: () => void = () => undefined;
+  const heldStream = new Promise<void>((resolve) => {
+    releaseHeldStream = resolve;
+  });
   const heldDeny: Array<() => Promise<void>> = [];
   const hanging: Array<() => Promise<void>> = [];
   const workspaceId = "ws_base_detail_superseded_denial";
@@ -1092,33 +1096,6 @@ test("superseded base workspace detail 403 closes live stream while a newer refr
       await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
       return;
     }
-    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
-      streamConnections += 1;
-      // Fulfill immediately. Awaiting a snapshot here blocks later
-      // /workspaces/{id} GETs from entering this mock, so the superseded-denial
-      // race would never start. After the latch, a reconnect must not apply a
-      // revoked snapshot either.
-      const snapshot = {
-        type: "snapshot",
-        workspace: {
-          ...authorizedWorkspace,
-          branch_name: revokedSnapshotBranch,
-          task_prompt: revokedSnapshotBranch,
-        },
-      };
-      await route.fulfill({
-        status: 200,
-        headers: {
-          "content-type": "text/event-stream; charset=utf-8",
-          "cache-control": "no-cache",
-        },
-        body:
-          streamConnections === 1
-            ? `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`
-            : `data: ${JSON.stringify(snapshot)}\n\n`,
-      });
-      return;
-    }
     if (path === "/api/awf/metrics/resources/saturation") {
       await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
       return;
@@ -1159,6 +1136,38 @@ test("superseded base workspace detail 403 closes live stream while a newer refr
     await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
   });
 
+  // Dedicated route so holding the inspector EventSource does not block the
+  // overlapping /workspaces/{id} GET that this race depends on. After the
+  // superseded 403 latches, a snapshot on the still-open source must not
+  // write revoked workspace metadata back.
+  await page.route(`**/api/awf/workspaces/${workspaceId}/stream*`, async (route) => {
+    streamConnections += 1;
+    const connection = streamConnections;
+    const snapshot = {
+      type: "snapshot",
+      workspace: {
+        ...authorizedWorkspace,
+        branch_name: revokedSnapshotBranch,
+        task_prompt: revokedSnapshotBranch,
+      },
+    };
+    if (connection === 1) {
+      await heldStream;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+      body: `data: ${JSON.stringify(
+        connection === 1
+          ? snapshot
+          : { type: "connected", workspace_id: workspaceId },
+      )}\n\n`,
+    });
+  });
+
   await page.goto("/");
   await waitForConsoleReady(page);
   await page.getByTestId(`workspace-card-${workspaceId}`).click();
@@ -1186,6 +1195,7 @@ test("superseded base workspace detail 403 closes live stream while a newer refr
   await expect(page.getByText("Stream: idle")).toBeVisible();
 
   const connectionsAtDenial = streamConnections;
+  releaseHeldStream();
   await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
   await page.waitForTimeout(1_500);
   await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
