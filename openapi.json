@@ -11231,6 +11231,17 @@
             "title": "Task Id",
             "type": "string"
           },
+          "task_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Key"
+          },
           "task_prompt": {
             "title": "Task Prompt",
             "type": "string"
@@ -12607,6 +12618,17 @@
               }
             ],
             "title": "Task External Id"
+          },
+          "task_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Key"
           },
           "task_kind": {
             "title": "Task Kind",

@@ -185,6 +185,8 @@ def workspace_response(
     computed_fields = dict(workspace_observability_payload(workspace))
     computed_fields["remote_push_branch"] = getattr(workspace, "remote_push_branch", None)
     computed_fields["task_kind"] = getattr(workspace, "task_kind", TaskKind.feature_branch_pr.value)
+    # Console reads ``task_key``; Core persists the same identifier as ``task_tag``.
+    computed_fields["task_key"] = getattr(workspace, "task_tag", None)
     computed_fields["is_stale_running"] = is_workspace_stale_running(workspace)
     computed_fields["remonitor_compose_runtime_available"] = remonitor_compose_runtime_available(
         workspace
