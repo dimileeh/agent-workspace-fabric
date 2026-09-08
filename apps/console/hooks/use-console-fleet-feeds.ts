@@ -39,6 +39,7 @@ import {
   claimFleetFeedOutage,
   claimFleetFeedSuccess,
   emptyFleetFeedMarks,
+  fleetAuthorizedEpochStillCurrent,
   revokeFleetFeedThroughGeneration,
 } from "@/lib/console-fleet-feed-generation";
 
@@ -178,7 +179,7 @@ export function useConsoleFleetFeeds({
     const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
     // Epoch is the auth/tenant clear. Inspector gated-detail generation is
     // independent — a listing/tail 401 must not drop this feed's denial or outage.
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (!fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)) {
       return;
     }
     const marks = resourceSaturationMarksRef.current;
@@ -230,7 +231,9 @@ export function useConsoleFleetFeeds({
       ? capabilityRouteToAwfPath(route)
       : awfPath("console/dashboard-summary");
     const result = await apiGet<ConsoleDashboardSummary>(path);
-    if (epoch !== authorizedFeedEpochRef.current) {
+    // Epoch is the auth/tenant clear. Inspector gated-detail generation is
+    // independent — a listing/tail 401 must not drop this feed's denial or outage.
+    if (!fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)) {
       return;
     }
     const marks = dashboardSummaryMarksRef.current;
@@ -282,7 +285,9 @@ export function useConsoleFleetFeeds({
       return;
     }
     const result = await apiGet<CloudRuntimeSummary>(capabilityRouteToAwfPath(route));
-    if (epoch !== authorizedFeedEpochRef.current) {
+    // Epoch is the auth/tenant clear. Inspector gated-detail generation is
+    // independent — a listing/tail 401 must not drop this feed's denial or outage.
+    if (!fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)) {
       return;
     }
     const marks = cloudRuntimeMarksRef.current;
@@ -327,7 +332,7 @@ export function useConsoleFleetFeeds({
     const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
     // Epoch is the auth/tenant clear. Inspector gated-detail generation is
     // independent — a listing/tail 401 must not drop this feed's denial or outage.
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (!fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)) {
       return;
     }
     const marks = workspaceSummaryMarksRef.current;
@@ -370,7 +375,7 @@ export function useConsoleFleetFeeds({
     );
     // Epoch is the auth/tenant clear. Inspector gated-detail generation is
     // independent — a listing/tail 401 must not drop this feed's denial or outage.
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (!fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)) {
       return;
     }
     const marks = mergeQueueMarksRef.current;
@@ -412,7 +417,7 @@ export function useConsoleFleetFeeds({
     const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
     // Epoch is the auth/tenant clear. Inspector gated-detail generation is
     // independent — a listing/tail 401 must not drop this feed's denial or outage.
-    if (epoch !== authorizedFeedEpochRef.current) {
+    if (!fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)) {
       return;
     }
     const marks = failureSummaryMarksRef.current;

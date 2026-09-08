@@ -9,6 +9,18 @@ export function emptyFleetFeedMarks(): FleetFeedMarks {
 }
 
 /**
+ * A completed fleet snapshot is stale only when the auth/tenant epoch moved.
+ * Inspector gated-detail generation is intentionally not an input: a listing
+ * or tail 401/403 must not drop this feed's own denial or outage.
+ */
+export function fleetAuthorizedEpochStillCurrent(
+  capturedEpoch: number,
+  currentEpoch: number,
+): boolean {
+  return capturedEpoch === currentEpoch;
+}
+
+/**
  * Apply a completed 401/403 unless a newer success already owns the feed.
  * A newer request that has only started is not recovery: stamp revoked through
  * the latest started generation so that in-flight success or transient failure

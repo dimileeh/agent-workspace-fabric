@@ -227,7 +227,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     assert.match(
       fleetFeeds,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(!fleetAuthorizedEpochStillCurrent\\(epoch, authorizedFeedEpochRef\\.current\\)\\)`,
       ),
       `Expected ${loader} to capture and discard on authorizedFeedEpochRef advance`,
     );
@@ -341,7 +341,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     assert.match(
       fleetFeeds,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(epoch !== authorizedFeedEpochRef\\.current\\)`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(!fleetAuthorizedEpochStillCurrent\\(epoch, authorizedFeedEpochRef\\.current\\)\\)`,
       ),
       `Expected ${loader} to discard after authorized epoch advance`,
     );
@@ -362,6 +362,8 @@ test("fleet denials are not discarded when inspector gated-detail generation adv
   );
   for (const loader of [
     "loadResourceSaturation",
+    "loadDashboardSummary",
+    "loadCloudRuntime",
     "loadWorkspaceSummary",
     "loadMergeQueue",
     "loadFailureSummary",
@@ -371,7 +373,9 @@ test("fleet denials are not discarded when inspector gated-detail generation adv
     const loadEnd = fleetFeeds.indexOf("\n  const ", loadStart + 1);
     assert.ok(loadEnd > loadStart, `Expected ${loader} body`);
     const loadBody = fleetFeeds.slice(loadStart, loadEnd);
-    const epochDiscard = loadBody.indexOf("epoch !== authorizedFeedEpochRef.current");
+    const epochDiscard = loadBody.indexOf(
+      "fleetAuthorizedEpochStillCurrent(epoch, authorizedFeedEpochRef.current)",
+    );
     const denialAt = loadBody.indexOf("claimFleetFeedDenial");
     const outageAt = loadBody.indexOf("claimFleetFeedOutage");
     assert.ok(epochDiscard > 0, `Expected ${loader} to discard on authorized epoch advance`);

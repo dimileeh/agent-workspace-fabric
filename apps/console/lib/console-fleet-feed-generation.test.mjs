@@ -6,8 +6,17 @@ import {
   claimFleetFeedOutage,
   claimFleetFeedSuccess,
   emptyFleetFeedMarks,
+  fleetAuthorizedEpochStillCurrent,
   revokeFleetFeedThroughGeneration,
 } from "./console-fleet-feed-generation.ts";
+
+test("inspector generation does not make a fleet response stale", () => {
+  // Auth/tenant clear is the only cross-feed discard. A selected workspace
+  // /logs 401 advances inspector gated-detail generation and must not hide a
+  // concurrently completed capacity, reliability, queue, or failure denial.
+  assert.equal(fleetAuthorizedEpochStillCurrent(3, 3), true);
+  assert.equal(fleetAuthorizedEpochStillCurrent(3, 4), false);
+});
 
 test("superseded fleet-feed 401/403 applies while a newer request has only started", () => {
   const marks = emptyFleetFeedMarks();
