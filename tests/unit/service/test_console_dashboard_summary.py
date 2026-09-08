@@ -6,10 +6,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.console_dashboard_summary import (
@@ -116,7 +118,7 @@ async def test_fleet_snapshot_pairs_live_and_windowed_counts(
 
     async with session_factory() as session:
         status_counts, awaiting_human, windowed = await _count_fleet_snapshot(
-            session, window_start=window_start
+            session, window_start=window_start, generated_at=now
         )
 
     assert status_counts[WorkspaceStatus.monitoring_pr.value] == 2
@@ -141,9 +143,9 @@ async def test_summary_uses_one_fleet_snapshot_for_live_and_window_counters(
     original = summary_mod._count_fleet_snapshot
 
     async def _spy(
-        session: AsyncSession, *, window_start: datetime
+        session: AsyncSession, *, window_start: datetime, generated_at: datetime
     ) -> tuple[dict[str, int], int, dict[str, int]]:
-        result = await original(session, window_start=window_start)
+        result = await original(session, window_start=window_start, generated_at=generated_at)
         calls.append(result)
         return result
 
@@ -212,6 +214,49 @@ async def test_service_summary_window_terminal_counts(
 
 
 @pytest.mark.unit
+async def test_service_summary_window_excludes_terminals_after_generated_at(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """*_last_window is the closed interval [window.start, generated_at]."""
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-console-summary")
+    now = datetime(2026, 9, 6, 17, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now + timedelta(seconds=1),
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        updated_at=now + timedelta(minutes=5),
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+    )
+
+    summary = await summarize_console_dashboard(
+        session_factory,
+        settings=settings,
+        now=now,
+        since_hours=24,
+    )
+
+    assert summary.window.start == now - timedelta(hours=24)
+    assert summary.generated_at == now
+    assert summary.counts.completed_last_window == 1
+    assert summary.counts.cancelled_last_window == 0
+    assert summary.counts.failed_last_window == 1
+
+
+@pytest.mark.unit
 async def test_service_summary_counts_whole_control_plane_fleet_not_capacity_node(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -249,6 +294,14 @@ async def test_service_summary_counts_whole_control_plane_fleet_not_capacity_nod
         remote.node_id = "other-worker-node"
         completed.node_id = "other-worker-node"
         queued.node_id = "other-worker-node"
+        await session.commit()
+        # ORM onupdate replaces updated_at on the node_id write. Pin the terminal
+        # with a Core UPDATE so it stays inside [window.start, generated_at].
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == remote_completed)
+            .values(updated_at=now - timedelta(hours=2))
+        )
         await session.commit()
 
     summary = await summarize_console_dashboard(

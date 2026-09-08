@@ -97,7 +97,7 @@ async def summarize_console_dashboard_for_session(
     # a READ COMMITTED snapshot (a workspace cannot be both executing and
     # completed_last_window under the published as_of).
     status_counts, awaiting_human, windowed = await _count_fleet_snapshot(
-        session, window_start=window_start
+        session, window_start=window_start, generated_at=generated_at
     )
     saturation = _workspace_saturation_counts(status_counts, awaiting_human=awaiting_human)
 
@@ -155,12 +155,16 @@ async def _count_fleet_snapshot(
     session: AsyncSession,
     *,
     window_start: datetime,
+    generated_at: datetime,
 ) -> tuple[dict[str, int], int, dict[str, int]]:
     """Count live fleet status, awaiting_human, and windowed terminals in one SELECT.
 
     Separate SELECTs under READ COMMITTED can observe different committed states
     (e.g. awaiting_human=1 with monitoring_pr=0, or the same row as both running
     and completed_last_window). One statement keeps the published snapshot coherent.
+
+    Windowed terminals are the closed interval ``[window_start, generated_at]``.
+    A lower bound alone includes rows committed after the published anchor.
     """
 
     status_exprs = [
@@ -193,6 +197,7 @@ async def _count_fleet_snapshot(
                         and_(
                             Workspace.status == status.value,
                             Workspace.updated_at >= window_start,
+                            Workspace.updated_at <= generated_at,
                         ),
                         1,
                     ),
