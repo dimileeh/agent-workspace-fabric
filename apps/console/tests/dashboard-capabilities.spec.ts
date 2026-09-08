@@ -3376,4 +3376,138 @@ test.describe("hosted context query carry", () => {
     await expect.poll(() => tenantBCapabilityFailures).toBeGreaterThan(0);
     await expect(page.getByText(/capabilities outage/i).first()).toBeVisible();
   });
+
+  test("context switch after capability 401 allows tenant B missing-contract navigation", async ({
+    page,
+  }) => {
+    // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gQ8ZW: tenant A's
+    // capabilities 401 must not stay latched across a configured context switch.
+    // Tenant B's 404 is a missing contract, not an authorization failure, so
+    // legacy-safe overview navigation must proceed with B's failure reason.
+    const apiPrefix = "/api/core-console";
+    let denyTenantA = false;
+    const tenantACaps = {
+      ...(hostedCapabilities() as Record<string, unknown>),
+      identity: {
+        backend_id: "awf-cloud-tenant-a",
+        scope: "tenant",
+        tenant_id: "tenant_a",
+      },
+    };
+    const workspaceFor = (tenant: "a" | "b") => ({
+      workspace_id: `ws_tenant_${tenant}`,
+      title: `Tenant ${tenant.toUpperCase()} workspace`,
+      repo_url: `https://github.com/example/tenant-${tenant}`,
+      base_branch: "main",
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: `Rows for tenant ${tenant}`,
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    await page.route("**/api/core-console/**", async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      const orgId = url.searchParams.get("org_id");
+      if (path === `${apiPrefix}/health`) {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === `${apiPrefix}/console/capabilities`) {
+        if (orgId === "org_b") {
+          await fulfillJson(
+            route,
+            { detail: { error_code: "NOT_FOUND", message: "capability contract missing for tenant b" } },
+            404,
+          );
+          return;
+        }
+        if (denyTenantA) {
+          await fulfillJson(
+            route,
+            { detail: { error_code: "UNAUTHORIZED", message: "tenant A authorization denied" } },
+            401,
+          );
+          return;
+        }
+        await fulfillJson(route, tenantACaps);
+        return;
+      }
+      if (path === `${apiPrefix}/console/dashboard-summary`) {
+        await fulfillJson(route, loadConsoleFixture("dashboard-summary.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/console/cloud-runtime`) {
+        await fulfillJson(route, loadConsoleFixture("cloud-runtime.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/workspaces/overview`) {
+        await fulfillJson(
+          route,
+          listEnvelope([workspaceFor(orgId === "org_b" ? "b" : "a")]),
+        );
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/workspaces/summary`) {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === `${apiPrefix}/merge-queue`) {
+        await fulfillJson(route, listEnvelope([]));
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/failures/summary`) {
+        await fulfillJson(route, {
+          total_failures: 0,
+          window_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/workspaces?org_id=org_a&project_id=proj_a");
+    await waitForConsoleReady(page);
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toBeVisible();
+
+    denyTenantA = true;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(page.getByText("tenant A authorization denied")).toBeVisible();
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toHaveCount(0);
+
+    await page.evaluate(() => {
+      const next = new URL(window.location.href);
+      next.searchParams.set("org_id", "org_b");
+      next.searchParams.set("project_id", "proj_b");
+      window.history.replaceState(null, "", `${next.pathname}?${next.searchParams.toString()}`);
+    });
+
+    await expect(page.getByText("capability contract missing for tenant b")).toBeVisible();
+    await expect(page.getByText("tenant A authorization denied")).toHaveCount(0);
+    await expect(page.getByTestId("workspace-card-ws_tenant_b")).toBeVisible();
+    await expect(page.getByTestId("workspace-card-ws_tenant_a")).toHaveCount(0);
+  });
 });

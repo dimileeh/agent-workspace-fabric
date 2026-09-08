@@ -561,6 +561,13 @@ export function ConsoleDashboard() {
     authorizedFeedEpochRef.current += 1;
     if (options?.authDenied) {
       consoleAuthDeniedRef.current = true;
+    } else {
+      // Context and identity resets are not denials. Leaving a prior tenant's
+      // 401/403 latched makes the new context ignore 404, malformed, and
+      // transient capability failures, and loadOverview keeps returning early
+      // with that tenant's authorization error.
+      consoleAuthDeniedRef.current = false;
+      setCapabilityError(null);
     }
     setResourceSaturation(null);
     setResourceError(null);
@@ -623,7 +630,7 @@ export function ConsoleDashboard() {
       lastCapabilityIdentityKeyRef.current = null;
       setCapabilities(null);
     }
-  }, [setSelectedId]);
+  }, [setSelectedId, setCapabilityError]);
 
   // Missing/rolled-back negotiation (capabilities 404): drop optional inventories so
   // gated polls stop, but keep overview/selection/basic detail. Do not bump

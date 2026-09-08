@@ -2906,6 +2906,30 @@ test("withdrawn events outage yields the inspector banner", () => {
   );
 });
 
+test("non-auth context reset clears a prior capability authorization latch", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gQ8ZW: a configured
+  // context switch calls clearAuthorizedConsoleFeeds without authDenied. Leaving
+  // tenant A's 401/403 latch set makes tenant B's 404, malformed payload, or
+  // transient failure a no-op, and loadOverview keeps returning early with the
+  // previous authorization error instead of legacy-safe navigation.
+  const dashboard = dashboardSource.dashboard;
+  const clearStart = dashboard.indexOf("const clearAuthorizedConsoleFeeds = useCallback");
+  assert.ok(clearStart > 0, "Expected clearAuthorizedConsoleFeeds");
+  const clearEnd = dashboard.indexOf("const clearCapabilityGatedInventories = useCallback", clearStart);
+  assert.ok(clearEnd > clearStart, "Expected gated inventory clear after authorized feed clear");
+  const clearBody = dashboard.slice(clearStart, clearEnd);
+  assert.match(
+    clearBody,
+    /if \(options\?\.authDenied\) \{\s*consoleAuthDeniedRef\.current = true;\s*\} else \{[\s\S]*?consoleAuthDeniedRef\.current = false;\s*setCapabilityError\(null\);/,
+    "Expected a non-auth clear to drop the prior context's authorization latch and error",
+  );
+  assert.match(
+    dashboard,
+    /clearAuthorizedConsoleFeeds\(\{\s*clearCapabilities:\s*true\s*\}\)/,
+    "Expected configured context changes to call the helper without authDenied",
+  );
+});
+
 test("configured context query changes clear authorized state before capability response", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
