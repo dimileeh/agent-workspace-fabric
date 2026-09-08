@@ -168,6 +168,49 @@ export function openAwfWorkspaceSocket({
 
 type WorkspaceStreamSocket = Pick<WebSocket, "on" | "close">;
 
+const HANDSHAKE_AUTH_STATUS = /Unexpected server response: (401|403)\b/;
+
+function authorizationStatusFromError(error: unknown): 401 | 403 | null {
+  if (error !== null && typeof error === "object") {
+    const record = error as { statusCode?: unknown; status?: unknown };
+    const numeric = record.statusCode ?? record.status;
+    if (numeric === 401 || numeric === 403) {
+      return numeric;
+    }
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const match = HANDSHAKE_AUTH_STATUS.exec(message);
+  if (match?.[1] === "401") {
+    return 401;
+  }
+  if (match?.[1] === "403") {
+    return 403;
+  }
+  return null;
+}
+
+function authorizationStatusFromCloseReason(reason: string): 401 | 403 | null {
+  const normalized = reason.trim();
+  if (normalized === "UNAUTHORIZED") {
+    return 401;
+  }
+  if (normalized === "FORBIDDEN") {
+    return 403;
+  }
+  return null;
+}
+
+function streamAuthorizationDeniedFrame(status: 401 | 403, detail: string) {
+  return {
+    type: "error" as const,
+    ok: false,
+    error_code: status === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+    status,
+    message: "Workspace stream authorization denied.",
+    detail,
+  };
+}
+
 /**
  * Wire an upstream workspace WebSocket into an SSE stream.
  *
@@ -176,6 +219,10 @@ type WorkspaceStreamSocket = Pick<WebSocket, "on" | "close">;
  * relying on a follow-up "close" event firing. Previously a mid-stream error
  * (socket already opened) only emitted an error frame and left the connection
  * dangling until the upstream happened to also emit "close".
+ *
+ * A 401/403 handshake rejection (or a policy close with UNAUTHORIZED /
+ * FORBIDDEN) keeps that status on the SSE error frame so the console can
+ * treat route-level authorization revocation as feed denial, not an outage.
  */
 export function attachWorkspaceStreamHandlers({
   socket,
@@ -210,10 +257,16 @@ export function attachWorkspaceStreamHandlers({
       return;
     }
     terminated = true;
-    send({
-      type: "error",
-      ...normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."),
-    });
+    const status = authorizationStatusFromError(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    send(
+      status === null
+        ? {
+            type: "error",
+            ...normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."),
+          }
+        : streamAuthorizationDeniedFrame(status, detail),
+    );
     socket.close();
     closeStream();
   });
@@ -222,12 +275,18 @@ export function attachWorkspaceStreamHandlers({
       return;
     }
     terminated = true;
-    send({
-      type: "closed",
-      workspace_id: workspaceId,
-      code,
-      reason: reason.toString("utf-8"),
-    });
+    const reasonText = reason.toString("utf-8");
+    const status = authorizationStatusFromCloseReason(reasonText);
+    send(
+      status === null
+        ? {
+            type: "closed",
+            workspace_id: workspaceId,
+            code,
+            reason: reasonText,
+          }
+        : streamAuthorizationDeniedFrame(status, reasonText),
+    );
     closeStream();
   });
 }

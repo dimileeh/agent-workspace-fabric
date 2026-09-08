@@ -872,8 +872,8 @@ export type AwfStreamFrame =
       occurred_at?: string;
     }
   | { type: "heartbeat"; workspace_id: string }
-  | { type: "closed"; workspace_id: string; code: number; reason: string }
-  | { type: "error"; error_code: string; message: string };
+  | { type: "closed"; workspace_id: string; code: number; reason: string; status?: number }
+  | { type: "error"; error_code: string; message: string; status?: number };
 
 export interface FailureExample {
   workspace_id: string;

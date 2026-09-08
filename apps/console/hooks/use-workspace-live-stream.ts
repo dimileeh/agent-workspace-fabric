@@ -30,6 +30,7 @@ type UseWorkspaceLiveStreamArgs = {
   logTailAuthDeniedRef: MutableRefObject<boolean>;
   workspaceDetailAuthDenied: boolean;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
+  setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
@@ -54,6 +55,7 @@ export function useWorkspaceLiveStream({
   logTailAuthDeniedRef,
   workspaceDetailAuthDenied,
   workspaceDetailAuthDeniedRef,
+  setWorkspaceDetailAuthDenied,
   eventFeedAuthDeniedRef,
   setStreamState,
   setDetail,
@@ -96,6 +98,31 @@ export function useWorkspaceLiveStream({
       workspaceDetailAuthDeniedRef.current ||
       logListingAuthDeniedRef.current ||
       logTailAuthDeniedRef.current;
+
+    const applyStreamAuthorizationDenial = (message: string) => {
+      // Route-level /stream 401/403 is authorization revocation, not an outage.
+      // Latch before close() so the follow-up error event cannot reopen the
+      // inspector or leave the previous snapshot, events, and logs visible.
+      workspaceDetailAuthDeniedRef.current = true;
+      setWorkspaceDetailAuthDenied(true);
+      setStreamState("idle");
+      setError(message);
+      setLogEntries([]);
+      setStreamOffsets({});
+      setDetail((current) => {
+        if (!workspaceDetailAuthDeniedRef.current) {
+          return current;
+        }
+        return {
+          ...current,
+          workspace: null,
+          events: [],
+        };
+      });
+    };
+
+    const streamAuthorizationDenied = (frame: { status?: number }) =>
+      frame.status === 401 || frame.status === 403;
 
     source.onmessage = (message) => {
       if (
@@ -202,6 +229,15 @@ export function useWorkspaceLiveStream({
         });
         return;
       }
+      if (frame.type === "error" || frame.type === "closed") {
+        if (streamAuthorizationDenied(frame)) {
+          applyStreamAuthorizationDenial(
+            frame.type === "error" ? frame.message : "Workspace stream authorization denied.",
+          );
+          source.close();
+          return;
+        }
+      }
       if (frame.type === "error") {
         terminalError = true;
         setStreamState("error");
@@ -241,6 +277,7 @@ export function useWorkspaceLiveStream({
     logTailAuthDeniedRef,
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
+    setWorkspaceDetailAuthDenied,
     eventFeedAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,

@@ -1846,6 +1846,16 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
     "Expected inspector /stream to close when listing, tail, or base-detail authorization is denied, not only drop frames after they arrive",
   );
   assert.match(
+    dashboardSource.liveStream,
+    /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?workspaceDetailAuthDeniedRef\.current = true;[\s\S]*?setWorkspaceDetailAuthDenied\(true\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?workspace: null,[\s\S]*?events: \[\],[\s\S]*?const streamAuthorizationDenied = \(frame: \{ status\?: number \}\) =>\s*frame\.status === 401 \|\| frame\.status === 403;[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
+    "Expected a workspace stream 401/403 frame to latch feed denial and clear previously rendered stream data",
+  );
+  assert.match(
+    dashboardSource.dashboard,
+    /useWorkspaceLiveStream\(\{[\s\S]*?setWorkspaceDetailAuthDenied,/,
+    "Expected the inspector live stream to publish route-level stream authorization denial",
+  );
+  assert.match(
     dashboardSource.detailLoader,
     /const applyLogListingAuthDenial = \(result: ApiEnvelope<ListEnvelope<WorkspaceLogStream>>\) => \{[\s\S]*?logListingAuthDeniedRef\.current = true;[\s\S]*?setLogListingAuthDenied\(true\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?void streamsPromise\.then\(\(result\) => \{[\s\S]*?applyLogListingAuthDenial\(result\);[\s\S]*?if \(allowLogs && streams != null && feedAuthDenied\(streams\)\) \{[\s\S]*?applyLogListingAuthDenial\(streams\);/,
     "Expected listing 401/403 to clear selection caches as soon as the listing settles and again after merge so a sibling 200 cannot restore selection",
