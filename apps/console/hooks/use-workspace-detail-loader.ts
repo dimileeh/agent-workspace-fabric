@@ -443,6 +443,87 @@ export function useWorkspaceDetailLoader({
         }
       };
 
+      const applyWorkspaceSuccessIfSettled = (result: ApiEnvelope<Workspace>) => {
+        if (!result.ok) {
+          return;
+        }
+        // Record and apply a successful GET as soon as it settles. A sibling
+        // hang must not keep this response "in hand" until Promise.all, or an
+        // older 401/403 can stamp the revoke watermark over this generation
+        // and leave the inspector cleared while access is already restored.
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current ||
+          generation <= workspaceDetailVisitGenerationFloorRef.current ||
+          generation <= revokedWorkspaceDetailGenerationRef.current
+        ) {
+          return;
+        }
+        publishWorkspaceDetailRecovered();
+        setDetail((current) => ({
+          ...current,
+          workspace: workspaceFromDetailResult(current.workspace, result),
+        }));
+      };
+
+      const applyEventFeedSuccessIfSettled = (
+        result: ApiEnvelope<ListEnvelope<WorkspaceEvent>>,
+      ) => {
+        if (!result.ok) {
+          return;
+        }
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current ||
+          generation <= workspaceDetailVisitGenerationFloorRef.current ||
+          generation <= revokedEventFeedGenerationRef.current
+        ) {
+          return;
+        }
+        publishEventFeedRecovered();
+        setDetail((current) => {
+          if (eventFeedAuthDeniedRef.current) {
+            return current;
+          }
+          return { ...current, events: result.data.items };
+        });
+      };
+
+      const optionalFeedDenialStillCurrent = () =>
+        epoch === authorizedFeedEpochRef.current &&
+        selectedIdRef.current === workspaceId &&
+        visit === workspaceDetailVisitRef.current &&
+        generation > workspaceDetailVisitGenerationFloorRef.current &&
+        (generation > revokedWorkspaceDetailGenerationRef.current || denialApplied);
+
+      const applyRuntimeAuthDenial = (result: ApiEnvelope<WorkspaceRuntime>) => {
+        if (!allowRuntime || result.ok || !feedAuthDenied(result)) {
+          return;
+        }
+        if (!optionalFeedDenialStillCurrent()) {
+          return;
+        }
+        setDetail((current) => ({ ...current, runtime: null }));
+        if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
+          setError(result.message);
+        }
+      };
+
+      const applyOperationsAuthDenial = (result: ApiEnvelope<ListEnvelope<Operation>>) => {
+        if (!allowOperations || result.ok || !feedAuthDenied(result)) {
+          return;
+        }
+        if (!optionalFeedDenialStillCurrent()) {
+          return;
+        }
+        setDetail((current) => ({ ...current, operations: [] }));
+        if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
+          setError(result.message);
+        }
+      };
+
       const workspacePromise = apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`));
       const runtimePromise = allowRuntime
         ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
@@ -465,14 +546,38 @@ export function useWorkspaceDetailLoader({
       // as that request settles. Promise.all never runs the handlers below if
       // a sibling runtime/events/operations request hangs, and apiGet has no
       // timeout, so revoked inspector data would stay available indefinitely.
-      void workspacePromise.then(applyWorkspaceDenialIfSettled);
+      // A successful GET is recorded here too, so an in-hand 200 is not
+      // discarded when an older denial stamps the watermark while a sibling
+      // is still outstanding.
+      void workspacePromise.then((result) => {
+        if (result.ok) {
+          applyWorkspaceSuccessIfSettled(result);
+        } else {
+          applyWorkspaceDenialIfSettled(result);
+        }
+      });
+      void runtimePromise.then((result) => {
+        if (result != null) {
+          applyRuntimeAuthDenial(result);
+        }
+      });
+      void operationsPromise.then((result) => {
+        if (result != null) {
+          applyOperationsAuthDenial(result);
+        }
+      });
       void streamsPromise.then((result) => {
         if (result != null) {
           applyLogListingAuthDenial(result);
         }
       });
       void eventsPromise.then((result) => {
-        if (result != null) {
+        if (result == null) {
+          return;
+        }
+        if (result.ok) {
+          applyEventFeedSuccessIfSettled(result);
+        } else {
           applyEventFeedAuthDenial(result);
         }
       });
@@ -611,8 +716,16 @@ export function useWorkspaceDetailLoader({
       if (firstFailure && !firstFailure.ok) {
         // A latched base-detail 401/403 owns this banner. A newer request that
         // only hangs or fails transiently is not recovery and must not replace
-        // the revocation reason.
-        if (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) {
+        // the revocation reason. A latched event-feed 401/403 has the same
+        // precedence over an earlier-listed sibling outage (runtime is checked
+        // before events, so firstFailure would otherwise hide the revocation).
+        const eventDenialOwnsBanner =
+          eventFeedAuthDeniedRef.current &&
+          !(events != null && feedAuthDenied(events) && firstFailure === events);
+        if (
+          (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) &&
+          !eventDenialOwnsBanner
+        ) {
           setError(firstFailure.message);
         }
       } else if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
