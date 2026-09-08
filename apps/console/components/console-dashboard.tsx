@@ -161,19 +161,21 @@ export function ConsoleDashboard() {
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
   const consoleAuthDeniedRef = useRef(false);
-  // Capability poll generation: discard stale 200/404 responses after a newer
-  // request. A 401/403 and a network/5xx outage stay authoritative unless a
-  // newer successful negotiation has already been applied — a newer request
-  // merely starting is not recovery.
+  // Capability poll generation: discard a stale successful 200 after a newer
+  // request has started. A 401/403, a network/5xx outage, and a missing or
+  // malformed contract (404 / malformed 200) stay authoritative unless a newer
+  // successful negotiation has already been applied — a newer request merely
+  // starting is not recovery.
   const capabilityRequestGenerationRef = useRef(0);
   // Highest capability generation that applied a successful negotiation.
   // An older 401/403 must not clear feeds this newer success already owns.
   // An older network/5xx outage must not replace the error that success cleared.
   const appliedCapabilityGenerationRef = useRef(0);
-  // Highest capability generation that applied a network/5xx outage. A newer
-  // request merely starting is not recovery. An older success must not clear
-  // an outage this newer failure already applied, or last-good capabilities
-  // keep enabling mutating controls with no stale/error indication.
+  // Highest capability generation that applied a network/5xx outage or a
+  // missing/invalid contract (404 / malformed 200). A newer request merely
+  // starting is not recovery. An older success must not clear a failure this
+  // newer response already applied, or last-good capabilities keep enabling
+  // mutating controls with no stale/error indication.
   const appliedCapabilityFailureGenerationRef = useRef(0);
   // Highest capability generation covered by an applied 401/403. An older
   // overlapping 200 (started before that denial) must not restore cleared
@@ -810,6 +812,51 @@ export function ConsoleDashboard() {
         }
         return true;
       };
+      const applyMissingCapabilityContract = (
+        failedGeneration: number,
+        applyClear: () => void,
+        message: string,
+      ): boolean => {
+        // A soft tenant switch already owns the console. An older context's
+        // 404 or malformed payload must not clear the new fingerprint.
+        if (contextFingerprint !== configuredContextFingerprintRef.current) {
+          return false;
+        }
+        // A newer successful negotiation already owns the console. A late
+        // missing/invalid contract from an older request must not clear it.
+        if (failedGeneration < appliedCapabilityGenerationRef.current) {
+          return false;
+        }
+        // A newer outage or missing-contract response already owns the warning.
+        if (failedGeneration < appliedCapabilityFailureGenerationRef.current) {
+          return false;
+        }
+        // A 401/403 already covers this generation. Do not replace the
+        // authorization reason or restore cleared capabilities.
+        if (
+          failedGeneration <= revokedCapabilityGenerationRef.current ||
+          consoleAuthDeniedRef.current
+        ) {
+          return false;
+        }
+        appliedCapabilityFailureGenerationRef.current = Math.max(
+          appliedCapabilityFailureGenerationRef.current,
+          failedGeneration,
+        );
+        applyClear();
+        // Re-check in the updater: a newer success or denial can settle after
+        // this missing-contract response is queued.
+        setCapabilityError((current) =>
+          contextFingerprint !== configuredContextFingerprintRef.current ||
+          failedGeneration < appliedCapabilityGenerationRef.current ||
+          failedGeneration < appliedCapabilityFailureGenerationRef.current ||
+          consoleAuthDeniedRef.current
+            ? current
+            : message,
+        );
+        setCapabilitiesReady(true);
+        return true;
+      };
       // Apply even if a newer request has started but has not yet established
       // recovery. A newer request merely starting, hanging, or failing
       // transiently is not recovery.
@@ -826,31 +873,19 @@ export function ConsoleDashboard() {
         const applied = applyTransientCapabilityOutage(generation, result.message);
         return applied ? appliedCapabilitiesRef.current : null;
       }
-      if (
-        generation !== capabilityRequestGenerationRef.current ||
-        generation <= revokedCapabilityGenerationRef.current ||
-        generation < appliedCapabilityGenerationRef.current
-      ) {
-        return null;
-      }
-      // A newer network/5xx already applied the outage. This older 404/200
-      // must not clear it, or last-good capabilities stay current with no error.
-      if (generation < appliedCapabilityFailureGenerationRef.current) {
-        return null;
-      }
-      if (!result.ok) {
-        // Missing/rolled-back negotiation: clear gated inventories so optional
-        // feeds stop polling, without wiping legacy-safe workspace navigation
-        // (CONSOLE_BACKEND_CONTRACT — no inferred privileges). Non-404 failures
-        // already applied above; this return keeps result narrowed for success.
-        if (result.status === 404) {
+      // Missing/rolled-back negotiation: clear gated inventories so optional
+      // feeds stop polling, without wiping legacy-safe workspace navigation
+      // (CONSOLE_BACKEND_CONTRACT — no inferred privileges). Apply even if
+      // Refresh has only started a newer request. Suppress only after a newer
+      // successful negotiation has applied — a hang is not recovery, and
+      // discarding this 404 leaves capabilityError null so retained capabilities
+      // keep enabling mutating controls.
+      if (!result.ok && result.status === 404) {
+        applyMissingCapabilityContract(generation, () => {
           clearCapabilityGatedInventories();
-          setCapabilityError(result.message);
-          setCapabilitiesReady(true);
-        }
+        }, result.message);
         return null;
       }
-
       const parsed = parseConsoleCapabilities(result.data);
       if (!parsed.ok) {
         // Identity is extracted independently of inventory malformations. Preserve
@@ -858,18 +893,32 @@ export function ConsoleDashboard() {
         // same trusted identity; otherwise wipe authorized feeds and advance the
         // epoch so late prior-tenant overview rows cannot apply
         // (CONSOLE_BACKEND_CONTRACT — malformed ≡ missing/404 only for unchanged
-        // trusted identity).
-        const clearAction = resolveCapabilityParseFailureClear({
-          priorIdentityKey: lastCapabilityIdentityKeyRef.current,
-          trustedIdentityKey: parsed.trustedIdentityKey,
-        });
-        if (clearAction === "clear_authorized") {
-          clearAuthorizedConsoleFeeds({ clearCapabilities: true });
-        } else {
-          clearCapabilityGatedInventories();
-        }
-        setCapabilityError(parsed.message);
-        setCapabilitiesReady(true);
+        // trusted identity). A malformed 200 is a completed invalid contract,
+        // not a stale success: apply it unless a newer negotiation already recovered.
+        applyMissingCapabilityContract(generation, () => {
+          const clearAction = resolveCapabilityParseFailureClear({
+            priorIdentityKey: lastCapabilityIdentityKeyRef.current,
+            trustedIdentityKey: parsed.trustedIdentityKey,
+          });
+          if (clearAction === "clear_authorized") {
+            clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+          } else {
+            clearCapabilityGatedInventories();
+          }
+        }, parsed.message);
+        return null;
+      }
+      if (
+        generation !== capabilityRequestGenerationRef.current ||
+        generation <= revokedCapabilityGenerationRef.current ||
+        generation < appliedCapabilityGenerationRef.current
+      ) {
+        return null;
+      }
+      // A newer network/5xx or missing-contract response already applied.
+      // This older success must not clear it, or last-good capabilities stay
+      // current with no error (or a cleared contract is restored).
+      if (generation < appliedCapabilityFailureGenerationRef.current) {
         return null;
       }
 

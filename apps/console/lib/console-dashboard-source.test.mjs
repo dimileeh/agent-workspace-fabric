@@ -1486,6 +1486,44 @@ test("loadCapabilities applies superseded network/5xx until a newer success land
   );
 });
 
+test("loadCapabilities applies superseded 404 and malformed payloads until a newer success lands", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMp: a periodic
+  // capability request can return 404 or a malformed 200 after Refresh has
+  // only started a newer request. Discarding that completed missing-contract
+  // response because generation !== current leaves capabilityError null if
+  // the newer request hangs, so retained capabilities keep enabling mutating
+  // controls. Suppress only after a newer successful negotiation has applied.
+  const dashboard = dashboardSource.dashboard;
+  const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
+  assert.ok(loadStart > 0, "Expected loadCapabilities");
+  const loadEnd = dashboard.indexOf("useConsoleFleetFeeds({", loadStart);
+  assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before fleet feeds");
+  const loadBody = dashboard.slice(loadStart, loadEnd);
+  const generationDiscardAt = loadBody.indexOf("generation !== capabilityRequestGenerationRef.current");
+  assert.ok(generationDiscardAt > 0, "Expected success-path generation discard");
+  const beforeGenerationDiscard = loadBody.slice(0, generationDiscardAt);
+  assert.match(
+    beforeGenerationDiscard,
+    /if \(!result\.ok && result\.status === 404\) \{\s*applyMissingCapabilityContract\(generation, \(\) => \{\s*clearCapabilityGatedInventories\(\);\s*\}, result\.message\);\s*return null;\s*\}/,
+    "Expected capability 404 to clear gated inventories before discarding a non-latest generation",
+  );
+  assert.match(
+    beforeGenerationDiscard,
+    /const parsed = parseConsoleCapabilities\(result\.data\);[\s\S]*?if \(!parsed\.ok\) \{[\s\S]*?applyMissingCapabilityContract\(generation,/,
+    "Expected malformed capability payloads to apply before discarding a non-latest generation",
+  );
+  assert.match(
+    loadBody,
+    /if \(failedGeneration < appliedCapabilityGenerationRef\.current\) \{\s*return false;\s*\}/,
+    "Expected an older missing-contract response to leave a newer applied success in place",
+  );
+  assert.match(
+    loadBody,
+    /appliedCapabilityFailureGenerationRef\.current = Math\.max\(\s*appliedCapabilityFailureGenerationRef\.current,\s*failedGeneration,\s*\)/,
+    "Expected a missing-contract response to record its generation so an older success cannot clear it",
+  );
+});
+
 test("loadCapabilities reloads overview after clearing a latched auth denial", () => {
   const dashboard = dashboardSource.dashboard;
   // Successful negotiation must not leave the workspace list empty until the
@@ -1698,8 +1736,13 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     dashboard,
-    /if \(result\.status === 404\) \{[\s\S]*?clearCapabilityGatedInventories\(\)[\s\S]*?setCapabilityError\(result\.message\)[\s\S]*?setCapabilitiesReady\(true\)[\s\S]*?return null;/,
+    /if \(!result\.ok && result\.status === 404\) \{[\s\S]*?applyMissingCapabilityContract\(generation, \(\) => \{\s*clearCapabilityGatedInventories\(\);\s*\}, result\.message\);[\s\S]*?return null;/,
     "Expected capabilities 404 to clear gated inventories only (legacy-safe navigation)",
+  );
+  assert.match(
+    dashboard,
+    /const applyMissingCapabilityContract = \([\s\S]*?setCapabilityError\(\(current\) =>[\s\S]*?setCapabilitiesReady\(true\);/,
+    "Expected missing-contract apply to set capabilityError and mark capabilities ready",
   );
   assert.match(
     dashboard,
@@ -1707,7 +1750,7 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
     "Expected retention comments to name 5xx/network only, not 404",
   );
   // 404 is a distinct gated-clear path; transient retain must not call it.
-  const idx404 = dashboard.indexOf("if (result.status === 404)");
+  const idx404 = dashboard.indexOf("if (!result.ok && result.status === 404)");
   const idxRetain = dashboard.indexOf("const retained = appliedCapabilitiesRef.current");
   assert.ok(idx404 > 0 && idxRetain > 0, "Expected both 404 clear and 5xx/network retain");
   const retainBody = dashboard.slice(

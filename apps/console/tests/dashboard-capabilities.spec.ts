@@ -2151,6 +2151,199 @@ test("superseded capability outage applies while a newer refresh hangs", async (
   await expect(active.locator(".kpi-value")).toHaveText("9");
 });
 
+test("superseded capability 404 applies while a newer refresh hangs", async ({ page }) => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMp: a periodic
+  // capability request can return 404 after Refresh has only started a newer
+  // request. That completed missing contract must clear gated inventories and
+  // set capabilityError so mutating controls fail closed until a newer success
+  // lands. A hang is not recovery. A 404 that arrives after a newer success
+  // must not wipe the recovered negotiation.
+  let capabilityMode: "ok" | "hold" | "hang" = "ok";
+  let settledCapabilitySuccesses = 0;
+  const held: Array<(kind: "missing" | "ok") => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+  const workspaceId = "ws_cap_superseded_missing";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Superseded capability 404",
+    repo_url: "https://github.com/example/cap-superseded-missing",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Older capability 404 must fail-close mutating controls while a newer refresh hangs",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (capabilityMode === "hold") {
+        await new Promise<void>((resolve) => {
+          held.push(async (kind) => {
+            if (kind === "missing") {
+              await fulfillJson(
+                route,
+                { detail: { error_code: "NOT_FOUND", message: "capabilities negotiation unavailable" } },
+                404,
+              );
+            } else {
+              await fulfillJson(route, localCapabilities());
+            }
+            resolve();
+          });
+        });
+        return;
+      }
+      if (capabilityMode === "hang") {
+        await new Promise<void>((resolve) => {
+          hanging.push(async () => {
+            await fulfillJson(route, localCapabilities());
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, localCapabilities());
+      settledCapabilitySuccesses += 1;
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(
+        route,
+        {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        },
+      );
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (
+      path.endsWith("/events") ||
+      path.endsWith("/operations") ||
+      path.endsWith("/logs") ||
+      path.endsWith("/runtime")
+    ) {
+      await fulfillJson(
+        route,
+        path.endsWith("/runtime")
+          ? { status: "running" }
+          : { items: [], next_cursor: null, has_more: false },
+      );
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const active = page
+    .getByText("Active", { exact: true })
+    .locator("..")
+    .filter({ has: page.locator(".kpi-value") });
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  const cancel = page.getByRole("button", { name: "Cancel" });
+  await expect(cancel).toBeEnabled();
+
+  capabilityMode = "hold";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  capabilityMode = "hang";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => hanging.length).toBe(1);
+
+  await held[0]("missing");
+  await expect(page.getByText(/capabilities negotiation unavailable/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await expect(cancel).toBeDisabled();
+  await cancel.locator("..").hover();
+  await expect(page.getByRole("tooltip", { name: /console capabilities unavailable/i })).toBeVisible();
+  expect(hanging.length).toBe(1);
+
+  await hanging[0]();
+  await expect(page.getByText(/capabilities negotiation unavailable/i)).toHaveCount(0, { timeout: 10_000 });
+  await expect(cancel).toBeEnabled();
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+
+  // A 404 that settles after a newer success has applied must not clear recovery.
+  capabilityMode = "hold";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => held.length).toBe(2);
+
+  const successesBeforeRecovery = settledCapabilitySuccesses;
+  capabilityMode = "ok";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => settledCapabilitySuccesses).toBeGreaterThan(successesBeforeRecovery);
+  await held[1]("missing");
+  await page.waitForTimeout(500);
+  await expect(page.getByText(/capabilities negotiation unavailable/i)).toHaveCount(0);
+  await expect(cancel).toBeEnabled();
+  await expect(active.locator(".kpi-value")).toHaveText("9");
+});
+
 test("malformed capabilities fail closed without saturation polls", async ({ page }) => {
   const requested: string[] = [];
   await mockAwfConsoleApi(page, {
