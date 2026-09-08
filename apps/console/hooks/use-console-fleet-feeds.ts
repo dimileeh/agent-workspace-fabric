@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from "react";
 import {
   capabilityRouteToAwfPath,
   isDiagnosticAvailable,
@@ -110,7 +117,10 @@ export function useConsoleFleetFeeds({
   // Same-identity withdrawal bumps the request generation and clears the
   // error in the dashboard. Stamp revoked through that generation so an
   // in-flight 503 cannot restore it. Refresh overlap does not call this.
-  noteFleetFeedCapabilityWithdrawalRef.current = (plan) => {
+  // Install after commit: react-hooks/refs forbids writing the ref during
+  // render, and a discarded render would drop the stamp. The initial no-op
+  // covers the first commit until this layout effect runs.
+  const noteFleetFeedCapabilityWithdrawal = useCallback((plan: CapabilityFeedWithdrawal) => {
     if (plan.clearDashboardSummary) {
       revokeFleetFeedThroughGeneration(
         dashboardSummaryRequestGenerationRef.current,
@@ -147,7 +157,18 @@ export function useConsoleFleetFeeds({
         failureSummaryMarksRef.current,
       );
     }
-  };
+  }, [
+    cloudRuntimeRequestGenerationRef,
+    dashboardSummaryRequestGenerationRef,
+    failureSummaryRequestGenerationRef,
+    mergeQueueRequestGenerationRef,
+    resourceSaturationRequestGenerationRef,
+    workspaceSummaryRequestGenerationRef,
+  ]);
+
+  useLayoutEffect(() => {
+    noteFleetFeedCapabilityWithdrawalRef.current = noteFleetFeedCapabilityWithdrawal;
+  }, [noteFleetFeedCapabilityWithdrawal, noteFleetFeedCapabilityWithdrawalRef]);
 
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;

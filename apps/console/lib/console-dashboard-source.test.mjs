@@ -1296,6 +1296,16 @@ test("capability withdrawal revokes in-flight fleet 503s on all six loaders", ()
     /noteFleetFeedCapabilityWithdrawalRef\.current\(plan\)/,
     "Expected same-identity withdrawal to revoke fleet-feed marks after the generation bump",
   );
+  assert.match(
+    fleetFeeds,
+    /useLayoutEffect\(\(\) => \{\s*noteFleetFeedCapabilityWithdrawalRef\.current = noteFleetFeedCapabilityWithdrawal;/,
+    "Expected fleet-feed withdrawal stamps to be installed in a layout effect, not during render (react-hooks/refs)",
+  );
+  assert.doesNotMatch(
+    fleetFeeds,
+    /noteFleetFeedCapabilityWithdrawalRef\.current = \(plan\) =>/,
+    "Expected fleet-feed withdrawal not to assign the ref during render (react-hooks/refs)",
+  );
   const withdrawals = [
     ["clearDashboardSummary", "dashboardSummaryRequestGenerationRef", "dashboardSummaryMarksRef"],
     ["clearResourceCapacity", "resourceSaturationRequestGenerationRef", "resourceSaturationMarksRef"],
