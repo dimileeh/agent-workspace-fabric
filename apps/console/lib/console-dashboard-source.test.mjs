@@ -836,7 +836,8 @@ test("sibling success republishes the newest outstanding outage, not feed priori
   // older runtime warning stays in settledDetailOutagesRef. outstandingOutageNewerThan
   // only suppresses when some record is newer than the caller, so a sibling
   // success of the same or a still-newer load publishes preferredOutstandingOutage.
-  // That picker must not let the older runtime warning replace a newer events
+  // That picker must select the newest outstanding generation, not the first
+  // feed-priority match, or the older runtime warning replaces a newer events
   // outage that has not recovered.
   const loader = dashboardSource.detailLoader;
   const start = loader.indexOf("const preferredOutstandingOutage = ");
@@ -845,12 +846,12 @@ test("sibling success republishes the newest outstanding outage, not feed priori
   const helper = loader.slice(start, end);
   assert.match(
     helper,
-    /if \(selected != null && record\.generation <= selected\.generation\) \{\s*continue;\s*\}/,
+    /let newestGeneration = -1;[\s\S]*?if \(record\.generation > newestGeneration\) \{\s*newestGeneration = record\.generation;\s*\}[\s\S]*?if \(newestGeneration < 0\) \{\s*return null;\s*\}[\s\S]*?record\.generation !== newestGeneration/,
     "Expected the newest settled failure to own the banner, with feed order only breaking same-generation ties",
   );
   assert.doesNotMatch(
     helper,
-    /return record\.message;/,
+    /eventsOutageReleasedThroughRef[\s\S]{0,120}return record\.message;/,
     "Expected preferredOutstandingOutage not to return the first feed-priority match",
   );
 });

@@ -873,49 +873,68 @@ export function useWorkspaceDetailLoader({
 
       // Cross-generation view of outstanding outages. The local map only sees
       // this load; a newer success must drop a feed the older load already stamped.
-      // The newest eligible failure owns the banner. Feed order only breaks ties
-      // within one generation, so a sibling success cannot republish a retained
-      // older runtime warning over a newer events outage that has not recovered.
+      const outstandingRecordEligible = (
+        feed: "workspace" | "runtime" | "events" | "operations" | "logs",
+        record: { generation: number; message: string },
+      ) => {
+        if (record.generation < appliedSuccessGeneration(feed)) {
+          return false;
+        }
+        // A withdrawn runtime/operations/events 5xx must not stay the preferred
+        // warning after the fence. A sibling success would otherwise republish
+        // it and hide a still-advertised outage.
+        if (
+          feed === "runtime" &&
+          record.generation <= runtimeDenialReleasedThroughRef.current
+        ) {
+          return false;
+        }
+        if (
+          feed === "operations" &&
+          record.generation <= operationsDenialReleasedThroughRef.current
+        ) {
+          return false;
+        }
+        if (
+          feed === "events" &&
+          record.generation <= eventsOutageReleasedThroughRef.current
+        ) {
+          return false;
+        }
+        return true;
+      };
+
+      // The newest eligible failure owns the banner. Feed order only breaks
+      // ties within that generation, so a sibling success of the same or a
+      // still-newer load cannot republish a retained older runtime warning
+      // over a newer events outage that has not recovered.
       const preferredOutstandingOutage = () => {
         const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
-        let selected: { generation: number; message: string } | null = null;
+        let newestGeneration = -1;
         for (const feed of order) {
           const record = settledDetailOutagesRef.current[feed];
-          if (record == null || record.generation < appliedSuccessGeneration(feed)) {
+          if (record == null || !outstandingRecordEligible(feed, record)) {
             continue;
           }
-          // A withdrawn runtime/operations 5xx must not stay the preferred
-          // warning after the fence. A sibling success would otherwise
-          // republish it and hide a still-advertised outage.
-          if (
-            feed === "runtime" &&
-            record.generation <= runtimeDenialReleasedThroughRef.current
-          ) {
-            continue;
+          if (record.generation > newestGeneration) {
+            newestGeneration = record.generation;
           }
-          if (
-            feed === "operations" &&
-            record.generation <= operationsDenialReleasedThroughRef.current
-          ) {
-            continue;
-          }
-          // A withdrawn events 5xx must not stay the preferred warning after
-          // the fence. No later /events read will clear it, and a sibling
-          // success would otherwise republish it.
-          if (
-            feed === "events" &&
-            record.generation <= eventsOutageReleasedThroughRef.current
-          ) {
-            continue;
-          }
-          // Strictly newer than the current pick. Equal generations keep the
-          // earlier feed so same-load failures stay in inspector order.
-          if (selected != null && record.generation <= selected.generation) {
-            continue;
-          }
-          selected = record;
         }
-        return selected?.message ?? null;
+        if (newestGeneration < 0) {
+          return null;
+        }
+        for (const feed of order) {
+          const record = settledDetailOutagesRef.current[feed];
+          if (
+            record == null ||
+            record.generation !== newestGeneration ||
+            !outstandingRecordEligible(feed, record)
+          ) {
+            continue;
+          }
+          return record.message;
+        }
+        return null;
       };
 
       const preferredSettledOutage = () => {

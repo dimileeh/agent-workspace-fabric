@@ -1075,8 +1075,8 @@ test("older detail feed outage survives a newer outage on a different feed", asy
 
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gK4B0: a retained older
 // runtime warning must not replace a newer events outage when a sibling success
-// of that newer load republishes the outstanding banner. Feed priority is only
-// a same-generation tie-break.
+// of that load, or of a still-newer load, republishes the outstanding banner.
+// Feed priority is only a same-generation tie-break.
 test("sibling success does not let an older runtime outage steal a newer events banner", async ({
   page,
 }) => {
@@ -1289,6 +1289,21 @@ test("sibling success does not let an older runtime outage steal a newer events 
     // Same-load operations 200 settles after the older runtime warning is
     // recorded. That sibling success republishes the outstanding banner.
     await fulfillJson(siblingOperations[0], emptyList);
+    await expect(inspector.getByText(eventsOutage)).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByText(runtimeOutage)).toHaveCount(0);
+    await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible();
+
+    const heldEventsBefore = heldAfter.length;
+    const hungRuntimeBefore = hungRuntime.length;
+    // A still-newer load's sibling 200 also republishes preferredOutstandingOutage.
+    // Events of that load stays pending so the newer outage has not recovered.
+    await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect.poll(() => heldAfter.length, { timeout: 10_000 }).toBeGreaterThan(heldEventsBefore);
+    await expect
+      .poll(() => hungRuntime.length, { timeout: 10_000 })
+      .toBeGreaterThan(hungRuntimeBefore);
     await expect(inspector.getByText(eventsOutage)).toBeVisible({ timeout: 10_000 });
     await expect(inspector.getByText(runtimeOutage)).toHaveCount(0);
     await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible();
