@@ -3,7 +3,7 @@
 Uses the official Antigravity CLI ``agy`` binary in print/headless mode.
 Headless docs: https://antigravity.google/docs/cli/headless
 
-Verified ``agy`` 1.1.13 contract (operator evidence; trust over older docs):
+Verified ``agy`` 1.1.27 contract (operator evidence; trust over older docs):
 
 - ``-p`` / ``--print`` is a **value-consuming** string flag. ``agy -p --model X``
   makes the prompt the literal string ``--model`` and turns ``X`` into a
@@ -18,18 +18,17 @@ Verified ``agy`` 1.1.13 contract (operator evidence; trust over older docs):
   the preamble fails closed above 100000 bytes rather than surfacing noisy
   ``execve`` ``E2BIG``. Empty prompts also fail closed (agy would otherwise
   idle-chat).
-- API-key mode accepts **exactly** the model slugs in
-  ``ANTIGRAVITY_API_KEY_MODE_MODELS`` (agy hardcodes them; e.g.
-  ``gemini-3.7-flash`` exists in the Gemini API but agy rejects it).
-- ``--effort`` is rejected by agy for **all** models in API-key mode. Effort
-  exists only on the OAuth path as composite model slugs (e.g.
-  ``gemini-3.6-flash-high``). AWF still accepts and records effort on the
-  adapter for policy/observability, but never emits ``--effort``.
+- API-key mode accepts **exactly** the model slugs and effort sets in
+  ``ANTIGRAVITY_API_KEY_MODE_MODELS`` (agy hardcodes them; Gemini API
+  availability is not authoritative). It requires a separate ``--effort``.
+- OAuth continues to use composite model slugs (e.g.
+  ``gemini-3.6-flash-high``), so AWF emits the separate effort flag only in
+  API-key mode.
 
 AWF still streams the wrapped prompt on docker-exec stdin into ``sh -lc``;
 only the inner ``agy`` argv uses the ``$(cat)`` bridge.
 
-Auth: agy 1.1.13 reads only ``GEMINI_API_KEY``. API-key mode requires
+Auth: agy reads only ``GEMINI_API_KEY``. API-key mode requires
 ``settings.json`` ``{"modelProvider":"gemini"}`` **and** a non-empty
 ``GEMINI_API_KEY``. The preamble seeds that settings file when
 ``GEMINI_API_KEY`` is set (create if missing; upsert ``modelProvider`` on an
@@ -51,21 +50,47 @@ preserved for the provider-neutral protocol parser to reject.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from awf.adapters.base import AgentAdapter, register_adapter
 from awf.db.enums import AgentRuntime
 
-# Exact API-key mode model slugs hardcoded by agy 1.1.13. Mirrors the
+# Exact API-key model/effort contract hardcoded by agy 1.1.27. Mirrors the
 # ANTIGRAVITY_VERSION pin in docker/agent-runtime.Dockerfile — re-verify this
-# frozenset when that pin is bumped (agy may add/remove slugs; Gemini API
-# availability is not authoritative).
-ANTIGRAVITY_API_KEY_MODE_MODELS: frozenset[str] = frozenset(
+# mapping whenever that pin changes.
+ANTIGRAVITY_API_KEY_MODE_MODELS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "gemini-3.1-pro-preview",
-        "gemini-3.5-flash",
-        "gemini-3.6-flash",
+        "gemini-3.8-flash": frozenset({"low", "medium", "high"}),
+        "gemini-3.7-flash": frozenset({"low", "medium", "high"}),
+        "gemini-3.6-flash": frozenset({"low", "medium", "high"}),
+        "gemini-3.1-pro": frozenset({"low", "high"}),
     }
 )
+
+_ANTIGRAVITY_EFFORT_LADDER = ("low", "medium", "high")
+_ANTIGRAVITY_NORMALIZED_EFFORTS = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
+
+
+def _api_key_mode_effort(model: str, effort: str | None) -> str:
+    """Normalize AWF effort and clamp upward to the model's supported set."""
+    normalized = (effort or "").strip().casefold()
+    requested = _ANTIGRAVITY_NORMALIZED_EFFORTS.get(normalized, "high")
+    supported = ANTIGRAVITY_API_KEY_MODE_MODELS[model]
+    if requested in supported:
+        return requested
+    requested_index = _ANTIGRAVITY_EFFORT_LADDER.index(requested)
+    return next(
+        candidate
+        for candidate in _ANTIGRAVITY_EFFORT_LADDER[requested_index + 1 :]
+        if candidate in supported
+    )
 
 
 # Decodes ``agy --output-format stream-json`` into the plaintext stdout AWF's
@@ -215,10 +240,10 @@ class AntigravityAdapter(AgentAdapter):
         stream-json events reach AWF as one plaintext response while non-text
         events still stream on stderr for the idle watchdog.
 
-        Effort is accepted and recorded on the adapter (``self._default_effort``)
-        for policy/observability, but never emitted as ``--effort``: agy
-        rejects that flag for every model in API-key mode (OAuth uses
-        composite slugs such as ``gemini-3.6-flash-high`` instead).
+        API-key mode requires a separate ``--effort``. AWF normalizes/clamps
+        its requested effort against the selected model's supported set.
+        OAuth keeps composite slugs such as ``gemini-3.6-flash-high`` and does
+        not receive the separate flag.
 
         Model allowlisting is API-key-mode only. ``_cli_args`` does not know
         the credential mode (hosted OAuth injects credentials later), so
@@ -226,10 +251,10 @@ class AntigravityAdapter(AgentAdapter):
         inside the ``GEMINI_API_KEY`` shell branch at runtime.
         """
         selected_model = model or self._default_model
-        _ = self._default_effort
 
         model_flag = ""
         api_key_model_reject = ""
+        api_key_effort_setup = ""
         if selected_model:
             model_flag = f" --model {shlex.quote(selected_model)}"
             if selected_model not in ANTIGRAVITY_API_KEY_MODE_MODELS:
@@ -241,6 +266,12 @@ class AntigravityAdapter(AgentAdapter):
                     ">&2\n"
                     "  exit 1\n"
                 )
+            else:
+                api_key_effort = _api_key_mode_effort(
+                    selected_model,
+                    self._default_effort,
+                )
+                api_key_effort_setup = f"  set -- --effort {api_key_effort}\n"
         # Seed/upsert modelProvider=gemini only when GEMINI_API_KEY is present —
         # that mode hard-requires GEMINI_API_KEY (agy does not read
         # ANTIGRAVITY_API_KEY). Do not alias credentials across env names.
@@ -249,6 +280,7 @@ class AntigravityAdapter(AgentAdapter):
         # Prompt transport: awf_prompt=$(cat) then -p "$awf_prompt" last.
         script = (
             "set -eu\n"
+            "set --\n"
             'settings_dir="${HOME}/.gemini/antigravity-cli"\n'
             'mkdir -p "$settings_dir"\n'
             'if [ -n "${GEMINI_API_KEY:-}" ]; then\n'
@@ -263,6 +295,7 @@ class AntigravityAdapter(AgentAdapter):
             '"$settings_dir/settings.json"\n'
             "  fi\n"
             f"{api_key_model_reject}"
+            f"{api_key_effort_setup}"
             "fi\n"
             "awf_prompt=$(cat)\n"
             'if [ -z "$awf_prompt" ]; then\n'
@@ -283,6 +316,6 @@ class AntigravityAdapter(AgentAdapter):
             # propagated); flags and the final ``-p`` pair are forwarded verbatim.
             f"exec python3 -c {shlex.quote(_ANTIGRAVITY_STREAM_JSON_DECODER)} "
             "--dangerously-skip-permissions --output-format stream-json "
-            f'--print-timeout 24h{model_flag} -p "$awf_prompt"\n'
+            f'--print-timeout 24h{model_flag} "$@" -p "$awf_prompt"\n'
         )
         return ["sh", "-lc", script]

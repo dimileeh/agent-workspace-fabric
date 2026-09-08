@@ -46,9 +46,10 @@ _AUTH_FAILURE_MARKERS = (
     "cursor api key",
     "cursor auth",
     "cursor authentication",
-    # agy 1.1.13 observed stderr (OAuth-only default / missing GEMINI_API_KEY).
+    # agy observed stderr (explicit login and print-mode OAuth fallback).
     # Dead antigravity_api_key markers dropped — agy never prints that name.
     "authentication required. run 'agy' to log in",
+    "authentication required. please visit the url to log in",
     "gemini_api_key environment variable is not set",
     "gemini_api_key",
     "google_api_key",

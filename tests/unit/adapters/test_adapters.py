@@ -909,13 +909,16 @@ class TestCentralDefaults:
             model="auto",
             effort=None,
         )
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity].model == "gemini-3.1-pro-preview"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.antigravity] == AgentDefaults(
+            model="gemini-3.1-pro",
+            effort="high",
+        )
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
         assert {
             defaults.effort
             for runtime, defaults in DEFAULT_AGENT_DEFAULTS.items()
-            if runtime is not AgentRuntime.cursor
+            if runtime not in {AgentRuntime.cursor, AgentRuntime.antigravity}
         } == {"xhigh"}
 
     @pytest.mark.unit

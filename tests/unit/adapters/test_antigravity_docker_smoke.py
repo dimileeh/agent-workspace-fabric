@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-_PINNED_VERSION = "1.1.13"
+_PINNED_VERSION = "1.1.27"
 _PINNED_PATH = Path("/usr/local/bin/agy")
 
 
