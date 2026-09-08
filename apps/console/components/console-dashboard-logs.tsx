@@ -1138,7 +1138,11 @@ export function WorkspaceLogColumn({
       streamAuthDeniedRef.current = false;
       setStreamAuthDenied(false);
       setStreamProbeNonce(0);
-      setError(null);
+      // Denial owned the banner. A listing outage recorded while the stream
+      // latch was set is still unrecovered inventory — surface it instead of
+      // clearing the banner so last-good streams look current. Tail recovery
+      // already does this; a later listing 200 is what clears the outage.
+      setError(listingOutageMessageRef.current);
     };
 
     const applyStreamAuthorizationDenial = (message: string) => {
