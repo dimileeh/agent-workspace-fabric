@@ -18,7 +18,7 @@ Verified ``agy`` 1.1.27 contract (operator evidence; trust over older docs):
   the preamble fails closed above 100000 bytes rather than surfacing noisy
   ``execve`` ``E2BIG``. Empty prompts also fail closed (agy would otherwise
   idle-chat).
-- API-key mode accepts **exactly** the model slugs and effort sets in
+- API-key mode requires a model, accepts **exactly** the model slugs and effort sets in
   ``ANTIGRAVITY_API_KEY_MODE_MODELS`` (agy hardcodes them; Gemini API
   availability is not authoritative). It requires a separate ``--effort``.
 - OAuth continues to use composite model slugs (e.g.
@@ -202,9 +202,11 @@ raise SystemExit(main())
 """
 
 
-def _api_key_mode_model_reject_message(model: str) -> str:
-    """Human-readable reject text for a model outside the API-key allowlist."""
+def _api_key_mode_model_reject_message(model: str | None) -> str:
+    """Human-readable reject text for a missing or unsupported API-key model."""
     valid = ", ".join(sorted(ANTIGRAVITY_API_KEY_MODE_MODELS))
+    if model is None:
+        return f"antigravity API-key mode requires an explicit or configured model; valid slugs: {valid}"
     return f"antigravity API-key mode does not accept model {model!r}; valid slugs: {valid}"
 
 
@@ -255,7 +257,14 @@ class AntigravityAdapter(AgentAdapter):
         model_flag = ""
         api_key_model_reject = ""
         api_key_effort_setup = ""
-        if selected_model:
+        if not selected_model:
+            api_key_model_reject = (
+                f"  printf '%s\\n' "
+                f"{shlex.quote(_api_key_mode_model_reject_message(None))} "
+                ">&2\n"
+                "  exit 1\n"
+            )
+        else:
             model_flag = f" --model {shlex.quote(selected_model)}"
             if selected_model not in ANTIGRAVITY_API_KEY_MODE_MODELS:
                 # Gate on GEMINI_API_KEY below — OAuth composite slugs must

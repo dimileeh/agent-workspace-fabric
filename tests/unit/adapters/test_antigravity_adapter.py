@@ -232,6 +232,58 @@ class TestAntigravityAdapter:
         assert "--dangerously-skip-permissions" in script
 
     @pytest.mark.unit
+    async def test_api_key_mode_rejects_missing_model_before_agy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """API-key mode must not invoke agy without a model and required effort."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        invocation_marker = tmp_path / "agy-invoked"
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib\n"
+            "pathlib.Path(os.environ['AWF_FAKE_AGY_MARKER']).touch()\n",
+            encoding="utf-8",
+        )
+        fake_agy.chmod(0o755)
+
+        home = tmp_path / "home"
+        home.mkdir()
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "HOME": str(home),
+                "GEMINI_API_KEY": "test-key-triggers-api-key-mode",
+                "AWF_FAKE_AGY_MARKER": str(invocation_marker),
+            }
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            _render_cli_script(model=None),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _stdout, stderr = await proc.communicate(input=b"prompt\n")
+
+        assert proc.returncode == 1
+        assert not invocation_marker.exists()
+        message = stderr.decode()
+        assert "API-key mode requires an explicit or configured model" in message
+        for slug in (
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.1-pro",
+        ):
+            assert slug in message
+
+    @pytest.mark.unit
     async def test_model_override_is_passed_without_prompt_in_docker_argv(self) -> None:
         """Explicit models are passed; docker-exec argv still omits the prompt."""
         runner = FakeCommandRunner()
