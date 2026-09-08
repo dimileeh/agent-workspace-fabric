@@ -977,7 +977,7 @@ export function useWorkspaceDetailLoader({
               if (!workspaceDetailAuthDeniedRef.current && !logListingAuthDeniedRef.current) {
                 setError(null);
               }
-            } else if (feedAuthDenied(workspace)) {
+            } else if (!workspace.ok && feedAuthDenied(workspace)) {
               setError(workspace.message);
               publishWorkspaceDetailAuthDenied(true);
             } else if (
