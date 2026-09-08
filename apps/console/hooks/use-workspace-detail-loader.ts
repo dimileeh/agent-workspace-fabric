@@ -1759,8 +1759,12 @@ export function useWorkspaceDetailLoader({
         if (record == null || record.generation < appliedGeneration[feed]) {
           continue;
         }
-        highest = Math.max(highest, record.generation);
-        if (message == null) {
+        // Newest generation owns the republished banner. Feed order only
+        // breaks ties, matching preferredOutstandingOutage. Taking the first
+        // eligible message hides a newer logs outage behind an older workspace
+        // warning after this withdrawal, including when workspace recovery hangs.
+        if (record.generation > highest) {
+          highest = record.generation;
           message = record.message;
         }
       }

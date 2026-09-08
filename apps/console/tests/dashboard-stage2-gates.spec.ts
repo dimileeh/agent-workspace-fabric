@@ -6658,3 +6658,262 @@ test("capability 403 clears stale summary KPIs", async ({ page }) => {
   // Auth clear drops capabilities → omit fleet_summary KPIs (not dash shells).
   await expect(kpi(page, "Active")).toHaveCount(0);
 });
+
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gL9tW: capability
+// withdrawal that releases one feed must republish the newest remaining
+// detail outage, not the first eligible feed in workspace/runtime/events/
+// operations/logs order. A generation-1 workspace outage must not hide a
+// generation-3 logs outage after runtime withdrawal, including while the
+// older workspace recovery hangs.
+test("runtime withdrawal republishes the newest remaining detail outage", async ({ page }) => {
+  test.setTimeout(45_000);
+  let phase: "bootstrap" | "older" | "newer" = "bootstrap";
+  let capabilityPhase: "ok" | "hold" | "withdrawn" = "ok";
+  let newerEvents = 0;
+  let newerOperations = 0;
+  const heldCapabilities: Route[] = [];
+  const hangingWorkspace: Route[] = [];
+  const hangingRuntime: Route[] = [];
+  const workspaceId = "ws_newest_remaining_outage";
+  const composeProject = "awf-ws-newest-remaining-outage";
+  const workspaceOutage = "older workspace outage must not hide newer logs";
+  const runtimeOutage = "runtime outage released by capability withdrawal";
+  const logsOutage = "newer logs outage must survive runtime withdrawal";
+  const baseCaps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withdrawnCaps = {
+    ...baseCaps,
+    diagnostics: baseCaps.diagnostics.map((item) =>
+      item.id === "workspace_runtime"
+        ? {
+            ...item,
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "Runtime detail withdrawn",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Newest remaining outage workspace",
+    repo_url: "https://github.com/example/newest-remaining-outage",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Republish the newest remaining detail outage after runtime withdrawal",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const emptyList = { items: [], next_cursor: null, has_more: false };
+  const outageBody = (message: string) => ({
+    detail: { error_code: "UPSTREAM_UNAVAILABLE", message },
+  });
+  const runtimeBody = {
+    workspace_id: workspaceId,
+    compose_project_name: composeProject,
+    stack_state: "running",
+    services: [],
+    app_endpoints: [],
+    logs_available: true,
+    control_available: true,
+    reason: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      if (capabilityPhase === "hold") {
+        heldCapabilities.push(route);
+        return;
+      }
+      await fulfillJson(route, capabilityPhase === "withdrawn" ? withdrawnCaps : baseCaps);
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}` ||
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/runtime` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await route.fallback();
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.route(`**/api/awf/workspaces/${workspaceId}**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      if (phase === "older") {
+        await fulfillJson(route, outageBody(workspaceOutage), 503);
+        return;
+      }
+      if (phase === "newer") {
+        hangingWorkspace.push(route);
+        return;
+      }
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (phase === "older") {
+        await fulfillJson(route, outageBody(runtimeOutage), 503);
+        return;
+      }
+      if (phase === "newer") {
+        hangingRuntime.push(route);
+        return;
+      }
+      await fulfillJson(route, runtimeBody);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (phase === "newer") {
+        await fulfillJson(route, outageBody(logsOutage), 503);
+        return;
+      }
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, emptyList);
+      if (phase === "newer") {
+        newerEvents += 1;
+      }
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, emptyList);
+      if (phase === "newer") {
+        newerOperations += 1;
+      }
+      return;
+    }
+    await route.fallback();
+  });
+
+  try {
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).click();
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector.getByText(composeProject, { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    phase = "older";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect(inspector.getByText(workspaceOutage)).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByText(logsOutage)).toHaveCount(0);
+
+    capabilityPhase = "hold";
+    phase = "newer";
+    await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(inspector.getByText(logsOutage)).toBeVisible({ timeout: 15_000 });
+    await expect(inspector.getByText(workspaceOutage)).toHaveCount(0);
+    await expect.poll(() => hangingWorkspace.length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => hangingRuntime.length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => newerEvents, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => newerOperations, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => heldCapabilities.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // Let sibling 200s flush before withdrawal. A later success would republish
+    // preferredOutstandingOutage and hide a wrong remaining.message.
+    await page.waitForTimeout(300);
+
+    capabilityPhase = "withdrawn";
+    for (const route of heldCapabilities.splice(0, heldCapabilities.length)) {
+      await fulfillJson(route, withdrawnCaps);
+    }
+    await expect(inspector.getByRole("heading", { name: "Runtime", exact: true })).toHaveCount(0, {
+      timeout: 10_000,
+    });
+    await expect(inspector.getByText(logsOutage)).toBeVisible();
+    await expect(inspector.getByText(workspaceOutage)).toHaveCount(0);
+    await expect(inspector.getByText(runtimeOutage)).toHaveCount(0);
+    // Workspace recovery is still hanging. The withdrawn runtime outage must
+    // not leave the older workspace message in its place.
+    await page.waitForTimeout(500);
+    await expect(inspector.getByText(logsOutage)).toBeVisible();
+    await expect(inspector.getByText(workspaceOutage)).toHaveCount(0);
+  } finally {
+    for (const held of hangingWorkspace) {
+      await fulfillJson(held, outageBody(workspaceOutage), 503).catch(() => undefined);
+    }
+    for (const held of hangingRuntime) {
+      await fulfillJson(held, outageBody(runtimeOutage), 503).catch(() => undefined);
+    }
+    for (const held of heldCapabilities) {
+      await fulfillJson(held, withdrawnCaps).catch(() => undefined);
+    }
+  }
+});
