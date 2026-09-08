@@ -527,8 +527,8 @@ test("loadWorkspace success clears shared error without clearing overview trunca
   );
   assert.match(
     dashboardSource.detailLoader,
-    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current\s*\) \{\s*setError\(null\);\s*\}/,
-    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail, event-feed, or listing denial still owns the banner",
+    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current &&\s*!runtimeAuthDenialHeld\(\) &&\s*!operationsAuthDenialHeld\(\)\s*\) \{\s*setError\(null\);\s*\}/,
+    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail, event-feed, listing, runtime, or operations denial still owns the banner",
   );
   assert.match(
     dashboardSource.detailLoader,
@@ -559,18 +559,35 @@ test("overview and workspace-detail errors clear only when their own feed succee
   );
   assert.match(
     dashboard,
-    /setOverviewError\(null\);\s*setOverview\(/,
-    "Expected overview success to clear only the overview error",
+    /setOverviewError\(\(current\) =>\s*generation < appliedOverviewFailureGenerationRef\.current \|\|\s*generation <= revokedOverviewGenerationRef\.current \|\|\s*consoleAuthDeniedRef\.current\s*\? current\s*: null,\s*\);\s*setOverview\(/,
+    "Expected overview success to clear only the overview error, and not a newer outage or denial",
   );
   assert.doesNotMatch(
     dashboard,
     /setOverviewError\(null\);[\s\S]{0,160}?setWorkspaceDetailError\(null\);\s*setOverview\(/,
     "Expected overview success not to clear the workspace-detail error",
   );
+  const outageStart = dashboard.indexOf(
+    "const applyOverviewOutage = (failedGeneration: number, message: string): boolean => {",
+  );
+  assert.ok(outageStart > 0, "Expected applyOverviewOutage helper for overview page failure");
+  const outageEnd = dashboard.indexOf("const collected = await collectOverviewPages", outageStart);
+  assert.ok(outageEnd > outageStart, "Expected collectOverviewPages after applyOverviewOutage");
+  const outageBody = dashboard.slice(outageStart, outageEnd);
   assert.match(
     dashboard,
-    /if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}/,
+    /if \(pageOutage\) \{\s*applyOverviewOutage\(generation, pageError \?\? ""\);\s*return;/,
+    "Expected overview page failure to record through applyOverviewOutage",
+  );
+  assert.match(
+    outageBody,
+    /setOverviewError\(\(current\) =>[\s\S]*?: message,\s*\);/,
     "Expected overview page failure to record only the overview error",
+  );
+  assert.equal(
+    outageBody.includes("setWorkspaceDetailError"),
+    false,
+    "Expected overview page failure not to write the workspace-detail error",
   );
   assert.match(
     dashboard,
@@ -1135,7 +1152,7 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}\s*return;/,
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(pageOutage\) \{\s*applyOverviewOutage\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(collected === null\) \{\s*return;/,
     "Expected loadOverview to apply auth denial before the transient last-good path",
   );
   assert.match(
