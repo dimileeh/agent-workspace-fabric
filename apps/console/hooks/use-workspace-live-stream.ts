@@ -169,7 +169,10 @@ export function useWorkspaceLiveStream({
       }
       workspaceDetailAuthDeniedRef.current = false;
       setWorkspaceDetailAuthDenied(false);
-      setError(null);
+      // Re-read at flush: a base-detail 401/403 can latch after this handshake
+      // and must keep its banner. Clearing the banner unconditionally would
+      // hide that still-denied GET.
+      setError((current) => (workspaceBaseDetailAuthDeniedRef.current ? current : null));
     };
 
     const applyStreamAuthorizationDenial = (message: string) => {

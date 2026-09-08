@@ -2000,6 +2000,16 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
     /if \(workspaceBaseDetailAuthDeniedRef\.current\) \{\s*return;\s*\}/,
     "Expected acceptStreamProbe not to clear workspaceDetailAuthDenied or the inspector error while a base-detail GET 401/403 is latched",
   );
+  assert.match(
+    probeBody,
+    /setError\(\(current\) =>\s*\(?workspaceBaseDetailAuthDeniedRef\.current \? current : null\)?\)/,
+    "Expected a stream handshake to keep the inspector error if a base-detail GET 401/403 latches before the error write",
+  );
+  assert.doesNotMatch(
+    probeBody,
+    /setError\(null\)/,
+    "Expected acceptStreamProbe not to clear the inspector error unconditionally",
+  );
   assert.doesNotMatch(
     probeBody,
     /workspaceBaseDetailAuthDeniedRef\.current = false/,
