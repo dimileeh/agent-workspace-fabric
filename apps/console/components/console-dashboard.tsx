@@ -248,11 +248,12 @@ export function ConsoleDashboard() {
   const releaseWithdrawnOptionalFeedDenialRef = useRef<
     (feeds: { runtime: boolean; operations: boolean; events: boolean }) => void
   >(() => {});
-  // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
+  // Gated detail generation: bumped on capabilities 404 / same-identity
   // inspector-detail withdrawal without touching authorizedFeedEpochRef.
-  // Optional feeds discard on mismatch; the basic workspace GET still applies.
-  // Unrelated fleet withdrawals must not bump this — they already invalidate
-  // their own request generations and would otherwise clear detail errors.
+  // Inspector optional feeds discard on mismatch; the basic workspace GET still
+  // applies. Fleet snapshots do not consult this ref — they already invalidate
+  // their own request generations. Unrelated fleet withdrawals must not bump
+  // this, or an in-flight detail load would ignore still-advertised failures.
   const gatedDetailFeedGenerationRef = useRef(0);
   const gatedDetailDroppedFeedsRef = useRef<GatedDetailDropStamp[]>([]);
 
@@ -625,8 +626,10 @@ export function ConsoleDashboard() {
   // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
   // concurrent overview loads and blank legacy-safe navigation
   // (CONSOLE_BACKEND_CONTRACT). Bump gatedDetailFeedGenerationRef only when
-  // leaving a negotiated snapshot, so in-flight optional detail feeds,
-  // log-tails, and gated inventories cannot restore cleared data. A persistent
+  // leaving a negotiated snapshot, so in-flight optional detail feeds and
+  // log-tails cannot restore cleared data. Fleet inventories use their own
+  // request generations plus a revoke stamp, not that inspector generation.
+  // A persistent
   // 404 poll must not bump that generation again — doing so discards
   // overlapping /workspaces/{id} loads whose latency exceeds the capability
   // interval and leaves the inspector empty. The basic workspace GET still
@@ -640,6 +643,21 @@ export function ConsoleDashboard() {
     resourceSaturationRequestGenerationRef.current += 1;
     workspaceSummaryRequestGenerationRef.current += 1;
     failureSummaryRequestGenerationRef.current += 1;
+    // Cover the bumped generations so an in-flight 401/503 cannot restore the
+    // cleared snapshot or error. Fleet loaders do not discard on inspector
+    // gated-detail advances, so this stamp is what keeps 404 from undoing itself.
+    noteFleetFeedCapabilityWithdrawalRef.current({
+      clearDashboardSummary: true,
+      clearResourceCapacity: true,
+      clearCloudRuntime: true,
+      clearReliability: true,
+      clearMergeQueue: true,
+      clearFailures: true,
+      clearRuntime: false,
+      clearEvents: false,
+      clearOperations: false,
+      clearLogs: false,
+    });
     // Already-cleared negotiation: another 404/malformed poll has no optional
     // snapshot left to invalidate. Repeating this bump is what starves the
     // basic workspace GET.
@@ -1074,7 +1092,6 @@ export function ConsoleDashboard() {
   } = useConsoleFleetFeeds({
     capabilities,
     authorizedFeedEpochRef,
-    gatedDetailFeedGenerationRef,
     dashboardSummaryRequestGenerationRef,
     cloudRuntimeRequestGenerationRef,
     mergeQueueRequestGenerationRef,

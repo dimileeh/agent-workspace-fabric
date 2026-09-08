@@ -45,7 +45,6 @@ import {
 type UseConsoleFleetFeedsArgs = {
   capabilities: ConsoleCapabilities | null;
   authorizedFeedEpochRef: MutableRefObject<number>;
-  gatedDetailFeedGenerationRef: MutableRefObject<number>;
   dashboardSummaryRequestGenerationRef: MutableRefObject<number>;
   cloudRuntimeRequestGenerationRef: MutableRefObject<number>;
   mergeQueueRequestGenerationRef: MutableRefObject<number>;
@@ -79,11 +78,14 @@ type UseConsoleFleetFeedsArgs = {
  * dashboard so auth clear and same-identity withdrawal can still bump them.
  * A completed 401/403 or network/5xx stays authoritative unless a newer success
  * has already been applied — a newer request merely starting is not recovery.
+ * Inspector listing/tail denials and optional-detail withdrawals must not
+ * discard these snapshots: each feed already has its own generation, and an
+ * unrelated inspector bump would hide a concurrent denial or outage behind
+ * last-good data.
  */
 export function useConsoleFleetFeeds({
   capabilities,
   authorizedFeedEpochRef,
-  gatedDetailFeedGenerationRef,
   dashboardSummaryRequestGenerationRef,
   cloudRuntimeRequestGenerationRef,
   mergeQueueRequestGenerationRef,
@@ -172,13 +174,11 @@ export function useConsoleFleetFeeds({
 
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const generation = ++resourceSaturationRequestGenerationRef.current;
     const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
-    ) {
+    // Epoch is the auth/tenant clear. Inspector gated-detail generation is
+    // independent — a listing/tail 401 must not drop this feed's denial or outage.
+    if (epoch !== authorizedFeedEpochRef.current) {
       return;
     }
     const marks = resourceSaturationMarksRef.current;
@@ -219,7 +219,7 @@ export function useConsoleFleetFeeds({
     }
     setResourceError(null);
     setResourceSaturation(fallbackResourceSaturation(result.data));
-  }, [authorizedFeedEpochRef, gatedDetailFeedGenerationRef, resourceSaturationRequestGenerationRef, setResourceError, setResourceSaturation]);
+  }, [authorizedFeedEpochRef, resourceSaturationRequestGenerationRef, setResourceError, setResourceSaturation]);
 
   const loadDashboardSummary = useCallback(async (caps?: ConsoleCapabilities | null) => {
     const epoch = authorizedFeedEpochRef.current;
@@ -323,13 +323,11 @@ export function useConsoleFleetFeeds({
 
   const loadWorkspaceSummary = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const generation = ++workspaceSummaryRequestGenerationRef.current;
     const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
-    ) {
+    // Epoch is the auth/tenant clear. Inspector gated-detail generation is
+    // independent — a listing/tail 401 must not drop this feed's denial or outage.
+    if (epoch !== authorizedFeedEpochRef.current) {
       return;
     }
     const marks = workspaceSummaryMarksRef.current;
@@ -362,19 +360,17 @@ export function useConsoleFleetFeeds({
     }
     setWorkspaceSummaryError(null);
     setWorkspaceSummary(result.data);
-  }, [authorizedFeedEpochRef, gatedDetailFeedGenerationRef, setWorkspaceSummary, setWorkspaceSummaryError, workspaceSummaryRequestGenerationRef]);
+  }, [authorizedFeedEpochRef, setWorkspaceSummary, setWorkspaceSummaryError, workspaceSummaryRequestGenerationRef]);
 
   const loadMergeQueue = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const generation = ++mergeQueueRequestGenerationRef.current;
     const result = await apiGet<ListEnvelope<MergeQueueItem>>(
       awfPath("merge-queue", { limit: mergeQueueLimit }),
     );
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
-    ) {
+    // Epoch is the auth/tenant clear. Inspector gated-detail generation is
+    // independent — a listing/tail 401 must not drop this feed's denial or outage.
+    if (epoch !== authorizedFeedEpochRef.current) {
       return;
     }
     const marks = mergeQueueMarksRef.current;
@@ -408,17 +404,15 @@ export function useConsoleFleetFeeds({
     setMergeQueue(result.data.items);
     setMergeQueueHasMore(result.data.has_more);
     setMergeQueueStatus("success");
-  }, [authorizedFeedEpochRef, gatedDetailFeedGenerationRef, mergeQueueRequestGenerationRef, setMergeQueue, setMergeQueueError, setMergeQueueHasMore, setMergeQueueStatus]);
+  }, [authorizedFeedEpochRef, mergeQueueRequestGenerationRef, setMergeQueue, setMergeQueueError, setMergeQueueHasMore, setMergeQueueStatus]);
 
   const loadFailureSummary = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
     const generation = ++failureSummaryRequestGenerationRef.current;
     const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current
-    ) {
+    // Epoch is the auth/tenant clear. Inspector gated-detail generation is
+    // independent — a listing/tail 401 must not drop this feed's denial or outage.
+    if (epoch !== authorizedFeedEpochRef.current) {
       return;
     }
     const marks = failureSummaryMarksRef.current;
@@ -454,7 +448,7 @@ export function useConsoleFleetFeeds({
     setFailureSummary(result.data);
     setFailureSummaryStatus("success");
     setFailureSummaryError(null);
-  }, [authorizedFeedEpochRef, failureSummaryRequestGenerationRef, gatedDetailFeedGenerationRef, setFailureSummary, setFailureSummaryError, setFailureSummaryStatus]);
+  }, [authorizedFeedEpochRef, failureSummaryRequestGenerationRef, setFailureSummary, setFailureSummaryError, setFailureSummaryStatus]);
 
   const reloadAvailableFeeds = useCallback(
     async (caps: ConsoleCapabilities | null) => {

@@ -336,20 +336,56 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     "loadResourceSaturation",
     "loadWorkspaceSummary",
     "loadFailureSummary",
+    "loadMergeQueue",
   ]) {
     assert.match(
       fleetFeeds,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current\\s*\\)`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(epoch !== authorizedFeedEpochRef\\.current\\)`,
       ),
-      `Expected ${loader} to discard after authorized epoch or gated-detail advance`,
+      `Expected ${loader} to discard after authorized epoch advance`,
     );
   }
-  assert.match(
-    fleetFeeds,
-    /const loadMergeQueue = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current\s*\)/,
-    "Expected loadMergeQueue to discard after authorized epoch or gated-detail advance",
+});
+
+test("fleet denials are not discarded when inspector gated-detail generation advances", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gJbi_: a selected
+  // workspace /logs 401 advances gatedDetailFeedGenerationRef. Fleet snapshots
+  // already have independent request generations, so that inspector bump must
+  // not drop a concurrently completed 401/403 or outage and leave last-good
+  // capacity/reliability/queue/failure data visible without an error.
+  const fleetFeeds = dashboardSource.fleetFeeds;
+  assert.equal(
+    fleetFeeds.includes("gatedDetailFeedGenerationRef"),
+    false,
+    "Expected fleet snapshot loaders not to consult inspector gated-detail generation",
   );
+  for (const loader of [
+    "loadResourceSaturation",
+    "loadWorkspaceSummary",
+    "loadMergeQueue",
+    "loadFailureSummary",
+  ]) {
+    const loadStart = fleetFeeds.indexOf(`const ${loader} = useCallback`);
+    assert.ok(loadStart > 0, `Expected ${loader}`);
+    const loadEnd = fleetFeeds.indexOf("\n  const ", loadStart + 1);
+    assert.ok(loadEnd > loadStart, `Expected ${loader} body`);
+    const loadBody = fleetFeeds.slice(loadStart, loadEnd);
+    const epochDiscard = loadBody.indexOf("epoch !== authorizedFeedEpochRef.current");
+    const denialAt = loadBody.indexOf("claimFleetFeedDenial");
+    const outageAt = loadBody.indexOf("claimFleetFeedOutage");
+    assert.ok(epochDiscard > 0, `Expected ${loader} to discard on authorized epoch advance`);
+    assert.ok(
+      denialAt > epochDiscard,
+      `Expected ${loader} 401/403 handling to run after the epoch check, not a gated-detail discard`,
+    );
+    assert.ok(outageAt > denialAt, `Expected ${loader} outage handling after denial handling`);
+    assert.doesNotMatch(
+      loadBody,
+      /gatedGeneration !== gatedDetailFeedGenerationRef\.current/,
+      `Expected ${loader} not to discard a completed denial or outage when inspector generation advances`,
+    );
+  }
 });
 
 test("periodic overview polls skip while a collection is still in flight", () => {
@@ -1803,8 +1839,8 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
   );
   assert.match(
     gatedClearBody,
-    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);\s*\}/,
-    "Expected 404 gated clear to bump inventory request generations always, and gatedDetailFeedGenerationRef only when leaving a negotiated snapshot",
+    /dashboardSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?cloudRuntimeRequestGenerationRef\.current \+= 1;[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;[\s\S]*?resourceSaturationRequestGenerationRef\.current \+= 1;[\s\S]*?workspaceSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?failureSummaryRequestGenerationRef\.current \+= 1;[\s\S]*?noteFleetFeedCapabilityWithdrawalRef\.current\(\{[\s\S]*?clearResourceCapacity: true,[\s\S]*?clearFailures: true,[\s\S]*?if \(appliedCapabilitiesRef\.current !== null\) \{\s*noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);\s*\}/,
+    "Expected 404 gated clear to bump inventory request generations, revoke in-flight fleet failures, and bump gatedDetailFeedGenerationRef only when leaving a negotiated snapshot",
   );
   assert.match(
     dashboard,
