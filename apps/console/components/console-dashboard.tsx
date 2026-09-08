@@ -212,12 +212,17 @@ export function ConsoleDashboard() {
   // would advance generation and cancel that collector; if every page walk
   // exceeds pollMs, the rail stays empty or permanently stale.
   const overviewLoadInFlightRef = useRef(false);
-  // Summary poll generation: older success/error must not replace newer state.
+  // Summary poll generation: older success must not replace newer state.
+  // A completed 401/403 or network/5xx stays authoritative unless a newer
+  // success has already been applied — a newer request merely starting is not
+  // recovery.
   const dashboardSummaryRequestGenerationRef = useRef(0);
   // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
+  // Failures apply until a newer success lands, same contract as dashboard-summary.
   const cloudRuntimeRequestGenerationRef = useRef(0);
   // Merge-queue poll generation: feed-level 401/403 clear must not lose to an
   // older in-flight 200 (capabilities may still keep the panel mounted).
+  // A completed failure is not discarded solely because a newer request started.
   const mergeQueueRequestGenerationRef = useRef(0);
   // Resource-capacity / reliability / failures poll generations: same feed-level
   // 401/403 + overlapping-poll contract as merge-queue / dashboard-summary.

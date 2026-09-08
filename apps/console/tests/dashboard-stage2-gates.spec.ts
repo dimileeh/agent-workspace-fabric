@@ -3703,6 +3703,247 @@ test("dashboard-summary feed-level 403 clears last-good KPIs while capabilities 
   await expect(page.getByText(/last snapshot|may be stale/i)).toHaveCount(0);
 });
 
+test("superseded dashboard-summary 403 applies while a newer refresh hangs", async ({ page }) => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkK: a periodic or
+  // earlier dashboard-summary request can return 401/403 after Refresh has only
+  // started a newer request. Discarding that denial because the newer request
+  // exists leaves revoked tenant KPIs visible if the newer request hangs.
+  let summaryMode: "ok" | "hold" | "hang" = "ok";
+  const held: Array<() => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (summaryMode === "hold") {
+        await new Promise<void>((resolve) => {
+          held.push(async () => {
+            await fulfillJson(
+              route,
+              { detail: { error_code: "FORBIDDEN", message: "tenant summary permission revoked" } },
+              403,
+            );
+            resolve();
+          });
+        });
+        return;
+      }
+      if (summaryMode === "hang") {
+        await new Promise<void>((resolve) => {
+          hanging.push(async () => {
+            await fulfillJson(route, summary);
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9");
+
+  summaryMode = "hold";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  summaryMode = "hang";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => hanging.length).toBe(1);
+
+  await held[0]();
+  await expect(page.getByText(/tenant summary permission revoked|forbidden|denied/i).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("—");
+  await expect(kpi(page, "Active")).not.toHaveAttribute("data-awf-stale", "true");
+  await expect(page.getByText(/last snapshot|may be stale/i)).toHaveCount(0);
+
+  // The in-flight refresh started before the denial; a later 200 is not recovery.
+  await hanging[0]();
+  await page.waitForTimeout(300);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("—");
+  await expect(page.getByText(/tenant summary permission revoked/i).first()).toBeVisible();
+});
+
+test("superseded dashboard-summary outage applies while a newer refresh hangs", async ({ page }) => {
+  // Same thread: a completed network/5xx must still warn that retained KPIs are
+  // stale when Refresh has only started a newer request that has not succeeded.
+  let summaryMode: "ok" | "hold" | "hang" = "ok";
+  const held: Array<() => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  const summary = localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 7,
+      monitoring_pr: 1,
+      awaiting_operator: 0,
+      awaiting_human: 0,
+      retrying: 0,
+      queued: 0,
+      completed_last_window: 0,
+      cancelled_last_window: 0,
+      failed_last_window: 0,
+    },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      if (summaryMode === "hold") {
+        await new Promise<void>((resolve) => {
+          held.push(async () => {
+            await fulfillJson(
+              route,
+              { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "summary outage" } },
+              503,
+            );
+            resolve();
+          });
+        });
+        return;
+      }
+      if (summaryMode === "hang") {
+        await new Promise<void>((resolve) => {
+          hanging.push(async () => {
+            await fulfillJson(route, summary);
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, summary);
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9");
+
+  summaryMode = "hold";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  summaryMode = "hang";
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => hanging.length).toBe(1);
+
+  await held[0]();
+  await expect(page.getByText(/last snapshot|may be stale/i)).toBeVisible({ timeout: 10_000 });
+  await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9");
+  await expect(kpi(page, "Active")).toHaveAttribute("data-awf-stale", "true");
+
+  await hanging[0]();
+});
+
 async function mockMergeQueueAuthClearRoutes(
   page: Page,
   options: {

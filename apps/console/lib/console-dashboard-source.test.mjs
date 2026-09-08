@@ -305,15 +305,15 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     assert.match(
       fleetFeeds,
       new RegExp(
-        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current \\|\\|\\s*generation !== \\w+RequestGenerationRef\\.current\\s*\\)`,
+        `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current\\s*\\)`,
       ),
-      `Expected ${loader} to discard after authorized epoch, gated-detail, or feed request generation advance`,
+      `Expected ${loader} to discard after authorized epoch or gated-detail advance`,
     );
   }
   assert.match(
     fleetFeeds,
-    /const loadMergeQueue = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== mergeQueueRequestGenerationRef\.current\s*\)/,
-    "Expected loadMergeQueue to discard after authorized epoch, gated-detail, or merge-queue request generation advance",
+    /const loadMergeQueue = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current\s*\)/,
+    "Expected loadMergeQueue to discard after authorized epoch or gated-detail advance",
   );
 });
 
@@ -1039,15 +1039,15 @@ test("loadDashboardSummary discards stale success and error via request generati
   );
   assert.match(
     fleetFeeds,
-    /const loadDashboardSummary = useCallback\([\s\S]*?const generation = \+\+dashboardSummaryRequestGenerationRef\.current;[\s\S]*?generation !== dashboardSummaryRequestGenerationRef\.current[\s\S]*?setDashboardSummaryError/,
-    "Expected loadDashboardSummary to bump generation before fetch and discard mismatched responses before success or error setters",
+    /const loadDashboardSummary = useCallback\([\s\S]*?const generation = \+\+dashboardSummaryRequestGenerationRef\.current;[\s\S]*?claimFleetFeedSuccess\(generation, dashboardSummaryRequestGenerationRef\.current, marks\)[\s\S]*?setDashboardSummaryError\(null\);/,
+    "Expected loadDashboardSummary to bump generation before fetch and discard a superseded success before applying it",
   );
 });
 
 test("loadDashboardSummary clears last-good snapshot on feed-level 401 or 403", () => {
   assert.match(
     dashboardSource.fleetFeeds,
-    /const loadDashboardSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setDashboardSummary\(null\);\s*setDashboardSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?setDashboardSummaryError\(result\.message\);/,
+    /const loadDashboardSummary = useCallback\([\s\S]*?if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{[\s\S]*?claimFleetFeedDenial\(generation, dashboardSummaryRequestGenerationRef\.current, marks\)[\s\S]*?setDashboardSummary\(null\);\s*setDashboardSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?claimFleetFeedOutage\(generation, marks\)[\s\S]*?setDashboardSummaryError\(result\.message\);/,
     "Expected loadDashboardSummary to drop authorized counters on 401/403 rather than retain last-good as a transient outage",
   );
 });
@@ -1055,7 +1055,7 @@ test("loadDashboardSummary clears last-good snapshot on feed-level 401 or 403", 
 test("loadMergeQueue clears last-good snapshot on feed-level 401 or 403", () => {
   assert.match(
     dashboardSource.fleetFeeds,
-    /const loadMergeQueue = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setMergeQueue\(\[\]\);\s*setMergeQueueHasMore\(false\);\s*setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);\s*return;\s*\}[\s\S]*?setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);/,
+    /const loadMergeQueue = useCallback\([\s\S]*?if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{[\s\S]*?claimFleetFeedDenial\(generation, mergeQueueRequestGenerationRef\.current, marks\)[\s\S]*?setMergeQueue\(\[\]\);\s*setMergeQueueHasMore\(false\);\s*setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);\s*return;\s*\}[\s\S]*?claimFleetFeedOutage\(generation, marks\)[\s\S]*?setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);/,
     "Expected loadMergeQueue to drop authorized queue rows on 401/403 rather than retain last-good as a transient outage",
   );
 });
@@ -1064,7 +1064,7 @@ test("loadResourceSaturation clears last-good snapshot on feed-level 401 or 403"
   const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
     fleetFeeds,
-    /const loadResourceSaturation = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setResourceSaturation\(null\);\s*setResourceError\(result\.message\);\s*return;\s*\}[\s\S]*?setResourceError\(result\.message\);/,
+    /const loadResourceSaturation = useCallback\([\s\S]*?if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{[\s\S]*?claimFleetFeedDenial\(\s*generation,\s*resourceSaturationRequestGenerationRef\.current,\s*marks,\s*\)[\s\S]*?setResourceSaturation\(null\);\s*setResourceError\(result\.message\);\s*return;\s*\}[\s\S]*?claimFleetFeedOutage\(generation, marks\)[\s\S]*?setResourceError\(result\.message\);/,
     "Expected loadResourceSaturation to drop authorized saturation on 401/403 rather than retain last-good as a transient outage",
   );
   assert.match(
@@ -1074,8 +1074,8 @@ test("loadResourceSaturation clears last-good snapshot on feed-level 401 or 403"
   );
   assert.match(
     fleetFeeds,
-    /const loadResourceSaturation = useCallback\([\s\S]*?const generation = \+\+resourceSaturationRequestGenerationRef\.current;[\s\S]*?generation !== resourceSaturationRequestGenerationRef\.current[\s\S]*?setResourceError/,
-    "Expected loadResourceSaturation to bump generation before fetch and discard mismatched responses before success or error setters",
+    /const loadResourceSaturation = useCallback\([\s\S]*?const generation = \+\+resourceSaturationRequestGenerationRef\.current;[\s\S]*?claimFleetFeedSuccess\(\s*generation,\s*resourceSaturationRequestGenerationRef\.current,\s*marks,\s*\)[\s\S]*?setResourceError\(null\);/,
+    "Expected loadResourceSaturation to bump generation before fetch and discard a superseded success before applying it",
   );
 });
 
@@ -1083,7 +1083,7 @@ test("loadWorkspaceSummary clears last-good snapshot on feed-level 401 or 403", 
   const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
     fleetFeeds,
-    /const loadWorkspaceSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setWorkspaceSummary\(null\);\s*setWorkspaceSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?setWorkspaceSummaryError\(result\.message\);/,
+    /const loadWorkspaceSummary = useCallback\([\s\S]*?if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{[\s\S]*?claimFleetFeedDenial\(generation, workspaceSummaryRequestGenerationRef\.current, marks\)[\s\S]*?setWorkspaceSummary\(null\);\s*setWorkspaceSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?claimFleetFeedOutage\(generation, marks\)[\s\S]*?setWorkspaceSummaryError\(result\.message\);/,
     "Expected loadWorkspaceSummary to drop authorized reliability on 401/403 rather than retain last-good as a transient outage",
   );
   assert.match(
@@ -1093,8 +1093,8 @@ test("loadWorkspaceSummary clears last-good snapshot on feed-level 401 or 403", 
   );
   assert.match(
     fleetFeeds,
-    /const loadWorkspaceSummary = useCallback\([\s\S]*?const generation = \+\+workspaceSummaryRequestGenerationRef\.current;[\s\S]*?generation !== workspaceSummaryRequestGenerationRef\.current[\s\S]*?setWorkspaceSummaryError/,
-    "Expected loadWorkspaceSummary to bump generation before fetch and discard mismatched responses before success or error setters",
+    /const loadWorkspaceSummary = useCallback\([\s\S]*?const generation = \+\+workspaceSummaryRequestGenerationRef\.current;[\s\S]*?claimFleetFeedSuccess\(generation, workspaceSummaryRequestGenerationRef\.current, marks\)[\s\S]*?setWorkspaceSummaryError\(null\);/,
+    "Expected loadWorkspaceSummary to bump generation before fetch and discard a superseded success before applying it",
   );
 });
 
@@ -1102,7 +1102,7 @@ test("loadFailureSummary clears last-good snapshot on feed-level 401 or 403", ()
   const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
     fleetFeeds,
-    /const loadFailureSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setFailureSummary\(null\);\s*setFailureSummaryStatus\("error"\);\s*setFailureSummaryError\(result\.message\);\s*return;\s*\}/,
+    /const loadFailureSummary = useCallback\([\s\S]*?if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{[\s\S]*?claimFleetFeedDenial\(generation, failureSummaryRequestGenerationRef\.current, marks\)[\s\S]*?setFailureSummary\(null\);\s*setFailureSummaryStatus\("error"\);\s*setFailureSummaryError\(result\.message\);\s*return;\s*\}/,
     "Expected loadFailureSummary to drop authorized failure examples on 401/403 rather than retain last-good as a transient outage",
   );
   assert.match(
@@ -1112,8 +1112,8 @@ test("loadFailureSummary clears last-good snapshot on feed-level 401 or 403", ()
   );
   assert.match(
     fleetFeeds,
-    /const loadFailureSummary = useCallback\([\s\S]*?const generation = \+\+failureSummaryRequestGenerationRef\.current;[\s\S]*?generation !== failureSummaryRequestGenerationRef\.current[\s\S]*?setFailureSummaryError/,
-    "Expected loadFailureSummary to bump generation before fetch and discard mismatched responses before success or error setters",
+    /const loadFailureSummary = useCallback\([\s\S]*?const generation = \+\+failureSummaryRequestGenerationRef\.current;[\s\S]*?claimFleetFeedSuccess\(generation, failureSummaryRequestGenerationRef\.current, marks\)[\s\S]*?setFailureSummaryError\(null\);/,
+    "Expected loadFailureSummary to bump generation before fetch and discard a superseded success before applying it",
   );
 });
 
@@ -1129,10 +1129,12 @@ test("loadFailureSummary treats advertised-feed 404 and 503 as refresh errors", 
   const loadEnd = fleetFeeds.indexOf("const reloadAvailableFeeds = useCallback", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadFailureSummary before reloadAvailableFeeds");
   const loadBody = fleetFeeds.slice(loadStart, loadEnd);
-  const authBranch = loadBody.indexOf("if (result.status === 401 || result.status === 403)");
+  const authBranch = loadBody.indexOf("result.status === 401 || result.status === 403");
   assert.ok(authBranch > 0, "Expected loadFailureSummary auth-denial branch");
   const afterAuth = loadBody.slice(authBranch);
-  const authReturn = afterAuth.indexOf("return;");
+  const denialApplied = afterAuth.indexOf("setFailureSummary(null);");
+  assert.ok(denialApplied > 0, "Expected loadFailureSummary auth-denial to clear the snapshot");
+  const authReturn = afterAuth.indexOf("return;", denialApplied);
   assert.ok(authReturn > 0, "Expected loadFailureSummary auth-denial branch to return");
   const outageBranch = afterAuth.slice(authReturn);
   assert.doesNotMatch(
@@ -1160,8 +1162,8 @@ test("loadMergeQueue discards stale success and error via request generation", (
   );
   assert.match(
     dashboardSource.fleetFeeds,
-    /const loadMergeQueue = useCallback\([\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?generation !== mergeQueueRequestGenerationRef\.current[\s\S]*?setMergeQueueError/,
-    "Expected loadMergeQueue to bump generation before fetch and discard mismatched responses before success or error setters",
+    /const loadMergeQueue = useCallback\([\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?claimFleetFeedSuccess\(generation, mergeQueueRequestGenerationRef\.current, marks\)[\s\S]*?setMergeQueueError\(null\);/,
+    "Expected loadMergeQueue to bump generation before fetch and discard a superseded success before applying it",
   );
 });
 
@@ -1173,9 +1175,44 @@ test("loadCloudRuntime discards stale success and error via request generation",
   );
   assert.match(
     dashboardSource.fleetFeeds,
-    /const loadCloudRuntime = useCallback\([\s\S]*?const generation = \+\+cloudRuntimeRequestGenerationRef\.current;[\s\S]*?generation !== cloudRuntimeRequestGenerationRef\.current[\s\S]*?setCloudRuntimeError/,
-    "Expected loadCloudRuntime to bump generation before fetch and discard mismatched responses before success or error setters",
+    /const loadCloudRuntime = useCallback\([\s\S]*?const generation = \+\+cloudRuntimeRequestGenerationRef\.current;[\s\S]*?claimFleetFeedSuccess\(generation, cloudRuntimeRequestGenerationRef\.current, marks\)[\s\S]*?setCloudRuntimeError\(null\);/,
+    "Expected loadCloudRuntime to bump generation before fetch and discard a superseded success before applying it",
   );
+});
+
+test("fleet feed loaders apply superseded 401/403 and outages until a newer success lands", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkK: a periodic
+  // dashboard-summary (and the same capacity, cloud-runtime, reliability,
+  // merge-queue, and failures) request can settle 401/403 or network/5xx after
+  // Refresh has only started a newer request. Discarding that failure solely
+  // because the newer request exists leaves revoked metrics visible or an
+  // outage with no stale-data warning if the newer request hangs.
+  const fleetFeeds = dashboardSource.fleetFeeds;
+  for (const loader of [
+    "loadResourceSaturation",
+    "loadDashboardSummary",
+    "loadCloudRuntime",
+    "loadWorkspaceSummary",
+    "loadMergeQueue",
+    "loadFailureSummary",
+  ]) {
+    const loadStart = fleetFeeds.indexOf(`const ${loader} = useCallback`);
+    assert.ok(loadStart > 0, `Expected ${loader}`);
+    const loadEnd = fleetFeeds.indexOf("\n  const ", loadStart + 1);
+    assert.ok(loadEnd > loadStart, `Expected ${loader} body`);
+    const loadBody = fleetFeeds.slice(loadStart, loadEnd);
+    const denialAt = loadBody.indexOf("claimFleetFeedDenial");
+    const outageAt = loadBody.indexOf("claimFleetFeedOutage");
+    const successAt = loadBody.indexOf("claimFleetFeedSuccess");
+    assert.ok(denialAt > 0, `Expected ${loader} to claim a 401/403 before discarding it`);
+    assert.ok(outageAt > denialAt, `Expected ${loader} to claim an outage after denial handling`);
+    assert.ok(successAt > outageAt, `Expected ${loader} to claim success only after failure handling`);
+    assert.doesNotMatch(
+      loadBody,
+      /generation !== \w+RequestGenerationRef\.current[\s\S]*?result\.status === 401/,
+      `Expected ${loader} not to discard 401/403 solely because a newer request started`,
+    );
+  }
 });
 
 test("capability-gated feed polls chain after the previous invocation settles", () => {
