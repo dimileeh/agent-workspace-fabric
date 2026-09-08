@@ -74,6 +74,11 @@ type UseWorkspaceDetailLoaderArgs = {
  * live stream until a successful detail read recovers it. That denial is
  * authoritative unless a newer successful GET has already applied — a newer
  * request merely starting, hanging, or failing transiently is not recovery.
+ * The same is true of a /logs 401/403: both are applied as soon as that
+ * request settles, even if a sibling runtime/events/operations request hangs.
+ * apiGet has no timeout, so waiting for every sibling would leave the
+ * inspector EventSource and cached workspace or log data available after
+ * authorization was revoked.
  * Snapshot frames must not write revoked workspace metadata back while that
  * latch is held.
  * Selection changes start a new visit and advance request generation. A late
@@ -168,31 +173,6 @@ export function useWorkspaceDetailLoader({
       let allowEvents = allowDetail("workspace_events");
       let allowOperations = allowDetail("workspace_operations");
       let { allowLogs } = resolveWorkspaceLogStreamAccess(caps);
-
-      const [workspace, fetchedRuntime, fetchedEvents, fetchedOperations, fetchedStreams] =
-        await Promise.all([
-          apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
-          allowRuntime
-            ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
-            : Promise.resolve(null),
-          allowEvents
-            ? apiGet<ListEnvelope<WorkspaceEvent>>(
-                awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
-              )
-            : Promise.resolve(null),
-          allowOperations
-            ? apiGet<ListEnvelope<Operation>>(
-                awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
-              )
-            : Promise.resolve(null),
-          allowLogs
-            ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
-            : Promise.resolve(null),
-        ]);
-      let runtime = fetchedRuntime;
-      let events = fetchedEvents;
-      let operations = fetchedOperations;
-      let streams = fetchedStreams;
 
       // Accept the full envelope (including listing success and gated-off null)
       // so the post-merge listing check can call this without a false-only cast.
@@ -302,9 +282,108 @@ export function useWorkspaceDetailLoader({
       };
 
       let denialApplied = false;
-      if (!workspace.ok && feedAuthDenied(workspace)) {
-        denialApplied = applyAuthoritativeWorkspaceDetailDenial(generation, workspace.message);
-      }
+      // Generation this load recorded for a /logs 401/403. That bump is not an
+      // external capabilities drop; treating it as one would clear the listing
+      // denial banner when the remaining siblings later settle.
+      let ownListingDropGeneration: number | null = null;
+
+      const applyWorkspaceDenialIfSettled = (result: ApiEnvelope<Workspace>) => {
+        if (result.ok || !feedAuthDenied(result)) {
+          return;
+        }
+        if (applyAuthoritativeWorkspaceDetailDenial(generation, result.message)) {
+          denialApplied = true;
+        }
+      };
+
+      const applyLogListingAuthDenial = (result: ApiEnvelope<ListEnvelope<WorkspaceLogStream>>) => {
+        if (!allowLogs || !feedAuthDenied(result) || result.ok) {
+          return;
+        }
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          generation !== workspaceDetailRequestGenerationRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current ||
+          generation <= workspaceDetailVisitGenerationFloorRef.current
+        ) {
+          return;
+        }
+        // A newer base-detail denial already covers this generation. Keep the
+        // same skip the post-merge path uses unless this request applied it.
+        if (generation <= revokedWorkspaceDetailGenerationRef.current && !denialApplied) {
+          return;
+        }
+        if (!logListingAuthDeniedRef.current) {
+          noteGatedDetailDrop(
+            gatedDetailDroppedFeedsRef,
+            gatedDetailFeedGenerationRef,
+            DROP_ALL_GATED_DETAIL_FEEDS,
+          );
+          ownListingDropGeneration = gatedDetailFeedGenerationRef.current;
+        }
+        logListingAuthDeniedRef.current = true;
+        selectedStreamsRef.current = [];
+        setLogListingAuthDenied(true);
+        setSelectedStreams([]);
+        setLogEntries([]);
+        setStreamOffsets({});
+        setDetail((current) => {
+          if (!logListingAuthDeniedRef.current) {
+            return current;
+          }
+          return { ...current, streams: [] };
+        });
+        // A latched base-detail 401/403 owns the banner. Do not replace it
+        // with the listing reason while that revocation is still in force.
+        if (!workspaceDetailAuthDeniedRef.current) {
+          setError(result.message);
+        }
+      };
+
+      const workspacePromise = apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`));
+      const runtimePromise = allowRuntime
+        ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
+        : Promise.resolve(null);
+      const eventsPromise = allowEvents
+        ? apiGet<ListEnvelope<WorkspaceEvent>>(
+            awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
+          )
+        : Promise.resolve(null);
+      const operationsPromise = allowOperations
+        ? apiGet<ListEnvelope<Operation>>(
+            awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
+          )
+        : Promise.resolve(null);
+      const streamsPromise = allowLogs
+        ? apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`))
+        : Promise.resolve(null);
+
+      // 401/403 closes /stream and drops cached workspace or log data as soon
+      // as that request settles. Promise.all never runs the handlers below if
+      // a sibling runtime/events/operations request hangs, and apiGet has no
+      // timeout, so revoked inspector data would stay available indefinitely.
+      void workspacePromise.then(applyWorkspaceDenialIfSettled);
+      void streamsPromise.then((result) => {
+        if (result != null) {
+          applyLogListingAuthDenial(result);
+        }
+      });
+
+      const [workspace, fetchedRuntime, fetchedEvents, fetchedOperations, fetchedStreams] =
+        await Promise.all([
+          workspacePromise,
+          runtimePromise,
+          eventsPromise,
+          operationsPromise,
+          streamsPromise,
+        ]);
+      let runtime = fetchedRuntime;
+      let events = fetchedEvents;
+      let operations = fetchedOperations;
+      let streams = fetchedStreams;
+
+      applyWorkspaceDenialIfSettled(workspace);
 
       if (
         epoch !== authorizedFeedEpochRef.current ||
@@ -342,42 +421,54 @@ export function useWorkspaceDetailLoader({
       // detail error; deriving that solely from the workspace GET presents a
       // retained snapshot as current.
       if (gatedGeneration !== gatedDetailFeedGenerationRef.current) {
-        const dropped = gatedDetailDropsSince(gatedDetailDroppedFeedsRef.current, gatedGeneration);
-        if (allGatedDetailFeedsDropped(dropped)) {
-          if (workspace.ok) {
-            publishWorkspaceDetailRecovered();
-            if (!workspaceDetailAuthDeniedRef.current) {
-              setError(null);
+        const stampsForExternalDrop =
+          ownListingDropGeneration == null
+            ? gatedDetailDroppedFeedsRef.current
+            : gatedDetailDroppedFeedsRef.current.filter(
+                (stamp) => stamp.generation !== ownListingDropGeneration,
+              );
+        const hasExternalDrop = stampsForExternalDrop.some((stamp) => stamp.generation > gatedGeneration);
+        // Only this load's /logs 401/403 advanced the generation. Fall through
+        // so sibling results still merge without treating the listing denial
+        // as a capabilities withdrawal.
+        if (hasExternalDrop) {
+          const dropped = gatedDetailDropsSince(stampsForExternalDrop, gatedGeneration);
+          if (allGatedDetailFeedsDropped(dropped)) {
+            if (workspace.ok) {
+              publishWorkspaceDetailRecovered();
+              if (!workspaceDetailAuthDeniedRef.current) {
+                setError(null);
+              }
+            } else if (feedAuthDenied(workspace)) {
+              setError(workspace.message);
+              publishWorkspaceDetailAuthDenied(true);
+            } else if (!workspaceDetailAuthDeniedRef.current) {
+              // A transient failure is not recovery. Keep the latched denial
+              // banner so a newer 5xx cannot hide the revocation.
+              setError(workspace.message);
             }
-          } else if (feedAuthDenied(workspace)) {
-            setError(workspace.message);
-            publishWorkspaceDetailAuthDenied(true);
-          } else if (!workspaceDetailAuthDeniedRef.current) {
-            // A transient failure is not recovery. Keep the latched denial
-            // banner so a newer 5xx cannot hide the revocation.
-            setError(workspace.message);
+            setDetail((current) => ({
+              ...current,
+              workspace: workspaceFromDetailResult(current.workspace, workspace),
+            }));
+            return;
           }
-          setDetail((current) => ({
-            ...current,
-            workspace: workspaceFromDetailResult(current.workspace, workspace),
-          }));
-          return;
-        }
-        if (dropped.runtime) {
-          allowRuntime = false;
-          runtime = null;
-        }
-        if (dropped.events) {
-          allowEvents = false;
-          events = null;
-        }
-        if (dropped.operations) {
-          allowOperations = false;
-          operations = null;
-        }
-        if (dropped.logs) {
-          allowLogs = false;
-          streams = null;
+          if (dropped.runtime) {
+            allowRuntime = false;
+            runtime = null;
+          }
+          if (dropped.events) {
+            allowEvents = false;
+            events = null;
+          }
+          if (dropped.operations) {
+            allowOperations = false;
+            operations = null;
+          }
+          if (dropped.logs) {
+            allowLogs = false;
+            streams = null;
+          }
         }
       }
 
@@ -458,28 +549,12 @@ export function useWorkspaceDetailLoader({
         };
       });
 
-      if (allowLogs && feedAuthDenied(streams)) {
+      if (allowLogs && streams != null && feedAuthDenied(streams)) {
         // Listing 401/403 while workspace_logs stays advertised is auth
-        // revocation for this column, not a transient outage. detail.streams
-        // is already cleared above; also drop retained selection, tail caches,
-        // and the live-log latch so the still-open EventSource cannot keep
-        // appending previously authorized frames (CONSOLE_BACKEND_CONTRACT).
-        if (!logListingAuthDeniedRef.current) {
-          noteGatedDetailDrop(
-            gatedDetailDroppedFeedsRef,
-            gatedDetailFeedGenerationRef,
-            DROP_ALL_GATED_DETAIL_FEEDS,
-          );
-        }
-        logListingAuthDeniedRef.current = true;
-        selectedStreamsRef.current = [];
-        // State (not only the ref) so the live-stream effect tears down the
-        // still-open EventSource instead of leaving it connected under a true
-        // workspace_logs capability gate.
-        setLogListingAuthDenied(true);
-        setSelectedStreams([]);
-        setLogEntries([]);
-        setStreamOffsets({});
+        // revocation for this column, not a transient outage. Apply even if
+        // the settlement handler already latched it, so a sibling 200 cannot
+        // restore selection or leave /stream open (CONSOLE_BACKEND_CONTRACT).
+        applyLogListingAuthDenial(streams);
       } else if (streams?.ok) {
         logListingAuthDeniedRef.current = false;
         setLogListingAuthDenied(false);

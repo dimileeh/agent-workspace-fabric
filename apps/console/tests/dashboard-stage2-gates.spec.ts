@@ -978,6 +978,235 @@ for (const deniedStatus of [401, 403] as const) {
   });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD08-: a /workspaces/{id}
+// 401/403 must latch denial and close the inspector EventSource without waiting
+// for a sibling runtime/events/operations request. Promise.all never settled
+// while that sibling hung, so cached workspace metadata stayed visible.
+for (const deniedStatus of [401, 403] as const) {
+  test(`base workspace detail ${deniedStatus} closes live stream without waiting for a hanging sibling`, async ({
+    page,
+  }) => {
+    test.setTimeout(45_000);
+    let detailMode: "ok" | "split" = "ok";
+    let streamConnections = 0;
+    let releaseHeldStream: () => void = () => undefined;
+    const heldStream = new Promise<void>((resolve) => {
+      releaseHeldStream = resolve;
+    });
+    const hangingSibling: Array<() => Promise<void>> = [];
+    const workspaceId = "ws_base_detail_hanging_sibling";
+    const overviewBranch = "overview-keep-branch";
+    const authorizedBranch = "authorized-detail-branch";
+    const revokedSnapshotBranch = "revoked-snapshot-branch-must-not-appear";
+    const siblingAfterDenial = "hanging-runtime-must-not-restore-workspace";
+    const overviewItem = {
+      workspace_id: workspaceId,
+      title: "Hanging sibling base detail denial workspace",
+      repo_url: "https://github.com/example/base-detail-hanging-sibling",
+      base_branch: "main",
+      branch_name: overviewBranch,
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: "Close the inspector stream when base detail is denied before siblings settle",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    };
+    const authorizedWorkspace = {
+      ...overviewItem,
+      id: workspaceId,
+      version: 3,
+      branch_name: authorizedBranch,
+    };
+
+    await page.route("**/api/awf/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/awf/health") {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === "/api/awf/console/capabilities") {
+        await fulfillJson(route, localCapabilities());
+        return;
+      }
+      if (path === "/api/awf/console/dashboard-summary") {
+        await fulfillJson(route, localDashboardSummary());
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}`) {
+        if (detailMode === "split") {
+          await fulfillJson(
+            route,
+            {
+              detail: {
+                error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+                message: "workspace detail permission revoked",
+              },
+            },
+            deniedStatus,
+          );
+          return;
+        }
+        await fulfillJson(route, authorizedWorkspace);
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+        if (detailMode === "split") {
+          await new Promise<void>((resolve) => {
+            hangingSibling.push(async () => {
+              await fulfillJson(route, {
+                workspace_id: workspaceId,
+                compose_project_name: siblingAfterDenial,
+                stack_state: "running",
+                services: [],
+                app_endpoints: [],
+                logs_available: true,
+                control_available: true,
+                reason: null,
+              });
+              resolve();
+            });
+          });
+          return;
+        }
+        await fulfillJson(route, {
+          workspace_id: workspaceId,
+          compose_project_name: "awf-ws-base-detail-hanging-sibling",
+          stack_state: "running",
+          services: [],
+          app_endpoints: [],
+          logs_available: true,
+          control_available: true,
+          reason: null,
+        });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (
+        path === `/api/awf/workspaces/${workspaceId}/operations` ||
+        path === `/api/awf/workspaces/${workspaceId}/logs`
+      ) {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+        streamConnections += 1;
+        if (streamConnections === 1) {
+          await heldStream;
+          const snapshot = {
+            type: "snapshot",
+            workspace: {
+              ...authorizedWorkspace,
+              branch_name: revokedSnapshotBranch,
+              task_prompt: revokedSnapshotBranch,
+            },
+          };
+          await route.fulfill({
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream; charset=utf-8",
+              "cache-control": "no-cache",
+            },
+            body: `data: ${JSON.stringify(snapshot)}\n\n`,
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+        });
+        return;
+      }
+      if (path === "/api/awf/metrics/resources/saturation") {
+        await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+        return;
+      }
+      if (path === "/api/awf/metrics/workspaces/summary") {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === "/api/awf/merge-queue") {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === "/api/awf/metrics/failures/summary") {
+        await fulfillJson(route, {
+          total_failures: 0,
+          since_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).click();
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(0);
+
+    detailMode = "split";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect.poll(() => hangingSibling.length, { timeout: 10_000 }).toBe(1);
+
+    // Runtime is still pending. Denial must already have cleared workspace
+    // metadata and closed /stream; waiting for Promise.all would leave both.
+    await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stream: idle")).toBeVisible();
+
+    const connectionsAtDenial = streamConnections;
+    releaseHeldStream();
+    await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+    await page.waitForTimeout(1_500);
+    await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stream: idle")).toBeVisible();
+    expect(streamConnections).toBe(connectionsAtDenial);
+
+    await hangingSibling[0]();
+    await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible();
+    await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stream: idle")).toBeVisible();
+    expect(streamConnections).toBe(connectionsAtDenial);
+  });
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gDcDc: a newer Refresh
 // starting another detail load must not drop an older /workspaces/{id} 401/403.
 // Capability loads already treat 401/403 as authoritative unless a newer
