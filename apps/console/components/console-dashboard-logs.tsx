@@ -1128,6 +1128,24 @@ export function WorkspaceLogColumn({
     const openedEpoch = columnEpochRef.current;
     let closedByServer = false;
     let terminalError = false;
+    let probeRejected = false;
+
+    const rejectFailedStreamProbe = () => {
+      // A delayed probe that receives a non-auth error or closed frame has
+      // not proved the route recovered. Close it so a later heartbeat or
+      // snapshot cannot accept the probe, and wait for the delayed retry.
+      if (!streamAuthDeniedRef.current || openedEpoch !== columnEpochRef.current) {
+        return;
+      }
+      probeRejected = true;
+      setStreamState("idle");
+      source.close();
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+      setStreamProbeNonce(0);
+      scheduleStreamAuthProbe();
+    };
 
     const acceptStreamProbe = () => {
       if (!streamAuthDeniedRef.current) {
@@ -1193,10 +1211,15 @@ export function WorkspaceLogColumn({
           }
           return;
         }
-      } else if (streamAuthDeniedRef.current) {
+        if (streamAuthDeniedRef.current) {
+          rejectFailedStreamProbe();
+          return;
+        }
+      } else if (streamAuthDeniedRef.current && !probeRejected) {
         acceptStreamProbe();
       }
       if (
+        probeRejected ||
         streamAuthDeniedRef.current ||
         openedEpoch !== columnEpochRef.current
       ) {
@@ -1290,13 +1313,7 @@ export function WorkspaceLogColumn({
       // A probe that dies without an authorized frame waits for the delayed
       // retry instead of letting EventSource reconnect immediately.
       if (streamAuthDeniedRef.current && openedEpoch === columnEpochRef.current) {
-        setStreamState("idle");
-        source.close();
-        if (eventSourceRef.current === source) {
-          eventSourceRef.current = null;
-        }
-        setStreamProbeNonce(0);
-        scheduleStreamAuthProbe();
+        rejectFailedStreamProbe();
         return;
       }
       if (
