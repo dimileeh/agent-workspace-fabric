@@ -249,21 +249,28 @@ export function useWorkspaceLiveStream({
           source.close();
           return;
         }
-        if (workspaceStreamAuthDeniedRef.current) {
-          rejectFailedStreamProbe();
-          return;
-        }
+        // Do not accept the probe or drop this frame here. The terminal
+        // error/closed close below must reset the nonce and schedule the
+        // next probe; returning early leaves that close to skip the retry.
       } else if (workspaceStreamAuthDeniedRef.current && !probeRejected) {
         acceptStreamProbe();
       }
-      if (probeRejected || workspaceStreamAuthDeniedRef.current) {
+      if (
+        (probeRejected || workspaceStreamAuthDeniedRef.current) &&
+        frame.type !== "error" &&
+        frame.type !== "closed"
+      ) {
         // The handshake has not proved /stream. Drop this frame so a later
         // heartbeat or snapshot cannot accept the probe or restore metadata.
+        // Error and closed frames fall through so the close below can
+        // reschedule a failed probe. close() does not fire onerror.
         return;
       }
-      if (workspaceBaseDetailAuthDeniedRef.current) {
+      if (workspaceBaseDetailAuthDeniedRef.current && !workspaceStreamAuthDeniedRef.current) {
         // The handshake proved /stream, not /workspaces/{id}. Drop this frame
         // so a snapshot cannot restore metadata the GET still denies.
+        // A still-latched route probe has not proved /stream; a generic
+        // error or closed frame must reach the close below and reschedule.
         setStreamState("idle");
         source.close();
         return;
@@ -367,6 +374,14 @@ export function useWorkspaceLiveStream({
         return;
       }
       if (frame.type === "error") {
+        // A delayed probe that receives a generic error frame has not proved
+        // the route recovered. close() does not fire onerror, so reset the
+        // nonce and schedule another probe instead of leaving the latch
+        // held with a nonzero nonce.
+        if (workspaceStreamAuthDeniedRef.current) {
+          rejectFailedStreamProbe();
+          return;
+        }
         terminalError = true;
         setStreamState("error");
         setError(frame.message);
@@ -374,6 +389,10 @@ export function useWorkspaceLiveStream({
         return;
       }
       if (frame.type === "closed") {
+        if (workspaceStreamAuthDeniedRef.current) {
+          rejectFailedStreamProbe();
+          return;
+        }
         closedByServer = true;
         setStreamState("idle");
         source.close();

@@ -2017,7 +2017,7 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   );
   assert.match(
     liveStream,
-    /if \(workspaceBaseDetailAuthDeniedRef\.current\) \{[\s\S]*?setStreamState\("idle"\);\s*source\.close\(\);\s*return;\s*\}[\s\S]*?if \(workspaceDetailAuthDeniedRef\.current \|\| workspaceBaseDetailAuthDeniedRef\.current\)/,
+    /if \(workspaceBaseDetailAuthDeniedRef\.current && !workspaceStreamAuthDeniedRef\.current\) \{[\s\S]*?setStreamState\("idle"\);\s*source\.close\(\);\s*return;\s*\}[\s\S]*?if \(workspaceDetailAuthDeniedRef\.current \|\| workspaceBaseDetailAuthDeniedRef\.current\)/,
     "Expected a stream snapshot not to write workspace metadata while a base-detail GET 401/403 is still latched",
   );
   assert.match(
@@ -2032,8 +2032,8 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   );
   assert.match(
     liveStream,
-    /if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*rejectFailedStreamProbe\(\);\s*return;\s*\}/,
-    "Expected a non-auth error or closed frame during an inspector stream probe to reject the probe instead of leaving the latch latched",
+    /if \(frame\.type === "error"\) \{[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*rejectFailedStreamProbe\(\);\s*return;\s*\}[\s\S]*?if \(frame\.type === "closed"\) \{[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*rejectFailedStreamProbe\(\);\s*return;\s*\}/,
+    "Expected a non-auth error or closed frame during an inspector stream probe to reject the probe instead of closing without a retry",
   );
   assert.match(
     liveStream,
