@@ -18,6 +18,14 @@ const dashboardSource = {
     new URL("../hooks/workspace-detail-feed-settlement.ts", import.meta.url),
     "utf8",
   ),
+  detailVisit: readFileSync(
+    new URL("../hooks/workspace-detail-visit.ts", import.meta.url),
+    "utf8",
+  ),
+  optionalFeedRelease: readFileSync(
+    new URL("../hooks/workspace-detail-optional-feed-release.ts", import.meta.url),
+    "utf8",
+  ),
   serializedPoll: readFileSync(
     new URL("../hooks/use-serialized-periodic-load.ts", import.meta.url),
     "utf8",
@@ -38,6 +46,10 @@ const dashboardSource = {
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
   logs: readFileSync(new URL("../components/console-dashboard-logs.tsx", import.meta.url), "utf8"),
+  logFullscreen: readFileSync(
+    new URL("../components/console-dashboard-log-fullscreen.tsx", import.meta.url),
+    "utf8",
+  ),
   inspector: readFileSync(
     new URL("../components/console-dashboard-inspector.tsx", import.meta.url),
     "utf8",
@@ -62,6 +74,8 @@ const dashboardSource = {
 
 // Source assertions follow the extracted modules. Keep the original dashboard
 // and detail-loader searches working without weakening the behavioral checks.
+// Fullscreen logs, detail-visit reset, and optional-feed release are searched
+// on their own keys — concatenating them would hide moved slice boundaries.
 dashboardSource.dashboard = `${dashboardSource.dashboard}\n${dashboardSource.capabilities}`;
 dashboardSource.detailLoader = `${dashboardSource.detailLoader}\n${dashboardSource.feedSettlement}`;
 
@@ -277,7 +291,12 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /workspaceDetailVisitRef\.current \+= 1;[\s\S]*?workspaceDetailVisitGenerationFloorRef\.current = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = 0;/,
+    /beginWorkspaceDetailVisit\(selectedId,/,
+    "Expected a selection change to start a new detail visit through the extracted reset",
+  );
+  assert.match(
+    dashboardSource.detailVisit,
+    /workspaceDetailVisitRef\.current \+= 1;[\s\S]*?workspaceDetailVisitGenerationFloorRef\.current =\s*\+\+refs\.workspaceDetailRequestGenerationRef\.current;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = 0;/,
     "Expected a selection change to start a new detail visit, advance request generation, and drop denial watermarks",
   );
   assert.match(
@@ -1968,7 +1987,7 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
     "Expected an in-flight or later /events 200 not to refill events cleared by stream denial",
   );
   assert.match(
-    detail,
+    dashboardSource.detailVisit,
     /workspaceStreamAuthDeniedRef\.current = false;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;/,
     "Expected a selection change to drop stream-denial ownership with the visit watermarks",
   );
@@ -2226,7 +2245,7 @@ test("workspace rail omits log actions when showWorkspaceLogs is false", () => {
 test("fullscreen log stream requires listing capability via allowStreamLogs", () => {
   const dashboard = dashboardSource.dashboard;
   const overlays = dashboardSource.overlays;
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   // Split maintainability extraction wires fullscreen props through overlays.
   assert.match(
     dashboard,
@@ -2302,7 +2321,7 @@ test("fullscreen listing 401/403 applies while a newer poll is in flight", () =>
   // leaves cached private tails and EventSource open. A newer applied 200
   // still wins; an older overlapping 200 stays rejected; a later generation
   // may recover.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const loadStart = logs.indexOf("const loadStreams = useCallback");
   assert.ok(loadStart > 0, "Expected WorkspaceLogColumn.loadStreams");
   const loadEnd = logs.indexOf("useEffect(() => {", loadStart);
@@ -2340,7 +2359,7 @@ test("fullscreen listing 200 discards a success older than the last applied gene
   // not pass the revocation-only guard and overwrite streams. The first
   // completed success still lands because appliedListingGenerationRef starts
   // at 0 (strictly older, not equal).
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const loadStart = logs.indexOf("const loadStreams = useCallback");
   assert.ok(loadStart > 0, "Expected WorkspaceLogColumn.loadStreams");
   const loadEnd = logs.indexOf("useEffect(() => {", loadStart);
@@ -2378,7 +2397,7 @@ test("fullscreen listing 200 flush does not rewind streams after a newer failure
   // applied. A 200 that already passed that check can still flush setStreams
   // after the failure watermark advances, keeping the error text while
   // last-good streams rewind to the stale snapshot.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const loadStart = logs.indexOf("const loadStreams = useCallback");
   assert.ok(loadStart > 0, "Expected WorkspaceLogColumn.loadStreams");
   const loadEnd = logs.indexOf("useEffect(() => {", loadStart);
@@ -2408,7 +2427,7 @@ test("fullscreen tail 401/403 applies while a newer reload is in flight", () => 
   // request hangs or fails transiently. A newer applied 200 for the denied
   // stream still wins; a sibling 200 must not suppress the clear. A request
   // that started before the denial stays rejected.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
   assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
   const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
@@ -2462,7 +2481,7 @@ test("fullscreen loadSelectedTails retains last-successful tails on transient re
   // synthetic error entry from readLogTailEntry. Surface the refresh warning
   // separately and only install entries from successful reads. 401/403 still
   // drops authorized column contents.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
   assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
   const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
@@ -2539,7 +2558,7 @@ test("fullscreen listing refresh retries denied tails when metadata is unchanged
   // streams on the next listing refresh, but do not start a second reload
   // while one is already in flight — a newer generation would discard the
   // slower success.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const effectStart = logs.indexOf("if (!selectedTailRefreshKey) {");
   assert.ok(effectStart > 0, "Expected the fullscreen tail refresh-key effect");
   const effectEnd = logs.indexOf(
@@ -2584,7 +2603,7 @@ test("fullscreen tail outage compares recovery against the failed stream", () =>
   // applied success — deselecting B, completing an A-only wave, then
   // reselecting B while its new read hangs otherwise leaves B's snapshot
   // visible with no outage warning.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
   assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
   const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
@@ -2632,7 +2651,7 @@ test("fullscreen listing refresh retries network/5xx tail errors when metadata i
   // skipped every later poll. The stale snapshot and warning then persisted
   // until Tail all. Retry streams recorded in tailRefreshErrors on the next
   // listing refresh, without starting a second reload while one is in flight.
-  const logs = dashboardSource.logs;
+  const logs = dashboardSource.logFullscreen;
   const effectStart = logs.indexOf("if (!selectedTailRefreshKey) {");
   assert.ok(effectStart > 0, "Expected the fullscreen tail refresh-key effect");
   const effectEnd = logs.indexOf(
@@ -2735,11 +2754,15 @@ test("runtime and operations withdrawal releases hook-local denial ownership", (
   // Withdrawing the feed leaves no later read that can recover it, so the
   // watermark must be cleared or a basic-detail 200 cannot drop the banner.
   const loader = dashboardSource.detailLoader;
-  const releaseStart = loader.indexOf("const releaseWithdrawnOptionalFeedDenial = useCallback");
+  const release = dashboardSource.optionalFeedRelease;
+  const releaseStart = release.indexOf("export function releaseWithdrawnOptionalDetailFeeds");
   assert.ok(releaseStart > 0, "Expected a hook callback that releases withdrawn optional-feed denial");
-  const releaseEnd = loader.indexOf("useLayoutEffect(() => {", releaseStart);
-  assert.ok(releaseEnd > releaseStart, "Expected the release callback to be installed in a layout effect");
-  const releaseBody = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    loader,
+    /const releaseWithdrawnOptionalFeedDenial = useCallback\([\s\S]*?releaseWithdrawnOptionalDetailFeeds\([\s\S]*?useLayoutEffect\(\(\) => \{\s*releaseWithdrawnOptionalFeedDenialRef\.current = releaseWithdrawnOptionalFeedDenial;/,
+    "Expected the release callback to be installed in a layout effect",
+  );
+  const releaseBody = release.slice(releaseStart);
   assert.match(
     releaseBody,
     /if \(feeds\.runtime\) \{\s*runtimeDenialReleasedThroughRef\.current = Math\.max\(\s*runtimeDenialReleasedThroughRef\.current,\s*releasedThrough,\s*\);\s*revokedRuntimeGenerationRef\.current = 0;\s*delete settledDetailOutagesRef\.current\.runtime;\s*\}/,
@@ -2784,11 +2807,15 @@ test("withdrawn runtime or operations outage yields the inspector banner", () =>
   // can clear that reason, so a still-advertised sibling outage stays hidden
   // until the workspace changes.
   const loader = dashboardSource.detailLoader;
-  const releaseStart = loader.indexOf("const releaseWithdrawnOptionalFeedDenial = useCallback");
+  const release = dashboardSource.optionalFeedRelease;
+  const releaseStart = release.indexOf("export function releaseWithdrawnOptionalDetailFeeds");
   assert.ok(releaseStart > 0, "Expected a hook callback that releases withdrawn optional-feed denial");
-  const releaseEnd = loader.indexOf("useLayoutEffect(() => {", releaseStart);
-  assert.ok(releaseEnd > releaseStart, "Expected the release callback to be installed in a layout effect");
-  const releaseBody = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    loader,
+    /const releaseWithdrawnOptionalFeedDenial = useCallback\([\s\S]*?releaseWithdrawnOptionalDetailFeeds\([\s\S]*?useLayoutEffect\(\(\) => \{\s*releaseWithdrawnOptionalFeedDenialRef\.current = releaseWithdrawnOptionalFeedDenial;/,
+    "Expected the release callback to be installed in a layout effect",
+  );
+  const releaseBody = release.slice(releaseStart);
   assert.match(
     releaseBody,
     /const runtimeOutage = feeds\.runtime \? settledDetailOutagesRef\.current\.runtime : undefined;/,
@@ -2864,11 +2891,15 @@ test("withdrawn events outage yields the inspector banner", () => {
   // through preferredOutstandingOutage until the selection changes.
   const loader = dashboardSource.detailLoader;
   const dashboard = dashboardSource.dashboard;
-  const releaseStart = loader.indexOf("const releaseWithdrawnOptionalFeedDenial = useCallback");
+  const release = dashboardSource.optionalFeedRelease;
+  const releaseStart = release.indexOf("export function releaseWithdrawnOptionalDetailFeeds");
   assert.ok(releaseStart > 0, "Expected a hook callback that releases withdrawn optional-feed denial");
-  const releaseEnd = loader.indexOf("useLayoutEffect(() => {", releaseStart);
-  assert.ok(releaseEnd > releaseStart, "Expected the release callback to be installed in a layout effect");
-  const releaseBody = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    loader,
+    /const releaseWithdrawnOptionalFeedDenial = useCallback\([\s\S]*?releaseWithdrawnOptionalDetailFeeds\([\s\S]*?useLayoutEffect\(\(\) => \{\s*releaseWithdrawnOptionalFeedDenialRef\.current = releaseWithdrawnOptionalFeedDenial;/,
+    "Expected the release callback to be installed in a layout effect",
+  );
+  const releaseBody = release.slice(releaseStart);
   assert.match(
     releaseBody,
     /const eventsOutage = feeds\.events \? settledDetailOutagesRef\.current\.events : undefined;/,
@@ -3103,9 +3134,9 @@ test("dashboard paths go through the console URL builder", () => {
   assert.match(dashboardSource.shared, /operatorPath\(/);
   assert.match(dashboardSource.shared, /awfPath\(/);
   assert.doesNotMatch(dashboardSource.shared, /["'`]\/api\/(?:awf|operator)/);
-  assert.match(dashboardSource.logs, /from "@\/lib\/console-urls"/);
-  assert.match(dashboardSource.logs, /awfPath\(/);
-  assert.doesNotMatch(dashboardSource.logs, /["'`]\/api\/awf/);
+  assert.match(dashboardSource.logFullscreen, /from "@\/lib\/console-urls"/);
+  assert.match(dashboardSource.logFullscreen, /awfPath\(/);
+  assert.doesNotMatch(dashboardSource.logFullscreen, /["'`]\/api\/awf/);
 });
 
 test("extractPrNumberFromHref regex is forge-neutral (GitHub + Bitbucket)", () => {
@@ -3138,7 +3169,10 @@ test("extractPrNumberFromHref returns null for non-PR URLs and edge cases", () =
 });
 
 test("formatPrLinkLabel in logs view passes pr_number", () => {
-  assert.match(dashboardSource.logs, /formatPrLinkLabel\(workspace\.pr_url,\s*workspace\.pr_number\)/);
+  assert.match(
+    dashboardSource.logFullscreen,
+    /formatPrLinkLabel\(workspace\.pr_url,\s*workspace\.pr_number\)/,
+  );
 });
 
 test("formatPrLinkLabel in detail view passes pr_number", () => {
