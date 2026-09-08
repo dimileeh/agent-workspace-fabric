@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { fallbackLlmUsage } from "@/lib/format";
 import {
   resolveWorkspaceLogStreamAccess,
@@ -13,6 +13,7 @@ import {
   type LogEntry,
   mergeEvent,
   parseFrame,
+  streamAuthProbeDelayMs,
   trimLogEntries,
 } from "@/components/console-dashboard-shared";
 
@@ -31,7 +32,9 @@ type UseWorkspaceLiveStreamArgs = {
   workspaceDetailAuthDenied: boolean;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
+  workspaceStreamAuthDeniedRef: MutableRefObject<boolean>;
   noteWorkspaceStreamAuthorizationDenied: () => void;
+  noteWorkspaceStreamAuthorizationRecovered: () => void;
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
@@ -57,7 +60,9 @@ export function useWorkspaceLiveStream({
   workspaceDetailAuthDenied,
   workspaceDetailAuthDeniedRef,
   setWorkspaceDetailAuthDenied,
+  workspaceStreamAuthDeniedRef,
   noteWorkspaceStreamAuthorizationDenied,
+  noteWorkspaceStreamAuthorizationRecovered,
   eventFeedAuthDeniedRef,
   setStreamState,
   setDetail,
@@ -65,6 +70,38 @@ export function useWorkspaceLiveStream({
   setStreamOffsets,
   setError,
 }: UseWorkspaceLiveStreamArgs): void {
+  // Bumped when a delayed /stream probe is due. Zero means the route latch
+  // still holds EventSource closed; a non-zero nonce is the one later probe.
+  const [streamProbeNonce, setStreamProbeNonce] = useState(0);
+  const streamProbeTimerRef = useRef<number | null>(null);
+
+  const clearStreamAuthProbe = () => {
+    if (streamProbeTimerRef.current !== null) {
+      window.clearTimeout(streamProbeTimerRef.current);
+      streamProbeTimerRef.current = null;
+    }
+  };
+
+  const scheduleStreamAuthProbe = () => {
+    if (streamProbeTimerRef.current !== null) {
+      return;
+    }
+    streamProbeTimerRef.current = window.setTimeout(() => {
+      streamProbeTimerRef.current = null;
+      if (!workspaceStreamAuthDeniedRef.current) {
+        return;
+      }
+      setStreamProbeNonce((current) => current + 1);
+    }, streamAuthProbeDelayMs);
+  };
+
+  useEffect(() => {
+    return () => {
+      clearStreamAuthProbe();
+      setStreamProbeNonce(0);
+    };
+  }, [selectedId]);
+
   useEffect(() => {
     // Listing, tail, or base-detail 401/403 while workspace_stream stays
     // advertised must close /stream, not only drop frames after they arrive.
@@ -72,8 +109,21 @@ export function useWorkspaceLiveStream({
     // the EventSource down. Tail and base-detail denial are separate: a later
     // listing 200 must not reopen /stream, and a snapshot must not write
     // revoked workspace metadata back until a successful detail GET recovers.
-    if (!selectedId || logListingAuthDenied || logTailAuthDenied || workspaceDetailAuthDenied) {
+    // A route-scoped /stream 401/403 is different: GET must not recover it,
+    // but a later probe may open and clear that latch after it connects.
+    if (!selectedId || logListingAuthDenied || logTailAuthDenied) {
       setStreamState("idle");
+      return;
+    }
+    const probingDeniedStream =
+      workspaceDetailAuthDenied &&
+      workspaceStreamAuthDeniedRef.current &&
+      streamProbeNonce > 0;
+    if (workspaceDetailAuthDenied && !probingDeniedStream) {
+      setStreamState("idle");
+      if (workspaceStreamAuthDeniedRef.current) {
+        scheduleStreamAuthProbe();
+      }
       return;
     }
     const { allowStream, allowStreamLogs } = resolveWorkspaceLogStreamAccess(capabilities);
@@ -101,14 +151,31 @@ export function useWorkspaceLiveStream({
       logListingAuthDeniedRef.current ||
       logTailAuthDeniedRef.current;
 
+    const acceptStreamProbe = () => {
+      if (!workspaceStreamAuthDeniedRef.current) {
+        return;
+      }
+      // The probe connected. Clear the route latch so a later detail GET may
+      // refresh, but leave the revoke watermark covering in-flight GETs.
+      noteWorkspaceStreamAuthorizationRecovered();
+      workspaceDetailAuthDeniedRef.current = false;
+      setWorkspaceDetailAuthDenied(false);
+      setStreamProbeNonce(0);
+      setError(null);
+    };
+
     const applyStreamAuthorizationDenial = (message: string) => {
       // Route-level /stream 401/403 is authorization revocation, not an outage.
       // Raise the detail revoke watermark before close() so an in-flight or
       // later authorized /workspaces/{id} GET cannot clear this latch, restore
       // the revoked snapshot, and reopen EventSource on the next poll.
+      // Hold the probe closed until the delayed retry; do not reconnect here.
       noteWorkspaceStreamAuthorizationDenied();
+      clearStreamAuthProbe();
+      setStreamProbeNonce(0);
       workspaceDetailAuthDeniedRef.current = true;
       setWorkspaceDetailAuthDenied(true);
+      scheduleStreamAuthProbe();
       setStreamState("idle");
       setError(message);
       setLogEntries([]);
@@ -132,13 +199,31 @@ export function useWorkspaceLiveStream({
       if (
         epoch !== authorizedFeedEpochRef.current ||
         selectedIdRef.current !== selectedId ||
-        streamAuthDenied()
+        logListingAuthDeniedRef.current ||
+        logTailAuthDeniedRef.current
       ) {
+        return;
+      }
+      // Base-detail denial without a stream-route probe must still drop
+      // frames. During a probe the route latch is held until this connection
+      // proves authorized, so that latch alone must not discard the handshake.
+      if (workspaceDetailAuthDeniedRef.current && !workspaceStreamAuthDeniedRef.current) {
         return;
       }
       const frame = parseFrame(message.data);
       if (!frame) {
         return;
+      }
+      if (frame.type === "error" || frame.type === "closed") {
+        if (streamAuthorizationDenied(frame)) {
+          applyStreamAuthorizationDenial(
+            frame.type === "error" ? frame.message : "Workspace stream authorization denied.",
+          );
+          source.close();
+          return;
+        }
+      } else if (workspaceStreamAuthDeniedRef.current) {
+        acceptStreamProbe();
       }
       if (frame.type === "connected" || frame.type === "heartbeat") {
         setStreamState("live");
@@ -233,15 +318,6 @@ export function useWorkspaceLiveStream({
         });
         return;
       }
-      if (frame.type === "error" || frame.type === "closed") {
-        if (streamAuthorizationDenied(frame)) {
-          applyStreamAuthorizationDenial(
-            frame.type === "error" ? frame.message : "Workspace stream authorization denied.",
-          );
-          source.close();
-          return;
-        }
-      }
       if (frame.type === "error") {
         terminalError = true;
         setStreamState("error");
@@ -259,6 +335,15 @@ export function useWorkspaceLiveStream({
     source.onerror = () => {
       // close() from an authorization denial fires error; do not flip the
       // cleared inspector back to connecting while the latch is held.
+      // A probe that dies without an authorized frame must wait for the
+      // delayed retry rather than letting EventSource reconnect immediately.
+      if (workspaceStreamAuthDeniedRef.current) {
+        setStreamState("idle");
+        source.close();
+        setStreamProbeNonce(0);
+        scheduleStreamAuthProbe();
+        return;
+      }
       if (streamAuthDenied()) {
         setStreamState("idle");
         return;
@@ -281,8 +366,11 @@ export function useWorkspaceLiveStream({
     logTailAuthDeniedRef,
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
+    workspaceStreamAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
     noteWorkspaceStreamAuthorizationDenied,
+    noteWorkspaceStreamAuthorizationRecovered,
+    streamProbeNonce,
     eventFeedAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,

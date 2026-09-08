@@ -47,6 +47,12 @@ const parsedPollMs = Number.parseInt(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS
 export const pollMs = Number.isFinite(parsedPollMs) && Number.isInteger(parsedPollMs) && parsedPollMs > 0
   ? Math.max(MIN_POLL_MS, parsedPollMs)
   : DEFAULT_POLL_MS;
+// A /stream 401/403 must not reconnect on every detail or listing poll — that
+// thrash treated a still-denied route as recovered. Wait past a couple of
+// polls so a later probe can clear the route latch after a successful
+// connection, without a selection change and without restoring revoked caches
+// from GET or listing success.
+export const streamAuthProbeDelayMs = pollMs * 4;
 export const maxLogChars = 180_000;
 export const mergeQueueLimit = 20;
 

@@ -47,6 +47,7 @@ logStreamActivityFor,
 parseFrame,
 pollMs,
 readLogTailEntry,
+streamAuthProbeDelayMs,
 type LogTailReadResult,
 scrollLogOutputToTail,
 toggleStream,
@@ -422,9 +423,12 @@ export function WorkspaceLogColumn({
   // Route-scoped /stream 401/403 while listing and tail stay reachable.
   // Listing or tail 200 must not clear this latch or restore column caches:
   // the stream route can stay denied while those reads remain authorized.
-  // The column remounts (and may retry) when the operator reopens it.
+  // A later /stream probe may clear the latch after it connects. The column
+  // remounts (and may retry) when the operator reopens it.
   const streamAuthDeniedRef = useRef(false);
   const [streamAuthDenied, setStreamAuthDenied] = useState(false);
+  const [streamProbeNonce, setStreamProbeNonce] = useState(0);
+  const streamProbeTimerRef = useRef<number | null>(null);
   const tailDeniedStreamIdsRef = useRef<Set<string>>(new Set());
   // Streams whose last selected-tail read failed with network/5xx. The
   // 401/403 denial set stays empty, and a static or closed listing does not
@@ -1065,14 +1069,48 @@ export function WorkspaceLogColumn({
     void loadSelectedTails();
   }, [loadSelectedTails, tailSignal]);
 
+  const clearStreamAuthProbe = () => {
+    if (streamProbeTimerRef.current !== null) {
+      window.clearTimeout(streamProbeTimerRef.current);
+      streamProbeTimerRef.current = null;
+    }
+  };
+
+  const scheduleStreamAuthProbe = () => {
+    if (streamProbeTimerRef.current !== null) {
+      return;
+    }
+    streamProbeTimerRef.current = window.setTimeout(() => {
+      streamProbeTimerRef.current = null;
+      if (!streamAuthDeniedRef.current) {
+        return;
+      }
+      setStreamProbeNonce((current) => current + 1);
+    }, streamAuthProbeDelayMs);
+  };
+
+  useEffect(() => {
+    return () => {
+      clearStreamAuthProbe();
+      setStreamProbeNonce(0);
+    };
+  }, [workspace.workspace_id]);
+
   useEffect(() => {
     // Listing is required to pick/surface streams; do not open /stream or buffer
     // frames when workspace_logs is unsupported (even if workspace_stream is up).
-    // Listing, tail, or route-level /stream 401/403 while workspace_logs stays
-    // advertised must close /stream. Tail and stream denial are separate: a
-    // later listing 200 must not reopen either, or restore revoked log text.
-    if (!allowStreamLogs || listingDenied || tailAuthDenied || streamAuthDenied) {
+    // Listing or tail 401/403 while workspace_logs stays advertised must close
+    // /stream. Those denials are separate from a route-level /stream 401/403:
+    // a later listing or tail 200 must not reopen or restore revoked log text.
+    // The stream-route latch can clear only after a later /stream probe connects.
+    if (!allowStreamLogs || listingDenied || tailAuthDenied) {
       setStreamState("idle");
+      return;
+    }
+    const probingDeniedStream = streamAuthDenied && streamProbeNonce > 0;
+    if (streamAuthDenied && !probingDeniedStream) {
+      setStreamState("idle");
+      scheduleStreamAuthProbe();
       return;
     }
     // workspace_stream may stay up while workspace_events is unsupported or
@@ -1091,17 +1129,32 @@ export function WorkspaceLogColumn({
     let closedByServer = false;
     let terminalError = false;
 
+    const acceptStreamProbe = () => {
+      if (!streamAuthDeniedRef.current) {
+        return;
+      }
+      // The probe connected. Keep previously cleared caches empty until new
+      // frames arrive; listing or tail 200 must still not restore them.
+      streamAuthDeniedRef.current = false;
+      setStreamAuthDenied(false);
+      setStreamProbeNonce(0);
+      setError(null);
+    };
+
     const applyStreamAuthorizationDenial = (message: string) => {
       // Route-level /stream 401/403 is authorization revocation, not an outage.
       // Clear column caches and hold this EventSource closed. Listing and tail
       // can stay authorized; those 200s must not restore revoked log text or
-      // reopen /stream until the operator reopens the column.
+      // reopen /stream. A later probe may clear this latch after it connects.
       if (!streamAuthDeniedRef.current) {
         columnEpochRef.current += 1;
       }
       const denialEpoch = columnEpochRef.current;
+      clearStreamAuthProbe();
+      setStreamProbeNonce(0);
       streamAuthDeniedRef.current = true;
       setStreamAuthDenied(true);
+      scheduleStreamAuthProbe();
       setStreamState("idle");
       setError(message);
       const denialStillOwnsColumn = () =>
@@ -1114,13 +1167,32 @@ export function WorkspaceLogColumn({
       if (
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
-        streamAuthDeniedRef.current ||
         openedEpoch !== columnEpochRef.current
       ) {
         return;
       }
       const frame = parseFrame(message.data);
       if (!frame) {
+        return;
+      }
+      if (frame.type === "error" || frame.type === "closed") {
+        if (isFullscreenStreamAuthDenied(frame)) {
+          applyStreamAuthorizationDenial(
+            frame.type === "error" ? frame.message : "Workspace stream authorization denied.",
+          );
+          source.close();
+          if (eventSourceRef.current === source) {
+            eventSourceRef.current = null;
+          }
+          return;
+        }
+      } else if (streamAuthDeniedRef.current) {
+        acceptStreamProbe();
+      }
+      if (
+        streamAuthDeniedRef.current ||
+        openedEpoch !== columnEpochRef.current
+      ) {
         return;
       }
       if (frame.type === "connected" || frame.type === "heartbeat" || frame.type === "snapshot") {
@@ -1191,18 +1263,6 @@ export function WorkspaceLogColumn({
         });
         return;
       }
-      if (frame.type === "error" || frame.type === "closed") {
-        if (isFullscreenStreamAuthDenied(frame)) {
-          applyStreamAuthorizationDenial(
-            frame.type === "error" ? frame.message : "Workspace stream authorization denied.",
-          );
-          source.close();
-          if (eventSourceRef.current === source) {
-            eventSourceRef.current = null;
-          }
-          return;
-        }
-      }
       if (frame.type === "error") {
         terminalError = true;
         setStreamState("error");
@@ -1220,6 +1280,18 @@ export function WorkspaceLogColumn({
     source.onerror = () => {
       // close() from an authorization denial fires error; do not flip the
       // cleared column back to connecting or surface a live stream.
+      // A probe that dies without an authorized frame waits for the delayed
+      // retry instead of letting EventSource reconnect immediately.
+      if (streamAuthDeniedRef.current && openedEpoch === columnEpochRef.current) {
+        setStreamState("idle");
+        source.close();
+        if (eventSourceRef.current === source) {
+          eventSourceRef.current = null;
+        }
+        setStreamProbeNonce(0);
+        scheduleStreamAuthProbe();
+        return;
+      }
       if (
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
@@ -1242,7 +1314,7 @@ export function WorkspaceLogColumn({
         eventSourceRef.current = null;
       }
     };
-  }, [allowStreamLogs, capabilities, listingDenied, streamAuthDenied, tailAuthDenied, workspace.workspace_id]);
+  }, [allowStreamLogs, capabilities, listingDenied, streamAuthDenied, streamProbeNonce, tailAuthDenied, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">

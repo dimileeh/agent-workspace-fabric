@@ -1861,8 +1861,13 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.liveStream,
-    /if \(!selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied \|\| workspaceDetailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected inspector /stream to close when listing, tail, or base-detail authorization is denied, not only drop frames after they arrive",
+    /if \(!selectedId \|\| logListingAuthDenied \|\| logTailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected inspector /stream to close when listing or tail authorization is denied, not only drop frames after they arrive",
+  );
+  assert.match(
+    dashboardSource.liveStream,
+    /if \(workspaceDetailAuthDenied && !probingDeniedStream\) \{\s*setStreamState\("idle"\);\s*if \(workspaceStreamAuthDeniedRef\.current\) \{\s*scheduleStreamAuthProbe\(\);\s*\}\s*return;\s*\}/,
+    "Expected base-detail denial to hold /stream closed, and a stream-route latch to schedule a later probe instead of reconnecting immediately",
   );
   assert.match(
     dashboardSource.liveStream,
@@ -1907,8 +1912,8 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   );
   const noteStart = detail.indexOf("const noteWorkspaceStreamAuthorizationDenied = ");
   assert.ok(noteStart > 0, "Expected noteWorkspaceStreamAuthorizationDenied");
-  const noteEnd = detail.indexOf("return { loadWorkspace, noteWorkspaceStreamAuthorizationDenied };", noteStart);
-  assert.ok(noteEnd > noteStart, "Expected stream-denial helper to be returned to the dashboard");
+  const noteEnd = detail.indexOf("const noteWorkspaceStreamAuthorizationRecovered = ", noteStart);
+  assert.ok(noteEnd > noteStart, "Expected stream-denial helper before the probe-recovery helper");
   const noteBody = detail.slice(noteStart, noteEnd);
   assert.match(
     noteBody,
@@ -1961,6 +1966,30 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
     detail,
     /workspaceStreamAuthDeniedRef\.current = false;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;/,
     "Expected a selection change to drop stream-denial ownership with the visit watermarks",
+  );
+  const probeRecoveredStart = detail.indexOf("const noteWorkspaceStreamAuthorizationRecovered = ");
+  assert.ok(probeRecoveredStart > 0, "Expected noteWorkspaceStreamAuthorizationRecovered");
+  const probeRecoveredEnd = detail.indexOf("return {", probeRecoveredStart);
+  const recoveredFn = detail.slice(probeRecoveredStart, probeRecoveredEnd);
+  assert.match(
+    recoveredFn,
+    /workspaceStreamAuthDeniedRef\.current = false;/,
+    "Expected a successful stream probe to clear the route-specific latch",
+  );
+  assert.equal(
+    recoveredFn.includes("revokedWorkspaceDetailGenerationRef.current = 0"),
+    false,
+    "Expected stream-probe recovery not to lower the revoke watermark that still blocks in-flight GETs",
+  );
+  assert.match(
+    liveStream,
+    /noteWorkspaceStreamAuthorizationRecovered\(\);[\s\S]*?workspaceDetailAuthDeniedRef\.current = false;/,
+    "Expected a successful inspector stream probe to clear the route latch before writing frames",
+  );
+  assert.match(
+    liveStream,
+    /streamAuthProbeDelayMs/,
+    "Expected the inspector stream probe to wait rather than reopen on the next detail poll",
   );
 });
 
@@ -2149,8 +2178,23 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
   assert.match(
     logs,
-    /if \(!allowStreamLogs \|\| listingDenied \|\| tailAuthDenied \|\| streamAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing, tail, or route-level stream has not been auth-denied",
+    /if \(!allowStreamLogs \|\| listingDenied \|\| tailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing or tail has not been auth-denied",
+  );
+  assert.match(
+    logs,
+    /if \(streamAuthDenied && !probingDeniedStream\) \{\s*setStreamState\("idle"\);\s*scheduleStreamAuthProbe\(\);\s*return;\s*\}/,
+    "Expected a fullscreen stream-route latch to schedule a later probe instead of reconnecting on listing or tail success",
+  );
+  assert.match(
+    logs,
+    /streamAuthDeniedRef\.current = false;[\s\S]*?setStreamAuthDenied\(false\);/,
+    "Expected a successful fullscreen stream probe to clear the route-specific latch",
+  );
+  assert.match(
+    logs,
+    /streamAuthProbeDelayMs/,
+    "Expected the fullscreen stream probe to wait rather than reopen on the next listing poll",
   );
   assert.match(
     logs,

@@ -877,7 +877,12 @@ export function ConsoleDashboard() {
     setFailureSummaryError,
   });
 
-  const { loadWorkspace, noteWorkspaceStreamAuthorizationDenied } = useWorkspaceDetailLoader({
+  const {
+    loadWorkspace,
+    noteWorkspaceStreamAuthorizationDenied,
+    noteWorkspaceStreamAuthorizationRecovered,
+    workspaceStreamAuthDeniedRef,
+  } = useWorkspaceDetailLoader({
     selectedId,
     selectedIdRef,
     capabilities,
@@ -1052,7 +1057,9 @@ export function ConsoleDashboard() {
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
+    workspaceStreamAuthDeniedRef,
     noteWorkspaceStreamAuthorizationDenied,
+    noteWorkspaceStreamAuthorizationRecovered,
     eventFeedAuthDeniedRef,
     setStreamState,
     setDetail,
