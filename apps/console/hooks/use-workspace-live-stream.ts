@@ -31,6 +31,7 @@ type UseWorkspaceLiveStreamArgs = {
   workspaceDetailAuthDenied: boolean;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
+  noteWorkspaceStreamAuthorizationDenied: () => void;
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
@@ -56,6 +57,7 @@ export function useWorkspaceLiveStream({
   workspaceDetailAuthDenied,
   workspaceDetailAuthDeniedRef,
   setWorkspaceDetailAuthDenied,
+  noteWorkspaceStreamAuthorizationDenied,
   eventFeedAuthDeniedRef,
   setStreamState,
   setDetail,
@@ -101,8 +103,10 @@ export function useWorkspaceLiveStream({
 
     const applyStreamAuthorizationDenial = (message: string) => {
       // Route-level /stream 401/403 is authorization revocation, not an outage.
-      // Latch before close() so the follow-up error event cannot reopen the
-      // inspector or leave the previous snapshot, events, and logs visible.
+      // Raise the detail revoke watermark before close() so an in-flight or
+      // later authorized /workspaces/{id} GET cannot clear this latch, restore
+      // the revoked snapshot, and reopen EventSource on the next poll.
+      noteWorkspaceStreamAuthorizationDenied();
       workspaceDetailAuthDeniedRef.current = true;
       setWorkspaceDetailAuthDenied(true);
       setStreamState("idle");
@@ -278,6 +282,7 @@ export function useWorkspaceLiveStream({
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
+    noteWorkspaceStreamAuthorizationDenied,
     eventFeedAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,

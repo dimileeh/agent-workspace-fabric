@@ -1862,6 +1862,67 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
 });
 
+test("stream 401/403 does not recover through a later workspace GET", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gMutN: a /stream
+  // 401/403 latches the inspector but must also raise the detail revoke
+  // watermark. Recovery for that latch is otherwise a successful
+  // /workspaces/{id} GET, so an in-flight or later authorized detail read
+  // clears the denial, restores the revoked snapshot, and reopens EventSource
+  // on every poll.
+  const liveStream = dashboardSource.liveStream;
+  const detail = dashboardSource.detailLoader;
+  const denialStart = liveStream.indexOf("const applyStreamAuthorizationDenial = ");
+  assert.ok(denialStart > 0, "Expected applyStreamAuthorizationDenial");
+  const denialEnd = liveStream.indexOf("const streamAuthorizationDenied = ", denialStart);
+  assert.ok(denialEnd > denialStart, "Expected stream status check after denial helper");
+  const denialBody = liveStream.slice(denialStart, denialEnd);
+  assert.match(
+    denialBody,
+    /noteWorkspaceStreamAuthorizationDenied\(\);[\s\S]*?workspaceDetailAuthDeniedRef\.current = true;/,
+    "Expected stream 401/403 to raise the detail revoke watermark before latching",
+  );
+  assert.match(
+    dashboardSource.dashboard,
+    /useWorkspaceLiveStream\(\{[\s\S]*?noteWorkspaceStreamAuthorizationDenied,/,
+    "Expected the inspector live stream to publish route-level stream denial into the detail loader",
+  );
+  const noteStart = detail.indexOf("const noteWorkspaceStreamAuthorizationDenied = ");
+  assert.ok(noteStart > 0, "Expected noteWorkspaceStreamAuthorizationDenied");
+  const noteEnd = detail.indexOf("return { loadWorkspace, noteWorkspaceStreamAuthorizationDenied };", noteStart);
+  assert.ok(noteEnd > noteStart, "Expected stream-denial helper to be returned to the dashboard");
+  const noteBody = detail.slice(noteStart, noteEnd);
+  assert.match(
+    noteBody,
+    /workspaceStreamAuthDeniedRef\.current = true;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = Math\.max\(\s*revokedWorkspaceDetailGenerationRef\.current,\s*workspaceDetailRequestGenerationRef\.current,\s*\);/,
+    "Expected stream denial to cover every detail request already started",
+  );
+  const recoveredStart = detail.indexOf("const publishWorkspaceDetailRecovered = ");
+  assert.ok(recoveredStart > 0, "Expected publishWorkspaceDetailRecovered");
+  const recoveredEnd = detail.indexOf("const workspaceFromDetailResult = ", recoveredStart);
+  assert.ok(recoveredEnd > recoveredStart, "Expected workspace result helper after recovery helper");
+  const recoveredBody = detail.slice(recoveredStart, recoveredEnd);
+  assert.match(
+    recoveredBody,
+    /workspaceStreamAuthDeniedRef\.current \|\|\s*generation <= revokedWorkspaceDetailGenerationRef\.current/,
+    "Expected a successful workspace GET not to clear a route-scoped stream denial",
+  );
+  const settledStart = detail.indexOf("const applyWorkspaceSuccessIfSettled = ");
+  assert.ok(settledStart > 0, "Expected applyWorkspaceSuccessIfSettled");
+  const settledEnd = detail.indexOf("const applyEventFeedSuccessIfSettled = ", settledStart);
+  assert.ok(settledEnd > settledStart, "Expected event success helper after workspace success helper");
+  const settledBody = detail.slice(settledStart, settledEnd);
+  assert.match(
+    settledBody,
+    /generation <= revokedWorkspaceDetailGenerationRef\.current \|\|[\s\S]*?workspaceStreamAuthDeniedRef\.current/,
+    "Expected an in-flight or later workspace GET not to restore a stream-revoked snapshot",
+  );
+  assert.match(
+    detail,
+    /workspaceStreamAuthDeniedRef\.current = false;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;/,
+    "Expected a selection change to drop stream-denial ownership with the visit watermarks",
+  );
+});
+
 test("inspector listing 401/403 applies after Refresh starts a newer detail load", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkO: a /logs
   // 401/403 that settles after a newer detail load has started must still

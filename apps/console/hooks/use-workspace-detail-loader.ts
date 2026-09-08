@@ -159,6 +159,11 @@ export function useWorkspaceDetailLoader({
   // after this watermark may recover. Re-applying a denial already inside
   // this window must not raise the watermark.
   const revokedWorkspaceDetailGenerationRef = useRef(0);
+  // /stream 401/403 is route-scoped. A later authorized /workspaces/{id} GET
+  // must not clear that latch or restore the revoked snapshot — the GET can
+  // still succeed while the stream route stays denied, and treating it as
+  // recovery reopens EventSource on every poll.
+  const workspaceStreamAuthDeniedRef = useRef(false);
   // Highest detail generation that applied a successful /events GET. An older
   // event-feed 401/403 must not clear events this newer success already owns.
   const appliedEventFeedGenerationRef = useRef(0);
@@ -237,6 +242,9 @@ export function useWorkspaceDetailLoader({
     // take, including the window before that GET begins.
     workspaceDetailVisitGenerationFloorRef.current = ++workspaceDetailRequestGenerationRef.current;
     // Previous visit's denial/success must not cover this inspector visit.
+    // A new visit may retry /stream; the previous route denial must not
+    // keep that retry closed, and must not survive onto the re-opened GET.
+    workspaceStreamAuthDeniedRef.current = false;
     revokedWorkspaceDetailGenerationRef.current = 0;
     appliedWorkspaceDetailGenerationRef.current = 0;
     revokedEventFeedGenerationRef.current = 0;
@@ -295,7 +303,10 @@ export function useWorkspaceDetailLoader({
         // the inspector. Clearing the latch here would reopen /stream for a
         // request that started before that revocation. An older success must
         // not record recovery after a newer one already owns the snapshot.
+        // A /stream 401/403 is not recovered by this GET: the stream route can
+        // stay denied while /workspaces/{id} remains authorized.
         if (
+          workspaceStreamAuthDeniedRef.current ||
           generation <= revokedWorkspaceDetailGenerationRef.current ||
           generation < appliedWorkspaceDetailGenerationRef.current
         ) {
@@ -635,7 +646,11 @@ export function useWorkspaceDetailLoader({
           selectedIdRef.current !== workspaceId ||
           visit !== workspaceDetailVisitRef.current ||
           generation <= workspaceDetailVisitGenerationFloorRef.current ||
-          generation <= revokedWorkspaceDetailGenerationRef.current
+          generation <= revokedWorkspaceDetailGenerationRef.current ||
+          // Route-scoped /stream denial owns the inspector. This GET must not
+          // restore the revoked snapshot or clear the latch that closed
+          // EventSource.
+          workspaceStreamAuthDeniedRef.current
         ) {
           return;
         }
@@ -1878,5 +1893,16 @@ export function useWorkspaceDetailLoader({
     selectedId ?? "",
   );
 
-  return { loadWorkspace };
+  const noteWorkspaceStreamAuthorizationDenied = useCallback(() => {
+    // Cover every detail request already started so an in-flight GET cannot
+    // clear the latch. A poll that starts afterward has a newer generation;
+    // workspaceStreamAuthDeniedRef keeps that GET from reopening /stream.
+    workspaceStreamAuthDeniedRef.current = true;
+    revokedWorkspaceDetailGenerationRef.current = Math.max(
+      revokedWorkspaceDetailGenerationRef.current,
+      workspaceDetailRequestGenerationRef.current,
+    );
+  }, []);
+
+  return { loadWorkspace, noteWorkspaceStreamAuthorizationDenied };
 }
