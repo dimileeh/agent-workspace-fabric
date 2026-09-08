@@ -1,3 +1,4 @@
+import re
 import tomllib
 from pathlib import Path
 
@@ -78,6 +79,43 @@ def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
     assert "/apps/console/hooks" in sdist_includes
     assert "/docker/compose/.env" in set(sdist.get("exclude", []))
     assert sdist.get("force-include", {}).get("apps/console/hooks") == "apps/console/hooks"
+
+
+_HOOK_IMPORT = re.compile(r"""from ["']@/hooks/([^"']+)["']""")
+
+
+def test_console_hook_imports_are_packaged_for_bootstrap_build() -> None:
+    """Installed console builds must resolve the ``@/hooks`` modules the dashboard imports.
+
+    Wheel and sdist package only the console directories listed in the Hatch
+    manifests. A new hooks module imported by the dashboard is missing from the
+    bootstrap context unless that directory is force-included and copied before
+    the control-plane image runs ``uv sync``.
+    """
+    dashboard = REPO_ROOT / "apps/console/components/console-dashboard.tsx"
+    modules = _HOOK_IMPORT.findall(dashboard.read_text(encoding="utf-8"))
+    assert modules, "console-dashboard.tsx must import packaged @/hooks modules"
+
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+    wheel_force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    sdist = data["tool"]["hatch"]["build"]["targets"]["sdist"]
+    dockerfile_prefix = (
+        (REPO_ROOT / "docker" / "control-plane.Dockerfile")
+        .read_text(encoding="utf-8")
+        .split("RUN uv sync --frozen --extra dev", maxsplit=1)[0]
+    )
+
+    assert wheel_force_include["apps/console/hooks"] == "awf/bootstrap_assets/apps/console/hooks"
+    assert "/apps/console/hooks" in sdist.get("include", [])
+    assert sdist.get("force-include", {}).get("apps/console/hooks") == "apps/console/hooks"
+    assert "COPY apps/console/hooks ./apps/console/hooks" in dockerfile_prefix
+
+    for module in modules:
+        source = REPO_ROOT / "apps/console/hooks" / f"{module}.ts"
+        assert source.is_file(), module
+        assert source.relative_to(REPO_ROOT).as_posix().startswith("apps/console/hooks/")
 
 
 def test_sdist_includes_installer_release_metadata() -> None:
