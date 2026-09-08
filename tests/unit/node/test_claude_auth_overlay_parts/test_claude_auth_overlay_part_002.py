@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -1463,13 +1464,18 @@ def test_signature_tracks_metadata_preserving_edit(tmp_path: Path) -> None:
     before = _host_claude_signature(host_home)
 
     settings = host_home / ".claude" / "settings.json"
-    mtime_ns = settings.stat().st_mtime_ns
+    original_stat = settings.stat()
+    mtime_ns = original_stat.st_mtime_ns
     new_content = '{"theme": "DARK"}\n'  # same length as the seeded '{"theme": "dark"}\n'
     assert len(new_content) == len('{"theme": "dark"}\n')
+    # Fast Linux writes can share a coarse filesystem clock tick. This case
+    # specifically exercises a ctime change with size and mtime preserved.
+    time.sleep(0.02)
     settings.write_text(new_content)
     # Restore the original mtime; size and mode are unchanged, so only ``ctime`` moves.
     os.utime(settings, ns=(mtime_ns, mtime_ns))
     assert settings.stat().st_mtime_ns == mtime_ns
+    assert settings.stat().st_ctime_ns != original_stat.st_ctime_ns
 
     after = _host_claude_signature(host_home)
     # Size+mtime+mode alone would be unchanged; ``ctime`` flags the hidden rewrite.
