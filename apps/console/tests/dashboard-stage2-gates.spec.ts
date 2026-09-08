@@ -1903,7 +1903,14 @@ test("older settled workspace and events success does not overwrite a newer snap
   await expect(inspector.getByText(freshEvent, { exact: true })).toHaveCount(1);
   await expect(inspector.getByText(staleEvent, { exact: true })).toHaveCount(0);
 
+  // The newer refresh's hanging runtime later settles, so Promise.all merges
+  // that generation. That merge must not treat a declined recovery as a
+  // payload write, and the older success must still be absent.
   await fulfillJson(hangingRuntime[0], runtimeBody);
+  await expect(inspector.getByText(freshBranch, { exact: true })).toBeVisible();
+  await expect(inspector.getByText(staleBranch, { exact: true })).toHaveCount(0);
+  await expect(inspector.getByText(freshEvent, { exact: true })).toHaveCount(1);
+  await expect(inspector.getByText(staleEvent, { exact: true })).toHaveCount(0);
 });
 
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD0PE: leaving and

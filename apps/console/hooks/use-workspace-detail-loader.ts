@@ -672,23 +672,41 @@ export function useWorkspaceDetailLoader({
         if (hasExternalDrop) {
           const dropped = gatedDetailDropsSince(stampsForExternalDrop, gatedGeneration);
           if (allGatedDetailFeedsDropped(dropped)) {
-            if (workspace.ok) {
-              publishWorkspaceDetailRecovered();
+            // publish* owns the applied* watermark. A declined recovery must
+            // not write this payload — an older 200 that lost to a newer
+            // success would replace the inspector, and a hanging sibling
+            // means nothing later repairs that snapshot.
+            const workspaceRecoveryOwned = workspace.ok
+              ? publishWorkspaceDetailRecovered()
+              : false;
+            if (workspaceRecoveryOwned) {
               if (!workspaceDetailAuthDeniedRef.current) {
                 setError(null);
               }
             } else if (feedAuthDenied(workspace)) {
               setError(workspace.message);
               publishWorkspaceDetailAuthDenied(true);
-            } else if (!workspaceDetailAuthDeniedRef.current) {
+            } else if (!workspace.ok && !workspaceDetailAuthDeniedRef.current) {
               // A transient failure is not recovery. Keep the latched denial
               // banner so a newer 5xx cannot hide the revocation.
               setError(workspace.message);
             }
-            setDetail((current) => ({
-              ...current,
-              workspace: workspaceFromDetailResult(current.workspace, workspace),
-            }));
+            if (workspace.ok && !workspaceRecoveryOwned) {
+              return;
+            }
+            setDetail((current) => {
+              if (
+                workspace.ok &&
+                (generation < appliedWorkspaceDetailGenerationRef.current ||
+                  workspaceDetailAuthDeniedRef.current)
+              ) {
+                return current;
+              }
+              return {
+                ...current,
+                workspace: workspaceFromDetailResult(current.workspace, workspace),
+              };
+            });
             return;
           }
           if (dropped.runtime) {
@@ -717,12 +735,18 @@ export function useWorkspaceDetailLoader({
       // the error update so the denial banner does not outlive the read.
       // Latch before setDetail so a snapshot frame cannot restore workspace
       // between this apply and the live-stream effect cleanup.
+      // Same ownership rule as the immediate 200 handlers: record applied*
+      // only when this generation still owns the snapshot, and only then
+      // write the payload. A declined publish must not replace a newer
+      // inspector when this merge runs after that newer success.
+      let workspaceRecoveryOwned = false;
       if (workspace.ok) {
-        publishWorkspaceDetailRecovered();
+        workspaceRecoveryOwned = publishWorkspaceDetailRecovered();
       } else if (feedAuthDenied(workspace)) {
         publishWorkspaceDetailAuthDenied(true);
       }
 
+      let eventRecoveryOwned = false;
       if (allowEvents && events != null && feedAuthDenied(events)) {
         // Event-feed 401/403 while workspace_events stays advertised is auth
         // revocation for the Events panel, not a transient outage. Apply even
@@ -733,7 +757,7 @@ export function useWorkspaceDetailLoader({
         // Clear the latch before setDetail so this successful /events read is
         // what restores the panel. A denied generation stays latched and must
         // not write items back.
-        publishEventFeedRecovered();
+        eventRecoveryOwned = publishEventFeedRecovered();
       }
 
       // This setter is the workspace-detail slot only. Do not clear overview
@@ -765,7 +789,14 @@ export function useWorkspaceDetailLoader({
       // can apply after this request passed the generation check, and must not
       // lose to this write or to a newer hang/5xx.
       setDetail((current) => {
-        const nextWorkspace = workspaceFromDetailResult(current.workspace, workspace);
+        const staleWorkspaceSuccess =
+          workspace.ok &&
+          (!workspaceRecoveryOwned ||
+            generation < appliedWorkspaceDetailGenerationRef.current ||
+            workspaceDetailAuthDeniedRef.current);
+        const nextWorkspace = staleWorkspaceSuccess
+          ? current.workspace
+          : workspaceFromDetailResult(current.workspace, workspace);
 
         const nextRuntime = !allowRuntime
           ? null
@@ -775,13 +806,21 @@ export function useWorkspaceDetailLoader({
               ? null
               : current.runtime;
 
+        const staleEventSuccess =
+          events != null &&
+          events.ok &&
+          !eventFeedAuthDeniedRef.current &&
+          !feedAuthDenied(events) &&
+          (!eventRecoveryOwned || generation < appliedEventFeedGenerationRef.current);
         const nextEvents = !allowEvents
           ? []
-          : events != null && events.ok && !eventFeedAuthDeniedRef.current
-            ? events.data.items
-            : feedAuthDenied(events) || eventFeedAuthDeniedRef.current
-              ? []
-              : current.events;
+          : staleEventSuccess
+            ? current.events
+            : events != null && events.ok && !eventFeedAuthDeniedRef.current
+              ? events.data.items
+              : feedAuthDenied(events) || eventFeedAuthDeniedRef.current
+                ? []
+                : current.events;
 
         const nextOperations = !allowOperations
           ? []
