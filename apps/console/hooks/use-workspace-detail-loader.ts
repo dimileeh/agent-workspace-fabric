@@ -174,6 +174,17 @@ export function useWorkspaceDetailLoader({
   // An older outage must not replace a newer one after a sibling hang delayed
   // that older request past the newer warning.
   const appliedDetailFailureGenerationRef = useRef(0);
+  // Settled network/5xx messages still owning the inspector banner, by feed.
+  // Success handlers clear the recovered feed immediately: Promise.all never
+  // reaches setError(null) when a sibling of the newer load hangs.
+  const settledDetailOutagesRef = useRef<
+    Partial<
+      Record<
+        "workspace" | "runtime" | "events" | "operations" | "logs",
+        { generation: number; message: string }
+      >
+    >
+  >({});
   // Highest detail generation that applied a successful /logs listing. An
   // older 401/403 must not clear caches this newer success already owns.
   // A newer request merely starting is not recovery.
@@ -216,6 +227,7 @@ export function useWorkspaceDetailLoader({
     revokedOperationsGenerationRef.current = 0;
     appliedOperationsGenerationRef.current = 0;
     appliedDetailFailureGenerationRef.current = 0;
+    settledDetailOutagesRef.current = {};
     revokedLogListingGenerationRef.current = 0;
     appliedLogListingGenerationRef.current = 0;
   }, [selectedId]);
@@ -509,6 +521,7 @@ export function useWorkspaceDetailLoader({
           return;
         }
         applyAcceptedLogListing(result.data.items);
+        releaseRecoveredDetailOutage("logs");
       };
 
       const publishEventFeedRecovered = (): boolean => {
@@ -623,6 +636,7 @@ export function useWorkspaceDetailLoader({
             workspace: workspaceFromDetailResult(current.workspace, result),
           };
         });
+        releaseRecoveredDetailOutage("workspace");
       };
 
       const applyEventFeedSuccessIfSettled = (
@@ -655,6 +669,7 @@ export function useWorkspaceDetailLoader({
           }
           return { ...current, events: result.data.items };
         });
+        releaseRecoveredDetailOutage("events");
       };
 
       const optionalFeedContextCurrent = () =>
@@ -803,6 +818,45 @@ export function useWorkspaceDetailLoader({
         );
       };
 
+      const appliedSuccessGeneration = (
+        feed: "workspace" | "runtime" | "events" | "operations" | "logs",
+      ) => {
+        if (feed === "workspace") {
+          return appliedWorkspaceDetailGenerationRef.current;
+        }
+        if (feed === "runtime") {
+          return appliedRuntimeGenerationRef.current;
+        }
+        if (feed === "events") {
+          return appliedEventFeedGenerationRef.current;
+        }
+        if (feed === "operations") {
+          return appliedOperationsGenerationRef.current;
+        }
+        return appliedLogListingGenerationRef.current;
+      };
+
+      const authorizationOwnsDetailBanner = () =>
+        workspaceDetailAuthDeniedRef.current ||
+        eventFeedAuthDeniedRef.current ||
+        logListingAuthDeniedRef.current ||
+        runtimeAuthDenialHeld() ||
+        operationsAuthDenialHeld();
+
+      // Cross-generation view of outstanding outages. The local map only sees
+      // this load; a newer success must drop a feed the older load already stamped.
+      const preferredOutstandingOutage = () => {
+        const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
+        for (const feed of order) {
+          const record = settledDetailOutagesRef.current[feed];
+          if (record == null || record.generation < appliedSuccessGeneration(feed)) {
+            continue;
+          }
+          return record.message;
+        }
+        return null;
+      };
+
       const preferredSettledOutage = () => {
         const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
         for (const feed of order) {
@@ -830,17 +884,27 @@ export function useWorkspaceDetailLoader({
         if (generation < appliedDetailFailureGenerationRef.current) {
           return;
         }
+        const existing = settledDetailOutagesRef.current[feed];
+        if (existing != null && generation < existing.generation) {
+          return;
+        }
         settledTransientOutages[feed] = result.message;
+        settledDetailOutagesRef.current[feed] = { generation, message: result.message };
         appliedDetailFailureGenerationRef.current = Math.max(
           appliedDetailFailureGenerationRef.current,
           generation,
         );
         setError((current) => {
           // A newer outage can own the banner before this update flushes.
-          if (generation < appliedDetailFailureGenerationRef.current) {
+          // A newer success of this feed already recovered the snapshot; do
+          // not restamp the warning that success cleared.
+          if (
+            generation < appliedDetailFailureGenerationRef.current ||
+            generation < appliedSuccessGeneration(feed)
+          ) {
             return current;
           }
-          return preferredSettledOutage() ?? current;
+          return preferredOutstandingOutage() ?? preferredSettledOutage() ?? current;
         });
       };
 
@@ -856,6 +920,32 @@ export function useWorkspaceDetailLoader({
         }
         appliedRef.current = Math.max(appliedRef.current, generation);
         return true;
+      };
+
+      // A recovered feed must drop its outage as soon as the 200 owns the
+      // snapshot. Promise.all never reaches setError(null) if a sibling of
+      // this load hangs, so the matching success handler is the only writer
+      // that can clear a banner an older generation already stamped.
+      const releaseRecoveredDetailOutage = (
+        feed: "workspace" | "runtime" | "events" | "operations" | "logs",
+      ) => {
+        const recorded = settledDetailOutagesRef.current[feed];
+        if (recorded != null && recorded.generation <= generation) {
+          delete settledDetailOutagesRef.current[feed];
+        }
+        if (authorizationOwnsDetailBanner()) {
+          return;
+        }
+        setError((current) => {
+          if (authorizationOwnsDetailBanner()) {
+            return current;
+          }
+          // A newer outage can own the banner before this update flushes.
+          if (generation < appliedDetailFailureGenerationRef.current) {
+            return current;
+          }
+          return preferredOutstandingOutage();
+        });
       };
 
       const applyOptionalFeedAuthDenial = (
@@ -956,6 +1046,7 @@ export function useWorkspaceDetailLoader({
           }
           return { ...current, runtime: result.data };
         });
+        releaseRecoveredDetailOutage("runtime");
       };
 
       const applyOperationsSuccessIfSettled = (
@@ -984,6 +1075,7 @@ export function useWorkspaceDetailLoader({
           }
           return { ...current, operations: result.data.items };
         });
+        releaseRecoveredDetailOutage("operations");
       };
 
       const workspacePromise = apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`));

@@ -701,6 +701,36 @@ test("detail settlement handlers record transient feed outages without waiting f
   }
 });
 
+test("recovered detail success clears a settled outage without waiting for siblings", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gG7PJ: a newer feed
+  // 200 updates the snapshot, but Promise.all never reaches setError(null) if
+  // a sibling hangs. The matching success handler must drop that outage.
+  const dashboard = dashboardSource.detailLoader;
+  assert.match(
+    dashboard,
+    /const releaseRecoveredDetailOutage = /,
+    "Expected a settlement-time helper that clears a recovered feed outage",
+  );
+  const successHandlers = [
+    ["applyWorkspaceSuccessIfSettled", "workspace"],
+    ["applyEventFeedSuccessIfSettled", "events"],
+    ["applyLogListingSuccessIfSettled", "logs"],
+    ["applyRuntimeSuccessIfSettled", "runtime"],
+    ["applyOperationsSuccessIfSettled", "operations"],
+  ];
+  for (const [handler, feed] of successHandlers) {
+    const start = dashboard.indexOf(`const ${handler} = `);
+    assert.ok(start > 0, `Expected ${handler}`);
+    const end = dashboard.indexOf("\n      const ", start + 1);
+    const body = dashboard.slice(start, end);
+    assert.match(
+      body,
+      new RegExp(`releaseRecoveredDetailOutage\\("${feed}"\\)`),
+      `Expected ${handler} to clear a recovered ${feed} outage`,
+    );
+  }
+});
+
 test("loadLogTail retains last-successful tails on transient refresh failure", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAHZU: automatic
   // selected-stream tail refresh must not wipe prior tails/live entries on
