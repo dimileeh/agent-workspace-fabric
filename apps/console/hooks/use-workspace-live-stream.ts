@@ -147,12 +147,28 @@ export function useWorkspaceLiveStream({
     );
     let closedByServer = false;
     let terminalError = false;
+    let probeRejected = false;
 
     const streamAuthDenied = () =>
       workspaceDetailAuthDeniedRef.current ||
       workspaceBaseDetailAuthDeniedRef.current ||
       logListingAuthDeniedRef.current ||
       logTailAuthDeniedRef.current;
+
+    const rejectFailedStreamProbe = () => {
+      // A delayed probe that receives a non-auth error or closed frame has
+      // not proved the route recovered. close() does not fire onerror, so
+      // reschedule here: leaving the route latch and a nonzero nonce holds
+      // the inspector blank after the outage and authorization recover.
+      if (!workspaceStreamAuthDeniedRef.current) {
+        return;
+      }
+      probeRejected = true;
+      setStreamState("idle");
+      source.close();
+      setStreamProbeNonce(0);
+      scheduleStreamAuthProbe();
+    };
 
     const acceptStreamProbe = () => {
       if (!workspaceStreamAuthDeniedRef.current) {
@@ -233,8 +249,17 @@ export function useWorkspaceLiveStream({
           source.close();
           return;
         }
-      } else if (workspaceStreamAuthDeniedRef.current) {
+        if (workspaceStreamAuthDeniedRef.current) {
+          rejectFailedStreamProbe();
+          return;
+        }
+      } else if (workspaceStreamAuthDeniedRef.current && !probeRejected) {
         acceptStreamProbe();
+      }
+      if (probeRejected || workspaceStreamAuthDeniedRef.current) {
+        // The handshake has not proved /stream. Drop this frame so a later
+        // heartbeat or snapshot cannot accept the probe or restore metadata.
+        return;
       }
       if (workspaceBaseDetailAuthDeniedRef.current) {
         // The handshake proved /stream, not /workspaces/{id}. Drop this frame
@@ -361,10 +386,7 @@ export function useWorkspaceLiveStream({
       // A probe that dies without an authorized frame must wait for the
       // delayed retry rather than letting EventSource reconnect immediately.
       if (workspaceStreamAuthDeniedRef.current) {
-        setStreamState("idle");
-        source.close();
-        setStreamProbeNonce(0);
-        scheduleStreamAuthProbe();
+        rejectFailedStreamProbe();
         return;
       }
       if (streamAuthDenied()) {

@@ -5817,6 +5817,192 @@ test("fullscreen logs restore listing outage after stream probe recovery", async
   await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gPpu9: a delayed inspector
+// /stream probe that receives a non-auth error or closed frame must close that
+// EventSource and schedule another probe. Programmatic close() does not fire
+// onerror, so leaving the route latch and a nonzero nonce blanks the inspector
+// after authorization recovers. A later heartbeat or log on the failed
+// connection must not accept the probe.
+for (const terminal of ["error", "closed"] as const) {
+test(`inspector reschedules a stream probe after a non-auth ${terminal} frame`, async ({ page }) => {
+  test.setTimeout(90_000);
+  let streamPhase: "deny" | "probe-fail" | "recover" = "deny";
+  let streamOpens = 0;
+  const heldStream = createDeferred();
+  const workspaceId = `ws_inspector_stream_probe_${terminal}`;
+  const liveSecret = "inspector-probe-log-after-terminal-frame-must-not-appear";
+  const denialMessage = "Workspace stream authorization denied.";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      await fulfillJson(route, logRead("active.stdout", "authorized-inspector-before-stream-probe"));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      if (streamPhase === "deny") {
+        await heldStream.promise;
+        const frames: AwfStreamFrame[] = [
+          { type: "connected", workspace_id: workspaceId },
+          {
+            type: "error",
+            error_code: "FORBIDDEN",
+            message: denialMessage,
+            status: 403,
+          },
+        ];
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+        });
+        return;
+      }
+      if (streamPhase === "recover") {
+        const frames: AwfStreamFrame[] = [
+          { type: "connected", workspace_id: workspaceId },
+          { type: "heartbeat", workspace_id: workspaceId },
+        ];
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+        });
+        return;
+      }
+      const terminalFrame: AwfStreamFrame =
+        terminal === "error"
+          ? {
+              type: "error",
+              error_code: "UPSTREAM_UNAVAILABLE",
+              message: "stream probe failed without authorization",
+              status: 503,
+            }
+          : {
+              type: "closed",
+              workspace_id: workspaceId,
+              code: 1000,
+              reason: "stream probe closed without authorization",
+            };
+      const frames: AwfStreamFrame[] = [
+        terminalFrame,
+        { type: "heartbeat", workspace_id: workspaceId },
+        {
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          data: liveSecret,
+          offset: 0,
+          next_offset: liveSecret.length,
+          occurred_at: now,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
+  await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThan(0);
+  const opensBeforeDenial = streamOpens;
+
+  heldStream.resolve();
+  await expect(inspector.getByText(denialMessage)).toBeVisible({ timeout: 12_000 });
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  await expect.poll(() => streamOpens).toBe(opensBeforeDenial);
+
+  streamPhase = "probe-fail";
+  const opensAtDenial = streamOpens;
+  await expect.poll(() => streamOpens, { timeout: 30_000 }).toBeGreaterThan(opensAtDenial);
+  await expect(inspector.getByText(denialMessage)).toBeVisible();
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await expect(page.getByText("Stream: live")).toHaveCount(0);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+
+  const opensAfterFailedProbe = streamOpens;
+  await expect.poll(() => streamOpens, { timeout: 4_000 }).toBe(opensAfterFailedProbe);
+  streamPhase = "recover";
+  await expect.poll(() => streamOpens, { timeout: 30_000 }).toBeGreaterThan(opensAfterFailedProbe);
+  await expect(inspector.getByText(denialMessage)).toHaveCount(0, { timeout: 12_000 });
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await expect(page.getByText("Stream: live")).toBeVisible();
+});
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gOqTv: a delayed /stream
 // probe that receives a non-auth error or closed frame must close that
 // EventSource. A later heartbeat or log on the same connection must not

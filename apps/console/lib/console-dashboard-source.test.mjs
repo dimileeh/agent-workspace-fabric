@@ -2025,6 +2025,21 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
     /streamAuthProbeDelayMs/,
     "Expected the inspector stream probe to wait rather than reopen on the next detail poll",
   );
+  assert.match(
+    liveStream,
+    /const rejectFailedStreamProbe = \(\) => \{[\s\S]*?if \(!workspaceStreamAuthDeniedRef\.current\) \{\s*return;\s*\}[\s\S]*?setStreamProbeNonce\(0\);\s*scheduleStreamAuthProbe\(\);/,
+    "Expected a failed inspector stream probe to reset the nonce and schedule another probe",
+  );
+  assert.match(
+    liveStream,
+    /if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(streamAuthorizationDenied\(frame\)\) \{[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*rejectFailedStreamProbe\(\);\s*return;\s*\}/,
+    "Expected a non-auth error or closed frame during an inspector stream probe to reject the probe instead of leaving the latch latched",
+  );
+  assert.match(
+    liveStream,
+    /source\.onerror = \(\) => \{[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*rejectFailedStreamProbe\(\);\s*return;\s*\}/,
+    "Expected a probe that dies without an authorized frame to use the same delayed retry as a non-auth error frame",
+  );
 });
 
 test("base-detail latch records overlapping GET denials while stream denial holds", () => {
