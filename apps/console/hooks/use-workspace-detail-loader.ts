@@ -77,7 +77,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * authoritative unless a newer successful GET has already applied — a newer
  * request merely starting, hanging, or failing transiently is not recovery.
  * The same is true of a /logs 401/403: both are applied as soon as that
- * request settles, even if a sibling runtime/events/operations request hangs.
+ * request settles, even if a sibling runtime/events/operations request hangs,
+ * and even if Refresh has only started a newer detail load. A newer listing
+ * 200 that has already applied is recovery; a newer request that is still
+ * in flight, hanging, or failing transiently is not.
  * A base-detail denial also drops cached listing and tail text immediately;
  * a later sibling 200 must not write that log data back while the latch is
  * held. apiGet has no timeout, so waiting for every sibling would leave the
@@ -156,6 +159,15 @@ export function useWorkspaceDetailLoader({
   // request that starts after this watermark may recover.
   const revokedRuntimeGenerationRef = useRef(0);
   const revokedOperationsGenerationRef = useRef(0);
+  // Highest detail generation that applied a successful /logs listing. An
+  // older 401/403 must not clear caches this newer success already owns.
+  // A newer request merely starting is not recovery.
+  const appliedLogListingGenerationRef = useRef(0);
+  // Highest detail generation covered by an applied /logs 401/403. An older
+  // or in-flight 200 must not restore cleared listing or leave /stream open.
+  // A request that starts after this watermark may recover. Re-applying a
+  // denial already inside this window must not raise the watermark.
+  const revokedLogListingGenerationRef = useRef(0);
   // Selection visit that owns the watermarks above. A late 401/403 may still
   // see the same selectedId after the operator leaves and re-opens that
   // workspace; it must not stamp the new visit's in-flight GET.
@@ -188,6 +200,8 @@ export function useWorkspaceDetailLoader({
     appliedRuntimeGenerationRef.current = 0;
     revokedOperationsGenerationRef.current = 0;
     appliedOperationsGenerationRef.current = 0;
+    revokedLogListingGenerationRef.current = 0;
+    appliedLogListingGenerationRef.current = 0;
   }, [selectedId]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -345,16 +359,70 @@ export function useWorkspaceDetailLoader({
         }
       };
 
+      const publishLogListingRecovered = (): boolean => {
+        // A denial that landed after this 200 passed the generation check owns
+        // the listing. An older success must not record recovery after a newer
+        // one already owns the inspector logs.
+        if (
+          generation <= revokedLogListingGenerationRef.current ||
+          generation < appliedLogListingGenerationRef.current
+        ) {
+          return false;
+        }
+        appliedLogListingGenerationRef.current = Math.max(
+          appliedLogListingGenerationRef.current,
+          generation,
+        );
+        logListingAuthDeniedRef.current = false;
+        setLogListingAuthDenied(false);
+        return true;
+      };
+
+      const applyAcceptedLogListing = (items: WorkspaceLogStream[]) => {
+        logStreamActivityRef.current = updateLogStreamActivity(
+          logStreamActivityRef.current,
+          workspaceId,
+          items,
+        );
+        setSelectedStreams((current) => pickWorkspaceLogStreams(items, current));
+        setDetail((current) => {
+          if (
+            logListingAuthDeniedRef.current ||
+            generation < appliedLogListingGenerationRef.current
+          ) {
+            return current;
+          }
+          return { ...current, streams: items };
+        });
+      };
+
+      // Apply even if a newer detail load has started but has not yet applied
+      // a listing 200. generation !== current treats that start as recovery
+      // and leaves cached log text and the inspector EventSource open while
+      // the newer /logs request hangs.
       const applyLogListingAuthDenial = (result: ApiEnvelope<ListEnvelope<WorkspaceLogStream>>) => {
         if (!allowLogs || !feedAuthDenied(result) || result.ok) {
           return;
         }
         if (
           epoch !== authorizedFeedEpochRef.current ||
-          generation !== workspaceDetailRequestGenerationRef.current ||
           selectedIdRef.current !== workspaceId ||
           visit !== workspaceDetailVisitRef.current ||
           generation <= workspaceDetailVisitGenerationFloorRef.current
+        ) {
+          return;
+        }
+        // A newer listing 200 already recovered access. A late 401/403 from
+        // an older load must not clear caches or close /stream.
+        if (generation < appliedLogListingGenerationRef.current) {
+          return;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark here would reject a recovery that started
+        // after the original denial.
+        if (
+          logListingAuthDeniedRef.current &&
+          generation <= revokedLogListingGenerationRef.current
         ) {
           return;
         }
@@ -363,6 +431,17 @@ export function useWorkspaceDetailLoader({
         if (generation <= revokedWorkspaceDetailGenerationRef.current && !denialApplied) {
           return;
         }
+        // Cover every detail request that has already started so an in-flight
+        // refresh cannot restore cleared listing or leave /stream open. A
+        // request that starts after this watermark may recover. A later 401
+        // must not raise that watermark to the current generation.
+        const denialWatermark = logListingAuthDeniedRef.current
+          ? generation
+          : workspaceDetailRequestGenerationRef.current;
+        revokedLogListingGenerationRef.current = Math.max(
+          revokedLogListingGenerationRef.current,
+          denialWatermark,
+        );
         if (!logListingAuthDeniedRef.current) {
           noteGatedDetailDrop(
             gatedDetailDroppedFeedsRef,
@@ -388,6 +467,32 @@ export function useWorkspaceDetailLoader({
         if (!workspaceDetailAuthDeniedRef.current) {
           setError(result.message);
         }
+      };
+
+      const applyLogListingSuccessIfSettled = (
+        result: ApiEnvelope<ListEnvelope<WorkspaceLogStream>>,
+      ) => {
+        if (!result.ok || !allowLogs) {
+          return;
+        }
+        // Only the latest load may apply a listing 200. A superseded success
+        // must not restore caches after Refresh has started a newer request.
+        // Settlement records that success immediately so an older 401/403
+        // cannot treat a hanging sibling as recovered access.
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          generation !== workspaceDetailRequestGenerationRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current ||
+          generation <= workspaceDetailVisitGenerationFloorRef.current ||
+          workspaceDetailAuthDeniedRef.current
+        ) {
+          return;
+        }
+        if (!publishLogListingRecovered()) {
+          return;
+        }
+        applyAcceptedLogListing(result.data.items);
       };
 
       const publishEventFeedRecovered = (): boolean => {
@@ -760,7 +865,12 @@ export function useWorkspaceDetailLoader({
         }
       });
       void streamsPromise.then((result) => {
-        if (result != null) {
+        if (result == null) {
+          return;
+        }
+        if (result.ok) {
+          applyLogListingSuccessIfSettled(result);
+        } else {
           applyLogListingAuthDenial(result);
         }
       });
@@ -847,13 +957,19 @@ export function useWorkspaceDetailLoader({
               ? publishWorkspaceDetailRecovered()
               : false;
             if (workspaceRecoveryOwned) {
-              if (!workspaceDetailAuthDeniedRef.current) {
+              // A latched listing 401/403 owns this banner. A newer request
+              // that only hangs or fails transiently is not recovery.
+              if (!workspaceDetailAuthDeniedRef.current && !logListingAuthDeniedRef.current) {
                 setError(null);
               }
             } else if (feedAuthDenied(workspace)) {
               setError(workspace.message);
               publishWorkspaceDetailAuthDenied(true);
-            } else if (!workspace.ok && !workspaceDetailAuthDeniedRef.current) {
+            } else if (
+              !workspace.ok &&
+              !workspaceDetailAuthDeniedRef.current &&
+              !logListingAuthDeniedRef.current
+            ) {
               // A transient failure is not recovery. Keep the latched denial
               // banner so a newer 5xx cannot hide the revocation.
               setError(workspace.message);
@@ -872,6 +988,7 @@ export function useWorkspaceDetailLoader({
               return {
                 ...current,
                 workspace: workspaceFromDetailResult(current.workspace, workspace),
+                streams: logListingAuthDeniedRef.current ? [] : current.streams,
               };
             });
             return;
@@ -947,25 +1064,47 @@ export function useWorkspaceDetailLoader({
         eventRecoveryOwned = publishEventFeedRecovered();
       }
 
+      // Listing 401/403 while workspace_logs stays advertised is auth
+      // revocation for this column, not a transient outage. Apply before
+      // setDetail so an in-flight listing 200 cannot restore selection or
+      // leave /stream open. A newer listing 200 records recovery the same
+      // way, so an older denial cannot clear caches that success owns.
+      let listingRecoveryOwned = false;
+      if (allowLogs && streams != null && feedAuthDenied(streams)) {
+        applyLogListingAuthDenial(streams);
+      } else if (allowLogs && streams?.ok && !workspaceDetailAuthDeniedRef.current) {
+        listingRecoveryOwned = publishLogListingRecovered();
+        if (listingRecoveryOwned) {
+          applyAcceptedLogListing(streams.data.items);
+        }
+      }
+
       // This setter is the workspace-detail slot only. Do not clear overview
       // errors here — an independent overview success must not clear this
       // warning either (CONSOLE_BACKEND_CONTRACT).
       if (firstFailure && !firstFailure.ok) {
         // A latched base-detail 401/403 owns this banner. A newer request that
         // only hangs or fails transiently is not recovery and must not replace
-        // the revocation reason. A latched event-feed 401/403 has the same
-        // precedence over an earlier-listed sibling outage (runtime is checked
-        // before events, so firstFailure would otherwise hide the revocation).
+        // the revocation reason. A latched event-feed or listing 401/403 has
+        // the same precedence over an earlier-listed sibling outage.
         const eventDenialOwnsBanner =
           eventFeedAuthDeniedRef.current &&
           !(events != null && feedAuthDenied(events) && firstFailure === events);
+        const listingDenialOwnsBanner =
+          logListingAuthDeniedRef.current &&
+          !(streams != null && feedAuthDenied(streams) && firstFailure === streams);
         if (
           (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) &&
-          !eventDenialOwnsBanner
+          !eventDenialOwnsBanner &&
+          !listingDenialOwnsBanner
         ) {
           setError(firstFailure.message);
         }
-      } else if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
+      } else if (
+        !workspaceDetailAuthDeniedRef.current &&
+        !eventFeedAuthDeniedRef.current &&
+        !logListingAuthDeniedRef.current
+      ) {
         setError(null);
       }
 
@@ -1031,9 +1170,9 @@ export function useWorkspaceDetailLoader({
 
         const nextStreams = !allowLogs
           ? []
-          : workspaceDetailAuthDeniedRef.current
+          : workspaceDetailAuthDeniedRef.current || logListingAuthDeniedRef.current
             ? []
-            : streams != null && streams.ok
+            : streams != null && streams.ok && listingRecoveryOwned
               ? streams.data.items
               : feedAuthDenied(streams)
                 ? []
@@ -1047,25 +1186,6 @@ export function useWorkspaceDetailLoader({
           streams: nextStreams,
         };
       });
-
-      if (allowLogs && streams != null && feedAuthDenied(streams)) {
-        // Listing 401/403 while workspace_logs stays advertised is auth
-        // revocation for this column, not a transient outage. Apply even if
-        // the settlement handler already latched it, so a sibling 200 cannot
-        // restore selection or leave /stream open (CONSOLE_BACKEND_CONTRACT).
-        applyLogListingAuthDenial(streams);
-      } else if (streams?.ok && !workspaceDetailAuthDeniedRef.current) {
-        logListingAuthDeniedRef.current = false;
-        setLogListingAuthDenied(false);
-        logStreamActivityRef.current = updateLogStreamActivity(
-          logStreamActivityRef.current,
-          workspaceId,
-          streams.data.items,
-        );
-        setSelectedStreams((current) => {
-          return pickWorkspaceLogStreams(streams.data.items, current);
-        });
-      }
     } finally {
       // A superseded explicit refresh, selection change, or post-mutation load
       // must not clear the latch while that newer request is still in flight.

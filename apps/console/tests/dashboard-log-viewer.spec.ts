@@ -1468,6 +1468,214 @@ test(`inspector logs apply listing denial without waiting for a hanging sibling 
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkO: a /logs 401/403
+// that settles after Refresh has started a newer detail load must still clear
+// inspector caches and close EventSource. A newer request merely starting or
+// later returning an in-flight 200 is not recovery; only a listing 200 that
+// has already applied, or a later request that starts after the denial, is.
+for (const deniedStatus of [401, 403] as const) {
+test(`inspector logs apply superseded listing denial while a newer refresh hangs (${deniedStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  let listingMode: "ok" | "hold-deny" | "hang" | "recover" = "ok";
+  let streamOpens = 0;
+  const heldDeny: Array<() => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  const heldStream = createDeferred();
+  const workspaceId = "ws_inspector_log_superseded_listing_denial";
+  const authorizedMarker = "authorized-inspector-log-before-superseded-listing-denial";
+  const inflightMarker = "in-flight-listing-must-not-restore";
+  const recoveryMarker = "listing-recovered-after-superseded-denial";
+  const liveSecret = "inspector-live-frame-after-superseded-listing-denial-must-not-appear";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z", active: 1, failed: 0 });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/runtime` ||
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}`
+    ) {
+      if (path.endsWith("/events") || path.endsWith("/operations")) {
+        await fulfillJson(route, listEnvelope([]));
+        return;
+      }
+      if (path.endsWith("/runtime")) {
+        await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+        return;
+      }
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "hold-deny") {
+        await new Promise<void>((resolve) => {
+          heldDeny.push(async () => {
+            await fulfillJson(
+              route,
+              {
+                detail: {
+                  error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+                  message: "log listing permission revoked",
+                },
+              },
+              deniedStatus,
+            );
+            resolve();
+          });
+        });
+        return;
+      }
+      if (listingMode === "hang") {
+        await new Promise<void>((resolve) => {
+          hanging.push(async () => {
+            await fulfillJson(route, listEnvelope([logStream("stale-inflight.stdout", 64, 1, now)]));
+            resolve();
+          });
+        });
+        return;
+      }
+      if (listingMode === "recover") {
+        await fulfillJson(route, listEnvelope([logStream("recovered.stdout", 64, 1, now)]));
+        return;
+      }
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/stale-inflight.stdout`) {
+      await fulfillJson(route, logRead("stale-inflight.stdout", inflightMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/recovered.stdout`) {
+      await fulfillJson(route, logRead("recovered.stdout", recoveryMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      await heldStream.promise;
+      const frames: AwfStreamFrame[] = [
+        { type: "connected", workspace_id: workspaceId },
+        {
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          offset: 0,
+          next_offset: liveSecret.length,
+          data: liveSecret,
+          occurred_at: now,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
+  const output = inspector.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+  await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
+
+  listingMode = "hold-deny";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => heldDeny.length, { timeout: 10_000 }).toBe(1);
+
+  // A second matching /logs is not delivered while the first handler waits.
+  // Click in-page so loadWorkspace advances generation before we release the
+  // older 401/403. Playwright's click can return before that handler runs
+  // while a route is held, which would treat the later listing as recovery.
+  listingMode = "hang";
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button: HTMLButtonElement) => {
+    button.click();
+  });
+
+  await heldDeny[0]();
+  await expect(inspector.getByText(/log listing permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  await expect(inspector.getByText("No log streams recorded.")).toBeVisible();
+  await expect(output).toContainText("No log data loaded.");
+  await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(inspector.getByRole("checkbox", { name: "active.stdout" })).toHaveCount(0);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  const opensAtDenial = streamOpens;
+
+  await expect.poll(() => hanging.length, { timeout: 10_000 }).toBe(1);
+  await hanging[0]();
+  await page.waitForTimeout(750);
+  await expect(inspector.getByText(/log listing permission revoked/i)).toBeVisible();
+  await expect(inspector.getByText(inflightMarker)).toHaveCount(0);
+  await expect(inspector.getByRole("checkbox", { name: "stale-inflight.stdout" })).toHaveCount(0);
+  await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(output).toContainText("No log data loaded.");
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  expect(streamOpens).toBe(opensAtDenial);
+
+  heldStream.resolve();
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await page.waitForTimeout(1_000);
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  expect(streamOpens).toBe(opensAtDenial);
+
+  listingMode = "recover";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect(output).toContainText(recoveryMarker, { timeout: 12_000 });
+  await expect(inspector.getByText(/log listing permission revoked/i)).toHaveCount(0);
+  await expect(inspector.getByText(authorizedMarker)).toHaveCount(0);
+  await expect(inspector.getByText(inflightMarker)).toHaveCount(0);
+  await expect.poll(() => streamOpens, { timeout: 10_000 }).toBeGreaterThan(opensAtDenial);
+});
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD08-: a /workspaces/{id}
 // 401/403 must also drop cached inspector log text without waiting for a
 // sibling runtime/events/operations request. Closing EventSource alone leaves
