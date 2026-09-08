@@ -1752,23 +1752,67 @@ export function useWorkspaceDetailLoader({
         logs: appliedLogListingGenerationRef.current,
       };
       const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
-      let highest = 0;
-      let message: string | null = null;
+      const remainingOutageEligible = (
+        feed: (typeof order)[number],
+        record: { generation: number; message: string },
+      ) => {
+        if (record.generation < appliedGeneration[feed]) {
+          return false;
+        }
+        // Same fences as preferredOutstandingOutage. A withdrawn feed is
+        // deleted above; a leftover record at or below its release watermark
+        // must not outrank a still-advertised newer failure.
+        if (
+          feed === "runtime" &&
+          record.generation <= runtimeDenialReleasedThroughRef.current
+        ) {
+          return false;
+        }
+        if (
+          feed === "operations" &&
+          record.generation <= operationsDenialReleasedThroughRef.current
+        ) {
+          return false;
+        }
+        if (
+          feed === "events" &&
+          record.generation <= eventsOutageReleasedThroughRef.current
+        ) {
+          return false;
+        }
+        return true;
+      };
+      // Two-pass, matching preferredOutstandingOutage: discover the newest
+      // eligible generation, then take that generation's first feed message.
+      // Pairing message with the first eligible feed hides a newer logs
+      // outage behind an older workspace warning after this withdrawal,
+      // including when workspace recovery hangs.
+      let highest = -1;
       for (const feed of order) {
         const record = settledDetailOutagesRef.current[feed];
-        if (record == null || record.generation < appliedGeneration[feed]) {
+        if (record == null || !remainingOutageEligible(feed, record)) {
           continue;
         }
-        // Newest generation owns the republished banner. Feed order only
-        // breaks ties, matching preferredOutstandingOutage. Taking the first
-        // eligible message hides a newer logs outage behind an older workspace
-        // warning after this withdrawal, including when workspace recovery hangs.
         if (record.generation > highest) {
           highest = record.generation;
-          message = record.message;
         }
       }
-      const remaining = { highest, message };
+      let message: string | null = null;
+      if (highest >= 0) {
+        for (const feed of order) {
+          const record = settledDetailOutagesRef.current[feed];
+          if (
+            record == null ||
+            record.generation !== highest ||
+            !remainingOutageEligible(feed, record)
+          ) {
+            continue;
+          }
+          message = record.message;
+          break;
+        }
+      }
+      const remaining = { highest: Math.max(highest, 0), message };
       // A withdrawn 5xx must not keep the failure watermark above a still-
       // advertised sibling that settles later. Leave a newer advertised
       // warning's watermark alone.

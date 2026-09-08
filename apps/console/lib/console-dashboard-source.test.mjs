@@ -2519,6 +2519,16 @@ test("withdrawn runtime or operations outage yields the inspector banner", () =>
   );
   assert.match(
     releaseBody,
+    /let highest = -1;[\s\S]*?if \(record\.generation > highest\) \{\s*highest = record\.generation;\s*\}[\s\S]*?record\.generation !== highest[\s\S]*?message = record\.message;/,
+    "Expected withdrawal to republish the message of the newest remaining generation, not the first eligible feed",
+  );
+  assert.doesNotMatch(
+    releaseBody,
+    /if \(message == null\)/,
+    "Expected withdrawal not to keep the first eligible feed message while tracking a newer generation",
+  );
+  assert.match(
+    releaseBody,
     /\(withdrawnDenialHeld \|\|\s*releasedRuntimeOutage \|\|\s*releasedOperationsOutage \|\|\s*releasedEventsOutage\) &&\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current &&\s*!runtimeStillHeld &&\s*!operationsStillHeld/,
     "Expected withdrawal to replace the banner only when the withdrawn 401 or 5xx owned it and no other denial remains",
   );
