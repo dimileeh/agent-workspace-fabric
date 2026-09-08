@@ -2151,6 +2151,262 @@ test("older runtime and operations denial does not clear a newer recovered snaps
   await expect(inspector.getByText("No operations recorded.")).toHaveCount(0);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gFmlJ: a later recovery
+// 401/403 must not raise the runtime/operations watermark to the latest started
+// generation, or an overlapping Refresh that began after the original denial
+// stays cleared until another load starts.
+test("later runtime and operations 401 does not block a newer in-flight refresh", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let detailPhase: "bootstrap" | "first-deny" | "hold-recovery-deny" | "hold-newer-success" =
+    "bootstrap";
+  const recoveryRuntime: Route[] = [];
+  const recoveryOperations: Route[] = [];
+  const newerRuntime: Route[] = [];
+  const newerOperations: Route[] = [];
+  const workspaceId = "ws_optional_denial_overlap";
+  const initialRuntime = "initial-overlap-runtime-project";
+  const recoveredRuntime = "recovered-overlap-runtime-project";
+  const initialOperation = "initial-overlap-operation-reason";
+  const recoveredOperation = "recovered-overlap-operation-reason";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Later optional denial must not block a newer refresh",
+    repo_url: "https://github.com/example/optional-denial-overlap",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "A newer refresh must apply after a recovery request itself 401s",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  const runtimeBody = (composeProject: string) => ({
+    workspace_id: workspaceId,
+    compose_project_name: composeProject,
+    stack_state: "running",
+    services: [],
+    app_endpoints: [],
+    logs_available: true,
+    control_available: true,
+    reason: null,
+  });
+  const operationBody = (reason: string) => ({
+    items: [
+      {
+        id: `op-${reason}`,
+        workspace_id: workspaceId,
+        type: "execute",
+        status: "running",
+        error_code: null,
+        error_message: null,
+        payload: null,
+        result: null,
+        idempotency_key: null,
+        created_at: "2026-09-06T17:00:00Z",
+        started_at: "2026-09-06T17:00:00Z",
+        finished_at: null,
+        owner: "worker",
+        source: "awf",
+        action: null,
+        pr_number: null,
+        pr_url: null,
+        source_head_sha: null,
+        source_base_sha: null,
+        reason,
+        reason_code: null,
+        failure_code: null,
+        failure_message: null,
+        log_stream_refs: {},
+        log_stream_ids: [],
+      },
+    ],
+    next_cursor: null,
+    has_more: false,
+  });
+  const denied = (message: string) => ({
+    detail: { error_code: "UNAUTHORIZED", message },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}` ||
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/runtime` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations`
+    ) {
+      await route.fallback();
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.route(`**/api/awf/workspaces/${workspaceId}**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 2 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (detailPhase === "first-deny") {
+        await fulfillJson(route, denied("runtime permission revoked"), 401);
+        return;
+      }
+      if (detailPhase === "hold-recovery-deny") {
+        recoveryRuntime.push(route);
+        return;
+      }
+      if (detailPhase === "hold-newer-success") {
+        newerRuntime.push(route);
+        return;
+      }
+      await fulfillJson(route, runtimeBody(initialRuntime));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      if (detailPhase === "first-deny") {
+        await fulfillJson(route, denied("operations permission revoked"), 401);
+        return;
+      }
+      if (detailPhase === "hold-recovery-deny") {
+        recoveryOperations.push(route);
+        return;
+      }
+      if (detailPhase === "hold-newer-success") {
+        newerOperations.push(route);
+        return;
+      }
+      await fulfillJson(route, operationBody(initialOperation));
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByText(initialRuntime, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText(initialOperation, { exact: true })).toBeVisible();
+
+  detailPhase = "first-deny";
+  await page.locator("header").getByRole("button", { name: "Refresh" }).click({ force: true });
+  await expect(inspector.getByText("runtime permission revoked")).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText("Runtime snapshot unavailable.")).toBeVisible();
+  await expect(inspector.getByText("No operations recorded.")).toBeVisible();
+  await expect(inspector.getByText(initialRuntime, { exact: true })).toHaveCount(0);
+
+  detailPhase = "hold-recovery-deny";
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await expect.poll(() => recoveryRuntime.length, { timeout: 10_000 }).toBe(1);
+  await expect.poll(() => recoveryOperations.length, { timeout: 10_000 }).toBe(1);
+
+  detailPhase = "hold-newer-success";
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await expect.poll(() => newerRuntime.length, { timeout: 10_000 }).toBe(1);
+  await expect.poll(() => newerOperations.length, { timeout: 10_000 }).toBe(1);
+
+  await fulfillJson(recoveryRuntime[0], denied("runtime permission still revoked"), 401);
+  await fulfillJson(recoveryOperations[0], denied("operations permission still revoked"), 401);
+  // Operations settles after runtime, so its denial owns the banner. Either
+  // message proves this recovery 401 applied before the newer refresh is released.
+  await expect(inspector.getByText("operations permission still revoked")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(inspector.getByText(recoveredRuntime, { exact: true })).toHaveCount(0);
+
+  await fulfillJson(newerRuntime[0], runtimeBody(recoveredRuntime));
+  await fulfillJson(newerOperations[0], operationBody(recoveredOperation));
+  await expect(inspector.getByText(recoveredRuntime, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText(recoveredOperation, { exact: true })).toBeVisible();
+  await expect(inspector.getByText("runtime permission still revoked")).toHaveCount(0);
+  await expect(inspector.getByText("runtime permission revoked")).toHaveCount(0);
+  await expect(inspector.getByText("Runtime snapshot unavailable.")).toHaveCount(0);
+  await expect(inspector.getByText("No operations recorded.")).toHaveCount(0);
+});
+
 test("in-flight runtime and operations denial after withdrawal does not stamp a detail error", async ({
   page,
 }) => {

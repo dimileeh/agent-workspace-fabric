@@ -95,7 +95,9 @@ type UseWorkspaceDetailLoaderArgs = {
  * Runtime and operations 401/403 apply on settlement the same way: an older
  * denial must not clear a newer recovered snapshot, and a denial after
  * workspace_runtime / workspace_operations withdrawal must not stamp a detail
- * error no later read of that feed will clear.
+ * error no later read of that feed will clear. A later 401 while that denial
+ * is still in force stamps only that request's generation, so a newer
+ * in-flight refresh that started after the original denial can still apply.
  * Selection changes start a new visit and advance request generation. A late
  * 401/403 from the previous visit must not latch denial or stamp the watermark
  * onto the re-opened workspace's in-flight GET, even when selectedId matches
@@ -717,13 +719,18 @@ export function useWorkspaceDetailLoader({
         if (revokedRef.current > 0 && generation <= revokedRef.current) {
           return;
         }
-        // The first denial covers every detail request that has already
-        // started so an in-flight 200 cannot restore the cleared feed. A
-        // later 401 must not raise that watermark to the current generation.
-        revokedRef.current = Math.max(
-          revokedRef.current,
-          workspaceDetailRequestGenerationRef.current,
-        );
+        // The first denial, and a denial after a successful recovery, covers
+        // every detail request that has already started so an in-flight 200
+        // cannot restore the cleared feed. A later 401 while that denial is
+        // still in force must stamp only this request's generation. Raising
+        // the watermark to the latest started generation would reject a newer
+        // in-flight refresh that started after this recovery request.
+        const denialAlreadyHeld =
+          revokedRef.current > 0 && appliedRef.current <= revokedRef.current;
+        const denialWatermark = denialAlreadyHeld
+          ? generation
+          : workspaceDetailRequestGenerationRef.current;
+        revokedRef.current = Math.max(revokedRef.current, denialWatermark);
         setDetail((current) => {
           if (generation < appliedRef.current) {
             return current;
