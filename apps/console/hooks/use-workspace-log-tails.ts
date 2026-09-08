@@ -253,6 +253,10 @@ export function useWorkspaceLogTails({
   // merely starting is not recovery: an older 401/403 still latches unless a
   // strictly newer success for that stream has already been applied.
   const logTailRequestGenerationRef = useRef<Record<string, number>>({});
+  // Selection visit that owns in-flight tails. A late 401/403 may still see
+  // the same selectedId after w->null->w; it must not revoke the reopened visit.
+  // Same-visit overlap still honors an older 401/403 until a newer success lands.
+  const logTailVisitRef = useRef(0);
   // Highest per-stream generation that applied a successful tail read. An
   // older 401/403 must not clear a snapshot this newer success already owns.
   const appliedLogTailGenerationRef = useRef<Record<string, number>>({});
@@ -320,6 +324,10 @@ export function useWorkspaceLogTails({
     void loadLogTailRef.current(pending.workspaceId, pending.stream, selectedStreamIds);
   }, [logListingAuthDeniedRef, selectedIdRef]);
 
+  useLayoutEffect(() => {
+    logTailVisitRef.current += 1;
+  }, [selectedId]);
+
   useEffect(() => {
     logTailDeniedStreamKeysRef.current.clear();
     logTailInFlightStreamKeysRef.current.clear();
@@ -341,6 +349,7 @@ export function useWorkspaceLogTails({
     async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
       const epoch = authorizedFeedEpochRef.current;
       const gatedGeneration = gatedDetailFeedGenerationRef.current;
+      const visit = logTailVisitRef.current;
       const generationKey = `${workspaceId}:${stream.stream_id}`;
       const generation = (logTailRequestGenerationRef.current[generationKey] ?? 0) + 1;
       logTailRequestGenerationRef.current[generationKey] = generation;
@@ -371,6 +380,13 @@ export function useWorkspaceLogTails({
         const revokedGeneration = revokedLogTailGenerationRef.current[generationKey] ?? 0;
         const superseded = generation !== logTailRequestGenerationRef.current[generationKey];
         const authFailure = !result.ok && isLogTailAuthFailure(result.status);
+        // A selection change starts a new visit. Drop this result even when
+        // selectedId matches the re-opened workspace — the epoch/selection
+        // check below cannot see w->null->w. Same-visit overlap is unchanged.
+        if (visit !== logTailVisitRef.current) {
+          settleInFlight();
+          return;
+        }
         if (
           epoch !== authorizedFeedEpochRef.current ||
           selectedIdRef.current !== workspaceId ||
@@ -661,6 +677,7 @@ export function useWorkspaceLogTails({
       logStreamActivityRef,
       logTailAuthDeniedRef,
       logTailRequestGenerationRef,
+      logTailVisitRef,
       revokedLogTailGenerationRef,
       selectedIdRef,
       setLogEntries,

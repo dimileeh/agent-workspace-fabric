@@ -294,6 +294,16 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
+    /logTailVisitRef\.current \+= 1;/,
+    "Expected a selection change to start a new log-tail visit",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /const visit = logTailVisitRef\.current;[\s\S]*?if \(visit !== logTailVisitRef\.current\) \{\s*settleInFlight\(\);\s*return;\s*\}/,
+    "Expected a previous-visit tail 401/403 to be dropped after w->null->w even when selectedId matches",
+  );
+  assert.match(
+    dashboardSource.logTails,
     /const gatedGenerationAdvanced =\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*settleInFlight\(\);\s*return;\s*\}/,
     "Expected a gated-detail generation bump to discard non-auth tail results without dropping sibling 401/403s",
   );
