@@ -394,6 +394,270 @@ test("workspace detail feed outage keeps last-successful runtime and events", as
   await expect(page.getByText(eventMarker, { exact: true })).toBeVisible();
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMt: a network/5xx on
+// one detail feed must warn as soon as that request settles, even if a sibling
+// hangs. Promise.all never reaches firstFailure, and apiGet has no timeout, so
+// the last-successful snapshot would otherwise stay up without the outage.
+for (const failedFeed of ["runtime", "events", "operations", "logs", "workspace"] as const) {
+  test(`detail ${failedFeed} outage warns without waiting for a hanging sibling`, async ({
+    page,
+  }) => {
+    test.setTimeout(45_000);
+    let detailMode: "ok" | "split" = "ok";
+    const hangingSibling: Array<() => Promise<void>> = [];
+    const workspaceId = `ws_settled_${failedFeed}_outage`;
+    const retained = {
+      branch: "settled-outage-branch-keep",
+      runtime: "awf-ws-settled-outage-runtime",
+      event: "settled-outage-event-keep",
+      operation: "settled-outage-operation-keep",
+      stream: "settled-outage-stream-keep",
+    };
+    const outageMessage = `${failedFeed} outage while sibling hangs`;
+    const hangFeed = failedFeed === "runtime" ? "events" : "runtime";
+    const overviewItem = {
+      workspace_id: workspaceId,
+      title: "Settled detail outage workspace",
+      repo_url: "https://github.com/example/settled-detail-outage",
+      base_branch: "main",
+      branch_name: "overview-branch",
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: "Warn when a detail feed fails before siblings settle",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    };
+    const workspaceBody = {
+      ...overviewItem,
+      id: workspaceId,
+      version: 1,
+      branch_name: retained.branch,
+    };
+    const runtimeBody = {
+      workspace_id: workspaceId,
+      compose_project_name: retained.runtime,
+      stack_state: "running",
+      services: [],
+      app_endpoints: [],
+      logs_available: true,
+      control_available: true,
+      reason: null,
+    };
+    const eventsBody = {
+      items: [
+        {
+          id: "evt_settled_outage",
+          workspace_id: workspaceId,
+          event_type: retained.event,
+          old_state: null,
+          new_state: "running",
+          reason_code: null,
+          payload: null,
+          occurred_at: "2026-09-06T17:00:00Z",
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
+    };
+    const operationsBody = {
+      items: [
+        {
+          id: "op_settled_outage",
+          workspace_id: workspaceId,
+          type: "refresh",
+          status: "succeeded",
+          error_code: null,
+          error_message: null,
+          payload: null,
+          result: null,
+          idempotency_key: null,
+          created_at: "2026-09-06T17:00:00Z",
+          started_at: "2026-09-06T17:00:00Z",
+          finished_at: "2026-09-06T17:00:01Z",
+          owner: null,
+          source: null,
+          action: null,
+          pr_number: null,
+          pr_url: null,
+          source_head_sha: null,
+          source_base_sha: null,
+          reason: retained.operation,
+          reason_code: null,
+          failure_code: null,
+          failure_message: null,
+          log_stream_refs: {},
+          log_stream_ids: [],
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
+    };
+    const logsBody = {
+      items: [
+        {
+          stream_id: retained.stream,
+          source: "agent",
+          name: retained.stream,
+          kind: "stdout",
+          path: "/tmp/settled-outage.log",
+          byte_count: 4,
+          line_count: 1,
+          opened_at: "2026-09-06T17:00:00Z",
+          closed_at: null,
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
+    };
+
+    const feedPath = (feed: typeof failedFeed) => {
+      if (feed === "workspace") {
+        return `/api/awf/workspaces/${workspaceId}`;
+      }
+      return `/api/awf/workspaces/${workspaceId}/${feed}`;
+    };
+    const successBody = (feed: typeof failedFeed) => {
+      if (feed === "workspace") {
+        return workspaceBody;
+      }
+      if (feed === "runtime") {
+        return runtimeBody;
+      }
+      if (feed === "events") {
+        return eventsBody;
+      }
+      if (feed === "operations") {
+        return operationsBody;
+      }
+      return logsBody;
+    };
+    const retainedText = {
+      workspace: retained.branch,
+      runtime: retained.runtime,
+      events: retained.event,
+      operations: retained.operation,
+      logs: retained.stream,
+    }[failedFeed];
+
+    await page.route("**/api/awf/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/awf/health") {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === "/api/awf/console/capabilities") {
+        await fulfillJson(route, localCapabilities());
+        return;
+      }
+      if (path === "/api/awf/console/dashboard-summary") {
+        await fulfillJson(route, localDashboardSummary());
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+        });
+        return;
+      }
+      if (path === "/api/awf/metrics/resources/saturation") {
+        await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+        return;
+      }
+      if (path === "/api/awf/metrics/workspaces/summary") {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === "/api/awf/merge-queue") {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === "/api/awf/metrics/failures/summary") {
+        await fulfillJson(route, {
+          total_failures: 0,
+          since_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      const detailFeeds = ["workspace", "runtime", "events", "operations", "logs"] as const;
+      const matched = detailFeeds.find((feed) => path === feedPath(feed));
+      if (matched) {
+        if (detailMode === "split" && matched === failedFeed) {
+          await fulfillJson(
+            route,
+            { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+            503,
+          );
+          return;
+        }
+        if (detailMode === "split" && matched === hangFeed) {
+          await new Promise<void>((resolve) => {
+            hangingSibling.push(async () => {
+              await fulfillJson(route, successBody(matched));
+              resolve();
+            });
+          });
+          return;
+        }
+        await fulfillJson(route, successBody(matched));
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    try {
+      await page.goto("/");
+      await waitForConsoleReady(page);
+      await page.getByTestId(`workspace-card-${workspaceId}`).click();
+      const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+      await expect(inspector.getByText(retainedText, { exact: true }).first()).toBeVisible({
+        timeout: 10_000,
+      });
+
+      detailMode = "split";
+      await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+      await expect.poll(() => hangingSibling.length, { timeout: 10_000 }).toBe(1);
+
+      // The failed feed has settled; the sibling is still pending. Waiting for
+      // Promise.all would leave the last-successful snapshot looking current.
+      await expect(inspector.getByText(outageMessage)).toBeVisible({ timeout: 15_000 });
+      await expect(inspector.getByText(retainedText, { exact: true }).first()).toBeVisible();
+    } finally {
+      await hangingSibling[0]?.();
+    }
+  });
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAjDt: a later overview
 // success must not clear a retained workspace-detail warning, or the last-good
 // inspector snapshot looks current while the diagnostic feed is still down.

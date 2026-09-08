@@ -81,6 +81,11 @@ type UseWorkspaceDetailLoaderArgs = {
  * and even if Refresh has only started a newer detail load. A newer listing
  * 200 that has already applied is recovery; a newer request that is still
  * in flight, hanging, or failing transiently is not.
+ * Network/5xx failures are recorded the same way: the shared outage warning
+ * is stamped when that request settles, without clearing the last-successful
+ * snapshot. Promise.all never reaches firstFailure while any sibling hangs,
+ * and apiGet has no timeout, so waiting would leave cached diagnostics up
+ * indefinitely without the required warning.
  * A base-detail denial also drops cached listing and tail text immediately;
  * a later sibling 200 must not write that log data back while the latch is
  * held. apiGet has no timeout, so waiting for every sibling would leave the
@@ -161,6 +166,10 @@ export function useWorkspaceDetailLoader({
   // request that starts after this watermark may recover.
   const revokedRuntimeGenerationRef = useRef(0);
   const revokedOperationsGenerationRef = useRef(0);
+  // Highest detail generation that recorded a settled network/5xx warning.
+  // An older outage must not replace a newer one after a sibling hang delayed
+  // that older request past the newer warning.
+  const appliedDetailFailureGenerationRef = useRef(0);
   // Highest detail generation that applied a successful /logs listing. An
   // older 401/403 must not clear caches this newer success already owns.
   // A newer request merely starting is not recovery.
@@ -202,6 +211,7 @@ export function useWorkspaceDetailLoader({
     appliedRuntimeGenerationRef.current = 0;
     revokedOperationsGenerationRef.current = 0;
     appliedOperationsGenerationRef.current = 0;
+    appliedDetailFailureGenerationRef.current = 0;
     revokedLogListingGenerationRef.current = 0;
     appliedLogListingGenerationRef.current = 0;
   }, [selectedId]);
@@ -677,6 +687,139 @@ export function useWorkspaceDetailLoader({
         return feed === "runtime" ? !dropped.runtime : !dropped.operations;
       };
 
+      const externalInspectorDrops = () => {
+        if (gatedGeneration === gatedDetailFeedGenerationRef.current) {
+          return null;
+        }
+        const stampsForExternalDrop =
+          ownListingDropGeneration == null
+            ? gatedDetailDroppedFeedsRef.current
+            : gatedDetailDroppedFeedsRef.current.filter(
+                (stamp) => stamp.generation !== ownListingDropGeneration,
+              );
+        const hasExternalDrop = stampsForExternalDrop.some(
+          (stamp) => stamp.generation > gatedGeneration,
+        );
+        if (!hasExternalDrop) {
+          return null;
+        }
+        return gatedDetailDropsSince(stampsForExternalDrop, gatedGeneration);
+      };
+
+      // This load's settled non-401/403 messages, in firstFailure order.
+      // Overlapping loads keep their own maps; the failure watermark decides
+      // which load owns the shared banner.
+      const settledTransientOutages: {
+        workspace?: string;
+        runtime?: string;
+        events?: string;
+        operations?: string;
+        logs?: string;
+      } = {};
+
+      const detailFeedOutageSuppressed = (
+        feed: "workspace" | "runtime" | "events" | "operations" | "logs",
+      ) => {
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current ||
+          generation <= workspaceDetailVisitGenerationFloorRef.current
+        ) {
+          return true;
+        }
+        // A latched authorization denial owns this banner. A transient
+        // sibling is not recovery and must not replace the revocation reason.
+        if (
+          workspaceDetailAuthDeniedRef.current ||
+          eventFeedAuthDeniedRef.current ||
+          logListingAuthDeniedRef.current
+        ) {
+          return true;
+        }
+        const dropped = externalInspectorDrops();
+        if (dropped != null && allGatedDetailFeedsDropped(dropped)) {
+          return feed !== "workspace";
+        }
+        if (feed === "workspace") {
+          return (
+            generation < appliedWorkspaceDetailGenerationRef.current ||
+            generation <= revokedWorkspaceDetailGenerationRef.current
+          );
+        }
+        if (feed === "runtime") {
+          return (
+            !allowRuntime ||
+            (dropped != null && dropped.runtime) ||
+            generation < appliedRuntimeGenerationRef.current ||
+            generation <= revokedRuntimeGenerationRef.current
+          );
+        }
+        if (feed === "events") {
+          return (
+            !allowEvents ||
+            (dropped != null && dropped.events) ||
+            generation < appliedEventFeedGenerationRef.current ||
+            generation <= revokedEventFeedGenerationRef.current
+          );
+        }
+        if (feed === "operations") {
+          return (
+            !allowOperations ||
+            (dropped != null && dropped.operations) ||
+            generation < appliedOperationsGenerationRef.current ||
+            generation <= revokedOperationsGenerationRef.current
+          );
+        }
+        return (
+          !allowLogs ||
+          (dropped != null && dropped.logs) ||
+          generation < appliedLogListingGenerationRef.current ||
+          generation <= revokedLogListingGenerationRef.current
+        );
+      };
+
+      const preferredSettledOutage = () => {
+        const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
+        for (const feed of order) {
+          const message = settledTransientOutages[feed];
+          if (message != null && !detailFeedOutageSuppressed(feed)) {
+            return message;
+          }
+        }
+        return null;
+      };
+
+      // Network/5xx must warn as soon as this request settles. firstFailure
+      // only runs after Promise.all, and apiGet has no timeout, so a hanging
+      // sibling would leave the last-successful snapshot looking current.
+      const applyDetailFeedTransientOutage = (
+        feed: "workspace" | "runtime" | "events" | "operations" | "logs",
+        result: ApiEnvelope<unknown>,
+      ) => {
+        if (result.ok || feedAuthDenied(result)) {
+          return;
+        }
+        if (detailFeedOutageSuppressed(feed)) {
+          return;
+        }
+        if (generation < appliedDetailFailureGenerationRef.current) {
+          return;
+        }
+        settledTransientOutages[feed] = result.message;
+        appliedDetailFailureGenerationRef.current = Math.max(
+          appliedDetailFailureGenerationRef.current,
+          generation,
+        );
+        setError((current) => {
+          // A newer outage can own the banner before this update flushes.
+          if (generation < appliedDetailFailureGenerationRef.current) {
+            return current;
+          }
+          return preferredSettledOutage() ?? current;
+        });
+      };
+
       const publishOptionalFeedRecovered = (
         appliedRef: MutableRefObject<number>,
         revokedRef: MutableRefObject<number>,
@@ -843,12 +986,16 @@ export function useWorkspaceDetailLoader({
       // timeout, so revoked inspector data would stay available indefinitely.
       // A successful GET is recorded here too, so an in-hand 200 is not
       // discarded when an older denial stamps the watermark while a sibling
-      // is still outstanding.
+      // is still outstanding. Network/5xx is recorded the same way: waiting
+      // for firstFailure would leave the last-successful snapshot up without
+      // the required outage warning.
       void workspacePromise.then((result) => {
         if (result.ok) {
           applyWorkspaceSuccessIfSettled(result);
-        } else {
+        } else if (feedAuthDenied(result)) {
           applyWorkspaceDenialIfSettled(result);
+        } else {
+          applyDetailFeedTransientOutage("workspace", result);
         }
       });
       void runtimePromise.then((result) => {
@@ -857,8 +1004,10 @@ export function useWorkspaceDetailLoader({
         }
         if (result.ok) {
           applyRuntimeSuccessIfSettled(result);
-        } else {
+        } else if (feedAuthDenied(result)) {
           applyRuntimeAuthDenial(result);
+        } else {
+          applyDetailFeedTransientOutage("runtime", result);
         }
       });
       void operationsPromise.then((result) => {
@@ -867,8 +1016,10 @@ export function useWorkspaceDetailLoader({
         }
         if (result.ok) {
           applyOperationsSuccessIfSettled(result);
-        } else {
+        } else if (feedAuthDenied(result)) {
           applyOperationsAuthDenial(result);
+        } else {
+          applyDetailFeedTransientOutage("operations", result);
         }
       });
       void streamsPromise.then((result) => {
@@ -877,8 +1028,10 @@ export function useWorkspaceDetailLoader({
         }
         if (result.ok) {
           applyLogListingSuccessIfSettled(result);
-        } else {
+        } else if (feedAuthDenied(result)) {
           applyLogListingAuthDenial(result);
+        } else {
+          applyDetailFeedTransientOutage("logs", result);
         }
       });
       void eventsPromise.then((result) => {
@@ -887,8 +1040,10 @@ export function useWorkspaceDetailLoader({
         }
         if (result.ok) {
           applyEventFeedSuccessIfSettled(result);
-        } else {
+        } else if (feedAuthDenied(result)) {
           applyEventFeedAuthDenial(result);
+        } else {
+          applyDetailFeedTransientOutage("events", result);
         }
       });
 

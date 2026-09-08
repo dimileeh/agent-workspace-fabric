@@ -661,6 +661,46 @@ test("loadWorkspace retains last-good diagnostics on transient feed failure; cle
   );
 });
 
+test("detail settlement handlers record transient feed outages without waiting for siblings", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMt: a network/5xx
+  // that settles while any sibling hangs must stamp the outage warning.
+  // Promise.all / firstFailure never runs until every request settles, and
+  // apiGet has no timeout.
+  const dashboard = dashboardSource.detailLoader;
+  const helperStart = dashboard.indexOf("const applyDetailFeedTransientOutage = ");
+  assert.ok(helperStart > 0, "Expected a settlement-time transient outage helper");
+  const helperEnd = dashboard.indexOf("const publishOptionalFeedRecovered", helperStart);
+  assert.ok(helperEnd > helperStart, "Expected the transient outage helper to end before optional-feed recovery");
+  const helper = dashboard.slice(helperStart, helperEnd);
+  assert.match(
+    helper,
+    /if \(result\.ok \|\| feedAuthDenied\(result\)\) \{\s*return;\s*\}/,
+    "Expected transient outage recording to ignore success and 401/403",
+  );
+  assert.match(
+    helper,
+    /setError/,
+    "Expected transient outage recording to stamp the detail error banner",
+  );
+  assert.equal(
+    helper.includes("setDetail"),
+    false,
+    "Expected a transient outage to keep the last-successful snapshot",
+  );
+
+  const settledStart = dashboard.indexOf("void workspacePromise.then");
+  const settledEnd = dashboard.indexOf("const [workspace, fetchedRuntime", settledStart);
+  assert.ok(settledStart > 0 && settledEnd > settledStart, "Expected per-request settlement handlers");
+  const settled = dashboard.slice(settledStart, settledEnd);
+  for (const feed of ["workspace", "runtime", "events", "operations", "logs"]) {
+    assert.match(
+      settled,
+      new RegExp(`applyDetailFeedTransientOutage\\("${feed}"`),
+      `Expected the ${feed} settlement handler to record a transient outage`,
+    );
+  }
+});
+
 test("loadLogTail retains last-successful tails on transient refresh failure", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAHZU: automatic
   // selected-stream tail refresh must not wipe prior tails/live entries on
