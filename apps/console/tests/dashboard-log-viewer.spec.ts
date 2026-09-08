@@ -2158,6 +2158,195 @@ test(`inspector logs close live stream after tail authorization denial while lis
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkW: a manual Tail
+// click increments the per-stream generation before an older automatic or
+// manual read returns 401/403. Discarding that denial because the newer
+// request started leaves cached tails and EventSource open if the newer
+// request hangs or fails transiently. A later request that starts after the
+// denial may still recover.
+for (const deniedStatus of [401, 403] as const) {
+test(`inspector logs apply tail denial while a newer reload is in flight (${deniedStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let tailPhase: "ok" | "hold" | "recover" = "ok";
+  let olderStarted = 0;
+  let newerStarted = 0;
+  let streamOpens = 0;
+  const heldTails: Array<{ promise: Promise<void>; resolve: () => void }> = [];
+  const heldStream = createDeferred();
+  const workspaceId = "ws_inspector_tail_slow_denial";
+  const authorizedMarker = "authorized-inspector-tail-before-slow-denial";
+  const recoveryMarker = "inspector-tail-recovered-after-slow-denial";
+  const liveSecret = "inspector-live-frame-during-slow-tail-denial-must-not-appear";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z", active: 1, failed: 0 });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, listEnvelope([logStream("active.stdout", 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      if (tailPhase === "hold") {
+        const index = heldTails.length;
+        const gate = createDeferred();
+        heldTails.push(gate);
+        if (index === 0) {
+          olderStarted = 1;
+        } else {
+          newerStarted += 1;
+        }
+        await gate.promise;
+        if (index === 0) {
+          await fulfillJson(
+            route,
+            {
+              detail: {
+                error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+                message: "log tail permission revoked",
+              },
+            },
+            deniedStatus,
+          );
+          return;
+        }
+        await fulfillJson(route, { detail: { message: "transient tail refresh failed" } }, 500);
+        return;
+      }
+      if (tailPhase === "recover") {
+        await fulfillJson(route, logRead("active.stdout", recoveryMarker));
+        return;
+      }
+      await fulfillJson(route, logRead("active.stdout", authorizedMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      await heldStream.promise;
+      const frames: AwfStreamFrame[] = [
+        { type: "connected", workspace_id: workspaceId },
+        {
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "active.stdout",
+          source: "agent",
+          fd: "stdout",
+          data: liveSecret,
+          offset: 0,
+          next_offset: liveSecret.length,
+          occurred_at: now,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
+  const output = inspector.getByTestId("log-output");
+  await expect(output).toContainText(authorizedMarker);
+
+  tailPhase = "hold";
+  await inspector.getByRole("button", { name: "Tail", exact: true }).click();
+  await expect.poll(() => olderStarted, { timeout: 12_000 }).toBe(1);
+  await inspector.getByRole("button", { name: "Tail", exact: true }).click();
+  await expect.poll(() => newerStarted, { timeout: 12_000 }).toBe(1);
+
+  const older = heldTails[0];
+  const newer = heldTails[1];
+  expect(older, "held older tail denial").toBeTruthy();
+  expect(newer, "held newer tail reload").toBeTruthy();
+  older?.resolve();
+
+  // The newer reload is still pending. Denial must already have cleared caches
+  // and closed /stream; waiting for that newer request would leave the snapshot.
+  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  const opensAtDenial = streamOpens;
+
+  newer?.resolve();
+  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible();
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect.poll(() => streamOpens, { timeout: 3_000 }).toBe(opensAtDenial);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+
+  heldStream.resolve();
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await page.waitForTimeout(1_000);
+  await expect(inspector.getByText(liveSecret)).toHaveCount(0);
+  await expect(output).not.toContainText(authorizedMarker);
+  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible();
+
+  tailPhase = "recover";
+  await inspector.getByRole("button", { name: "Tail", exact: true }).click();
+  await expect(output).toContainText(recoveryMarker, { timeout: 12_000 });
+  await expect(inspector.getByText(/log tail permission revoked/i)).toHaveCount(0);
+  await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThan(opensAtDenial);
+});
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCZwi: a 401/403 used
 // to keep the automatic-tail fingerprint, so later authorized listing polls
 // with unchanged metadata started zero retries and the latch stayed closed

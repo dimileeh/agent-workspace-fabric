@@ -249,8 +249,19 @@ export function useWorkspaceLogTails({
 }: UseWorkspaceLogTailsArgs) {
   // Per-stream tail request generation: overlapping reloads of the same stream
   // stay monotonic so a newer 401/403 denial cannot lose to an older in-flight
-  // 200 (epoch/gated refs alone do not advance on that path).
+  // 200 (epoch/gated refs alone do not advance on that path). A newer request
+  // merely starting is not recovery: an older 401/403 still latches unless a
+  // strictly newer success for that stream has already been applied.
   const logTailRequestGenerationRef = useRef<Record<string, number>>({});
+  // Highest per-stream generation that applied a successful tail read. An
+  // older 401/403 must not clear a snapshot this newer success already owns.
+  const appliedLogTailGenerationRef = useRef<Record<string, number>>({});
+  // Highest per-stream generation covered by an applied 401/403. An older or
+  // in-flight 200 (started before that denial) must not restore cleared caches.
+  // Re-applying a denial already inside this window must not raise the
+  // watermark, or a recovery that started after the original denial would be
+  // rejected.
+  const revokedLogTailGenerationRef = useRef<Record<string, number>>({});
   // A 200 from a sibling stream must not clear a 401/403 latched for another
   // selected tail. EventSource is workspace-wide, so the latch stays held until
   // every denied stream that is still selected and listed itself succeeds (a
@@ -315,6 +326,8 @@ export function useWorkspaceLogTails({
     pendingAutomaticTailsRef.current.clear();
     previousAutomaticTailPartsRef.current = new Map();
     previousAutomaticTailWorkspaceRef.current = selectedId;
+    appliedLogTailGenerationRef.current = {};
+    revokedLogTailGenerationRef.current = {};
     setLogTailRefreshErrors({});
   }, [selectedId]);
 
@@ -354,9 +367,12 @@ export function useWorkspaceLogTails({
             limit_bytes: 65536,
           }),
         );
+        const appliedGeneration = appliedLogTailGenerationRef.current[generationKey] ?? 0;
+        const revokedGeneration = revokedLogTailGenerationRef.current[generationKey] ?? 0;
+        const superseded = generation !== logTailRequestGenerationRef.current[generationKey];
+        const authFailure = !result.ok && isLogTailAuthFailure(result.status);
         if (
           epoch !== authorizedFeedEpochRef.current ||
-          generation !== logTailRequestGenerationRef.current[generationKey] ||
           selectedIdRef.current !== workspaceId ||
           logListingAuthDeniedRef.current ||
           workspaceDetailAuthDeniedRef.current
@@ -364,12 +380,33 @@ export function useWorkspaceLogTails({
           settleInFlight();
           return;
         }
+        // A newer reload merely starting is not recovery. Discard a completed
+        // 401/403 only when a strictly newer successful read for this stream
+        // has already been applied, or when this request already sits inside
+        // an applied denial window (raising the watermark then would reject a
+        // recovery that started after it). Non-auth results stay monotonic:
+        // an older 200 or 5xx must not overwrite a newer read, and a request
+        // covered by the revoke watermark must not restore cleared caches.
+        if (authFailure) {
+          if (
+            generation < appliedGeneration ||
+            (logTailDeniedStreamKeysRef.current.has(generationKey) && generation <= revokedGeneration)
+          ) {
+            settleInFlight();
+            return;
+          }
+        } else if (superseded || generation <= revokedGeneration || generation < appliedGeneration) {
+          settleInFlight();
+          return;
+        }
         // The first tail 401/403 calls noteGatedDetailDrop, which advances
         // gatedDetailFeedGenerationRef. A sibling denial that already captured
         // the prior generation must still be recorded; discarding it here lets
         // a later 200 for only the recorded stream reopen EventSource while
-        // another selected stream is still unauthorized. Epoch, per-stream
-        // generation, selection, and listing denial remain hard discards.
+        // another selected stream is still unauthorized. Epoch, selection, and
+        // listing denial remain hard discards. A per-stream generation bump
+        // discards non-auth results, but not a 401/403, unless a newer success
+        // for that stream has already been applied.
         const gatedGenerationAdvanced =
           gatedGeneration !== gatedDetailFeedGenerationRef.current;
         // A sibling 401 advances gated generation and discards this non-auth
@@ -445,6 +482,19 @@ export function useWorkspaceLogTails({
               activeNow,
             );
             logTailDeniedStreamKeysRef.current.add(logTailRefreshErrorKey(workspaceId, stream.stream_id));
+            // Cover every tail request for this stream that has already
+            // started so an older or in-flight 200 cannot restore caches.
+            // Stamp the current generation, not only this denial's, and do
+            // not raise it again for a denial already inside the window.
+            revokedLogTailGenerationRef.current[generationKey] = Math.max(
+              revokedLogTailGenerationRef.current[generationKey] ?? 0,
+              logTailRequestGenerationRef.current[generationKey] ?? generation,
+            );
+            const denialStillOwnsTail = () =>
+              !logListingAuthDeniedRef.current &&
+              !workspaceDetailAuthDeniedRef.current &&
+              (appliedLogTailGenerationRef.current[generationKey] ?? 0) <= generation &&
+              logTailDeniedStreamKeysRef.current.has(generationKey);
             pruneDeniedLogTailsOutsideActiveStreams(
               logTailDeniedStreamKeysRef.current,
               workspaceId,
@@ -471,7 +521,9 @@ export function useWorkspaceLogTails({
               omitLogTailRefreshError(current, workspaceId, stream.stream_id),
             );
             setLogEntries((current) => {
-              if (logListingAuthDeniedRef.current || workspaceDetailAuthDeniedRef.current) {
+              // A newer success may land after this denial queued its clear.
+              // Keep that recovered snapshot; do not wipe it with this error.
+              if (!denialStillOwnsTail()) {
                 return current;
               }
               return trimLogEntries(
@@ -493,7 +545,7 @@ export function useWorkspaceLogTails({
                 selectedStreamIds,
               );
             });
-            setStreamOffsets({});
+            setStreamOffsets((current) => (denialStillOwnsTail() ? {} : current));
             return;
           }
           // Transient network/5xx (and other non-auth) failures: keep the
@@ -524,6 +576,12 @@ export function useWorkspaceLogTails({
         // held drops every recovered stream except the last one.
         settleInFlight();
         const recoveredKey = logTailRefreshErrorKey(workspaceId, stream.stream_id);
+        // Record this generation before the writes so an older in-flight
+        // 401/403 cannot clear the snapshot this success just established.
+        appliedLogTailGenerationRef.current[generationKey] = Math.max(
+          appliedLogTailGenerationRef.current[generationKey] ?? 0,
+          generation,
+        );
         // A sibling 200 must not clear a denial that is still selected and
         // listed. It must not keep EventSource closed for a stream that was
         // deselected or that left the listing while this read was in flight.
@@ -593,6 +651,7 @@ export function useWorkspaceLogTails({
       }
     },
     [
+      appliedLogTailGenerationRef,
       authorizedFeedEpochRef,
       drainPendingAutomaticTail,
       gatedDetailDroppedFeedsRef,
@@ -602,6 +661,7 @@ export function useWorkspaceLogTails({
       logStreamActivityRef,
       logTailAuthDeniedRef,
       logTailRequestGenerationRef,
+      revokedLogTailGenerationRef,
       selectedIdRef,
       setLogEntries,
       setLogTailAuthDenied,

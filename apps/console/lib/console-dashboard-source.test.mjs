@@ -289,13 +289,38 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
-    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current \|\|\s*workspaceDetailAuthDeniedRef\.current\s*\)/,
-    "Expected loadLogTail to discard after epoch/per-stream generation advance, selection change, listing denial, or base-detail denial",
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current \|\|\s*workspaceDetailAuthDeniedRef\.current\s*\)/,
+    "Expected loadLogTail to discard after epoch change, selection change, listing denial, or base-detail denial",
   );
   assert.match(
     dashboardSource.logTails,
     /const gatedGenerationAdvanced =\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current;[\s\S]*?if \(gatedGenerationAdvanced && \(result\.ok \|\| !isLogTailAuthFailure\(result\.status\)\)\) \{\s*settleInFlight\(\);\s*return;\s*\}/,
     "Expected a gated-detail generation bump to discard non-auth tail results without dropping sibling 401/403s",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /const appliedLogTailGenerationRef = useRef<Record<string, number>>\(\{\}\);/,
+    "Expected a per-stream applied-tail generation so an older denial cannot clear a newer success",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /generation < appliedGeneration/,
+    "Expected an older inspector tail denial to leave a newer applied success in place",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /revokedLogTailGenerationRef\.current\[generationKey\] = Math\.max\(\s*revokedLogTailGenerationRef\.current\[generationKey\] \?\? 0,\s*logTailRequestGenerationRef\.current\[generationKey\] \?\? generation,\s*\)/,
+    "Expected inspector tail denial to revoke every reload of that stream that has already started",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /generation <= revokedGeneration/,
+    "Expected an in-flight inspector tail 200 to stay rejected after denial",
+  );
+  assert.match(
+    dashboardSource.logTails,
+    /appliedLogTailGenerationRef\.current\[generationKey\] = Math\.max\(\s*appliedLogTailGenerationRef\.current\[generationKey\] \?\? 0,\s*generation,\s*\)/,
+    "Expected a landed inspector tail 200 to record its generation as applied",
   );
   for (const loader of [
     "loadResourceSaturation",
@@ -664,7 +689,11 @@ test("loadLogTail retains last-successful tails on transient refresh failure", (
     /current\.filter\(\(entry\) => entry\.workspaceId !== workspaceId\)/,
     "Expected 401/403 to drop prior tail and live entries for the revoked workspace",
   );
-  assert.match(authBody, /setStreamOffsets\(\{\}\)/, "Expected 401/403 to clear retained stream offsets");
+  assert.match(
+    authBody,
+    /setStreamOffsets\(\(current\) => \(denialStillOwnsTail\(\) \? \{\} : current\)\)/,
+    "Expected 401/403 to clear retained stream offsets unless a newer success already owns the tail",
+  );
   assert.match(authBody, /tail-error:/, "Expected 401/403 to record an error line after clearing authorized tails");
 
   const transientBody = body.slice(transientIdx, body.indexOf("const tailEntry", transientIdx));
@@ -716,7 +745,7 @@ test("tail authorization denial closes the inspector live stream", () => {
   const authBody = tails.slice(authIdx, authEnd);
   assert.match(
     authBody,
-    /if \(!logTailAuthDeniedRef\.current\) \{\s*noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);\s*\}[\s\S]*?syncWorkspaceLogTailAuthDenied\(\s*logTailDeniedStreamKeysRef\.current,\s*workspaceId,\s*logTailAuthDeniedRef,\s*setLogTailAuthDenied,\s*\);[\s\S]*?setStreamOffsets\(\{\}\)/,
+    /if \(!logTailAuthDeniedRef\.current\) \{\s*noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);\s*\}[\s\S]*?syncWorkspaceLogTailAuthDenied\(\s*logTailDeniedStreamKeysRef\.current,\s*workspaceId,\s*logTailAuthDeniedRef,\s*setLogTailAuthDenied,\s*\);[\s\S]*?setStreamOffsets\(\(current\) => \(denialStillOwnsTail\(\) \? \{\} : current\)\)/,
     "Expected tail 401/403 to invalidate in-flight tails, sync the denial latch, and clear offsets",
   );
   assert.doesNotMatch(
