@@ -156,10 +156,9 @@ ARG CURSOR_VERSION=2026.09.02-c22c1a3
 ARG CURSOR_X64_SHA256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c
 ARG CURSOR_ARM64_SHA256=fb7bc635be6172ebcf68f907fd9217e3614da51916455c6d7fdb66690997884c
 # Antigravity CLI (agy). Pinned by GitHub release asset + sha256 per arch.
-# Operator must verify the arm64 sha before merge; CI validates linux/amd64 only.
-ARG ANTIGRAVITY_VERSION=1.1.13
-ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9
-ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8
+ARG ANTIGRAVITY_VERSION=1.1.27
+ARG ANTIGRAVITY_AMD64_SHA256=f874d4f6b8a73c2df660f580f25fb656fcb6e64adbfd746e6692e837fd9a20be
+ARG ANTIGRAVITY_ARM64_SHA256=97fc9fe5a6067406cd02cbe4ae6e362c9623a24d33bec486911246c17ceb6a94
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
 ARG CCUSAGE_VERSION=20.0.20

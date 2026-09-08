@@ -18,12 +18,10 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # the Auto profile; eligible teams can pass Cursor's parameterized
         # auto-smart selector as an explicit model override.
         AgentRuntime.cursor: AgentDefaults(model=CURSOR_DEFAULT_MODEL),
-        # Antigravity API-key mode (agy 1.1.13) accepts exactly the slugs in
-        # ANTIGRAVITY_API_KEY_MODE_MODELS; gemini-3.1-pro-preview is the
-        # Pro-class default. Effort is accepted/recorded but never emitted:
-        # agy rejects --effort for all models in API-key mode (OAuth-only
-        # composite slugs such as gemini-3.6-flash-high).
-        AgentRuntime.antigravity: AgentDefaults(model="gemini-3.1-pro-preview", effort="xhigh"),
+        # Antigravity API-key mode (agy 1.1.27) accepts the model/effort pairs
+        # in ANTIGRAVITY_API_KEY_MODE_MODELS. Keep the live default pro-class;
+        # the adapter emits the required separate effort only in API-key mode.
+        AgentRuntime.antigravity: AgentDefaults(model="gemini-3.1-pro", effort="high"),
         AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
         # The Grok Build CLI reports grok-build as the current default coding model.
         AgentRuntime.grok: AgentDefaults(model="grok-build", effort="xhigh"),
