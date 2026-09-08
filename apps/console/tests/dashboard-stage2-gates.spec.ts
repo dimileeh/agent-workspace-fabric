@@ -3116,6 +3116,211 @@ for (const deniedFeed of ["runtime", "operations"] as const) {
   });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gKGUJ: a latched
+// authorization denial must not discard a concurrent sibling network/5xx
+// before it reaches settledDetailOutagesRef. Record the outage and defer
+// its banner until the denial clears. Otherwise an explicit refresh can
+// recover the denied feed, releaseRecoveredDetailOutage clears the
+// revocation reason, and the retained snapshot looks current while the
+// failed feed's replacement hangs — serialized polling cannot resume.
+test("latched authorization denial retains a sibling outage until recovery republishes it", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let detailPhase: "bootstrap" | "split" | "recover" = "bootstrap";
+  const heldDenial: Route[] = [];
+  const heldOutage: Route[] = [];
+  const hangingLogs: Array<() => Promise<void>> = [];
+  const hangingRecoveryRuntime: Route[] = [];
+  const workspaceId = "ws_denial_retains_sibling_outage";
+  const denialMessage = "events permission revoked";
+  const outageMessage = "runtime outage while authorization is revoked";
+  const retainedRuntime = "retained-runtime-during-deferred-outage";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Denial must retain a sibling outage",
+    repo_url: "https://github.com/example/denial-retains-sibling-outage",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Retain a sibling detail outage while authorization denial is latched",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const runtimeBody = {
+    workspace_id: workspaceId,
+    compose_project_name: retainedRuntime,
+    stack_state: "running",
+    services: [],
+    app_endpoints: [],
+    logs_available: true,
+    control_available: true,
+    reason: null,
+  };
+  const emptyList = { items: [], next_cursor: null, has_more: false };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 2 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (detailPhase === "split") {
+        heldOutage.push(route);
+        return;
+      }
+      if (detailPhase === "recover") {
+        hangingRecoveryRuntime.push(route);
+        return;
+      }
+      await fulfillJson(route, runtimeBody);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      if (detailPhase === "split") {
+        heldDenial.push(route);
+        return;
+      }
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (detailPhase === "split") {
+        await new Promise<void>((resolve) => {
+          hangingLogs.push(async () => {
+            await fulfillJson(route, emptyList);
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  try {
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).click();
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    detailPhase = "split";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect.poll(() => heldDenial.length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => heldOutage.length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => hangingLogs.length, { timeout: 10_000 }).toBe(1);
+
+    await fulfillJson(
+      heldDenial[0],
+      { detail: { error_code: "FORBIDDEN", message: denialMessage } },
+      403,
+    );
+    await expect(inspector.getByText(denialMessage)).toBeVisible({ timeout: 10_000 });
+
+    await fulfillJson(
+      heldOutage[0],
+      { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+      503,
+    );
+    await page.waitForTimeout(1_000);
+    await expect(inspector.getByText(denialMessage)).toBeVisible();
+    await expect(inspector.getByText(outageMessage)).toHaveCount(0);
+    await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible();
+
+    detailPhase = "recover";
+    // A Playwright click while the older GET is pending does not dispatch the
+    // React refresh handler. A DOM click still starts the newer generation.
+    await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect.poll(() => hangingRecoveryRuntime.length, { timeout: 10_000 }).toBe(1);
+    await expect(inspector.getByText(denialMessage)).toHaveCount(0);
+    await expect(inspector.getByText(outageMessage)).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible();
+  } finally {
+    await hangingLogs[0]?.();
+    await fulfillJson(hangingRecoveryRuntime[0], runtimeBody).catch(() => undefined);
+  }
+});
+
 test("in-flight runtime and operations denial after withdrawal does not stamp a detail error", async ({
   page,
 }) => {

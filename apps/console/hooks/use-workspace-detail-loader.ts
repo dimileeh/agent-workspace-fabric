@@ -790,19 +790,14 @@ export function useWorkspaceDetailLoader({
         ) {
           return true;
         }
-        // A latched authorization denial owns this banner. A transient
-        // sibling is not recovery and must not replace the revocation reason.
-        // Runtime and operations denials are generation watermarks, not
-        // boolean latches; a held watermark is the same ownership.
-        if (
-          workspaceDetailAuthDeniedRef.current ||
-          eventFeedAuthDeniedRef.current ||
-          logListingAuthDeniedRef.current ||
-          runtimeAuthDenialHeld() ||
-          operationsAuthDenialHeld()
-        ) {
-          return true;
-        }
+        // Authorization denial ownership is a display latch, not a reason to
+        // drop the record. applyDetailFeedTransientOutage still stores a
+        // concurrent sibling network/5xx so releaseRecoveredDetailOutage can
+        // republish it after the denial clears. Discarding it here lets an
+        // explicit refresh recover the denied feed, clear the banner, and
+        // leave the retained snapshot looking current while a replacement
+        // request hangs — serialized polling cannot resume until that hang
+        // settles.
         const dropped = externalInspectorDrops();
         if (dropped != null && allGatedDetailFeedsDropped(dropped)) {
           return feed !== "workspace";
@@ -950,6 +945,12 @@ export function useWorkspaceDetailLoader({
           appliedDetailFailureGenerationRef.current,
           generation,
         );
+        // Higher-priority denial keeps the banner. The record above is what
+        // releaseRecoveredDetailOutage republishes when that denial clears,
+        // including when Promise.all never runs because a sibling hangs.
+        if (authorizationOwnsDetailBanner()) {
+          return;
+        }
         setError((current) => {
           // A newer outage can own the banner before this update flushes.
           // A newer success of this feed already recovered the snapshot; do
