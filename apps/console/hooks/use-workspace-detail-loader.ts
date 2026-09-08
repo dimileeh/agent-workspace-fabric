@@ -899,6 +899,14 @@ export function useWorkspaceDetailLoader({
       let streams = fetchedStreams;
 
       applyWorkspaceDenialIfSettled(workspace);
+      // Honor a /logs 401/403 that settled after Refresh started a newer
+      // detail load. The equality check below drops the rest of this merge,
+      // and a newer request merely starting is not authorization recovery.
+      // applyLogListingAuthDenial still skips the denial when a newer listing
+      // 200 has already been applied.
+      if (streams != null) {
+        applyLogListingAuthDenial(streams);
+      }
 
       if (
         epoch !== authorizedFeedEpochRef.current ||

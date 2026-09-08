@@ -279,7 +279,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const stampsForExternalDrop =[\s\S]*?const dropped = gatedDetailDropsSince\(stampsForExternalDrop, gatedGeneration\);[\s\S]*?if \(allGatedDetailFeedsDropped\(dropped\)\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspaceFromDetailResult\(current\.workspace, workspace\),[\s\S]*?\}\)\)[\s\S]*?return;/,
+    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const stampsForExternalDrop =[\s\S]*?const dropped = gatedDetailDropsSince\(stampsForExternalDrop, gatedGeneration\);[\s\S]*?if \(allGatedDetailFeedsDropped\(dropped\)\) \{[\s\S]*?setDetail\(\(current\) => \{[\s\S]*?workspace: workspaceFromDetailResult\(current\.workspace, workspace\),[\s\S]*?streams: logListingAuthDeniedRef\.current \? \[\] : current\.streams,[\s\S]*?\}\);[\s\S]*?return;/,
     "Expected a gated-detail generation bump to union external drops since capture, then apply the basic workspace GET and skip optional feeds",
   );
   assert.match(
@@ -492,8 +492,8 @@ test("loadWorkspace success clears shared error without clearing overview trunca
   );
   assert.match(
     dashboardSource.detailLoader,
-    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(!workspaceDetailAuthDeniedRef\.current && !eventFeedAuthDeniedRef\.current\) \{\s*setError\(null\);\s*\}/,
-    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail or event-feed denial still owns the banner",
+    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current\s*\) \{\s*setError\(null\);\s*\}/,
+    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail, event-feed, or listing denial still owns the banner",
   );
   assert.match(
     dashboardSource.detailLoader,
@@ -1506,6 +1506,43 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
     dashboardSource.detailLoader,
     /const applyLogListingAuthDenial = \(result: ApiEnvelope<ListEnvelope<WorkspaceLogStream>>\) => \{[\s\S]*?logListingAuthDeniedRef\.current = true;[\s\S]*?setLogListingAuthDenied\(true\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?void streamsPromise\.then\(\(result\) => \{[\s\S]*?applyLogListingAuthDenial\(result\);[\s\S]*?if \(allowLogs && streams != null && feedAuthDenied\(streams\)\) \{[\s\S]*?applyLogListingAuthDenial\(streams\);/,
     "Expected listing 401/403 to clear selection caches as soon as the listing settles and again after merge so a sibling 200 cannot restore selection",
+  );
+});
+
+test("inspector listing 401/403 applies after Refresh starts a newer detail load", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkO: a /logs
+  // 401/403 that settles after a newer detail load has started must still
+  // clear caches and close EventSource. Only a listing 200 that has already
+  // applied is recovery.
+  const detail = dashboardSource.detailLoader;
+  const denialStart = detail.indexOf("const applyLogListingAuthDenial = ");
+  assert.ok(denialStart > 0, "Expected applyLogListingAuthDenial");
+  const denialEnd = detail.indexOf("const applyLogListingSuccessIfSettled = ", denialStart);
+  assert.ok(denialEnd > denialStart, "Expected listing success helper after denial handler");
+  const denialBody = detail.slice(denialStart, denialEnd);
+  assert.doesNotMatch(
+    denialBody,
+    /generation !== workspaceDetailRequestGenerationRef\.current/,
+    "Expected listing 401/403 not to be discarded solely because a newer detail load started",
+  );
+  assert.match(
+    denialBody,
+    /if \(generation < appliedLogListingGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected an older listing denial to leave a newer applied listing success in place",
+  );
+  const settledStart = detail.indexOf("const [workspace, fetchedRuntime, fetchedEvents, fetchedOperations, fetchedStreams]");
+  assert.ok(settledStart > 0, "Expected detail Promise.all settlement");
+  const settledEnd = detail.indexOf("applyWorkspaceDenialIfSettled(workspace);", settledStart);
+  const discardAt = detail.indexOf(
+    "generation !== workspaceDetailRequestGenerationRef.current",
+    settledEnd,
+  );
+  assert.ok(discardAt > settledEnd, "Expected superseded-generation discard after settlement");
+  const beforeDiscard = detail.slice(settledEnd, discardAt);
+  assert.match(
+    beforeDiscard,
+    /if \(streams != null\) \{\s*applyLogListingAuthDenial\(streams\);\s*\}/,
+    "Expected listing 401/403 to apply before a superseded-generation discard",
   );
 });
 
