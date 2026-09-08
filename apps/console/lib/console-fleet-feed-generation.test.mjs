@@ -6,6 +6,7 @@ import {
   claimFleetFeedOutage,
   claimFleetFeedSuccess,
   emptyFleetFeedMarks,
+  revokeFleetFeedThroughGeneration,
 } from "./console-fleet-feed-generation.ts";
 
 test("superseded fleet-feed 401/403 applies while a newer request has only started", () => {
@@ -49,4 +50,22 @@ test("an older outage does not replace a newer applied outage", () => {
   assert.equal(claimFleetFeedOutage(2, marks), true);
   assert.equal(claimFleetFeedOutage(1, marks), false);
   assert.equal(marks.appliedFailure, 2);
+});
+
+test("capability withdrawal covers in-flight 503s without discarding overlap", () => {
+  // Withdrawal bumps request generation and clears the error. An in-flight 503
+  // at the previous generation must not restore that error. A newer request
+  // merely starting (Refresh overlap) does not revoke, so the older 503 still
+  // applies until a newer success lands.
+  const withdrawn = emptyFleetFeedMarks();
+  revokeFleetFeedThroughGeneration(2, withdrawn);
+  assert.equal(claimFleetFeedOutage(1, withdrawn), false);
+  assert.equal(claimFleetFeedDenial(1, 2, withdrawn), false);
+  assert.equal(withdrawn.appliedFailure, 0);
+  assert.equal(claimFleetFeedOutage(3, withdrawn), true);
+  assert.equal(claimFleetFeedSuccess(4, 4, withdrawn), true);
+
+  const overlap = emptyFleetFeedMarks();
+  assert.equal(claimFleetFeedOutage(1, overlap), true);
+  assert.equal(overlap.appliedFailure, 1);
 });

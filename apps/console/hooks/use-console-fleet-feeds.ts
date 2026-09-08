@@ -7,6 +7,7 @@ import {
   isWidgetAvailable,
   widgetRoute,
 } from "@/lib/console-capabilities";
+import type { CapabilityFeedWithdrawal } from "@/lib/console-dashboard-derived";
 import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
 import { parseDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath } from "@/lib/console-urls";
@@ -31,6 +32,7 @@ import {
   claimFleetFeedOutage,
   claimFleetFeedSuccess,
   emptyFleetFeedMarks,
+  revokeFleetFeedThroughGeneration,
 } from "@/lib/console-fleet-feed-generation";
 
 type UseConsoleFleetFeedsArgs = {
@@ -43,6 +45,9 @@ type UseConsoleFleetFeedsArgs = {
   resourceSaturationRequestGenerationRef: MutableRefObject<number>;
   workspaceSummaryRequestGenerationRef: MutableRefObject<number>;
   failureSummaryRequestGenerationRef: MutableRefObject<number>;
+  noteFleetFeedCapabilityWithdrawalRef: MutableRefObject<
+    (plan: CapabilityFeedWithdrawal) => void
+  >;
   setResourceSaturation: Dispatch<SetStateAction<ResourceSaturationSummary | null>>;
   setResourceError: Dispatch<SetStateAction<string | null>>;
   setDashboardSummary: Dispatch<SetStateAction<ConsoleDashboardSummary | null>>;
@@ -78,6 +83,7 @@ export function useConsoleFleetFeeds({
   resourceSaturationRequestGenerationRef,
   workspaceSummaryRequestGenerationRef,
   failureSummaryRequestGenerationRef,
+  noteFleetFeedCapabilityWithdrawalRef,
   setResourceSaturation,
   setResourceError,
   setDashboardSummary,
@@ -100,6 +106,48 @@ export function useConsoleFleetFeeds({
   const workspaceSummaryMarksRef = useRef(emptyFleetFeedMarks());
   const mergeQueueMarksRef = useRef(emptyFleetFeedMarks());
   const failureSummaryMarksRef = useRef(emptyFleetFeedMarks());
+
+  // Same-identity withdrawal bumps the request generation and clears the
+  // error in the dashboard. Stamp revoked through that generation so an
+  // in-flight 503 cannot restore it. Refresh overlap does not call this.
+  noteFleetFeedCapabilityWithdrawalRef.current = (plan) => {
+    if (plan.clearDashboardSummary) {
+      revokeFleetFeedThroughGeneration(
+        dashboardSummaryRequestGenerationRef.current,
+        dashboardSummaryMarksRef.current,
+      );
+    }
+    if (plan.clearResourceCapacity) {
+      revokeFleetFeedThroughGeneration(
+        resourceSaturationRequestGenerationRef.current,
+        resourceSaturationMarksRef.current,
+      );
+    }
+    if (plan.clearCloudRuntime) {
+      revokeFleetFeedThroughGeneration(
+        cloudRuntimeRequestGenerationRef.current,
+        cloudRuntimeMarksRef.current,
+      );
+    }
+    if (plan.clearReliability) {
+      revokeFleetFeedThroughGeneration(
+        workspaceSummaryRequestGenerationRef.current,
+        workspaceSummaryMarksRef.current,
+      );
+    }
+    if (plan.clearMergeQueue) {
+      revokeFleetFeedThroughGeneration(
+        mergeQueueRequestGenerationRef.current,
+        mergeQueueMarksRef.current,
+      );
+    }
+    if (plan.clearFailures) {
+      revokeFleetFeedThroughGeneration(
+        failureSummaryRequestGenerationRef.current,
+        failureSummaryMarksRef.current,
+      );
+    }
+  };
 
   const loadResourceSaturation = useCallback(async () => {
     const epoch = authorizedFeedEpochRef.current;

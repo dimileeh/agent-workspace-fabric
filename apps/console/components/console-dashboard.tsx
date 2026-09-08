@@ -55,6 +55,7 @@ import {
   noteGatedDetailDrop,
   planCapabilityFeedWithdrawal,
   resolveDashboardPanelVisibility,
+  type CapabilityFeedWithdrawal,
   type GatedDetailDropStamp,
 } from "@/lib/console-dashboard-derived";
 import {
@@ -229,6 +230,10 @@ export function ConsoleDashboard() {
   const resourceSaturationRequestGenerationRef = useRef(0);
   const workspaceSummaryRequestGenerationRef = useRef(0);
   const failureSummaryRequestGenerationRef = useRef(0);
+  // Filled by useConsoleFleetFeeds after the withdrawal generation bump.
+  const noteFleetFeedCapabilityWithdrawalRef = useRef<
+    (plan: CapabilityFeedWithdrawal) => void
+  >(() => {});
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // inspector-detail withdrawal without touching authorizedFeedEpochRef.
   // Optional feeds discard on mismatch; the basic workspace GET still applies.
@@ -696,6 +701,8 @@ export function ConsoleDashboard() {
         // load ignore still-advertised runtime/events/operations/log failures.
         noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, gatedDetailDropFromWithdrawal(plan));
       }
+      // Stamp revoked so an in-flight 503 cannot restore the cleared error.
+      noteFleetFeedCapabilityWithdrawalRef.current(plan);
     },
     [],
   );
@@ -942,6 +949,7 @@ export function ConsoleDashboard() {
     resourceSaturationRequestGenerationRef,
     workspaceSummaryRequestGenerationRef,
     failureSummaryRequestGenerationRef,
+    noteFleetFeedCapabilityWithdrawalRef,
     setResourceSaturation,
     setResourceError,
     setDashboardSummary,

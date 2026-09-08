@@ -30,6 +30,20 @@ export function claimFleetFeedDenial(
 }
 
 /**
+ * Capability withdrawal bumps the request generation and clears the snapshot
+ * and error. Cover that bumped generation so an in-flight 503 or 401 cannot
+ * restore the cleared error. A later request increments past this floor.
+ * Refresh overlap does not call this — an older outage still applies until a
+ * newer success lands.
+ */
+export function revokeFleetFeedThroughGeneration(
+  generation: number,
+  marks: FleetFeedMarks,
+): void {
+  marks.revoked = Math.max(marks.revoked, generation);
+}
+
+/**
  * Apply a completed network/5xx (or other non-auth) failure unless a newer
  * success, a newer outage, or an applied denial already owns the feed.
  * A newer request merely starting is not recovery.

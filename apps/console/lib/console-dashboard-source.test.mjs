@@ -1266,6 +1266,42 @@ test("fleet feed loaders apply superseded 401/403 and outages until a newer succ
       /generation !== \w+RequestGenerationRef\.current[\s\S]*?result\.status === 401/,
       `Expected ${loader} not to discard 401/403 solely because a newer request started`,
     );
+    assert.doesNotMatch(
+      loadBody,
+      /generation !== \w+RequestGenerationRef\.current[\s\S]{0,160}claimFleetFeedOutage/,
+      `Expected ${loader} not to drop a superseded 503 solely because a newer request started`,
+    );
+  }
+});
+
+test("capability withdrawal revokes in-flight fleet 503s on all six loaders", () => {
+  // Withdrawal bumps request generation and clears the error. Without stamping
+  // revoked through that bumped generation, the in-flight 503 still claims the
+  // outage and restores the error. Refresh overlap must keep using
+  // claimFleetFeedOutage without a latest-generation discard.
+  const dashboard = dashboardSource.dashboard;
+  const fleetFeeds = dashboardSource.fleetFeeds;
+  assert.match(
+    dashboard,
+    /noteFleetFeedCapabilityWithdrawalRef\.current\(plan\)/,
+    "Expected same-identity withdrawal to revoke fleet-feed marks after the generation bump",
+  );
+  const withdrawals = [
+    ["clearDashboardSummary", "dashboardSummaryRequestGenerationRef", "dashboardSummaryMarksRef"],
+    ["clearResourceCapacity", "resourceSaturationRequestGenerationRef", "resourceSaturationMarksRef"],
+    ["clearCloudRuntime", "cloudRuntimeRequestGenerationRef", "cloudRuntimeMarksRef"],
+    ["clearReliability", "workspaceSummaryRequestGenerationRef", "workspaceSummaryMarksRef"],
+    ["clearMergeQueue", "mergeQueueRequestGenerationRef", "mergeQueueMarksRef"],
+    ["clearFailures", "failureSummaryRequestGenerationRef", "failureSummaryMarksRef"],
+  ];
+  for (const [flag, generationRef, marksRef] of withdrawals) {
+    assert.match(
+      fleetFeeds,
+      new RegExp(
+        `if \\(plan\\.${flag}\\) \\{[\\s\\S]*?revokeFleetFeedThroughGeneration\\(\\s*${generationRef}\\.current,\\s*${marksRef}\\.current,\\s*\\)`,
+      ),
+      `Expected ${flag} withdrawal to revoke in-flight 503s through the bumped generation`,
+    );
   }
 });
 
