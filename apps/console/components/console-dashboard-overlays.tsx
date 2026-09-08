@@ -1,6 +1,6 @@
 "use client";
 
-import type { WorkspaceOverview } from "@/lib/types";
+import type { ConsoleCapabilities, WorkspaceOverview } from "@/lib/types";
 import { MultiWorkspaceLogsFullscreen } from "./console-dashboard-logs";
 import { TaskDetailsModal } from "./console-dashboard-workspace-detail";
 import type { LogWorkspaceTarget, SortDirection } from "./console-dashboard-shared";
@@ -12,6 +12,7 @@ type ConsoleDashboardOverlaysProps = {
   fullscreenTailSignal: number;
   allowFullscreenLogs: boolean;
   allowFullscreenStreamLogs: boolean;
+  capabilities: ConsoleCapabilities | null;
   onTailAll: () => void;
   onToggleSortDirection: () => void;
   onRemoveWorkspace: (workspaceId: string) => void;
@@ -33,6 +34,7 @@ export function ConsoleDashboardOverlays(props: ConsoleDashboardOverlaysProps) {
           tailSignal={props.fullscreenTailSignal}
           allowLogs={props.allowFullscreenLogs}
           allowStreamLogs={props.allowFullscreenStreamLogs}
+          capabilities={props.capabilities}
           onTailAll={props.onTailAll}
           onToggleSortDirection={props.onToggleSortDirection}
           onRemoveWorkspace={props.onRemoveWorkspace}

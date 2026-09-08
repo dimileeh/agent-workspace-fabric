@@ -2818,6 +2818,129 @@ test("fullscreen logs skip unsupported workspace_logs and workspace_stream", asy
   expect(requested.some((path) => path.includes("/stream"))).toBe(false);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gJbjC: fullscreen log
+// columns must not request the events channel when workspace_events is
+// unsupported or policy_disabled, even if workspace_logs and workspace_stream
+// stay advertised. Core reads event history for any subscription that includes
+// events.
+for (const eventsGate of [
+  { availability: "unsupported", reason_code: "policy_disabled" },
+  { availability: "unsupported", reason_code: "not_implemented" },
+] as const) {
+  test(`fullscreen logs request only log channels when workspace_events is ${eventsGate.reason_code}`, async ({
+    page,
+  }) => {
+    const streamUrls: string[] = [];
+    const caps = localCapabilities() as {
+      diagnostics: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+    const gated = {
+      ...caps,
+      diagnostics: caps.diagnostics.map((item) =>
+        item.id === "workspace_events"
+          ? {
+              id: item.id,
+              availability: eventsGate.availability,
+              reason_code: eventsGate.reason_code,
+              message: "workspace_events unavailable",
+              semantics: "Optional workspace events detail feed.",
+            }
+          : item,
+      ),
+    };
+    const workspaceId = "ws_fullscreen_events_gate";
+    const overviewItem = {
+      workspace_id: workspaceId,
+      title: "Fullscreen events gate",
+      repo_url: "https://github.com/example/fullscreen-events-gate",
+      base_branch: "main",
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: "Omit events from fullscreen stream",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    };
+    await mockAwfConsoleApi(page, {
+      capabilities: gated,
+      overviewItems: [overviewItem],
+    });
+    await page.route(`**/api/awf/workspaces/${workspaceId}**`, async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      if (path === `/api/awf/workspaces/${workspaceId}`) {
+        await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+        return;
+      }
+      if (path.endsWith("/logs")) {
+        await fulfillJson(
+          route,
+          listEnvelope([
+            {
+              stream_id: "agent.stdout",
+              source: "agent",
+              name: "agent.stdout",
+              kind: "stdout",
+              path: "/tmp/agent.stdout",
+              byte_count: 12,
+              line_count: 1,
+              opened_at: "2026-09-06T17:00:00Z",
+              closed_at: null,
+            },
+          ]),
+        );
+        return;
+      }
+      if (path.includes("/logs/")) {
+        await fulfillJson(route, {
+          stream_id: "agent.stdout",
+          offset: 0,
+          next_offset: 12,
+          eof: true,
+          data: "agent line\n",
+        });
+        return;
+      }
+      if (path.endsWith("/stream")) {
+        streamUrls.push(url.toString());
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+        });
+        return;
+      }
+      if (path.endsWith("/events") || path.endsWith("/operations") || path.endsWith("/runtime")) {
+        await fulfillJson(route, path.endsWith("/runtime") ? { status: "running" } : listEnvelope([]));
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+    const modal = page.locator(".fixed.inset-0.z-50");
+    await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
+    await expect.poll(() => streamUrls.length).toBeGreaterThan(0);
+
+    for (const streamUrl of streamUrls) {
+      const channels = new URL(streamUrl).searchParams.get("channels") ?? "";
+      expect(channels.split(",").filter(Boolean)).toEqual(["agent", "validation", "services"]);
+      expect(channels.split(",")).not.toContain("events");
+      expect(new URL(streamUrl).searchParams.get("tail_bytes")).toBe("65536");
+    }
+  });
+}
+
 test("refresh reloads overview when capabilities are malformed", async ({ page }) => {
   const overviewItem = {
     workspace_id: "ws_refresh_cap",

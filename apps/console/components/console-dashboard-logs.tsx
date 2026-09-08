@@ -19,6 +19,7 @@ useState
 } from "react";
 
 import { formatAgentLabel } from "@/lib/agent-format";
+import { resolveWorkspaceStreamSubscription } from "@/lib/console-capabilities";
 import { awfPath } from "@/lib/console-urls";
 import {
 bytes,
@@ -26,6 +27,7 @@ pickWorkspaceLogStreams,
 renderLogEntries
 } from "@/lib/format";
 import type {
+ConsoleCapabilities,
 ListEnvelope,
 WorkspaceLogStream
 } from "@/lib/types";
@@ -180,6 +182,7 @@ export function MultiWorkspaceLogsFullscreen({
   tailSignal,
   allowLogs,
   allowStreamLogs,
+  capabilities,
   onTailAll,
   onToggleSortDirection,
   onRemoveWorkspace,
@@ -191,6 +194,7 @@ export function MultiWorkspaceLogsFullscreen({
   allowLogs: boolean;
   /** Combined listing+stream gate; never pass bare workspace_stream. */
   allowStreamLogs: boolean;
+  capabilities: ConsoleCapabilities | null;
   onTailAll: () => void;
   onToggleSortDirection: () => void;
   onRemoveWorkspace: (workspaceId: string) => void;
@@ -318,6 +322,7 @@ export function MultiWorkspaceLogsFullscreen({
                 tailSignal={tailSignal}
                 allowLogs={allowLogs}
                 allowStreamLogs={allowStreamLogs}
+                capabilities={capabilities}
                 onRemove={() => onRemoveWorkspace(workspace.workspace_id)}
               />
             ))}
@@ -334,6 +339,7 @@ export function WorkspaceLogColumn({
   tailSignal,
   allowLogs,
   allowStreamLogs,
+  capabilities,
   onRemove,
 }: {
   workspace: LogWorkspaceTarget;
@@ -342,6 +348,7 @@ export function WorkspaceLogColumn({
   allowLogs: boolean;
   /** Combined listing+stream gate; never pass bare workspace_stream. */
   allowStreamLogs: boolean;
+  capabilities: ConsoleCapabilities | null;
   onRemove: () => void;
 }) {
   const [streams, setStreams] = useState<WorkspaceLogStream[]>([]);
@@ -990,11 +997,15 @@ export function WorkspaceLogColumn({
       setStreamState("idle");
       return;
     }
+    // workspace_stream may stay up while workspace_events is unsupported or
+    // policy_disabled. Request only the negotiated feeds so Core does not read
+    // event history for a log column (same gates as the inspector stream).
+    const { allowEvents, channels, tailBytes } = resolveWorkspaceStreamSubscription(capabilities);
     setStreamState("connecting");
     const source = new EventSource(
       awfPath(`workspaces/${workspace.workspace_id}/stream`, {
-        channels: "events,agent,validation,services",
-        tail_bytes: 65536,
+        channels,
+        tail_bytes: tailBytes,
       }),
     );
     eventSourceRef.current = source;
@@ -1014,7 +1025,16 @@ export function WorkspaceLogColumn({
       if (!frame) {
         return;
       }
-      if (frame.type === "connected" || frame.type === "heartbeat" || frame.type === "snapshot" || frame.type === "event") {
+      if (frame.type === "connected" || frame.type === "heartbeat" || frame.type === "snapshot") {
+        setStreamState("live");
+        return;
+      }
+      if (frame.type === "event") {
+        // An unsupported workspace_events gate must not treat event history as
+        // the live signal. Snapshots and logs stay on this EventSource.
+        if (!allowEvents) {
+          return;
+        }
         setStreamState("live");
         return;
       }
@@ -1109,7 +1129,7 @@ export function WorkspaceLogColumn({
         eventSourceRef.current = null;
       }
     };
-  }, [allowStreamLogs, listingDenied, tailAuthDenied, workspace.workspace_id]);
+  }, [allowStreamLogs, capabilities, listingDenied, tailAuthDenied, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">

@@ -1634,6 +1634,7 @@ export function ConsoleDashboard() {
         fullscreenTailSignal={fullscreenTailSignal}
         allowFullscreenLogs={allowFullscreenLogs}
         allowFullscreenStreamLogs={allowFullscreenStreamLogs}
+        capabilities={capabilities}
         onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
         onToggleSortDirection={() =>
           setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
