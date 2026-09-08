@@ -4170,6 +4170,251 @@ test(`fullscreen logs apply tail denial while a newer reload is in flight (${den
 });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gK-GS: a newer
+// loadSelectedTails wave can apply a 200 for stream A while B fails
+// transiently. That must not advance a global success generation that
+// discards an older in-flight 401/403 for B. Only a newer success for the
+// denied stream itself may suppress its denial.
+for (const deniedStatus of [401, 403] as const) {
+test(`fullscreen logs apply tail denial when only a sibling stream has a newer success (${deniedStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let tailPhase: "ok" | "hold" = "ok";
+  let quietWaves = 0;
+  let activeWaves = 0;
+  let streamOpens = 0;
+  const heldTails = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  const heldStream = createDeferred();
+  const workspaceId = "ws_fs_tail_sibling_success_denial";
+  const quietMarker = "cached-quiet-tail-before-sibling-success";
+  const activeMarker = "cached-active-tail-before-sibling-success";
+  const activeNewerMarker = "newer-active-tail-must-not-hide-sibling-denial";
+  const liveSecret = "live-frame-after-sibling-success-must-not-hide-denial";
+
+  const holdTail = (streamId: string, wave: number) => {
+    const key = `${streamId}:${wave}`;
+    const existing = heldTails.get(key);
+    if (existing) {
+      return existing;
+    }
+    const gate = createDeferred();
+    heldTails.set(key, gate);
+    return gate;
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(
+        route,
+        listEnvelope([
+          logStream("quiet.stdout", 2_400, 120, quietOpenedAt),
+          logStream("active.stdout", 2_880, 120, activeOpenedAt),
+        ]),
+      );
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/quiet.stdout`) {
+      if (tailPhase === "hold") {
+        const wave = quietWaves;
+        quietWaves += 1;
+        await holdTail("quiet.stdout", wave).promise;
+        if (wave === 0) {
+          await fulfillJson(
+            route,
+            {
+              detail: {
+                error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+                message: "log tail permission revoked",
+              },
+            },
+            deniedStatus,
+          );
+          return;
+        }
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "transient quiet tail failed" } },
+          503,
+        );
+        return;
+      }
+      await fulfillJson(route, logRead("quiet.stdout", quietMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      if (tailPhase === "hold") {
+        const wave = activeWaves;
+        activeWaves += 1;
+        await holdTail("active.stdout", wave).promise;
+        if (wave === 0) {
+          await fulfillJson(route, logRead("active.stdout", activeMarker));
+          return;
+        }
+        await fulfillJson(route, logRead("active.stdout", activeNewerMarker));
+        return;
+      }
+      await fulfillJson(route, logRead("active.stdout", activeMarker));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      await heldStream.promise;
+      const frames: AwfStreamFrame[] = [
+        { type: "connected", workspace_id: workspaceId },
+        {
+          type: "log",
+          seq: 1,
+          workspace_id: workspaceId,
+          stream_id: "quiet.stdout",
+          source: "monitor",
+          fd: "stdout",
+          data: liveSecret,
+          offset: 0,
+          next_offset: liveSecret.length,
+          occurred_at: now,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(quietMarker);
+  await expect(output).toContainText(activeMarker);
+
+  tailPhase = "hold";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect.poll(() => quietWaves, { timeout: 12_000 }).toBe(1);
+  await expect.poll(() => activeWaves, { timeout: 12_000 }).toBe(1);
+
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect.poll(() => quietWaves, { timeout: 12_000 }).toBe(2);
+  await expect.poll(() => activeWaves, { timeout: 12_000 }).toBe(2);
+
+  // Newer wave: A succeeds, B fails transiently. The aggregate path applies
+  // A's snapshot before the older wave's 401/403 for B settles.
+  heldTails.get("active.stdout:1")?.resolve();
+  heldTails.get("quiet.stdout:1")?.resolve();
+  await expect(output).toContainText(activeNewerMarker, { timeout: 12_000 });
+  await expect(output).toContainText(quietMarker);
+  await expect(output).not.toContainText(activeMarker);
+
+  heldTails.get("quiet.stdout:0")?.resolve();
+  await expect(modal.getByText(/log tail permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  await expect(output).not.toContainText(quietMarker);
+  await expect(output).not.toContainText(activeNewerMarker);
+  await expect(output).toContainText("No log data loaded.");
+  await expect(modal.getByText(/stream idle/)).toBeVisible();
+  const opensAtDenial = streamOpens;
+
+  heldTails.get("active.stdout:0")?.resolve();
+  await expect(modal.getByText(/log tail permission revoked/i)).toBeVisible();
+  await expect(output).not.toContainText(quietMarker);
+  await expect(output).not.toContainText(activeMarker);
+  await expect(output).not.toContainText(activeNewerMarker);
+  await expect(output).toContainText("No log data loaded.");
+  await expect.poll(() => streamOpens, { timeout: 3_000 }).toBe(opensAtDenial);
+  await expect(modal.getByText(/stream idle/)).toBeVisible();
+
+  heldStream.resolve();
+  await expect(modal.getByText(liveSecret)).toHaveCount(0);
+  await page.waitForTimeout(1_000);
+  await expect(modal.getByText(liveSecret)).toHaveCount(0);
+  await expect(output).toContainText("No log data loaded.");
+  await expect(modal.getByText(/log tail permission revoked/i)).toBeVisible();
+  await expect(modal.getByText(/stream idle/)).toBeVisible();
+});
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gCRNH: a tail 401/403
 // that started before a listing denial must not revoke the column after that
 // listing recovers. Listing denial bumps the column epoch and clears
