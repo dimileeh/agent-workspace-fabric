@@ -76,9 +76,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * request merely starting, hanging, or failing transiently is not recovery.
  * Snapshot frames must not write revoked workspace metadata back while that
  * latch is held.
- * Selection changes start a new visit. A late 401/403 from the previous visit
- * must not latch denial or raise the watermark over the re-opened workspace,
- * even when the operator left and selected the same id again.
+ * Selection changes start a new visit and advance request generation. A late
+ * 401/403 from the previous visit must not latch denial or stamp the watermark
+ * onto the re-opened workspace's in-flight GET, even when selectedId matches
+ * again and that GET has not yet become the latest generation.
  * A gated-detail generation bump drops the union of every stamp recorded after
  * this load captured generation (all of them on capabilities 404). The basic
  * workspace GET still applies. Failures from diagnostics that remain advertised
@@ -123,6 +124,11 @@ export function useWorkspaceDetailLoader({
   // workspace; it must not stamp the new visit's in-flight GET.
   const workspaceDetailVisitRef = useRef(0);
   const workspaceDetailVisitSelectionRef = useRef<string | null | undefined>(undefined);
+  // Request generation at the start of the current visit. A 401/403 at or
+  // below this floor belongs to a previous visit and must not raise the
+  // watermark, even if it is still the latest started GET until the new visit
+  // issues its own request.
+  const workspaceDetailVisitGenerationFloorRef = useRef(0);
   const workspaceDetailLoadInFlightRef = useRef(false);
 
   useLayoutEffect(() => {
@@ -131,6 +137,11 @@ export function useWorkspaceDetailLoader({
     }
     workspaceDetailVisitSelectionRef.current = selectedId;
     workspaceDetailVisitRef.current += 1;
+    // The previous visit's in-flight GET is still the latest request generation
+    // until this visit starts its own load. Advance past it so that late
+    // 401/403 cannot stamp revoked onto the generation the re-opened GET will
+    // take, including the window before that GET begins.
+    workspaceDetailVisitGenerationFloorRef.current = ++workspaceDetailRequestGenerationRef.current;
     // Previous visit's denial/success must not cover this inspector visit.
     revokedWorkspaceDetailGenerationRef.current = 0;
     appliedWorkspaceDetailGenerationRef.current = 0;
@@ -250,7 +261,8 @@ export function useWorkspaceDetailLoader({
         if (
           epoch !== authorizedFeedEpochRef.current ||
           selectedIdRef.current !== workspaceId ||
-          visit !== workspaceDetailVisitRef.current
+          visit !== workspaceDetailVisitRef.current ||
+          deniedGeneration <= workspaceDetailVisitGenerationFloorRef.current
         ) {
           return false;
         }
@@ -301,9 +313,13 @@ export function useWorkspaceDetailLoader({
       ) {
         return;
       }
-      // Previous-visit responses can still be the latest generation until the
-      // re-opened workspace starts its own GET. Do not paint them onto this visit.
-      if (visit !== workspaceDetailVisitRef.current) {
+      // The visit boundary advances request generation, so a previous-visit
+      // response is no longer latest. Also drop it if the visit moved before
+      // that bump is visible to this closure.
+      if (
+        visit !== workspaceDetailVisitRef.current ||
+        generation <= workspaceDetailVisitGenerationFloorRef.current
+      ) {
         return;
       }
 

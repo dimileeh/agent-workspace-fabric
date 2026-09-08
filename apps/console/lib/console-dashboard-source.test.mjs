@@ -250,13 +250,18 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /workspaceDetailVisitRef\.current \+= 1;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = 0;/,
-    "Expected a selection change to start a new detail visit and drop denial watermarks",
+    /workspaceDetailVisitRef\.current \+= 1;[\s\S]*?workspaceDetailVisitGenerationFloorRef\.current = \+\+workspaceDetailRequestGenerationRef\.current;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = 0;/,
+    "Expected a selection change to start a new detail visit, advance request generation, and drop denial watermarks",
   );
   assert.match(
     dashboardSource.detailLoader,
     /visit !== workspaceDetailVisitRef\.current/,
     "Expected a late base-detail 401/403 to be ignored after the operator re-opens the workspace",
+  );
+  assert.match(
+    dashboardSource.detailLoader,
+    /deniedGeneration <= workspaceDetailVisitGenerationFloorRef\.current/,
+    "Expected a previous-visit 401/403 to be dropped even when selectedId matches the re-opened workspace",
   );
   assert.match(
     dashboardSource.detailLoader,
