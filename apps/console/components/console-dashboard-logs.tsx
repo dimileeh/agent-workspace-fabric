@@ -393,6 +393,11 @@ export function WorkspaceLogColumn({
   // warning this newer failure already applied, or last-good streams stay up
   // with no error again.
   const appliedListingFailureGenerationRef = useRef(0);
+  // Listing network/5xx owns the column error banner until a listing 200 or
+  // an authoritative listing 401/403. A later successful tail must not clear
+  // it: last-good stream metadata is still on screen, and a hung follow-up
+  // listing would otherwise look current.
+  const listingOutageMessageRef = useRef<string | null>(null);
   // Highest listing generation covered by an applied 401/403. An older
   // overlapping 200 (started before that denial) must not restore cleared
   // caches, even if it later observes a matching epoch. A later poll has a
@@ -720,8 +725,15 @@ export function WorkspaceLogColumn({
     if (tailAuthDeniedRef.current) {
       tailAuthDeniedRef.current = false;
       setTailAuthDenied(false);
+      // Denial owned the banner. A listing outage that was suppressed while
+      // the latch was set is still unrecovered inventory — surface it instead
+      // of leaving the last-good streams unmarked.
+      setError(listingOutageMessageRef.current);
+    } else if (listingOutageMessageRef.current == null) {
+      // Listing network/5xx owns this banner until a listing 200. Tail all
+      // (or any later successful tail) must not clear it.
+      setError(null);
     }
-    setError(null);
     // Drop failure stamps for streams this success recovered before the
     // queued write, so an older failure updater cannot re-stamp the warning.
     for (const success of successes) {
@@ -828,6 +840,7 @@ export function WorkspaceLogColumn({
       ) {
         return;
       }
+      listingOutageMessageRef.current = null;
       setError(message);
       appliedTailFailureGenerationRef.current = {};
       tailRefreshErrorStreamIdsRef.current.clear();
@@ -877,11 +890,14 @@ export function WorkspaceLogColumn({
         return;
       }
       appliedListingFailureGenerationRef.current = generation;
+      listingOutageMessageRef.current = result.message;
       // A latched tail 401/403 owns this banner. Listing success refuses to
       // clear it, so a transient listing failure must not replace the
       // authorization reason — a later listing 200 would otherwise leave a
       // recovered 503 on screen indefinitely. Re-check the latch in the
-      // updater: a denial can settle after this failure is queued.
+      // updater: a denial can settle after this failure is queued. The
+      // outage message stays recorded so a tail success cannot drop it, and
+      // so tail-denial recovery can restore it if listing has not.
       setError((current) =>
         generation < appliedListingGenerationRef.current ||
         generation < appliedListingFailureGenerationRef.current ||
@@ -917,6 +933,10 @@ export function WorkspaceLogColumn({
     // fingerprint matches the previous poll. A static/closed stream with a
     // tailRefreshError would otherwise keep the stale snapshot until Tail all.
     setAppliedListingGeneration(appliedListingGenerationRef.current);
+    // Listing recovered. Drop the outage even when a tail 401/403 still owns
+    // the visible banner, so a later tail success cannot restore a 503 the
+    // listing has already replaced.
+    listingOutageMessageRef.current = null;
     // Listing 200 does not clear a tail 401/403 latch or its banner.
     // Route-scoped tail permission can stay revoked while the stream list
     // remains authorized; wiping the denial message leaves an empty column.

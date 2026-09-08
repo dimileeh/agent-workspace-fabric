@@ -5330,6 +5330,148 @@ test("fullscreen logs keep latched tail denial through a listing outage", async 
   await expect(output).toContainText("No log data loaded.");
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gK-GY: a successful
+// tail read must not clear a listing network/5xx banner. Tail all would
+// otherwise drop the outage while last-good stream metadata stays up, and a
+// hung follow-up listing would present that inventory as current.
+test("fullscreen logs preserve listing outage across a successful tail", async ({ page }) => {
+  test.setTimeout(45_000);
+  let listingMode: "ok" | "outage" | "hang" = "ok";
+  let listingOutages = 0;
+  let listingRecoveries = 0;
+  const hangingListings: Array<() => void> = [];
+  const workspaceId = "ws_fs_listing_outage_tail_clear";
+  const streamId = "active.stdout";
+  const retainedMarker = "retained-tail-before-listing-outage";
+  const tailedAfterOutage = "tail-succeeded-during-listing-outage";
+  const outageMessage = "log listing feed outage during tail";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      if (listingMode === "hang") {
+        await new Promise<void>((resolve) => {
+          hangingListings.push(resolve);
+        });
+        listingRecoveries += 1;
+        await fulfillJson(route, listEnvelope([logStream(streamId, 2_880, 120, activeOpenedAt)]));
+        return;
+      }
+      if (listingMode === "outage") {
+        listingOutages += 1;
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+          503,
+        );
+        return;
+      }
+      await fulfillJson(route, listEnvelope([logStream(streamId, 2_880, 120, activeOpenedAt)]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/${streamId}`) {
+      await fulfillJson(
+        route,
+        logRead(streamId, listingOutages > 0 ? tailedAfterOutage : retainedMarker),
+      );
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(retainedMarker);
+  await expect(modal.getByRole("checkbox", { name: streamId })).toBeVisible();
+
+  listingMode = "outage";
+  await expect.poll(() => listingOutages, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByText(outageMessage)).toBeVisible();
+  await expect(modal.getByRole("checkbox", { name: streamId })).toBeVisible();
+  await expect(output).toContainText(retainedMarker);
+
+  listingMode = "hang";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect(output).toContainText(tailedAfterOutage, { timeout: 12_000 });
+  await expect.poll(() => hangingListings.length, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByText(outageMessage)).toBeVisible();
+  await expect(modal.getByRole("checkbox", { name: streamId })).toBeVisible();
+  await expect(output).toContainText(tailedAfterOutage);
+  await expect(output).not.toContainText("No log data loaded.");
+
+  listingMode = "ok";
+  while (hangingListings.length > 0) {
+    hangingListings.shift()?.();
+  }
+  await expect.poll(() => listingRecoveries, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByText(outageMessage)).toHaveCount(0);
+  await expect(modal.getByRole("checkbox", { name: streamId })).toBeVisible();
+  await expect(output).toContainText(tailedAfterOutage);
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
