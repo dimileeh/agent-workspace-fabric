@@ -320,6 +320,8 @@ export function useWorkspaceDetailLoader({
         // stay denied while /workspaces/{id} remains authorized. This GET
         // still proves the base-detail route is authorized, so drop only that
         // latch — the stream route keeps owning the inspector display.
+        // Record applied generation before that early return so an older
+        // overlapping 401 cannot re-stamp the latch after this newer success.
         if (
           generation <= revokedWorkspaceDetailGenerationRef.current ||
           generation < appliedWorkspaceDetailGenerationRef.current
@@ -327,13 +329,16 @@ export function useWorkspaceDetailLoader({
           return false;
         }
         workspaceBaseDetailAuthDeniedRef.current = false;
-        if (workspaceStreamAuthDeniedRef.current) {
-          return false;
-        }
+        // Record this success even when the stream route still owns the
+        // inspector. Clearing the base latch without this watermark lets an
+        // older overlapping 401 re-stamp it after this newer GET.
         appliedWorkspaceDetailGenerationRef.current = Math.max(
           appliedWorkspaceDetailGenerationRef.current,
           generation,
         );
+        if (workspaceStreamAuthDeniedRef.current) {
+          return false;
+        }
         publishWorkspaceDetailAuthDenied(false);
         return true;
       };
@@ -385,11 +390,19 @@ export function useWorkspaceDetailLoader({
         }
         // This request started inside an already-applied denial window.
         // Raising the watermark here would reject a recovery that started
-        // after the original denial.
+        // after the original denial. Stream denial already holds the display
+        // latch and that watermark, so this GET 401/403 would otherwise be
+        // skipped and never record the base-detail latch. A later /stream
+        // probe would then treat GET as authorized, clear the inspector error,
+        // and write snapshot metadata while this GET is still denied.
         if (
           workspaceDetailAuthDeniedRef.current &&
           deniedGeneration <= revokedWorkspaceDetailGenerationRef.current
         ) {
+          workspaceBaseDetailAuthDeniedRef.current = true;
+          // This GET denial owns the banner. Do not leave only the stream
+          // message, and do not raise the revoke watermark from this skip.
+          setError(message);
           return false;
         }
         // Cover every detail request that has already started so an in-flight
@@ -946,10 +959,22 @@ export function useWorkspaceDetailLoader({
       // above does not stop it. That later GET must not recover the latch or
       // write cleared workspace/events back — the stream route can stay denied
       // while /workspaces/{id} and /events remain authorized.
-      if (workspace.ok && generation > revokedWorkspaceDetailGenerationRef.current) {
+      if (
+        workspace.ok &&
+        generation > revokedWorkspaceDetailGenerationRef.current &&
+        generation >= appliedWorkspaceDetailGenerationRef.current
+      ) {
         // Same rule as the settled 200 path: this GET proved the base-detail
         // route, so a later stream probe must not keep treating it as denied.
+        // Record applied generation: this merge also clears the base latch,
+        // and an older overlapping 401 must not re-stamp it after this success
+        // when the stream route still owns the inspector. A newer success
+        // already owns the snapshot; do not clear its latch from here.
         workspaceBaseDetailAuthDeniedRef.current = false;
+        appliedWorkspaceDetailGenerationRef.current = Math.max(
+          appliedWorkspaceDetailGenerationRef.current,
+          generation,
+        );
       }
       if (workspaceStreamAuthDeniedRef.current) {
         return;

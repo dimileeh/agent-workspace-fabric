@@ -2027,6 +2027,50 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   );
 });
 
+test("base-detail latch records overlapping GET denials while stream denial holds", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gPmmZ: a
+  // /workspaces/{id} 401/403 that settles while stream denial already holds
+  // workspaceDetailAuthDenied is skipped and must still record
+  // workspaceBaseDetailAuthDeniedRef. Otherwise the later /stream probe treats
+  // GET as authorized, clears the inspector error, and writes snapshot
+  // metadata. A GET 200 in that window must also record
+  // appliedWorkspaceDetailGenerationRef when it clears the base latch, or an
+  // older overlapping 401 re-stamps it after the newer success.
+  const detail = dashboardSource.detailLoader;
+  const denialStart = detail.indexOf("const applyAuthoritativeWorkspaceDetailDenial = ");
+  assert.ok(denialStart > 0, "Expected applyAuthoritativeWorkspaceDetailDenial");
+  const denialEnd = detail.indexOf("const flags: DetailLoadFlags = ", denialStart);
+  assert.ok(denialEnd > denialStart, "Expected denial helper before detail flags");
+  const denialBody = detail.slice(denialStart, denialEnd);
+  assert.match(
+    denialBody,
+    /workspaceDetailAuthDeniedRef\.current &&\s*deniedGeneration <= revokedWorkspaceDetailGenerationRef\.current[\s\S]*?workspaceBaseDetailAuthDeniedRef\.current = true;/,
+    "Expected a GET 401/403 inside an already-held denial window to record the base-detail latch without raising the revoke watermark",
+  );
+  const recoveredStart = detail.indexOf("const publishWorkspaceDetailRecovered = ");
+  assert.ok(recoveredStart > 0, "Expected publishWorkspaceDetailRecovered");
+  const recoveredEnd = detail.indexOf("const workspaceFromDetailResult = ", recoveredStart);
+  assert.ok(recoveredEnd > recoveredStart, "Expected workspace result helper after recovery helper");
+  const recoveredBody = detail.slice(recoveredStart, recoveredEnd);
+  assert.match(
+    recoveredBody,
+    /workspaceBaseDetailAuthDeniedRef\.current = false;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = Math\.max\(\s*appliedWorkspaceDetailGenerationRef\.current,\s*generation,\s*\);[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*return false;\s*\}/,
+    "Expected a GET 200 to record applied generation before returning while stream denial still owns the inspector",
+  );
+  const mergeGuardStart = detail.indexOf(
+    "// A newer base-detail 401/403 already covers this generation. Do not\n      // restore revoked workspace metadata",
+  );
+  assert.ok(mergeGuardStart > 0, "Expected the post-merge revoke watermark guard");
+  const mergeGuardEnd = detail.indexOf("const firstFailure = ", mergeGuardStart);
+  assert.ok(mergeGuardEnd > mergeGuardStart, "Expected the detail merge after the revoke watermark guard");
+  const mergeGuardBody = detail.slice(mergeGuardStart, mergeGuardEnd);
+  assert.match(
+    mergeGuardBody,
+    /workspaceBaseDetailAuthDeniedRef\.current = false;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = Math\.max\(\s*appliedWorkspaceDetailGenerationRef\.current,\s*generation,\s*\);/,
+    "Expected the post-merge base-latch clear to record applied generation so an older 401 cannot re-stamp it",
+  );
+});
+
 test("inspector listing 401/403 applies after Refresh starts a newer detail load", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkO: a /logs
   // 401/403 that settles after a newer detail load has started must still
