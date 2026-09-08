@@ -62,6 +62,7 @@ def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
     assert force_include["migrations"] == "awf/bootstrap_assets/migrations"
     assert force_include["src"] == "awf/bootstrap_assets/src"
     assert force_include["openapi.json"] == "awf/bootstrap_assets/openapi.json"
+    assert force_include["apps/console/hooks"] == "awf/bootstrap_assets/apps/console/hooks"
 
     excluded = set(target.get("exclude", []))
     assert "docker/compose/.env" in excluded
@@ -74,7 +75,9 @@ def test_wheel_includes_bootstrap_assets_without_secret_env_files() -> None:
     assert "/migrations" in sdist_includes
     assert "/src" in sdist_includes
     assert "/openapi.json" in sdist_includes
+    assert "/apps/console/hooks" in sdist_includes
     assert "/docker/compose/.env" in set(sdist.get("exclude", []))
+    assert sdist.get("force-include", {}).get("apps/console/hooks") == "apps/console/hooks"
 
 
 def test_sdist_includes_installer_release_metadata() -> None:

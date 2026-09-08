@@ -85,6 +85,7 @@ exclude = [
 "apps/console/Dockerfile" = "awf/bootstrap_assets/apps/console/Dockerfile"
 "apps/console/app" = "awf/bootstrap_assets/apps/console/app"
 "apps/console/components" = "awf/bootstrap_assets/apps/console/components"
+"apps/console/hooks" = "awf/bootstrap_assets/apps/console/hooks"
 "apps/console/lib" = "awf/bootstrap_assets/apps/console/lib"
 "apps/console/next.config.ts" = "awf/bootstrap_assets/apps/console/next.config.ts"
 "apps/console/package-lock.json" = "awf/bootstrap_assets/apps/console/package-lock.json"
@@ -113,6 +114,7 @@ include = [
     "/apps/console/Dockerfile",
     "/apps/console/app",
     "/apps/console/components",
+    "/apps/console/hooks",
     "/apps/console/lib",
     "/apps/console/next.config.ts",
     "/apps/console/package-lock.json",
@@ -148,7 +150,8 @@ exclude = [
 
 [tool.hatch.build.targets.sdist.force-include]
 # Keep this alongside the sdist include entry: hatchling's wheel-from-sdist
-# path can otherwise omit this console source directory from generated wheels.
+# path can otherwise omit these console source directories from generated wheels.
+"apps/console/hooks" = "apps/console/hooks"
 "apps/console/lib" = "apps/console/lib"
 
 [tool.ruff]
