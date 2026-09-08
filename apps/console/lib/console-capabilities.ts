@@ -239,9 +239,13 @@ const CAPABILITY_ITEM_KEYS = new Set([
   "message",
 ]);
 
+const OPTIONAL_CAPABILITY_FIELDS = ["reason_code", "message", "route"] as const;
+
 /**
  * Optional metadata is string|null on every availability, not only unsupported.
- * Wrong types and unknown properties fail closed to match Pydantic/OpenAPI.
+ * Wrong types and unknown properties fail closed to match Pydantic/OpenAPI
+ * (`extra=forbid`, `additionalProperties: false`) before advertised controls
+ * can be enabled.
  */
 function validateOptionalCapabilityFields(record: Record<string, unknown>): string | null {
   for (const key of Object.keys(record)) {
@@ -249,11 +253,14 @@ function validateOptionalCapabilityFields(record: Record<string, unknown>): stri
       return `Console capability entry has unknown property ${key}.`;
     }
   }
-  if (record.reason_code != null && typeof record.reason_code !== "string") {
-    return "Console capability reason_code must be a string or null when present.";
-  }
-  if (record.message != null && typeof record.message !== "string") {
-    return "Console capability message must be a string or null when present.";
+  for (const field of OPTIONAL_CAPABILITY_FIELDS) {
+    if (!Object.hasOwn(record, field)) {
+      continue;
+    }
+    const value = record[field];
+    if (value !== null && typeof value !== "string") {
+      return `Console capability ${field} must be a string or null when present.`;
+    }
   }
   return null;
 }

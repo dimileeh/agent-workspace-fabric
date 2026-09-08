@@ -1189,6 +1189,62 @@ test("parseConsoleCapabilities rejects malformed optional metadata on available 
   assert.equal(unknownProperty.kind, "malformed");
   assert.match(unknownProperty.message, /unknown property/i);
 
+  const arrayReason = parseConsoleCapabilities({
+    ...localCapabilities,
+    diagnostics: [
+      {
+        id: "reliability",
+        availability: "available",
+        route: "/v1/metrics/workspaces/summary",
+        semantics: "reliability",
+        reason_code: ["not_implemented"],
+      },
+    ],
+  });
+  assert.equal(arrayReason.ok, false);
+  if (arrayReason.ok) return;
+  assert.equal(arrayReason.kind, "malformed");
+  assert.match(arrayReason.message, /reason_code must be a string or null/);
+
+  const objectMessage = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "cancel",
+        availability: "available",
+        semantics: "cancel",
+      },
+      {
+        id: "retry",
+        availability: "available",
+        semantics: "retry",
+        message: { text: "noted" },
+      },
+    ],
+  });
+  assert.equal(objectMessage.ok, false);
+  if (objectMessage.ok) return;
+  assert.equal(objectMessage.kind, "malformed");
+  assert.match(objectMessage.message, /message must be a string or null/);
+
+  const numericRoute = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "fleet_summary",
+        availability: "available",
+        route: 42,
+        semantics: "fleet",
+        reason_code: null,
+        message: null,
+      },
+    ],
+  });
+  assert.equal(numericRoute.ok, false);
+  if (numericRoute.ok) return;
+  assert.equal(numericRoute.kind, "malformed");
+  assert.match(numericRoute.message, /route must be a string or null/);
+
   const typedOptional = parseConsoleCapabilities({
     ...localCapabilities,
     controls: [
@@ -1205,6 +1261,7 @@ test("parseConsoleCapabilities rejects malformed optional metadata on available 
         semantics: "retry",
         reason_code: null,
         message: null,
+        route: null,
       },
     ],
   });
