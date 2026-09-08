@@ -22,6 +22,10 @@ const dashboardSource = {
     new URL("../hooks/use-workspace-mutating-controls.ts", import.meta.url),
     "utf8",
   ),
+  fleetFeeds: readFileSync(
+    new URL("../hooks/use-console-fleet-feeds.ts", import.meta.url),
+    "utf8",
+  ),
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
@@ -201,8 +205,18 @@ test("clearAuthorizedConsoleFeeds resets agent, model, repo, and search filter s
 
 test("authorized feed loaders discard responses after clear epoch advances", () => {
   const dashboard = dashboardSource.dashboard;
+  const fleetFeeds = dashboardSource.fleetFeeds;
+  assert.match(
+    dashboard,
+    /useConsoleFleetFeeds\(\{/,
+    "Expected fleet snapshot loaders to live in useConsoleFleetFeeds",
+  );
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current/,
+    "Expected loadOverview to capture and discard on authorizedFeedEpochRef advance",
+  );
   for (const loader of [
-    "loadOverview",
     "loadResourceSaturation",
     "loadDashboardSummary",
     "loadCloudRuntime",
@@ -211,7 +225,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     "loadFailureSummary",
   ]) {
     assert.match(
-      dashboard,
+      fleetFeeds,
       new RegExp(
         `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current`,
       ),
@@ -265,8 +279,8 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
-    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const dropped = gatedDetailDropsSince\(gatedDetailDroppedFeedsRef\.current, gatedGeneration\);[\s\S]*?if \(allGatedDetailFeedsDropped\(dropped\)\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspaceFromDetailResult\(current\.workspace, workspace\),[\s\S]*?\}\)\)[\s\S]*?return;/,
-    "Expected a gated-detail generation bump to union drops since capture, then apply the basic workspace GET and skip optional feeds",
+    /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const stampsForExternalDrop =[\s\S]*?const dropped = gatedDetailDropsSince\(stampsForExternalDrop, gatedGeneration\);[\s\S]*?if \(allGatedDetailFeedsDropped\(dropped\)\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspaceFromDetailResult\(current\.workspace, workspace\),[\s\S]*?\}\)\)[\s\S]*?return;/,
+    "Expected a gated-detail generation bump to union external drops since capture, then apply the basic workspace GET and skip optional feeds",
   );
   assert.match(
     dashboardSource.logTails,
@@ -275,8 +289,8 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.logTails,
-    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current\s*\)/,
-    "Expected loadLogTail to discard after epoch/per-stream generation advance, selection change, or listing denial",
+    /const loadLogTail = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generationKey = `\$\{workspaceId\}:\$\{stream\.stream_id\}`;[\s\S]*?const generation = \(logTailRequestGenerationRef\.current\[generationKey\] \?\? 0\) \+ 1;[\s\S]*?logTailRequestGenerationRef\.current\[generationKey\] = generation;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*generation !== logTailRequestGenerationRef\.current\[generationKey\] \|\|\s*selectedIdRef\.current !== workspaceId \|\|\s*logListingAuthDeniedRef\.current \|\|\s*workspaceDetailAuthDeniedRef\.current\s*\)/,
+    "Expected loadLogTail to discard after epoch/per-stream generation advance, selection change, listing denial, or base-detail denial",
   );
   assert.match(
     dashboardSource.logTails,
@@ -289,7 +303,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     "loadFailureSummary",
   ]) {
     assert.match(
-      dashboard,
+      fleetFeeds,
       new RegExp(
         `const ${loader} = useCallback\\([\\s\\S]*?const epoch = authorizedFeedEpochRef\\.current;[\\s\\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\\.current;[\\s\\S]*?const generation = \\+\\+\\w+RequestGenerationRef\\.current;[\\s\\S]*?if \\(\\s*epoch !== authorizedFeedEpochRef\\.current \\|\\|\\s*gatedGeneration !== gatedDetailFeedGenerationRef\\.current \\|\\|\\s*generation !== \\w+RequestGenerationRef\\.current\\s*\\)`,
       ),
@@ -297,7 +311,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
     );
   }
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadMergeQueue = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const gatedGeneration = gatedDetailFeedGenerationRef\.current;[\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?if \(\s*epoch !== authorizedFeedEpochRef\.current \|\|\s*gatedGeneration !== gatedDetailFeedGenerationRef\.current \|\|\s*generation !== mergeQueueRequestGenerationRef\.current\s*\)/,
     "Expected loadMergeQueue to discard after authorized epoch, gated-detail, or merge-queue request generation advance",
   );
@@ -478,8 +492,13 @@ test("loadWorkspace success clears shared error without clearing overview trunca
   );
   assert.match(
     dashboardSource.detailLoader,
-    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(!workspaceDetailAuthDeniedRef\.current\) \{\s*setError\(null\);\s*\}/,
-    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail denial still owns the banner",
+    /const loadWorkspace = useCallback\([\s\S]*?\} else if \(!workspaceDetailAuthDeniedRef\.current && !eventFeedAuthDeniedRef\.current\) \{\s*setError\(null\);\s*\}/,
+    "Expected loadWorkspace success to clear only the workspace-detail error setter, and not while a base-detail or event-feed denial still owns the banner",
+  );
+  assert.match(
+    dashboardSource.detailLoader,
+    /const eventDenialOwnsBanner =\s*eventFeedAuthDeniedRef\.current &&\s*!\(events != null && feedAuthDenied\(events\) && firstFailure === events\);/,
+    "Expected a latched event-feed denial to keep the banner when an earlier-listed sibling outage is the first failure",
   );
   assert.doesNotMatch(
     dashboardSource.detailLoader,
@@ -718,8 +737,8 @@ test("tail authorization denial closes the inspector live stream", () => {
   );
   assert.match(
     tails,
-    /const recoveredTailStillAuthorized = \(\) =>\s*!logListingAuthDeniedRef\.current && !logTailDeniedStreamKeysRef\.current\.has\(recoveredKey\);[\s\S]*?setLogEntries\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}[\s\S]*?setStreamOffsets\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}/,
-    "Expected a recovered inspector tail to apply unless listing is denied or this stream is denied again",
+    /const recoveredTailStillAuthorized = \(\) =>\s*!logListingAuthDeniedRef\.current &&\s*!workspaceDetailAuthDeniedRef\.current &&\s*!logTailDeniedStreamKeysRef\.current\.has\(recoveredKey\);[\s\S]*?setLogEntries\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}[\s\S]*?setStreamOffsets\(\(current\) => \{\s*if \(!recoveredTailStillAuthorized\(\)\) \{\s*return current;\s*\}/,
+    "Expected a recovered inspector tail to apply unless listing, base-detail, or this stream is denied again",
   );
 });
 
@@ -763,6 +782,16 @@ test("automatic inspector tails skip unchanged stream metadata and do not supers
   // success, so an unsupported workspace_stream leaves the inspector empty.
   const tails = dashboardSource.logTails;
   const dashboard = dashboardSource.dashboard;
+  assert.match(
+    tails,
+    /useLayoutEffect\(\(\) => \{\s*automaticSelectedStreamsRef\.current = selectedStreams;\s*automaticListedStreamIdsRef\.current = detailStreams\.map\(\(stream\) => stream\.stream_id\);\s*\}, \[detailStreams, selectedStreams\]\);/,
+    "Expected automatic tail refs to sync in a layout effect so an in-flight 401/200 sees the latest listing before the selection effect",
+  );
+  assert.doesNotMatch(
+    tails,
+    /const automaticListedStreamIdsRef = useRef\([\s\S]{0,240}?automaticSelectedStreamsRef\.current =/,
+    "Expected automatic tail refs not to be assigned during render (react-hooks/refs)",
+  );
   assert.doesNotMatch(
     dashboard,
     /for \(const stream of detail\.streams\) \{\s*if \(selectedStreams\.includes\(stream\.stream_id\)\) \{\s*void loadLogTail\(/,
@@ -1002,88 +1031,87 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
 
 test("loadDashboardSummary discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
+  const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
     dashboard,
     /const dashboardSummaryRequestGenerationRef = useRef\(0\);/,
     "Expected a dashboard-summary request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadDashboardSummary = useCallback\([\s\S]*?const generation = \+\+dashboardSummaryRequestGenerationRef\.current;[\s\S]*?generation !== dashboardSummaryRequestGenerationRef\.current[\s\S]*?setDashboardSummaryError/,
     "Expected loadDashboardSummary to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
 test("loadDashboardSummary clears last-good snapshot on feed-level 401 or 403", () => {
-  const dashboard = dashboardSource.dashboard;
   assert.match(
-    dashboard,
+    dashboardSource.fleetFeeds,
     /const loadDashboardSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setDashboardSummary\(null\);\s*setDashboardSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?setDashboardSummaryError\(result\.message\);/,
     "Expected loadDashboardSummary to drop authorized counters on 401/403 rather than retain last-good as a transient outage",
   );
 });
 
 test("loadMergeQueue clears last-good snapshot on feed-level 401 or 403", () => {
-  const dashboard = dashboardSource.dashboard;
   assert.match(
-    dashboard,
+    dashboardSource.fleetFeeds,
     /const loadMergeQueue = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setMergeQueue\(\[\]\);\s*setMergeQueueHasMore\(false\);\s*setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);\s*return;\s*\}[\s\S]*?setMergeQueueError\(result\.message\);\s*setMergeQueueStatus\("error"\);/,
     "Expected loadMergeQueue to drop authorized queue rows on 401/403 rather than retain last-good as a transient outage",
   );
 });
 
 test("loadResourceSaturation clears last-good snapshot on feed-level 401 or 403", () => {
-  const dashboard = dashboardSource.dashboard;
+  const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadResourceSaturation = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setResourceSaturation\(null\);\s*setResourceError\(result\.message\);\s*return;\s*\}[\s\S]*?setResourceError\(result\.message\);/,
     "Expected loadResourceSaturation to drop authorized saturation on 401/403 rather than retain last-good as a transient outage",
   );
   assert.match(
-    dashboard,
+    dashboardSource.dashboard,
     /const resourceSaturationRequestGenerationRef = useRef\(0\);/,
     "Expected a resource-saturation request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadResourceSaturation = useCallback\([\s\S]*?const generation = \+\+resourceSaturationRequestGenerationRef\.current;[\s\S]*?generation !== resourceSaturationRequestGenerationRef\.current[\s\S]*?setResourceError/,
     "Expected loadResourceSaturation to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
 test("loadWorkspaceSummary clears last-good snapshot on feed-level 401 or 403", () => {
-  const dashboard = dashboardSource.dashboard;
+  const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadWorkspaceSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setWorkspaceSummary\(null\);\s*setWorkspaceSummaryError\(result\.message\);\s*return;\s*\}[\s\S]*?setWorkspaceSummaryError\(result\.message\);/,
     "Expected loadWorkspaceSummary to drop authorized reliability on 401/403 rather than retain last-good as a transient outage",
   );
   assert.match(
-    dashboard,
+    dashboardSource.dashboard,
     /const workspaceSummaryRequestGenerationRef = useRef\(0\);/,
     "Expected a workspace-summary request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadWorkspaceSummary = useCallback\([\s\S]*?const generation = \+\+workspaceSummaryRequestGenerationRef\.current;[\s\S]*?generation !== workspaceSummaryRequestGenerationRef\.current[\s\S]*?setWorkspaceSummaryError/,
     "Expected loadWorkspaceSummary to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
 test("loadFailureSummary clears last-good snapshot on feed-level 401 or 403", () => {
-  const dashboard = dashboardSource.dashboard;
+  const fleetFeeds = dashboardSource.fleetFeeds;
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadFailureSummary = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*setFailureSummary\(null\);\s*setFailureSummaryStatus\("error"\);\s*setFailureSummaryError\(result\.message\);\s*return;\s*\}/,
     "Expected loadFailureSummary to drop authorized failure examples on 401/403 rather than retain last-good as a transient outage",
   );
   assert.match(
-    dashboard,
+    dashboardSource.dashboard,
     /const failureSummaryRequestGenerationRef = useRef\(0\);/,
     "Expected a failure-summary request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    fleetFeeds,
     /const loadFailureSummary = useCallback\([\s\S]*?const generation = \+\+failureSummaryRequestGenerationRef\.current;[\s\S]*?generation !== failureSummaryRequestGenerationRef\.current[\s\S]*?setFailureSummaryError/,
     "Expected loadFailureSummary to bump generation before fetch and discard mismatched responses before success or error setters",
   );
@@ -1095,12 +1123,12 @@ test("loadFailureSummary treats advertised-feed 404 and 503 as refresh errors", 
   // capability withdrawal. Keep the last snapshot, record the error, and do
   // not swap in the unavailable placeholder. Withdrawal still clears via
   // clearNewlyUnsupportedCapabilityFeeds.
-  const dashboard = dashboardSource.dashboard;
-  const loadStart = dashboard.indexOf("const loadFailureSummary = useCallback");
+  const fleetFeeds = dashboardSource.fleetFeeds;
+  const loadStart = fleetFeeds.indexOf("const loadFailureSummary = useCallback");
   assert.ok(loadStart > 0, "Expected loadFailureSummary");
-  const loadEnd = dashboard.indexOf("const reloadAvailableFeeds = useCallback", loadStart);
+  const loadEnd = fleetFeeds.indexOf("const reloadAvailableFeeds = useCallback", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadFailureSummary before reloadAvailableFeeds");
-  const loadBody = dashboard.slice(loadStart, loadEnd);
+  const loadBody = fleetFeeds.slice(loadStart, loadEnd);
   const authBranch = loadBody.indexOf("if (result.status === 401 || result.status === 403)");
   assert.ok(authBranch > 0, "Expected loadFailureSummary auth-denial branch");
   const afterAuth = loadBody.slice(authBranch);
@@ -1125,28 +1153,26 @@ test("loadFailureSummary treats advertised-feed 404 and 503 as refresh errors", 
 });
 
 test("loadMergeQueue discards stale success and error via request generation", () => {
-  const dashboard = dashboardSource.dashboard;
   assert.match(
-    dashboard,
+    dashboardSource.dashboard,
     /const mergeQueueRequestGenerationRef = useRef\(0\);/,
     "Expected a merge-queue request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    dashboardSource.fleetFeeds,
     /const loadMergeQueue = useCallback\([\s\S]*?const generation = \+\+mergeQueueRequestGenerationRef\.current;[\s\S]*?generation !== mergeQueueRequestGenerationRef\.current[\s\S]*?setMergeQueueError/,
     "Expected loadMergeQueue to bump generation before fetch and discard mismatched responses before success or error setters",
   );
 });
 
 test("loadCloudRuntime discards stale success and error via request generation", () => {
-  const dashboard = dashboardSource.dashboard;
   assert.match(
-    dashboard,
+    dashboardSource.dashboard,
     /const cloudRuntimeRequestGenerationRef = useRef\(0\);/,
     "Expected a cloud-runtime request-generation ref so overlapping polls stay monotonic",
   );
   assert.match(
-    dashboard,
+    dashboardSource.fleetFeeds,
     /const loadCloudRuntime = useCallback\([\s\S]*?const generation = \+\+cloudRuntimeRequestGenerationRef\.current;[\s\S]*?generation !== cloudRuntimeRequestGenerationRef\.current[\s\S]*?setCloudRuntimeError/,
     "Expected loadCloudRuntime to bump generation before fetch and discard mismatched responses before success or error setters",
   );
@@ -1249,7 +1275,7 @@ test("loadCapabilities applies superseded 401/403 unless a newer success recover
   const dashboard = dashboardSource.dashboard;
   const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
   assert.ok(loadStart > 0, "Expected loadCapabilities");
-  const loadEnd = dashboard.indexOf("const loadResourceSaturation = useCallback", loadStart);
+  const loadEnd = dashboard.indexOf("useConsoleFleetFeeds({", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before loadResourceSaturation");
   const loadBody = dashboard.slice(loadStart, loadEnd);
   assert.match(
@@ -1288,7 +1314,7 @@ test("loadCapabilities applies superseded network/5xx until a newer success land
   const dashboard = dashboardSource.dashboard;
   const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
   assert.ok(loadStart > 0, "Expected loadCapabilities");
-  const loadEnd = dashboard.indexOf("const loadResourceSaturation = useCallback", loadStart);
+  const loadEnd = dashboard.indexOf("useConsoleFleetFeeds({", loadStart);
   assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before loadResourceSaturation");
   const loadBody = dashboard.slice(loadStart, loadEnd);
   assert.match(
@@ -1441,8 +1467,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.detailLoader,
-    /if \(allowLogs && feedAuthDenied\(streams\)\) \{[\s\S]*?logListingAuthDeniedRef\.current = true;[\s\S]*?setLogListingAuthDenied\(true\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);/,
-    "Expected listing 401/403 to clear selection caches and latch denial so the live EventSource closes",
+    /const applyLogListingAuthDenial = \(result: ApiEnvelope<ListEnvelope<WorkspaceLogStream>>\) => \{[\s\S]*?logListingAuthDeniedRef\.current = true;[\s\S]*?setLogListingAuthDenied\(true\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setStreamOffsets\(\{\}\);[\s\S]*?void streamsPromise\.then\(\(result\) => \{[\s\S]*?applyLogListingAuthDenial\(result\);[\s\S]*?if \(allowLogs && streams != null && feedAuthDenied\(streams\)\) \{[\s\S]*?applyLogListingAuthDenial\(streams\);/,
+    "Expected listing 401/403 to clear selection caches as soon as the listing settles and again after merge so a sibling 200 cannot restore selection",
   );
 });
 
@@ -1882,6 +1908,11 @@ test("same-identity feed withdrawal invalidates gated reads without advancing au
     withdrawBody,
     /if \(plan\.clearRuntime \|\| plan\.clearEvents \|\| plan\.clearOperations \|\| plan\.clearLogs\) \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*gatedDetailDropFromWithdrawal\(plan\)\s*\);\s*\}/,
     "Expected same-identity inspector-detail withdrawal to record the drop mask and bump gatedDetailFeedGenerationRef",
+  );
+  assert.match(
+    withdrawBody,
+    /if \(plan\.clearEvents\) \{[\s\S]*?eventFeedAuthDeniedRef\.current = false;\s*setEventFeedAuthDenied\(false\);/,
+    "Expected workspace_events withdrawal to clear the event-denial latch so a basic-detail 200 can drop the stale authorization banner",
   );
   assert.doesNotMatch(
     withdrawBody,
