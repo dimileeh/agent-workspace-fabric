@@ -2345,6 +2345,31 @@ test("withdrawn runtime or operations outage yields the inspector banner", () =>
     /setError\(\(current\) => \{[\s\S]*?return remaining\.message;/,
     "Expected withdrawal to clear the stale 401/5xx or reveal the next advertised-feed outage",
   );
+  assert.match(
+    loader,
+    /if \(feed === "runtime"\) \{\s*return \(\s*!allowRuntime \|\|\s*\(dropped != null && dropped\.runtime\) \|\|\s*generation < appliedRuntimeGenerationRef\.current \|\|\s*generation <= revokedRuntimeGenerationRef\.current \|\|\s*generation <= runtimeDenialReleasedThroughRef\.current/,
+    "Expected an in-flight runtime 5xx started before withdrawal not to re-record the stale reason",
+  );
+  assert.match(
+    loader,
+    /if \(feed === "operations"\) \{\s*return \(\s*!allowOperations \|\|\s*\(dropped != null && dropped\.operations\) \|\|\s*generation < appliedOperationsGenerationRef\.current \|\|\s*generation <= revokedOperationsGenerationRef\.current \|\|\s*generation <= operationsDenialReleasedThroughRef\.current/,
+    "Expected an in-flight operations 5xx started before withdrawal not to re-record the stale reason",
+  );
+  assert.match(
+    loader,
+    /feed === "runtime" &&\s*record\.generation <= runtimeDenialReleasedThroughRef\.current/,
+    "Expected a withdrawn runtime outage not to stay the preferred inspector warning",
+  );
+  assert.match(
+    loader,
+    /feed === "operations" &&\s*record\.generation <= operationsDenialReleasedThroughRef\.current/,
+    "Expected a withdrawn operations outage not to stay the preferred inspector warning",
+  );
+  assert.match(
+    loader,
+    /const withdrawnOptionalFailureOwnsFirst =\s*\(firstFailure === runtime &&\s*generation <= runtimeDenialReleasedThroughRef\.current\) \|\|\s*\(firstFailure === operations &&\s*generation <= operationsDenialReleasedThroughRef\.current\);[\s\S]*?setError\(preferredOutstandingOutage\(\)\);/,
+    "Expected Promise.all not to restamp a withdrawn runtime or operations 401/5xx over an advertised-feed outage",
+  );
 });
 
 test("configured context query changes clear authorized state before capability response", () => {

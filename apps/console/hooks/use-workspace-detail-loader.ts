@@ -801,12 +801,15 @@ export function useWorkspaceDetailLoader({
             generation <= revokedWorkspaceDetailGenerationRef.current
           );
         }
+        // Withdrawal leaves no later /runtime read that can clear a 5xx this
+        // request started before the fence. Do not re-record it.
         if (feed === "runtime") {
           return (
             !allowRuntime ||
             (dropped != null && dropped.runtime) ||
             generation < appliedRuntimeGenerationRef.current ||
-            generation <= revokedRuntimeGenerationRef.current
+            generation <= revokedRuntimeGenerationRef.current ||
+            generation <= runtimeDenialReleasedThroughRef.current
           );
         }
         if (feed === "events") {
@@ -822,7 +825,8 @@ export function useWorkspaceDetailLoader({
             !allowOperations ||
             (dropped != null && dropped.operations) ||
             generation < appliedOperationsGenerationRef.current ||
-            generation <= revokedOperationsGenerationRef.current
+            generation <= revokedOperationsGenerationRef.current ||
+            generation <= operationsDenialReleasedThroughRef.current
           );
         }
         return (
@@ -865,6 +869,21 @@ export function useWorkspaceDetailLoader({
         for (const feed of order) {
           const record = settledDetailOutagesRef.current[feed];
           if (record == null || record.generation < appliedSuccessGeneration(feed)) {
+            continue;
+          }
+          // A withdrawn runtime/operations 5xx must not stay the preferred
+          // warning after the fence. A sibling success would otherwise
+          // republish it and hide a still-advertised outage.
+          if (
+            feed === "runtime" &&
+            record.generation <= runtimeDenialReleasedThroughRef.current
+          ) {
+            continue;
+          }
+          if (
+            feed === "operations" &&
+            record.generation <= operationsDenialReleasedThroughRef.current
+          ) {
             continue;
           }
           return record.message;
@@ -1426,7 +1445,25 @@ export function useWorkspaceDetailLoader({
         const operationsDenialOwnsBanner =
           operationsAuthDenialHeld() &&
           !(operations != null && feedAuthDenied(operations) && firstFailure === operations);
+        // A prior runtime/operations 401 or 5xx must not reclaim the banner
+        // after withdrawal. No later read of the dropped feed will clear it,
+        // and stamping it here hides a still-advertised sibling outage.
+        const withdrawnOptionalFailureOwnsFirst =
+          (firstFailure === runtime &&
+            generation <= runtimeDenialReleasedThroughRef.current) ||
+          (firstFailure === operations &&
+            generation <= operationsDenialReleasedThroughRef.current);
         if (
+          withdrawnOptionalFailureOwnsFirst &&
+          !workspaceDetailAuthDeniedRef.current &&
+          !eventFeedAuthDeniedRef.current &&
+          !logListingAuthDeniedRef.current &&
+          !runtimeAuthDenialHeld() &&
+          !operationsAuthDenialHeld()
+        ) {
+          setError(preferredOutstandingOutage());
+        } else if (
+          !withdrawnOptionalFailureOwnsFirst &&
           (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) &&
           !eventDenialOwnsBanner &&
           !listingDenialOwnsBanner &&
