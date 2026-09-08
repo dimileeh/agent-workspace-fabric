@@ -70,8 +70,11 @@ type UseWorkspaceDetailLoaderArgs = {
  * returned `loadWorkspace`, which advances generation and supersedes safely.
  * A newer feed-level 401/403 still wins over an older in-flight 200.
  * A 401/403 on the basic /workspaces/{id} GET latches denial and closes the
- * live stream until a successful detail read recovers it. Snapshot frames
- * must not write revoked workspace metadata back while that latch is held.
+ * live stream until a successful detail read recovers it. That denial is
+ * authoritative unless a newer successful GET has already applied — a newer
+ * request merely starting, hanging, or failing transiently is not recovery.
+ * Snapshot frames must not write revoked workspace metadata back while that
+ * latch is held.
  * A gated-detail generation bump drops the union of every stamp recorded after
  * this load captured generation (all of them on capabilities 404). The basic
  * workspace GET still applies. Failures from diagnostics that remain advertised
@@ -101,6 +104,16 @@ export function useWorkspaceDetailLoader({
   // (epoch/gated refs alone do not advance on that path). Periodic ticks do not
   // bump this — they skip while a detail load is in flight.
   const workspaceDetailRequestGenerationRef = useRef(0);
+  // Highest detail generation that applied a successful /workspaces/{id} GET.
+  // An older 401/403 must not clear workspace metadata this newer success
+  // already owns, and must not close a stream that recovery already reopened.
+  const appliedWorkspaceDetailGenerationRef = useRef(0);
+  // Highest detail generation covered by an applied base-detail 401/403. An
+  // older or in-flight 200 (started before that denial) must not restore
+  // revoked workspace metadata or leave /stream open. A request that starts
+  // after this watermark may recover. Re-applying a denial already inside
+  // this window must not raise the watermark.
+  const revokedWorkspaceDetailGenerationRef = useRef(0);
   const workspaceDetailLoadInFlightRef = useRef(false);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -149,14 +162,6 @@ export function useWorkspaceDetailLoader({
       let operations = fetchedOperations;
       let streams = fetchedStreams;
 
-      if (
-        epoch !== authorizedFeedEpochRef.current ||
-        generation !== workspaceDetailRequestGenerationRef.current ||
-        selectedIdRef.current !== workspaceId
-      ) {
-        return;
-      }
-
       // Accept the full envelope (including listing success and gated-off null)
       // so the post-merge listing check can call this without a false-only cast.
       const feedAuthDenied = (result: ApiEnvelope<unknown> | null | undefined) =>
@@ -170,6 +175,78 @@ export function useWorkspaceDetailLoader({
         workspaceDetailAuthDeniedRef.current = denied;
         setWorkspaceDetailAuthDenied(denied);
       };
+
+      const publishWorkspaceDetailRecovered = () => {
+        appliedWorkspaceDetailGenerationRef.current = Math.max(
+          appliedWorkspaceDetailGenerationRef.current,
+          generation,
+        );
+        publishWorkspaceDetailAuthDenied(false);
+      };
+
+      // Apply even if a newer request has started but has not yet established
+      // recovery. A newer request merely starting, hanging, or failing
+      // transiently is not recovery — dropping this denial leaves /stream open
+      // and lets snapshot frames write revoked workspace metadata back.
+      const applyAuthoritativeWorkspaceDetailDenial = (deniedGeneration: number, message: string) => {
+        if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
+          return false;
+        }
+        // A newer successful detail GET already owns the inspector.
+        if (deniedGeneration < appliedWorkspaceDetailGenerationRef.current) {
+          return false;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark here would reject a recovery that started
+        // after the original denial.
+        if (
+          workspaceDetailAuthDeniedRef.current &&
+          deniedGeneration <= revokedWorkspaceDetailGenerationRef.current
+        ) {
+          return false;
+        }
+        // Cover every detail request that has already started so an in-flight
+        // refresh cannot restore cleared workspace metadata. A request that
+        // starts after this watermark may recover.
+        revokedWorkspaceDetailGenerationRef.current = Math.max(
+          revokedWorkspaceDetailGenerationRef.current,
+          workspaceDetailRequestGenerationRef.current,
+        );
+        publishWorkspaceDetailAuthDenied(true);
+        setError(message);
+        setDetail((current) => {
+          // A recovery GET may land between this denial and the updater.
+          if (!workspaceDetailAuthDeniedRef.current) {
+            return current;
+          }
+          return {
+            ...current,
+            workspace: null,
+          };
+        });
+        return true;
+      };
+
+      let denialApplied = false;
+      if (!workspace.ok && feedAuthDenied(workspace)) {
+        denialApplied = applyAuthoritativeWorkspaceDetailDenial(generation, workspace.message);
+      }
+
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        generation !== workspaceDetailRequestGenerationRef.current ||
+        selectedIdRef.current !== workspaceId
+      ) {
+        return;
+      }
+
+      // A newer base-detail 401/403 already covers this generation. Do not
+      // restore revoked workspace metadata or replace the denial with a
+      // transient failure. The request that just applied the denial continues
+      // so remaining latest-generation feed writes stay consistent.
+      if (generation <= revokedWorkspaceDetailGenerationRef.current && !denialApplied) {
+        return;
+      }
 
       // Capabilities 404 / auth revocation bump gatedDetailFeedGenerationRef and
       // drop every optional inspector feed. The basic /workspaces/{id} GET is not
@@ -186,12 +263,14 @@ export function useWorkspaceDetailLoader({
         if (allGatedDetailFeedsDropped(dropped)) {
           if (workspace.ok) {
             setError(null);
-            publishWorkspaceDetailAuthDenied(false);
-          } else {
+            publishWorkspaceDetailRecovered();
+          } else if (feedAuthDenied(workspace)) {
             setError(workspace.message);
-            if (feedAuthDenied(workspace)) {
-              publishWorkspaceDetailAuthDenied(true);
-            }
+            publishWorkspaceDetailAuthDenied(true);
+          } else if (!workspaceDetailAuthDeniedRef.current) {
+            // A transient failure is not recovery. Keep the latched denial
+            // banner so a newer 5xx cannot hide the revocation.
+            setError(workspace.message);
           }
           setDetail((current) => ({
             ...current,
@@ -229,11 +308,26 @@ export function useWorkspaceDetailLoader({
       const firstFailure = [workspace, runtime, events, operations, streams].find(
         (item) => item != null && !item.ok,
       );
+      // A successful /workspaces/{id} GET is recovery. Clear the latch before
+      // the error update so the denial banner does not outlive the read.
+      // Latch before setDetail so a snapshot frame cannot restore workspace
+      // between this apply and the live-stream effect cleanup.
+      if (workspace.ok) {
+        publishWorkspaceDetailRecovered();
+      } else if (feedAuthDenied(workspace)) {
+        publishWorkspaceDetailAuthDenied(true);
+      }
+
       // This setter is the workspace-detail slot only. Do not clear overview
       // errors here — an independent overview success must not clear this
       // warning either (CONSOLE_BACKEND_CONTRACT).
       if (firstFailure && !firstFailure.ok) {
-        setError(firstFailure.message);
+        // A latched base-detail 401/403 owns this banner. A newer request that
+        // only hangs or fails transiently is not recovery and must not replace
+        // the revocation reason.
+        if (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) {
+          setError(firstFailure.message);
+        }
       } else {
         setError(null);
       }
@@ -241,14 +335,6 @@ export function useWorkspaceDetailLoader({
       // Gated-off feeds resolve to null and clear; transient network/5xx keep
       // last-successful inspector snapshots while the error banner stays visible
       // (CONSOLE_BACKEND_CONTRACT). Feed-level 401/403 drops that feed's cache.
-      // Latch before setDetail so a snapshot frame cannot restore workspace
-      // between this apply and the live-stream effect cleanup.
-      if (workspace.ok) {
-        publishWorkspaceDetailAuthDenied(false);
-      } else if (feedAuthDenied(workspace)) {
-        publishWorkspaceDetailAuthDenied(true);
-      }
-
       setDetail((current) => {
         const nextWorkspace = workspace.ok
           ? {

@@ -978,6 +978,239 @@ for (const deniedStatus of [401, 403] as const) {
   });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gDcDc: a newer Refresh
+// starting another detail load must not drop an older /workspaces/{id} 401/403.
+// Capability loads already treat 401/403 as authoritative unless a newer
+// success has applied. If the newer request hangs or fails transiently, the
+// inspector EventSource must still close and a snapshot must not write
+// revoked workspace metadata back.
+test("superseded base workspace detail 403 closes live stream while a newer refresh hangs", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let detailMode: "ok" | "hold-deny" | "hang" = "ok";
+  let streamConnections = 0;
+  const heldDeny: Array<() => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  const workspaceId = "ws_base_detail_superseded_denial";
+  const overviewBranch = "overview-keep-branch";
+  const authorizedBranch = "authorized-detail-branch";
+  const revokedSnapshotBranch = "revoked-snapshot-branch-must-not-appear";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Superseded base detail denial workspace",
+    repo_url: "https://github.com/example/base-detail-superseded-denial",
+    base_branch: "main",
+    branch_name: overviewBranch,
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Older base workspace detail 403 must close the inspector stream",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const authorizedWorkspace = {
+    ...overviewItem,
+    id: workspaceId,
+    version: 3,
+    branch_name: authorizedBranch,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      if (detailMode === "hold-deny") {
+        await new Promise<void>((resolve) => {
+          heldDeny.push(async () => {
+            await fulfillJson(
+              route,
+              {
+                detail: {
+                  error_code: "FORBIDDEN",
+                  message: "workspace detail permission revoked",
+                },
+              },
+              403,
+            );
+            resolve();
+          });
+        });
+        return;
+      }
+      if (detailMode === "hang") {
+        await new Promise<void>((resolve) => {
+          hanging.push(async () => {
+            await fulfillJson(route, { detail: { message: "workspace detail outage" } }, 503);
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, authorizedWorkspace);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, {
+        workspace_id: workspaceId,
+        compose_project_name: "awf-ws-base-detail-superseded",
+        stack_state: "running",
+        services: [],
+        app_endpoints: [],
+        logs_available: true,
+        control_available: true,
+        reason: null,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamConnections += 1;
+      // Fulfill immediately. Awaiting a snapshot here blocks later
+      // /workspaces/{id} GETs from entering this mock, so the superseded-denial
+      // race would never start. After the latch, a reconnect must not apply a
+      // revoked snapshot either.
+      const snapshot = {
+        type: "snapshot",
+        workspace: {
+          ...authorizedWorkspace,
+          branch_name: revokedSnapshotBranch,
+          task_prompt: revokedSnapshotBranch,
+        },
+      };
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body:
+          streamConnections === 1
+            ? `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`
+            : `data: ${JSON.stringify(snapshot)}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByText(authorizedBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(0);
+  await expect(page.getByText("Stream: idle")).toHaveCount(0);
+
+  detailMode = "hold-deny";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => heldDeny.length, { timeout: 10_000 }).toBe(1);
+
+  // A second matching GET is not delivered to this mock while the first
+  // handler is awaiting. The refresh still advances detail generation before
+  // that GET, so releasing the older 403 must latch denial before the newer
+  // request is allowed to fail transiently.
+  detailMode = "hang";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+
+  await heldDeny[0]();
+  await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+
+  const connectionsAtDenial = streamConnections;
+  await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+  await page.waitForTimeout(1_500);
+  await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+  await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  expect(streamConnections).toBe(connectionsAtDenial);
+
+  await expect.poll(() => hanging.length, { timeout: 10_000 }).toBe(1);
+  await hanging[0]();
+  await page.waitForTimeout(500);
+  await expect(inspector.getByText(/workspace detail permission revoked/i)).toBeVisible();
+  await expect(page.getByText(/workspace detail outage/i)).toHaveCount(0);
+  await expect(inspector.getByText(authorizedBranch, { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  expect(streamConnections).toBe(connectionsAtDenial);
+
+  detailMode = "ok";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect(inspector.getByText(authorizedBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText(/workspace detail permission revoked/i)).toHaveCount(0);
+  await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(connectionsAtDenial);
+  await expect(page.getByText("Stream: idle")).toHaveCount(0);
+  await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+});
+
 // Requests slower than pollMs must still apply. A wall-clock interval that
 // calls loadWorkspace every pollMs advances the detail generation, so four
 // overlapping successes produce zero setDetail writes until overlap ends.
