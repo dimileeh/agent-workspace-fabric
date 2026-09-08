@@ -2151,8 +2151,9 @@ test("fullscreen tail 401/403 applies while a newer reload is in flight", () => 
   // or manual reload increments tailRequestGenerationRef before an older
   // tail returns 401/403. Discarding that denial merely because the newer
   // request started leaves cached tails and EventSource open if the newer
-  // request hangs or fails transiently. A newer applied 200 still wins; a
-  // request that started before the denial stays rejected.
+  // request hangs or fails transiently. A newer applied 200 for the denied
+  // stream still wins; a sibling 200 must not suppress the clear. A request
+  // that started before the denial stays rejected.
   const logs = dashboardSource.logs;
   const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
   assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
@@ -2166,8 +2167,8 @@ test("fullscreen tail 401/403 applies while a newer reload is in flight", () => 
   const denialBody = body.slice(denialStart, denialEnd);
   assert.match(
     denialBody,
-    /generation < appliedTailGenerationRef\.current/,
-    "Expected an older tail denial to leave a newer applied success in place",
+    /generation < \(appliedTailSuccessGenerationRef\.current\[denied\.streamId\] \?\? 0\)/,
+    "Expected an older tail denial to leave a newer applied success for that stream in place",
   );
   assert.doesNotMatch(
     denialBody,
@@ -2181,8 +2182,8 @@ test("fullscreen tail 401/403 applies while a newer reload is in flight", () => 
   );
   assert.match(
     denialBody,
-    /appliedTailGenerationRef\.current <= generation/,
-    "Expected a queued denial clear to apply until a newer success owns the column",
+    /\(appliedTailSuccessGenerationRef\.current\[denied\.streamId\] \?\? 0\) <= generation/,
+    "Expected a queued denial clear to apply until a newer success for that stream owns the column",
   );
   assert.match(
     body,
@@ -2193,6 +2194,11 @@ test("fullscreen tail 401/403 applies while a newer reload is in flight", () => 
     body,
     /appliedTailGenerationRef\.current = Math\.max\(appliedTailGenerationRef\.current, generation\)/,
     "Expected a landed tail 200 to record its generation as applied",
+  );
+  assert.match(
+    body,
+    /appliedTailSuccessGenerationRef\.current\[streamId\] = generation/,
+    "Expected a landed tail 200 to record its generation for the streams it applied",
   );
 });
 
