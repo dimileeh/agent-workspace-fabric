@@ -35,6 +35,60 @@ from tests.unit.adapters.test_worktree_activity_probe_parts.helpers import (
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_scan_returns_slot_to_its_original_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
+) -> None:
+    owner = worktree_activity._LiveScanThreads(1)
+    replacement = worktree_activity._LiveScanThreads(1)
+    pending: list[Callable[[], None]] = []
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", owner)
+    monkeypatch.setattr(worktree_activity, "_start_scan_thread", pending.append)
+    scan = asyncio.create_task(
+        worktree_activity._run_scan(
+            lambda: "scanned", worktree_path="/ws/counter-owner", gate=worktree_activity._ScanGate()
+        )
+    )
+    await asyncio.sleep(0)
+    assert owner._live == 1
+    if cancelled:
+        scan.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await scan
+        await asyncio.sleep(0)
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", replacement)
+    assert len(pending) == 1
+    pending[0]()
+    if not cancelled:
+        assert await scan == "scanned"
+    assert owner._live == 0
+    assert replacement._live == 0
+
+
+@pytest.mark.unit
+async def test_scan_start_failure_returns_slot_to_its_original_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = worktree_activity._LiveScanThreads(1)
+    replacement = worktree_activity._LiveScanThreads(1)
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", owner)
+
+    def fail_start(_deliver: Callable[[], None]) -> None:
+        assert owner._live == 1
+        monkeypatch.setattr(worktree_activity, "_live_scan_threads", replacement)
+        raise RuntimeError("cannot start scan thread")
+
+    monkeypatch.setattr(worktree_activity, "_start_scan_thread", fail_start)
+    with pytest.raises(worktree_activity._ScanCapacityError, match="cannot start scan thread"):
+        await worktree_activity._run_scan(
+            lambda: "scanned", worktree_path="/ws/start-failure", gate=worktree_activity._ScanGate()
+        )
+    assert owner._live == 0
+    assert replacement._live == 0
+
+
+@pytest.mark.unit
 async def test_scans_never_occupy_the_shared_default_executor(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,

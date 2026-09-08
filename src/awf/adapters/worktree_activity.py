@@ -330,14 +330,15 @@ async def _run_scan[ScanResultT](
     unfinished scan threads as it is allowed; every caller turns that into the
     same "could not tell" a stalled scan would have produced.
     """
-    if not _live_scan_threads.acquire():
+    slots = _live_scan_threads
+    if not slots.acquire():
         _log.warning(
             "agent.worktree_activity.scan_capacity_exhausted",
             worktree_path=worktree_path,
-            max_live_scan_threads=_live_scan_threads.limit,
+            max_live_scan_threads=slots.limit,
         )
         raise _ScanCapacityError(
-            f"{_live_scan_threads.limit} worktree scan threads are still running",
+            f"{slots.limit} worktree scan threads are still running",
         )
     result: Future[ScanResultT] = Future()
     gate.hold(result)
@@ -355,7 +356,7 @@ async def _run_scan[ScanResultT](
         finally:
             # This thread is done, so the slot it held is free — whether the
             # caller is still waiting or abandoned it hours ago.
-            _live_scan_threads.release()
+            slots.release()
 
     try:
         _start_scan_thread(_deliver)
@@ -363,7 +364,7 @@ async def _run_scan[ScanResultT](
         # The interpreter is out of threads despite the ceiling above. Nothing
         # will run ``_deliver``, so the slot and the gate have to be released
         # here or this worktree would never be scanned again.
-        _live_scan_threads.release()
+        slots.release()
         result.cancel()
         raise _ScanCapacityError(str(exc)) from exc
     # ``wrap_future`` bridges the thread's result back onto this loop and drops

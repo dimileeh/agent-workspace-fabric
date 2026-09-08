@@ -5645,7 +5645,10 @@ test("fullscreen logs preserve listing outage across a successful tail", async (
     hangingListings.shift()?.();
   }
   await expect.poll(() => listingRecoveries, { timeout: 12_000 }).toBeGreaterThan(0);
-  await expect(modal.getByText(outageMessage)).toHaveCount(0);
+  // The inspector and fullscreen poll independently. The recovered request
+  // counted above may belong to the inspector; allow the fullscreen's next
+  // 5s poll and response to settle rather than timing out at the poll boundary.
+  await expect(modal.getByText(outageMessage)).toHaveCount(0, { timeout: 12_000 });
   await expect(modal.getByRole("checkbox", { name: streamId })).toBeVisible();
   await expect(output).toContainText(tailedAfterOutage);
 });
