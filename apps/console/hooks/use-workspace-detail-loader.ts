@@ -207,21 +207,23 @@ export function useWorkspaceDetailLoader({
         setWorkspaceDetailAuthDenied(denied);
       };
 
-      const publishWorkspaceDetailRecovered = () => {
+      const publishWorkspaceDetailRecovered = (): boolean => {
         // A denial that landed after this 200 passed the generation check owns
         // the inspector. Clearing the latch here would reopen /stream for a
-        // request that started before that revocation.
+        // request that started before that revocation. An older success must
+        // not record recovery after a newer one already owns the snapshot.
         if (
           generation <= revokedWorkspaceDetailGenerationRef.current ||
           generation < appliedWorkspaceDetailGenerationRef.current
         ) {
-          return;
+          return false;
         }
         appliedWorkspaceDetailGenerationRef.current = Math.max(
           appliedWorkspaceDetailGenerationRef.current,
           generation,
         );
         publishWorkspaceDetailAuthDenied(false);
+        return true;
       };
 
       const workspaceFromDetailResult = (
@@ -369,15 +371,16 @@ export function useWorkspaceDetailLoader({
         }
       };
 
-      const publishEventFeedRecovered = () => {
+      const publishEventFeedRecovered = (): boolean => {
         // A denial that landed after this 200 passed the generation check owns
         // the Events panel. Clearing the latch here would accept live frames
-        // for a request that started before that revocation.
+        // for a request that started before that revocation. An older success
+        // must not record recovery after a newer one already owns the panel.
         if (
           generation <= revokedEventFeedGenerationRef.current ||
           generation < appliedEventFeedGenerationRef.current
         ) {
-          return;
+          return false;
         }
         appliedEventFeedGenerationRef.current = Math.max(
           appliedEventFeedGenerationRef.current,
@@ -385,6 +388,7 @@ export function useWorkspaceDetailLoader({
         );
         eventFeedAuthDeniedRef.current = false;
         setEventFeedAuthDenied(false);
+        return true;
       };
 
       // /events 401/403 while workspace_events stays advertised clears
@@ -460,11 +464,25 @@ export function useWorkspaceDetailLoader({
         ) {
           return;
         }
-        publishWorkspaceDetailRecovered();
-        setDetail((current) => ({
-          ...current,
-          workspace: workspaceFromDetailResult(current.workspace, result),
-        }));
+        // publish* records applied* only when this generation still owns the
+        // snapshot. Writing afterward would let an older in-flight 200 replace
+        // a newer inspector even though the watermark update was skipped. A
+        // hanging sibling means Promise.all never repairs that overwrite.
+        if (!publishWorkspaceDetailRecovered()) {
+          return;
+        }
+        setDetail((current) => {
+          if (
+            generation < appliedWorkspaceDetailGenerationRef.current ||
+            workspaceDetailAuthDeniedRef.current
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            workspace: workspaceFromDetailResult(current.workspace, result),
+          };
+        });
       };
 
       const applyEventFeedSuccessIfSettled = (
@@ -482,9 +500,17 @@ export function useWorkspaceDetailLoader({
         ) {
           return;
         }
-        publishEventFeedRecovered();
+        // Same ownership gate as the workspace 200 handler: skip the payload
+        // when a newer /events success already applied, including inside the
+        // updater so a queued older write cannot land after that snapshot.
+        if (!publishEventFeedRecovered()) {
+          return;
+        }
         setDetail((current) => {
-          if (eventFeedAuthDeniedRef.current) {
+          if (
+            eventFeedAuthDeniedRef.current ||
+            generation < appliedEventFeedGenerationRef.current
+          ) {
             return current;
           }
           return { ...current, events: result.data.items };

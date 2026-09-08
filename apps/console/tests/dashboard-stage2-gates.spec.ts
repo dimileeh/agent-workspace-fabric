@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Route, test } from "@playwright/test";
 
 import {
   fulfillJson,
@@ -1675,6 +1675,235 @@ test("superseded base workspace detail 403 closes live stream while a newer refr
   await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(connectionsAtDenial);
   await expect(page.getByText("Stream: idle")).toHaveCount(0);
   await expect(page.getByText(revokedSnapshotBranch)).toHaveCount(0);
+});
+
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEc6I: an older
+// /workspaces/{id} or /events 200 that settles after a newer success must not
+// replace the inspector snapshot. The immediate handlers record applied* only
+// when that generation still owns the feed; writing afterward sticks while a
+// sibling hang keeps Promise.all from repairing the overwrite.
+test("older settled workspace and events success does not overwrite a newer snapshot while a sibling hangs", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let detailPhase: "bootstrap" | "hold-older" | "newer-hang" = "bootstrap";
+  // Stash routes and return without awaiting. Awaiting inside the handler
+  // blocks the next matching GET, so the newer success could never settle first.
+  const olderWorkspace: Route[] = [];
+  const olderEvents: Route[] = [];
+  const hangingRuntime: Route[] = [];
+  const workspaceId = "ws_older_success_must_not_clobber";
+  const overviewBranch = "overview-older-success-branch";
+  const initialBranch = "initial-detail-branch";
+  const staleBranch = "stale-older-success-branch";
+  const freshBranch = "fresh-newer-success-branch";
+  const initialEvent = "initial-detail-event";
+  const staleEvent = "stale-older-event";
+  const freshEvent = "fresh-newer-event";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Older success must not clobber newer detail",
+    repo_url: "https://github.com/example/older-success-clobber",
+    base_branch: "main",
+    branch_name: overviewBranch,
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Keep the newer inspector snapshot when an older success settles",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  const workspaceBody = (branchName: string) => ({
+    ...overviewItem,
+    id: workspaceId,
+    version: 3,
+    branch_name: branchName,
+  });
+  const eventItem = (eventType: string) => ({
+    id: `evt-${eventType}`,
+    workspace_id: workspaceId,
+    event_type: eventType,
+    old_state: null,
+    new_state: "running",
+    reason_code: null,
+    payload: null,
+    occurred_at: "2026-09-06T17:00:00Z",
+    created_at: "2026-09-06T17:00:00Z",
+  });
+  const runtimeBody = {
+    workspace_id: workspaceId,
+    compose_project_name: "awf-ws-older-success-clobber",
+    stack_state: "running",
+    services: [],
+    app_endpoints: [],
+    logs_available: true,
+    control_available: true,
+    reason: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}` ||
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/runtime`
+    ) {
+      await route.fallback();
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  // Registered after the catch-all so these GETs are not stuck behind an
+  // awaiting handler. Returning without fulfill keeps the older request
+  // pending while the newer generation's 200 can still settle.
+  await page.route(`**/api/awf/workspaces/${workspaceId}**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      if (detailPhase === "hold-older") {
+        olderWorkspace.push(route);
+        return;
+      }
+      await fulfillJson(
+        route,
+        workspaceBody(detailPhase === "newer-hang" ? freshBranch : initialBranch),
+      );
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      if (detailPhase === "hold-older") {
+        olderEvents.push(route);
+        return;
+      }
+      await fulfillJson(route, {
+        items: [eventItem(detailPhase === "newer-hang" ? freshEvent : initialEvent)],
+        next_cursor: null,
+        has_more: false,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (detailPhase === "newer-hang") {
+        hangingRuntime.push(route);
+        return;
+      }
+      await fulfillJson(route, runtimeBody);
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByText(initialBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText(initialEvent, { exact: true })).toHaveCount(1);
+
+  detailPhase = "hold-older";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => olderWorkspace.length, { timeout: 10_000 }).toBe(1);
+  await expect.poll(() => olderEvents.length, { timeout: 10_000 }).toBe(1);
+
+  detailPhase = "newer-hang";
+  // A Playwright click while the older GET is pending does not dispatch the
+  // React refresh handler. A DOM click still starts the newer generation so
+  // its 200 can settle before the held older success.
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await expect(inspector.getByText(freshBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText(freshEvent, { exact: true })).toHaveCount(1);
+  await expect.poll(() => hangingRuntime.length, { timeout: 10_000 }).toBe(1);
+
+  await fulfillJson(olderWorkspace[0], workspaceBody(staleBranch));
+  await fulfillJson(olderEvents[0], {
+    items: [eventItem(staleEvent)],
+    next_cursor: null,
+    has_more: false,
+  });
+  await page.waitForTimeout(1_500);
+  await expect(inspector.getByText(freshBranch, { exact: true })).toBeVisible();
+  await expect(inspector.getByText(staleBranch, { exact: true })).toHaveCount(0);
+  await expect(inspector.getByText(freshEvent, { exact: true })).toHaveCount(1);
+  await expect(inspector.getByText(staleEvent, { exact: true })).toHaveCount(0);
+
+  await fulfillJson(hangingRuntime[0], runtimeBody);
 });
 
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD0PE: leaving and
