@@ -2671,6 +2671,243 @@ test("later runtime and operations 401 does not block a newer in-flight refresh"
   await expect(inspector.getByText("No operations recorded.")).toHaveCount(0);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gG7PC: a runtime or
+// operations 401/403 that already applied at settlement owns the inspector
+// banner. A sibling 5xx must not replace that authorization reason while
+// another request still hangs, and the later Promise.all merge must not
+// either — apiGet has no timeout, so the reason would otherwise never return.
+for (const deniedFeed of ["runtime", "operations"] as const) {
+  test(`settled ${deniedFeed} auth denial is not replaced by a sibling detail outage`, async ({
+    page,
+  }) => {
+    test.setTimeout(45_000);
+    let detailPhase: "bootstrap" | "split" = "bootstrap";
+    const heldDenial: Route[] = [];
+    const heldOutage: Route[] = [];
+    const hangingLogs: Array<() => Promise<void>> = [];
+    const workspaceId = `ws_${deniedFeed}_denial_sibling_outage`;
+    const denialMessage = `${deniedFeed} permission revoked`;
+    const outageMessage = "events outage while authorization is revoked";
+    const runtimeProject = `${deniedFeed}-denial-runtime-project`;
+    const operationReason = `${deniedFeed}-denial-operation-reason`;
+    const overviewItem = {
+      workspace_id: workspaceId,
+      title: "Optional denial owns the banner over a sibling outage",
+      repo_url: "https://github.com/example/optional-denial-sibling-outage",
+      base_branch: "main",
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: "Keep a settled runtime or operations denial through a sibling 5xx",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    };
+    const runtimeBody = {
+      workspace_id: workspaceId,
+      compose_project_name: runtimeProject,
+      stack_state: "running",
+      services: [],
+      app_endpoints: [],
+      logs_available: true,
+      control_available: true,
+      reason: null,
+    };
+    const operationsBody = {
+      items: [
+        {
+          id: `op-${deniedFeed}-denial`,
+          workspace_id: workspaceId,
+          type: "execute",
+          status: "running",
+          error_code: null,
+          error_message: null,
+          payload: null,
+          result: null,
+          idempotency_key: null,
+          created_at: "2026-09-06T17:00:00Z",
+          started_at: "2026-09-06T17:00:00Z",
+          finished_at: null,
+          owner: "worker",
+          source: "awf",
+          action: null,
+          pr_number: null,
+          pr_url: null,
+          source_head_sha: null,
+          source_base_sha: null,
+          reason: operationReason,
+          reason_code: null,
+          failure_code: null,
+          failure_message: null,
+          log_stream_refs: {},
+          log_stream_ids: [],
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
+    };
+
+    await page.route("**/api/awf/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/awf/health") {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === "/api/awf/console/capabilities") {
+        await fulfillJson(route, localCapabilities());
+        return;
+      }
+      if (path === "/api/awf/console/dashboard-summary") {
+        await fulfillJson(route, localDashboardSummary());
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+        });
+        return;
+      }
+      if (path === "/api/awf/metrics/resources/saturation") {
+        await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+        return;
+      }
+      if (path === "/api/awf/metrics/workspaces/summary") {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === "/api/awf/merge-queue") {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === "/api/awf/metrics/failures/summary") {
+        await fulfillJson(route, {
+          total_failures: 0,
+          since_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}`) {
+        await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 2 });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+        if (detailPhase === "split" && deniedFeed === "runtime") {
+          heldDenial.push(route);
+          return;
+        }
+        await fulfillJson(route, runtimeBody);
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+        if (detailPhase === "split" && deniedFeed === "operations") {
+          heldDenial.push(route);
+          return;
+        }
+        await fulfillJson(route, operationsBody);
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+        if (detailPhase === "split") {
+          heldOutage.push(route);
+          return;
+        }
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+        if (detailPhase === "split") {
+          await new Promise<void>((resolve) => {
+            hangingLogs.push(async () => {
+              await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+              resolve();
+            });
+          });
+          return;
+        }
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    try {
+      await page.goto("/");
+      await waitForConsoleReady(page);
+      await page.getByTestId(`workspace-card-${workspaceId}`).click();
+      const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+      await expect(inspector.getByText(runtimeProject, { exact: true })).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(inspector.getByText(operationReason, { exact: true })).toBeVisible();
+
+      detailPhase = "split";
+      await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+      await expect.poll(() => heldDenial.length, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => heldOutage.length, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => hangingLogs.length, { timeout: 10_000 }).toBe(1);
+
+      await fulfillJson(
+        heldDenial[0],
+        { detail: { error_code: "FORBIDDEN", message: denialMessage } },
+        403,
+      );
+      await expect(inspector.getByText(denialMessage)).toBeVisible({ timeout: 10_000 });
+      if (deniedFeed === "runtime") {
+        await expect(inspector.getByText("Runtime snapshot unavailable.")).toBeVisible();
+      } else {
+        await expect(inspector.getByText("No operations recorded.")).toBeVisible();
+      }
+
+      await fulfillJson(
+        heldOutage[0],
+        { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+        503,
+      );
+      await page.waitForTimeout(1_000);
+      await expect(inspector.getByText(denialMessage)).toBeVisible();
+      await expect(inspector.getByText(outageMessage)).toHaveCount(0);
+
+      const releaseHang = hangingLogs[0];
+      hangingLogs.length = 0;
+      await releaseHang?.();
+      await page.waitForTimeout(1_000);
+      await expect(inspector.getByText(denialMessage)).toBeVisible();
+      await expect(inspector.getByText(outageMessage)).toHaveCount(0);
+    } finally {
+      await hangingLogs[0]?.();
+    }
+  });
+}
+
 test("in-flight runtime and operations denial after withdrawal does not stamp a detail error", async ({
   page,
 }) => {

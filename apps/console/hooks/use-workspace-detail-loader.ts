@@ -103,6 +103,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * error no later read of that feed will clear. A later 401 while that denial
  * is still in force stamps only that request's generation, so a newer
  * in-flight refresh that started after the original denial can still apply.
+ * That applied runtime or operations revocation owns the inspector banner
+ * the same way a workspace, event-feed, or listing 401/403 does: a sibling
+ * network/5xx is not recovery and must not replace the authorization reason
+ * while another request still hangs.
  * Selection changes start a new visit and advance request generation. A late
  * 401/403 from the previous visit must not latch denial or stamp the watermark
  * onto the re-opened workspace's in-flight GET, even when selectedId matches
@@ -706,6 +710,22 @@ export function useWorkspaceDetailLoader({
         return gatedDetailDropsSince(stampsForExternalDrop, gatedGeneration);
       };
 
+      // A settled runtime or operations 401/403 owns the banner until a later
+      // successful read of that feed recovers it. A sibling network/5xx is
+      // not that recovery — including when another request still hangs, so
+      // Promise.all never restores the authorization reason.
+      const optionalFeedAuthDenialHeld = (
+        revokedRef: MutableRefObject<number>,
+        appliedRef: MutableRefObject<number>,
+      ) => revokedRef.current > 0 && appliedRef.current <= revokedRef.current;
+      const runtimeAuthDenialHeld = () =>
+        optionalFeedAuthDenialHeld(revokedRuntimeGenerationRef, appliedRuntimeGenerationRef);
+      const operationsAuthDenialHeld = () =>
+        optionalFeedAuthDenialHeld(
+          revokedOperationsGenerationRef,
+          appliedOperationsGenerationRef,
+        );
+
       // This load's settled non-401/403 messages, in firstFailure order.
       // Overlapping loads keep their own maps; the failure watermark decides
       // which load owns the shared banner.
@@ -730,10 +750,14 @@ export function useWorkspaceDetailLoader({
         }
         // A latched authorization denial owns this banner. A transient
         // sibling is not recovery and must not replace the revocation reason.
+        // Runtime and operations denials are generation watermarks, not
+        // boolean latches; a held watermark is the same ownership.
         if (
           workspaceDetailAuthDeniedRef.current ||
           eventFeedAuthDeniedRef.current ||
-          logListingAuthDeniedRef.current
+          logListingAuthDeniedRef.current ||
+          runtimeAuthDenialHeld() ||
+          operationsAuthDenialHeld()
         ) {
           return true;
         }
@@ -1255,25 +1279,37 @@ export function useWorkspaceDetailLoader({
       if (firstFailure && !firstFailure.ok) {
         // A latched base-detail 401/403 owns this banner. A newer request that
         // only hangs or fails transiently is not recovery and must not replace
-        // the revocation reason. A latched event-feed or listing 401/403 has
-        // the same precedence over an earlier-listed sibling outage.
+        // the revocation reason. A latched event-feed or listing 401/403, and
+        // a held runtime or operations revocation, have the same precedence
+        // over an earlier-listed sibling outage — including when Promise.all
+        // finally runs after the hang that delayed this merge.
         const eventDenialOwnsBanner =
           eventFeedAuthDeniedRef.current &&
           !(events != null && feedAuthDenied(events) && firstFailure === events);
         const listingDenialOwnsBanner =
           logListingAuthDeniedRef.current &&
           !(streams != null && feedAuthDenied(streams) && firstFailure === streams);
+        const runtimeDenialOwnsBanner =
+          runtimeAuthDenialHeld() &&
+          !(runtime != null && feedAuthDenied(runtime) && firstFailure === runtime);
+        const operationsDenialOwnsBanner =
+          operationsAuthDenialHeld() &&
+          !(operations != null && feedAuthDenied(operations) && firstFailure === operations);
         if (
           (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) &&
           !eventDenialOwnsBanner &&
-          !listingDenialOwnsBanner
+          !listingDenialOwnsBanner &&
+          !runtimeDenialOwnsBanner &&
+          !operationsDenialOwnsBanner
         ) {
           setError(firstFailure.message);
         }
       } else if (
         !workspaceDetailAuthDeniedRef.current &&
         !eventFeedAuthDeniedRef.current &&
-        !logListingAuthDeniedRef.current
+        !logListingAuthDeniedRef.current &&
+        !runtimeAuthDenialHeld() &&
+        !operationsAuthDenialHeld()
       ) {
         setError(null);
       }
