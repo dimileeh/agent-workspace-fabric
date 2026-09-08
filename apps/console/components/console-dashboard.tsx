@@ -200,12 +200,19 @@ export function ConsoleDashboard() {
   // Overview poll generation: overlapping filter/explicit loads stay monotonic.
   // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
   // superseded paginated response must not overwrite a newer filtered rail.
-  // A completed 401/403 stays authoritative unless a newer successful overview
-  // has already been applied — a newer request merely starting is not recovery.
+  // A completed 401/403 or network/5xx stays authoritative unless a newer
+  // successful overview has already been applied — a newer request merely
+  // starting is not recovery.
   const overviewRequestGenerationRef = useRef(0);
   // Highest overview generation that applied a successful list. An older
-  // 401/403 must not clear a rail this newer success already owns.
+  // 401/403 must not clear a rail this newer success already owns. An older
+  // network/5xx outage must not replace the error that success cleared.
   const appliedOverviewGenerationRef = useRef(0);
+  // Highest overview generation that applied a network/5xx (or other non-auth)
+  // page failure. A newer request merely starting is not recovery. An older
+  // success must not clear a failure this newer response already applied, or
+  // the retained rail stays visible with no stale/error warning.
+  const appliedOverviewFailureGenerationRef = useRef(0);
   // Highest overview generation covered by an applied 401/403. An in-flight
   // refresh that started before the denial must not restore cleared rail,
   // inspector, or logs. A request that starts after this watermark may recover.
@@ -314,6 +321,7 @@ export function ConsoleDashboard() {
       // multi-value filters, and log selection see every matching workspace.
       let pageError: string | null = null;
       let pageAuthDenied = false;
+      let pageOutage = false;
       const applyOverviewAuthDenial = (deniedGeneration: number, message: string): boolean => {
         // A tenant/backend switch or console-level denial already wiped
         // authorized surfaces. An older context's 401/403 must not latch onto
@@ -385,6 +393,44 @@ export function ConsoleDashboard() {
         logStreamActivityRef.current = {};
         return true;
       };
+      const applyOverviewOutage = (failedGeneration: number, message: string): boolean => {
+        // A tenant/backend switch or console-level denial already wiped
+        // authorized surfaces. An older context's network/5xx must not latch
+        // an outage onto the new epoch or replace the authorization reason.
+        if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+          return false;
+        }
+        // A newer successful overview already owns the rail. A late 5xx from
+        // an older request must not re-latch overviewError.
+        if (failedGeneration < appliedOverviewGenerationRef.current) {
+          return false;
+        }
+        // A newer outage already owns the warning.
+        if (failedGeneration < appliedOverviewFailureGenerationRef.current) {
+          return false;
+        }
+        // A 401/403 already covers this generation. Do not replace the
+        // authorization reason.
+        if (failedGeneration <= revokedOverviewGenerationRef.current) {
+          return false;
+        }
+        appliedOverviewFailureGenerationRef.current = Math.max(
+          appliedOverviewFailureGenerationRef.current,
+          failedGeneration,
+        );
+        // Re-check in the updater: a newer success or denial can settle after
+        // this outage is queued. Retain the last-good rail; only 401/403 clears it.
+        setOverviewError((current) =>
+          epoch !== authorizedFeedEpochRef.current ||
+          failedGeneration < appliedOverviewGenerationRef.current ||
+          failedGeneration < appliedOverviewFailureGenerationRef.current ||
+          failedGeneration <= revokedOverviewGenerationRef.current ||
+          consoleAuthDeniedRef.current
+            ? current
+            : message,
+        );
+        return true;
+      };
       const collected = await collectOverviewPages(async (cursor) => {
         if (
           epoch !== authorizedFeedEpochRef.current ||
@@ -405,6 +451,15 @@ export function ConsoleDashboard() {
           pageAuthDenied = true;
           return null;
         }
+        // Transient page failures (5xx/network) retain the last-good rail.
+        // Record the completed outage before the generation guard: suppress it
+        // only after a newer successful overview has applied. A newer Refresh
+        // that has merely started, or is hanging, is not recovery.
+        if (!result.ok) {
+          pageError = result.message;
+          pageOutage = true;
+          return null;
+        }
         if (
           epoch !== authorizedFeedEpochRef.current ||
           consoleAuthDeniedRef.current ||
@@ -413,14 +468,14 @@ export function ConsoleDashboard() {
         ) {
           return null;
         }
-        if (!result.ok) {
-          pageError = result.message;
-          return null;
-        }
         return result.data;
       });
       if (pageAuthDenied) {
         applyOverviewAuthDenial(generation, pageError ?? "");
+        return;
+      }
+      if (pageOutage) {
+        applyOverviewOutage(generation, pageError ?? "");
         return;
       }
       if (
@@ -432,18 +487,16 @@ export function ConsoleDashboard() {
         return;
       }
       if (collected === null) {
-        // Transient page failures (5xx/network) retain the last-good authorized
-        // overview so rail/inspector stay usable; only 401/403 clears it.
-        if (pageError !== null) {
-          setOverviewError(pageError);
-        }
         return;
       }
-      // A newer 401/403 already covers this generation, or a newer success
-      // already owns the rail. Do not restore revoked or older rows.
+      // A newer 401/403 already covers this generation, a newer success
+      // already owns the rail, or a newer outage already owns the warning.
+      // Do not restore revoked rows or clear a failure that landed after a
+      // newer request started.
       if (
         generation <= revokedOverviewGenerationRef.current ||
-        generation < appliedOverviewGenerationRef.current
+        generation < appliedOverviewGenerationRef.current ||
+        generation < appliedOverviewFailureGenerationRef.current
       ) {
         return;
       }
@@ -462,8 +515,16 @@ export function ConsoleDashboard() {
           : null,
       );
       // Clear only the overview warning. A still-failing workspace-detail feed
-      // retains last-good inspector data and must keep its own banner.
-      setOverviewError(null);
+      // retains last-good inspector data and must keep its own banner. Re-check
+      // in the updater so a newer outage that settled after this success was
+      // claimed cannot be wiped.
+      setOverviewError((current) =>
+        generation < appliedOverviewFailureGenerationRef.current ||
+        generation <= revokedOverviewGenerationRef.current ||
+        consoleAuthDeniedRef.current
+          ? current
+          : null,
+      );
       setOverview(
         collected.items.map((item) => ({
           ...item,

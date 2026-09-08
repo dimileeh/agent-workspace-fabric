@@ -1015,6 +1015,260 @@ test("newer successful overview suppresses an older overview 403", async ({ page
   await expect(page.getByText("overview permission revoked")).toHaveCount(0);
 });
 
+test("superseded overview outage applies while a newer refresh hangs", async ({ page }) => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMr: a completed
+  // overview network/5xx can settle after Refresh has only started a newer
+  // loadOverview. That outage must still warn that the retained rail is stale.
+  // A hang is not recovery. Suppress the older failure only after a newer
+  // success has applied.
+  let overviewMode: "ok" | "hold" | "hang" = "ok";
+  const held: Array<(kind: "outage" | "ok") => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  const workspaceId = "ws_overview_superseded_outage";
+  const workspaceTitle = "Superseded overview outage";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: workspaceTitle,
+    repo_url: "https://github.com/example/overview-superseded-outage",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Older overview 503 must warn while a newer refresh hangs",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.route("**/api/awf/workspaces/overview*", async (route) => {
+    if (overviewMode === "hold") {
+      await new Promise<void>((resolve) => {
+        held.push(async (kind) => {
+          if (kind === "outage") {
+            await fulfillJson(
+              route,
+              { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "overview feed outage" } },
+              503,
+            );
+          } else {
+            await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+          }
+          resolve();
+        });
+      });
+      return;
+    }
+    if (overviewMode === "hang") {
+      await new Promise<void>((resolve) => {
+        hanging.push(async () => {
+          await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+          resolve();
+        });
+      });
+      return;
+    }
+    await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+
+  overviewMode = "hold";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  overviewMode = "hang";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => hanging.length).toBe(1);
+
+  await held[0]("outage");
+  await expect(page.getByText("overview feed outage").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await expect(page.getByText(workspaceTitle, { exact: true })).toBeVisible();
+
+  await page.waitForTimeout(500);
+  await expect(page.getByText("overview feed outage").first()).toBeVisible();
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  expect(hanging.length).toBe(1);
+
+  await hanging[0]();
+  await expect(page.getByText("overview feed outage")).toHaveCount(0, { timeout: 10_000 });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+});
+
+test("newer successful overview suppresses an older overview outage", async ({ page }) => {
+  // A 5xx from a request that started before a newer successful overview
+  // applied must not replace that recovered list with a stale outage warning.
+  let overviewMode: "ok" | "hold" | "release" = "ok";
+  const held: Array<(kind: "outage" | "ok") => Promise<void>> = [];
+  const workspaceId = "ws_overview_outage_after_success";
+  const olderTitle = "Older overview before outage";
+  const newerTitle = "Newer overview after outage";
+  const olderItem = {
+    workspace_id: workspaceId,
+    title: olderTitle,
+    repo_url: "https://github.com/example/overview-outage-after-success",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Older overview 503 must not warn after a newer success",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const newerItem = { ...olderItem, title: newerTitle };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      if (overviewMode === "hold" || overviewMode === "release") {
+        await new Promise<void>((resolve) => {
+          held.push(async (kind) => {
+            if (kind === "outage") {
+              await fulfillJson(
+                route,
+                { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "overview feed outage" } },
+                503,
+              );
+            } else {
+              await fulfillJson(route, { items: [newerItem], next_cursor: null, has_more: false });
+            }
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, { items: [olderItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByText(olderTitle, { exact: true })).toBeVisible();
+
+  overviewMode = "hold";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  overviewMode = "release";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => held.length).toBe(2);
+
+  await held[1]("ok");
+  await expect(page.getByText(newerTitle, { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  await held[0]("outage");
+  await page.waitForTimeout(500);
+  await expect(page.getByText(newerTitle, { exact: true })).toBeVisible();
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await expect(page.getByText("overview feed outage")).toHaveCount(0);
+});
+
 test("in-flight dashboard-summary after capability 401 does not restore cleared KPIs", async ({ page }) => {
   let authDenied = false;
   let delaySummary = false;
