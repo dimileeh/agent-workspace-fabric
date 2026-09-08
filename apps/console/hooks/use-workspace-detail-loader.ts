@@ -89,6 +89,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * detail.events as soon as that request settles. Live event frames are ignored
  * until a later successful /events read recovers the feed. A newer request
  * merely starting, hanging, or failing transiently is not recovery.
+ * Runtime and operations 401/403 apply on settlement the same way: an older
+ * denial must not clear a newer recovered snapshot, and a denial after
+ * workspace_runtime / workspace_operations withdrawal must not stamp a detail
+ * error no later read of that feed will clear.
  * Selection changes start a new visit and advance request generation. A late
  * 401/403 from the previous visit must not latch denial or stamp the watermark
  * onto the re-opened workspace's in-flight GET, even when selectedId matches
@@ -141,6 +145,17 @@ export function useWorkspaceDetailLoader({
   // or in-flight 200 must not restore revoked events or let live frames refill
   // the panel. A request that starts after this watermark may recover.
   const revokedEventFeedGenerationRef = useRef(0);
+  // Highest detail generation that applied a successful /runtime or
+  // /operations GET. An older 401/403 must not clear a snapshot this newer
+  // success already owns, including when a sibling hang keeps Promise.all
+  // from repairing the overwrite.
+  const appliedRuntimeGenerationRef = useRef(0);
+  const appliedOperationsGenerationRef = useRef(0);
+  // Highest detail generation covered by an applied runtime or operations
+  // 401/403. An older in-flight 200 must not restore the cleared feed. A
+  // request that starts after this watermark may recover.
+  const revokedRuntimeGenerationRef = useRef(0);
+  const revokedOperationsGenerationRef = useRef(0);
   // Selection visit that owns the watermarks above. A late 401/403 may still
   // see the same selectedId after the operator leaves and re-opens that
   // workspace; it must not stamp the new visit's in-flight GET.
@@ -169,6 +184,10 @@ export function useWorkspaceDetailLoader({
     appliedWorkspaceDetailGenerationRef.current = 0;
     revokedEventFeedGenerationRef.current = 0;
     appliedEventFeedGenerationRef.current = 0;
+    revokedRuntimeGenerationRef.current = 0;
+    appliedRuntimeGenerationRef.current = 0;
+    revokedOperationsGenerationRef.current = 0;
+    appliedOperationsGenerationRef.current = 0;
   }, [selectedId]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -517,37 +536,175 @@ export function useWorkspaceDetailLoader({
         });
       };
 
-      const optionalFeedDenialStillCurrent = () =>
+      const optionalFeedContextCurrent = () =>
         epoch === authorizedFeedEpochRef.current &&
         selectedIdRef.current === workspaceId &&
         visit === workspaceDetailVisitRef.current &&
         generation > workspaceDetailVisitGenerationFloorRef.current &&
         (generation > revokedWorkspaceDetailGenerationRef.current || denialApplied);
 
+      // Capability withdrawal (or a capabilities 404) drops the feed after this
+      // load captured generation. A listing 401/403 also bumps the generation
+      // with DROP_ALL; that stamp is this load's own, not a withdrawal, and
+      // must not suppress a still-advertised runtime/operations denial.
+      const optionalFeedStillAdvertised = (feed: "runtime" | "operations") => {
+        if (gatedGeneration === gatedDetailFeedGenerationRef.current) {
+          return true;
+        }
+        const stampsForExternalDrop =
+          ownListingDropGeneration == null
+            ? gatedDetailDroppedFeedsRef.current
+            : gatedDetailDroppedFeedsRef.current.filter(
+                (stamp) => stamp.generation !== ownListingDropGeneration,
+              );
+        const hasExternalDrop = stampsForExternalDrop.some(
+          (stamp) => stamp.generation > gatedGeneration,
+        );
+        if (!hasExternalDrop) {
+          return true;
+        }
+        const dropped = gatedDetailDropsSince(stampsForExternalDrop, gatedGeneration);
+        if (allGatedDetailFeedsDropped(dropped)) {
+          return false;
+        }
+        return feed === "runtime" ? !dropped.runtime : !dropped.operations;
+      };
+
+      const publishOptionalFeedRecovered = (
+        appliedRef: MutableRefObject<number>,
+        revokedRef: MutableRefObject<number>,
+      ): boolean => {
+        // A denial that landed after this 200 passed the generation check owns
+        // the feed. An older success must not record recovery after a newer
+        // one already owns the snapshot.
+        if (generation <= revokedRef.current || generation < appliedRef.current) {
+          return false;
+        }
+        appliedRef.current = Math.max(appliedRef.current, generation);
+        return true;
+      };
+
+      const applyOptionalFeedAuthDenial = (
+        feed: "runtime" | "operations",
+        result: ApiEnvelope<unknown>,
+        appliedRef: MutableRefObject<number>,
+        revokedRef: MutableRefObject<number>,
+        clearFeed: (current: DetailState) => DetailState,
+      ) => {
+        if (result.ok || !feedAuthDenied(result)) {
+          return;
+        }
+        if (feed === "runtime" ? !allowRuntime : !allowOperations) {
+          return;
+        }
+        if (!optionalFeedContextCurrent() || !optionalFeedStillAdvertised(feed)) {
+          return;
+        }
+        // A newer successful read already owns this snapshot. Applying the
+        // older 401/403 would wipe it and stamp an error the recovered feed
+        // already replaced.
+        if (generation < appliedRef.current) {
+          return;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark here would reject a recovery that started
+        // after the original denial.
+        if (revokedRef.current > 0 && generation <= revokedRef.current) {
+          return;
+        }
+        // The first denial covers every detail request that has already
+        // started so an in-flight 200 cannot restore the cleared feed. A
+        // later 401 must not raise that watermark to the current generation.
+        revokedRef.current = Math.max(
+          revokedRef.current,
+          workspaceDetailRequestGenerationRef.current,
+        );
+        setDetail((current) => {
+          if (generation < appliedRef.current) {
+            return current;
+          }
+          return clearFeed(current);
+        });
+        // A recovered read can own the snapshot between the generation check
+        // and this write. Do not stamp an error the newer success already
+        // replaced, and do not replace a latched workspace or event denial.
+        if (
+          generation < appliedRef.current ||
+          workspaceDetailAuthDeniedRef.current ||
+          eventFeedAuthDeniedRef.current
+        ) {
+          return;
+        }
+        setError(result.message);
+      };
+
       const applyRuntimeAuthDenial = (result: ApiEnvelope<WorkspaceRuntime>) => {
-        if (!allowRuntime || result.ok || !feedAuthDenied(result)) {
-          return;
-        }
-        if (!optionalFeedDenialStillCurrent()) {
-          return;
-        }
-        setDetail((current) => ({ ...current, runtime: null }));
-        if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
-          setError(result.message);
-        }
+        applyOptionalFeedAuthDenial(
+          "runtime",
+          result,
+          appliedRuntimeGenerationRef,
+          revokedRuntimeGenerationRef,
+          (current) => ({ ...current, runtime: null }),
+        );
       };
 
       const applyOperationsAuthDenial = (result: ApiEnvelope<ListEnvelope<Operation>>) => {
-        if (!allowOperations || result.ok || !feedAuthDenied(result)) {
+        applyOptionalFeedAuthDenial(
+          "operations",
+          result,
+          appliedOperationsGenerationRef,
+          revokedOperationsGenerationRef,
+          (current) => ({ ...current, operations: [] }),
+        );
+      };
+
+      const applyRuntimeSuccessIfSettled = (result: ApiEnvelope<WorkspaceRuntime>) => {
+        if (!allowRuntime || !result.ok) {
           return;
         }
-        if (!optionalFeedDenialStillCurrent()) {
+        if (!optionalFeedContextCurrent() || !optionalFeedStillAdvertised("runtime")) {
           return;
         }
-        setDetail((current) => ({ ...current, operations: [] }));
-        if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
-          setError(result.message);
+        if (generation <= revokedRuntimeGenerationRef.current) {
+          return;
         }
+        if (!publishOptionalFeedRecovered(appliedRuntimeGenerationRef, revokedRuntimeGenerationRef)) {
+          return;
+        }
+        setDetail((current) => {
+          if (generation < appliedRuntimeGenerationRef.current) {
+            return current;
+          }
+          return { ...current, runtime: result.data };
+        });
+      };
+
+      const applyOperationsSuccessIfSettled = (
+        result: ApiEnvelope<ListEnvelope<Operation>>,
+      ) => {
+        if (!allowOperations || !result.ok) {
+          return;
+        }
+        if (!optionalFeedContextCurrent() || !optionalFeedStillAdvertised("operations")) {
+          return;
+        }
+        if (generation <= revokedOperationsGenerationRef.current) {
+          return;
+        }
+        if (
+          !publishOptionalFeedRecovered(
+            appliedOperationsGenerationRef,
+            revokedOperationsGenerationRef,
+          )
+        ) {
+          return;
+        }
+        setDetail((current) => {
+          if (generation < appliedOperationsGenerationRef.current) {
+            return current;
+          }
+          return { ...current, operations: result.data.items };
+        });
       };
 
       const workspacePromise = apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`));
@@ -583,12 +740,22 @@ export function useWorkspaceDetailLoader({
         }
       });
       void runtimePromise.then((result) => {
-        if (result != null) {
+        if (result == null) {
+          return;
+        }
+        if (result.ok) {
+          applyRuntimeSuccessIfSettled(result);
+        } else {
           applyRuntimeAuthDenial(result);
         }
       });
       void operationsPromise.then((result) => {
-        if (result != null) {
+        if (result == null) {
+          return;
+        }
+        if (result.ok) {
+          applyOperationsSuccessIfSettled(result);
+        } else {
           applyOperationsAuthDenial(result);
         }
       });
@@ -746,6 +913,26 @@ export function useWorkspaceDetailLoader({
         publishWorkspaceDetailAuthDenied(true);
       }
 
+      let runtimeRecoveryOwned = false;
+      if (allowRuntime && runtime != null && feedAuthDenied(runtime)) {
+        applyRuntimeAuthDenial(runtime);
+      } else if (allowRuntime && runtime?.ok) {
+        runtimeRecoveryOwned = publishOptionalFeedRecovered(
+          appliedRuntimeGenerationRef,
+          revokedRuntimeGenerationRef,
+        );
+      }
+
+      let operationsRecoveryOwned = false;
+      if (allowOperations && operations != null && feedAuthDenied(operations)) {
+        applyOperationsAuthDenial(operations);
+      } else if (allowOperations && operations?.ok) {
+        operationsRecoveryOwned = publishOptionalFeedRecovered(
+          appliedOperationsGenerationRef,
+          revokedOperationsGenerationRef,
+        );
+      }
+
       let eventRecoveryOwned = false;
       if (allowEvents && events != null && feedAuthDenied(events)) {
         // Event-feed 401/403 while workspace_events stays advertised is auth
@@ -798,13 +985,19 @@ export function useWorkspaceDetailLoader({
           ? current.workspace
           : workspaceFromDetailResult(current.workspace, workspace);
 
+        const staleRuntimeSuccess =
+          runtime != null &&
+          runtime.ok &&
+          (!runtimeRecoveryOwned || generation < appliedRuntimeGenerationRef.current);
         const nextRuntime = !allowRuntime
           ? null
-          : runtime != null && runtime.ok
-            ? runtime.data
-            : feedAuthDenied(runtime)
-              ? null
-              : current.runtime;
+          : staleRuntimeSuccess
+            ? current.runtime
+            : runtime != null && runtime.ok
+              ? runtime.data
+              : feedAuthDenied(runtime) && generation >= appliedRuntimeGenerationRef.current
+                ? null
+                : current.runtime;
 
         const staleEventSuccess =
           events != null &&
@@ -822,13 +1015,19 @@ export function useWorkspaceDetailLoader({
                 ? []
                 : current.events;
 
+        const staleOperationsSuccess =
+          operations != null &&
+          operations.ok &&
+          (!operationsRecoveryOwned || generation < appliedOperationsGenerationRef.current);
         const nextOperations = !allowOperations
           ? []
-          : operations != null && operations.ok
-            ? operations.data.items
-            : feedAuthDenied(operations)
-              ? []
-              : current.operations;
+          : staleOperationsSuccess
+            ? current.operations
+            : operations != null && operations.ok
+              ? operations.data.items
+              : feedAuthDenied(operations) && generation >= appliedOperationsGenerationRef.current
+                ? []
+                : current.operations;
 
         const nextStreams = !allowLogs
           ? []
