@@ -35,6 +35,8 @@ useState
 } from "react";
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
+import { displayedTaskKey } from "@/lib/console-dashboard-derived";
+import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   attentionAgeSeconds,
@@ -242,10 +244,54 @@ export type FleetKpi = {
 // "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
 // KPIs dim per source (saturation vs reliability summary) so only the actually
 // stale values fade, while the warning above stays at full opacity.
-export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
+export function FleetHealthStrip({
+  kpis,
+  error,
+  lastSuccessAt,
+  coverageStatus,
+  coverageNotes,
+}: {
+  kpis: FleetKpi[];
+  error?: string | null;
+  lastSuccessAt?: string | null;
+  coverageStatus?: "complete" | "partial" | "unknown" | null;
+  coverageNotes?: readonly string[] | null;
+}) {
   const anyStale = kpis.some((kpi) => kpi.stale);
+  // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
+  // error — that banner is cleared on success — but do not let non-null counts
+  // look fully current either.
+  const coverageNotice = formatDashboardCoverageNotice(
+    coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
+  );
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
+      {error ? (
+        <div
+          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-2 py-0.5 text-[11px] font-medium text-danger-text"
+          role="alert"
+          data-testid="dashboard-summary-error"
+        >
+          <span aria-hidden>⚠</span>
+          <span>{error}</span>
+          {lastSuccessAt ? (
+            <span className="text-danger-text/80">· last success {lastSuccessAt}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {coverageNotice ? (
+        <div
+          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text"
+          role="status"
+          data-testid="dashboard-summary-coverage"
+        >
+          <span aria-hidden>⚠</span>
+          <span>{coverageNotice}</span>
+          {!error && lastSuccessAt ? (
+            <span className="text-attention-text/80">· last complete {lastSuccessAt}</span>
+          ) : null}
+        </div>
+      ) : null}
       {anyStale ? (
         <div className="mb-2 inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text">
           <span aria-hidden>⚠</span>
@@ -269,24 +315,44 @@ export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
   );
 }
 
-const NAV_ITEMS: { id: string; label: string; icon: typeof ListTree }[] = [
-  { id: "awf-workspaces", label: "Workspaces", icon: ListTree },
-  { id: "awf-capacity", label: "Capacity", icon: Server },
-  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest },
-  { id: "awf-failures", label: "Failures", icon: AlertTriangle },
+const NAV_ITEMS: {
+  id: string;
+  label: string;
+  icon: typeof ListTree;
+  key: "workspaces" | "capacity" | "mergeQueue" | "failures";
+}[] = [
+  { id: "awf-workspaces", label: "Workspaces", icon: ListTree, key: "workspaces" },
+  { id: "awf-capacity", label: "Capacity", icon: Server, key: "capacity" },
+  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest, key: "mergeQueue" },
+  { id: "awf-failures", label: "Failures", icon: AlertTriangle, key: "failures" },
 ];
 
 // Section jump-nav. On wide screens the panels sit side by side and need no
 // navigation; on narrow screens they stack into one tall column, so this sticky
 // bar (narrow-only) lets operators jump straight to a section.
-export function SectionNav() {
+// Only offer links whose matching section id is mounted (capability-gated).
+export function SectionNav({
+  showCapacity,
+  showMergeQueue,
+  showFailures,
+}: {
+  showCapacity: boolean;
+  showMergeQueue: boolean;
+  showFailures: boolean;
+}) {
+  const visible = {
+    workspaces: true,
+    capacity: showCapacity,
+    mergeQueue: showMergeQueue,
+    failures: showFailures,
+  };
   const go = (id: string) => document.getElementById(id)?.scrollIntoView({ block: "start" });
   return (
     <nav
       aria-label="Jump to section"
       className="sticky top-0 z-30 flex gap-2 overflow-x-auto border-b border-line bg-canvas px-4 py-2 xl:hidden"
     >
-      {NAV_ITEMS.map((item) => {
+      {NAV_ITEMS.filter((item) => visible[item.key]).map((item) => {
         const Icon = item.icon;
         return (
           <button
@@ -614,6 +680,7 @@ export function WorkspaceSelectionToolbar({
 export function WorkspaceList({
   items,
   selectedId,
+  showWorkspaceLogs = true,
   selectedWorkspaceIds,
   onSelect,
   onToggleWorkspaceSelection,
@@ -622,6 +689,8 @@ export function WorkspaceList({
 }: {
   items: WorkspaceOverview[];
   selectedId: string | null;
+  /** When false, omit per-row log checkboxes and Logs buttons. */
+  showWorkspaceLogs?: boolean;
   selectedWorkspaceIds: string[];
   onSelect: (workspaceId: string) => void;
   onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
@@ -703,6 +772,7 @@ export function WorkspaceList({
         const awaitingHumanFor = isAwaitingHuman(item)
           ? attentionAgeSeconds(attentionSince(item))
           : null;
+        const taskKey = displayedTaskKey(item);
         return (
           <div
             key={item.workspace_id}
@@ -713,13 +783,15 @@ export function WorkspaceList({
           >
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
               <div className="flex min-w-0 items-start gap-2">
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(item.workspace_id)}
-                  onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
-                  aria-label={`Select ${item.title} for fullscreen logs`}
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
-                />
+                {showWorkspaceLogs ? (
+                  <input
+                    type="checkbox"
+                    checked={selectedSet.has(item.workspace_id)}
+                    onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
+                    aria-label={`Select ${item.title} for fullscreen logs`}
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
+                  />
+                ) : null}
                 <div className="relative grid min-w-0 flex-1 gap-2 text-left">
                   <button
                     type="button"
@@ -734,6 +806,14 @@ export function WorkspaceList({
                     >
                       {item.title}
                     </span>
+                    {taskKey ? (
+                      <span
+                        className="mono text-[11px] text-slate-500"
+                        data-testid={`workspace-task-key-${item.workspace_id}`}
+                      >
+                        {taskKey}
+                      </span>
+                    ) : null}
                     <span className="relative inline-flex min-w-0 items-center gap-1.5">
                       <button
                         type="button"
@@ -758,6 +838,11 @@ export function WorkspaceList({
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
                       <span>created {formatDateTime(item.created_at)}</span>
                       <span>updated {formatDateTime(item.updated_at)}</span>
+                      {item.last_activity_at ? (
+                        <span data-testid={`workspace-last-activity-${item.workspace_id}`}>
+                          activity {formatDateTime(item.last_activity_at)}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
                       <Bot size={13} aria-hidden className="shrink-0" />
@@ -842,14 +927,16 @@ export function WorkspaceList({
                 <FileText size={12} aria-hidden />
                 Details
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenLogs(item.workspace_id)}
-                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
-              >
-                <Terminal size={12} aria-hidden />
-                Logs
-              </button>
+              {showWorkspaceLogs ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenLogs(item.workspace_id)}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
+                >
+                  <Terminal size={12} aria-hidden />
+                  Logs
+                </button>
+              ) : null}
             </div>
           </div>
         );

@@ -1,0 +1,263 @@
+{
+  "description": "Shared negative cases for unsupported-reason and duplicate-id fail-closed parity across OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Positives for valid unsupported reasons live in the route matrix / local fixture.",
+  "unsupported_reason_codes": [
+    "backend_kind_local",
+    "backend_kind_hosted",
+    "not_implemented",
+    "policy_disabled"
+  ],
+  "cases": [
+    {
+      "name": "unsupported_widget_missing_reason_code",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "unsupported",
+            "message": "missing reason",
+            "semantics": "telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_widget_missing_message",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "unsupported",
+            "reason_code": "not_implemented",
+            "semantics": "telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_widget_empty_reason_code",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "unsupported",
+            "reason_code": "",
+            "message": "empty reason",
+            "semantics": "telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_widget_empty_message",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "unsupported",
+            "reason_code": "not_implemented",
+            "message": "",
+            "semantics": "telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_widget_arbitrary_reason_code",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "unsupported",
+            "reason_code": "something_custom",
+            "message": "arbitrary",
+            "semantics": "telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "unsupported_control_arbitrary_reason_code",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "retry",
+            "availability": "unsupported",
+            "reason_code": "made_up",
+            "message": "nope",
+            "semantics": "retry"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unsupported_diagnostic_missing_reason_and_message",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [
+          {
+            "id": "reliability",
+            "availability": "unsupported",
+            "semantics": "reliability"
+          }
+        ],
+        "controls": []
+      }
+    },
+    {
+      "name": "duplicate_widget_id",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "fleet_summary",
+            "availability": "available",
+            "route": "/v1/console/dashboard-summary",
+            "semantics": "fleet"
+          },
+          {
+            "id": "fleet_summary",
+            "availability": "available",
+            "route": "/v1/console/dashboard-summary",
+            "semantics": "fleet-dup"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "duplicate_diagnostic_id",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [
+          {
+            "id": "reliability",
+            "availability": "available",
+            "route": "/v1/metrics/workspaces/summary",
+            "semantics": "reliability"
+          },
+          {
+            "id": "reliability",
+            "availability": "unsupported",
+            "reason_code": "policy_disabled",
+            "message": "dup",
+            "semantics": "reliability"
+          }
+        ],
+        "controls": []
+      }
+    },
+    {
+      "name": "duplicate_control_id",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "retry",
+            "availability": "available",
+            "semantics": "retry"
+          },
+          {
+            "id": "retry",
+            "availability": "unsupported",
+            "reason_code": "policy_disabled",
+            "message": "dup",
+            "semantics": "retry"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid_unsupported_widget_not_implemented",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "unsupported",
+            "reason_code": "not_implemented",
+            "message": "not implemented",
+            "semantics": "telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "valid_unsupported_control_policy_disabled",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": [
+          {
+            "id": "remonitor",
+            "availability": "unsupported",
+            "reason_code": "policy_disabled",
+            "message": "remonitor disabled",
+            "semantics": "remonitor"
+          }
+        ]
+      }
+    }
+  ]
+}

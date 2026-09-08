@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "./agent-format.ts";
+import {
+  formatAgentEffort,
+  formatAgentIdentityLabel,
+  formatAgentLabel,
+  formatAgentTitle,
+} from "./agent-format.ts";
 
 test("formatAgentLabel includes compact model and effort", () => {
   assert.equal(
@@ -71,6 +76,26 @@ test("formatAgentEffort omits missing legacy provenance fields", () => {
   );
 });
 
+test("formatAgentIdentityLabel omits requested effort from the inspector agent identity", () => {
+  assert.equal(
+    formatAgentIdentityLabel({
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      agent_effort: "xhigh",
+    }),
+    "codex · gpt-5.5",
+  );
+  assert.equal(
+    formatAgentIdentityLabel({
+      agent: "cursor",
+      agent_model: "auto-smart[optimize_for=intelligence]",
+      agent_effort: "high",
+      cursor_auto_mode: "intelligence",
+    }),
+    "cursor · Auto Intelligence",
+  );
+});
+
 test("formatAgentLabel names an explicit Cursor Auto routing mode", () => {
   assert.equal(
     formatAgentLabel({
@@ -95,4 +120,316 @@ test("formatAgentTitle names an explicit Cursor Auto routing mode", () => {
     }),
     "cursor / Auto Balance / model task_policy / effort unavailable",
   );
+});
+
+test("never labels default/task_policy/auto as confirmed execution model", async () => {
+  const { formatConfirmedExecutionModel, isConfirmedModelSource } = await import("./agent-format.ts");
+  assert.equal(isConfirmedModelSource("default"), false);
+  assert.equal(isConfirmedModelSource("task_policy"), false);
+  assert.equal(isConfirmedModelSource("auto"), false);
+  assert.equal(isConfirmedModelSource("inferred"), false);
+  assert.equal(isConfirmedModelSource("configured"), false);
+  assert.equal(isConfirmedModelSource("execution_evidence"), true);
+  assert.equal(isConfirmedModelSource("adapter_report"), true);
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "task_policy",
+    }),
+    "not recorded",
+  );
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "default",
+    }),
+    "not recorded",
+  );
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5-2026-08-07",
+      confirmed_execution_model_source: "execution_evidence",
+    }),
+    "gpt-5.5-2026-08-07 (execution_evidence)",
+  );
+});
+
+test("accepts contract-valid confirmed sources outside the former allowlist", async () => {
+  const { formatConfirmedExecutionModel, isConfirmedModelSource } = await import("./agent-format.ts");
+  assert.equal(isConfirmedModelSource("provider_report"), true);
+  assert.equal(isConfirmedModelSource("runtime_evidence"), true);
+  assert.equal(isConfirmedModelSource("cursor_cli_usage"), true);
+  assert.equal(isConfirmedModelSource(""), false);
+  assert.equal(isConfirmedModelSource("   "), false);
+  assert.equal(isConfirmedModelSource("AUTO"), false);
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "cursor_cli_usage",
+    }),
+    "gpt-5.5 (cursor_cli_usage)",
+  );
+  assert.equal(
+    formatConfirmedExecutionModel({
+      confirmed_execution_model: "gpt-5.5",
+      confirmed_execution_model_source: "auto",
+    }),
+    "not recorded",
+  );
+});
+
+test("mergeWorkspacePresentationFields keeps overview metadata when detail omits fields", async () => {
+  const { mergeWorkspacePresentationFields, formatConfirmedExecutionModel, formatRequestedModel } =
+    await import("./agent-format.ts");
+  const overview = {
+    requested_model: "gpt-overview",
+    requested_model_source: "task_policy",
+    requested_effort: "high",
+    confirmed_execution_model: "gpt-confirmed",
+    confirmed_execution_model_source: "execution_evidence",
+  };
+  const sparseDetail = {
+    agent_model: "legacy-detail",
+  };
+  const merged = mergeWorkspacePresentationFields(overview, sparseDetail);
+  assert.equal(formatRequestedModel(merged), "gpt-overview (task_policy)");
+  assert.equal(formatConfirmedExecutionModel(merged), "gpt-confirmed (execution_evidence)");
+  assert.equal(
+    formatConfirmedExecutionModel(sparseDetail),
+    "not recorded",
+    "detail-only sparse object would blank confirmed model without merge",
+  );
+});
+
+test("mergeWorkspacePresentationFields keeps confirmed model and source atomic", async () => {
+  const { mergeWorkspacePresentationFields, formatConfirmedExecutionModel } = await import(
+    "./agent-format.ts"
+  );
+  const overview = {
+    confirmed_execution_model: "gpt-overview-confirmed",
+    confirmed_execution_model_source: "execution_evidence",
+  };
+
+  const modelOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    confirmed_execution_model: "gpt-detail-confirmed",
+  });
+  assert.equal(
+    formatConfirmedExecutionModel(modelOnlyDetail),
+    "gpt-overview-confirmed (execution_evidence)",
+    "partial detail must not attach a new model to overview provenance",
+  );
+  assert.equal(modelOnlyDetail.confirmed_execution_model, "gpt-overview-confirmed");
+  assert.equal(modelOnlyDetail.confirmed_execution_model_source, "execution_evidence");
+
+  const sourceOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    confirmed_execution_model_source: "adapter_report",
+  });
+  assert.equal(
+    formatConfirmedExecutionModel(sourceOnlyDetail),
+    "gpt-overview-confirmed (execution_evidence)",
+    "partial detail must not attach a new source to the overview model",
+  );
+  assert.equal(sourceOnlyDetail.confirmed_execution_model, "gpt-overview-confirmed");
+  assert.equal(sourceOnlyDetail.confirmed_execution_model_source, "execution_evidence");
+
+  const completeDetail = mergeWorkspacePresentationFields(overview, {
+    confirmed_execution_model: "gpt-detail-confirmed",
+    confirmed_execution_model_source: "adapter_report",
+  });
+  assert.equal(
+    formatConfirmedExecutionModel(completeDetail),
+    "gpt-detail-confirmed (adapter_report)",
+  );
+});
+
+test("formatRequestedModel does not attach legacy source to an explicit request", async () => {
+  const { formatRequestedModel, formatRequestedEffort } = await import("./agent-format.ts");
+  assert.equal(
+    formatRequestedModel({
+      requested_model: "gpt-explicit",
+      agent_model: "gpt-legacy",
+      agent_model_source: "task_policy",
+    }),
+    "gpt-explicit",
+    "explicit request without requested_model_source must not inherit agent_model_source",
+  );
+  assert.equal(
+    formatRequestedEffort({
+      requested_effort: "xhigh",
+      agent_effort: "high",
+      agent_effort_source: "task_policy",
+    }),
+    "xhigh",
+    "explicit effort without requested_effort_source must not inherit agent_effort_source",
+  );
+  assert.equal(
+    formatRequestedModel({
+      agent_model: "gpt-legacy",
+      agent_model_source: "task_policy",
+    }),
+    "gpt-legacy (task_policy)",
+    "legacy value may still use legacy provenance",
+  );
+  assert.equal(
+    formatRequestedEffort({
+      agent_effort: "high",
+      agent_effort_source: "task_policy",
+    }),
+    "high (task_policy)",
+    "legacy effort may still use legacy provenance",
+  );
+});
+
+test("mergeWorkspacePresentationFields keeps requested value and source atomic", async () => {
+  const {
+    mergeWorkspacePresentationFields,
+    formatRequestedModel,
+    formatRequestedEffort,
+  } = await import("./agent-format.ts");
+  const overview = {
+    requested_model: "gpt-overview",
+    requested_model_source: "task_policy",
+    requested_effort: "high",
+    requested_effort_source: "task_policy",
+  };
+
+  const modelOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_model: "gpt-detail",
+  });
+  assert.equal(
+    formatRequestedModel(modelOnlyDetail),
+    "gpt-detail",
+    "detail model without source must not inherit overview provenance",
+  );
+  assert.equal(modelOnlyDetail.requested_model, "gpt-detail");
+  assert.equal(modelOnlyDetail.requested_model_source, undefined);
+
+  const modelSourceOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_model_source: "workspace_override",
+  });
+  assert.equal(
+    formatRequestedModel(modelSourceOnlyDetail),
+    "gpt-overview (task_policy)",
+    "detail source without model must not attach to overview model",
+  );
+  assert.equal(modelSourceOnlyDetail.requested_model, "gpt-overview");
+  assert.equal(modelSourceOnlyDetail.requested_model_source, "task_policy");
+
+  const effortOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_effort: "xhigh",
+  });
+  assert.equal(
+    formatRequestedEffort(effortOnlyDetail),
+    "xhigh",
+    "detail effort without source must not inherit overview provenance",
+  );
+  assert.equal(effortOnlyDetail.requested_effort, "xhigh");
+  assert.equal(effortOnlyDetail.requested_effort_source, undefined);
+
+  const effortSourceOnlyDetail = mergeWorkspacePresentationFields(overview, {
+    requested_effort_source: "workspace_override",
+  });
+  assert.equal(
+    formatRequestedEffort(effortSourceOnlyDetail),
+    "high (task_policy)",
+    "detail effort source without value must not attach to overview effort",
+  );
+  assert.equal(effortSourceOnlyDetail.requested_effort, "high");
+  assert.equal(effortSourceOnlyDetail.requested_effort_source, "task_policy");
+
+  const completeDetail = mergeWorkspacePresentationFields(overview, {
+    requested_model: "gpt-detail",
+    requested_model_source: "workspace_override",
+    requested_effort: "xhigh",
+    requested_effort_source: "workspace_override",
+  });
+  assert.equal(formatRequestedModel(completeDetail), "gpt-detail (workspace_override)");
+  assert.equal(formatRequestedEffort(completeDetail), "xhigh (workspace_override)");
+});
+
+test("resolveWorkflowFinishedAt falls back to finished_at", async () => {
+  const { resolveWorkflowFinishedAt } = await import("./agent-format.ts");
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T16:00:00Z",
+    }),
+    "2026-09-06T17:00:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: null,
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    "2026-09-06T16:30:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    "2026-09-06T16:30:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: null,
+      finished_at: null,
+    }),
+    null,
+  );
+  assert.equal(resolveWorkflowFinishedAt({}), null);
+});
+
+test("distinctFinishedAt omits finished_at already shown as Workflow finished", async () => {
+  const { distinctFinishedAt } = await import("./agent-format.ts");
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: null,
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    null,
+    "cloud rows that only send finished_at must not render it twice",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    null,
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T17:00:00Z",
+    }),
+    null,
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T17:00:00.000Z",
+    }),
+    null,
+    "equivalent ISO forms of the same instant must not render twice",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "not-a-timestamp",
+    }),
+    "not-a-timestamp",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: "2026-09-06T16:00:00Z",
+    }),
+    "2026-09-06T16:00:00Z",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "2026-09-06T17:00:00Z",
+      finished_at: null,
+    }),
+    null,
+  );
+  assert.equal(distinctFinishedAt({}), null);
 });

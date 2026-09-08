@@ -1,5 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { fulfillJson, localCapabilities } from "./fixtures/console-api";
+
 const now = "2026-05-02T12:00:00.000Z";
 const workspaceId = "ws_theme_dark_0001";
 const secondWorkspaceId = "ws_theme_dark_0002";
@@ -246,6 +248,41 @@ async function mockAwfApi(page: Page) {
       await fulfillJson(route, { status: "ok" });
       return;
     }
+    if (path === "/api/awf/console/capabilities") {
+      // Canonical local contract includes workspace_logs / workspace_stream so
+      // fullscreen log screenshots are not suppressed by the fail-closed gate.
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, {
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0,
+          executing: 0,
+          monitoring_pr: 0,
+          awaiting_operator: 0,
+          awaiting_human: 0,
+          retrying: 0,
+          queued: 0,
+          completed_last_window: 0,
+          cancelled_last_window: 0,
+          failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      });
+      return;
+    }
     if (path === "/api/awf/workspaces/overview") {
       await fulfillJson(route, listEnvelope([workspaceOverview(workspaceId), workspaceOverview(secondWorkspaceId, "completed")]));
       return;
@@ -325,14 +362,6 @@ async function mockAwfApi(page: Page) {
     }
 
     await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
-  });
-}
-
-async function fulfillJson(route: Parameters<Parameters<Page["route"]>[1]>[0], body: unknown, status = 200) {
-  await route.fulfill({
-    status,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
   });
 }
 

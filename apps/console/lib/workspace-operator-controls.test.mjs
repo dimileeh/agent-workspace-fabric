@@ -542,6 +542,48 @@ test("action failure summary keeps error code and message", () => {
   );
 });
 
+test("unsupported controls are disabled with capability reason", () => {
+  const capabilities = {
+    schema_version: 1,
+    backend_kind: "hosted",
+    generated_at: "2026-09-06T17:00:00Z",
+    widgets: [],
+    diagnostics: [],
+    controls: [
+      { id: "remonitor", availability: "available", semantics: "remonitor" },
+      { id: "refresh", availability: "available", semantics: "refresh" },
+      { id: "revalidate", availability: "available", semantics: "revalidate" },
+      {
+        id: "cancel",
+        availability: "unsupported",
+        reason_code: "policy_disabled",
+        message: "Cancel is not available on this backend.",
+        semantics: "cancel",
+      },
+    ],
+  };
+  assertControl(
+    {
+      overview: overview({ status: "running", pr_url: null }),
+      workspace: workspace({ status: "running", pr_url: null, pr_number: null }),
+      capabilities,
+      capabilitiesReady: true,
+    },
+    "cancel",
+    { enabled: false, reason: "Cancel is not available on this backend." },
+  );
+  assertControl(
+    {
+      overview: overview({ status: "running", pr_url: null }),
+      workspace: workspace({ status: "running", pr_url: null, pr_number: null }),
+      capabilities: null,
+      capabilitiesReady: true,
+    },
+    "cancel",
+    { enabled: false, reason: "console capabilities unavailable" },
+  );
+});
+
 function assertControl(context, action, expected) {
   const control = getWorkspaceOperatorControls(context).find((item) => item.action === action);
   assert.ok(control, `missing ${action} control`);

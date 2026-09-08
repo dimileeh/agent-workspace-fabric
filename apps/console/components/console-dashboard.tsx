@@ -10,53 +10,52 @@ useRef,
 useState,
 useTransition,
 } from "react";
-import { WorkspaceInspector } from "./workspace-inspector";
-
-import { capacityUtilizationPct,compactDuration,fallbackLlmUsage,pickWorkspaceLogStreams } from "@/lib/format";
-import { awfPath } from "@/lib/console-urls";
-import type { OperatorPreferences,ResolvedOperatorTheme } from "@/lib/operator-preferences";
+import { fallbackLlmUsage } from "@/lib/format";
 import {
-DEFAULT_OPERATOR_PREFERENCES,
-normalizeOperatorPreferences,
-} from "@/lib/operator-preferences";
-import { formatProviderReadinessRetryError } from "@/lib/provider-readiness-format";
+  capabilitiesForMutatingControls,
+  isDiagnosticAvailable,
+  isWidgetAvailable,
+} from "@/lib/console-capabilities";
+import { fleetKpisFromDashboardSummary } from "@/lib/console-dashboard-summary";
+import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
+import { collectOverviewPages, overviewListPath } from "@/lib/overview-list";
+import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
+import { useConsoleCapabilities } from "@/hooks/use-console-capabilities";
+import { useConsoleFleetFeeds } from "@/hooks/use-console-fleet-feeds";
+import { useSerializedPeriodicLoad } from "@/hooks/use-serialized-periodic-load";
+import { useWorkspaceDetailLoader } from "@/hooks/use-workspace-detail-loader";
+import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
+import { useOverviewQueryRef } from "@/hooks/use-overview-query-ref";
+import { useWorkspaceLiveStream } from "@/hooks/use-workspace-live-stream";
+import { useWorkspaceLogTails } from "@/hooks/use-workspace-log-tails";
+import { useWorkspaceMutatingControls } from "@/hooks/use-workspace-mutating-controls";
 import type {
-  AgentRuntime,
+  CloudRuntimeSummary,
+  ConsoleCapabilities,
+  ConsoleDashboardSummary,
   FailureSummaryResponse,
 ListEnvelope,
 MergeQueueItem,
-Operation,
 ResourceSaturationSummary,
-Workspace,
-WorkspaceControlResponse,
-WorkspaceEvent,
-WorkspaceLogRead,
-WorkspaceLogStream,
-WorkspaceOperatorAction,
-WorkspaceOperatorRequest,
 WorkspaceOverview,
 WorkspaceReliabilitySummary,
-WorkspaceRetryResponse,
-WorkspaceRuntime,
 } from "@/lib/types";
+import { getWorkspaceOperatorControls } from "@/lib/workspace-operator-controls";
+import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
+import { ConsoleDashboardInspector } from "./console-dashboard-inspector";
+import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
+import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar } from "./console-dashboard-overview";
+import { ConsoleDashboardWorkspaceRail } from "./console-dashboard-workspace-rail";
 import {
-getWorkspaceOperatorControls,
-summarizeWorkspaceOperatorFailure,
-summarizeWorkspaceOperatorSuccess,
-} from "@/lib/workspace-operator-controls";
-import {
-EventsPanel,
-LifecycleRail,
-MergeQueuePanel,
-OperationsPanel,
-ResourceCapacityPanel,
-RuntimePanel,
-terminalLifecycleSourceStage,
-} from "./console-dashboard-capacity";
-import { LogsPanel,MultiWorkspaceLogsFullscreen } from "./console-dashboard-logs";
-import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar,WorkspaceFilters,WorkspaceList,WorkspaceSelectionToolbar } from "./console-dashboard-overview";
-import { TaskDetailsModal,WorkspaceSummary } from "./console-dashboard-workspace-detail";
-import { FailureAnalysisPanel,SecretsLeasesPanel,SecurityEgressPanel } from "./console-dashboard-security";
+  DROP_ALL_GATED_DETAIL_FEEDS,
+  filterAndSortOverview,
+  gatedDetailDropFromWithdrawal,
+  noteGatedDetailDrop,
+  planCapabilityFeedWithdrawal,
+  resolveDashboardPanelVisibility,
+  type CapabilityFeedWithdrawal,
+  type GatedDetailDropStamp,
+} from "@/lib/console-dashboard-derived";
 import {
 type DetailState,
 type LogEntry,
@@ -67,40 +66,22 @@ type RetryActionState,
 type SortDirection,
 type WorkspaceSortKey,
 ErrorBanner,
-PanelContext,
 apiGet,
-apiPost,
-applyOperatorPreferenceAttributes,
 compareLogEntries,
-compareWorkspaceDates,
 emptyDetail,
-fallbackResourceSaturation,
-logStreamActivityFor,
-mergeEvent,
-mergeQueueLimit,
-operatorActionPath,
-operatorActionReason,
-operatorIdempotencyKey,
-parseFrame,
-pollMs,
-readStoredOperatorPreferences,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
-trimLogEntries,
-updateLogStreamActivity,
-writeStoredOperatorPreferences
 } from "./console-dashboard-shared";
 
 export function ConsoleDashboard() {
-  const [operatorPreferences, setOperatorPreferences] = useState<OperatorPreferences>(
-    DEFAULT_OPERATOR_PREFERENCES,
-  );
-  const [operatorPreferencesHydrated, setOperatorPreferencesHydrated] = useState(false);
-  const [systemTheme, setSystemTheme] = useState<ResolvedOperatorTheme>("light");
+  const { operatorPreferences, updateOperatorPreferences } = useOperatorThemePreferences();
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
-const searchParams = useSearchParams();
-  const [selectedId, setSelectedIdState] = useState<string | null>(searchParams.get("workspaceId"));
+  const searchParams = useSearchParams();
+  const { selectedId, selectedIdRef, setSelectedId } = useWorkspaceSelectionUrl(
+    searchParams,
+    searchParams.get("workspaceId"),
+  );
   const [detail, setDetail] = useState<DetailState>(emptyDetail);
   const [selectedStreams, setSelectedStreams] = useState<string[]>([]);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -132,42 +113,151 @@ const searchParams = useSearchParams();
   const [failureSummary, setFailureSummary] = useState<FailureSummaryResponse | null>(null);
   const [failureSummaryStatus, setFailureSummaryStatus] = useState<"loading" | "success" | "error" | "unavailable">("loading");
   const [failureSummaryError, setFailureSummaryError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<ConsoleCapabilities | null>(null);
+  const [capabilitiesReady, setCapabilitiesReady] = useState(false);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const [dashboardSummary, setDashboardSummary] = useState<ConsoleDashboardSummary | null>(null);
+  const [dashboardSummaryError, setDashboardSummaryError] = useState<string | null>(null);
+  const [cloudRuntime, setCloudRuntime] = useState<CloudRuntimeSummary | null>(null);
+  const [cloudRuntimeError, setCloudRuntimeError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
   const [operatorActionState, setOperatorActionState] = useState<OperatorActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Overview and selected-workspace diagnostic errors are independent feeds.
+  // A successful overview poll must not clear a retained runtime/events/
+  // operations/logs/stream warning, and a recovered detail load must not
+  // dismiss an overview outage. Truncation is a third slot for the same reason.
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [workspaceDetailError, setWorkspaceDetailError] = useState<string | null>(null);
+  const [overviewTruncationWarning, setOverviewTruncationWarning] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
-  const selectedIdRef = useRef<string | null>(selectedId);
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
-
-  const setSelectedId = useCallback((workspaceId: string | null) => {
-    selectedIdRef.current = workspaceId;
-    setSelectedIdState(workspaceId);
-  }, []);
-
-  useEffect(() => {
-    const urlWorkspaceId = searchParams.get("workspaceId");
-    if (selectedIdRef.current !== urlWorkspaceId) {
-      setSelectedId(urlWorkspaceId);
-    }
-  }, [searchParams, setSelectedId]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const currentParam = params.get("workspaceId");
-    if (selectedId !== currentParam) {
-      if (selectedId) {
-        params.set("workspaceId", selectedId);
-      } else {
-        params.delete("workspaceId");
-      }
-      const newQuery = params.toString();
-      window.history.replaceState(null, "", newQuery ? `?${newQuery}` : window.location.pathname);
-    }
-  }, [selectedId]);
+  // Listing 401/403 while workspace_logs stays advertised. Live log frames and
+  // in-flight tails must not refill caches the detail loader just cleared.
+  const logListingAuthDeniedRef = useRef(false);
+  // Mirrors the ref so the live-stream effect can close EventSource on listing
+  // 401/403. The ref alone does not re-run the effect, so the source stayed open.
+  const [logListingAuthDenied, setLogListingAuthDenied] = useState(false);
+  // Tail 401/403 while listing stays reachable. Listing success clears the
+  // listing latch, so this separate latch is what keeps /stream closed.
+  const logTailAuthDeniedRef = useRef(false);
+  const [logTailAuthDenied, setLogTailAuthDenied] = useState(false);
+  // Base /workspaces/{id} 401/403 while workspace_stream stays advertised.
+  // Listing/tail latches do not cover this path. Snapshot frames must not
+  // write revoked workspace metadata back until a successful detail GET.
+  const workspaceDetailAuthDeniedRef = useRef(false);
+  const [workspaceDetailAuthDenied, setWorkspaceDetailAuthDenied] = useState(false);
+  // Owned only by a base-detail GET 401/403. Stream-route denial also sets
+  // workspaceDetailAuthDenied so snapshots stay withheld, but a later /stream
+  // probe must not clear this GET latch or the inspector error.
+  const workspaceBaseDetailAuthDeniedRef = useRef(false);
+  // /events 401/403 while workspace_stream stays advertised. The detail loader
+  // clears detail.events, but EventSource event frames must not refill the
+  // panel until a successful /events read recovers the feed.
+  const eventFeedAuthDeniedRef = useRef(false);
+  const [, setEventFeedAuthDenied] = useState(false);
+  // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
+  const authorizedFeedEpochRef = useRef(0);
+  // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
+  const consoleAuthDeniedRef = useRef(false);
+  // Capability poll generation: discard a stale successful 200 after a newer
+  // request has started. A 401/403, a network/5xx outage, and a missing or
+  // malformed contract (404 / malformed 200) stay authoritative unless a newer
+  // successful negotiation has already been applied — a newer request merely
+  // starting is not recovery.
+  const capabilityRequestGenerationRef = useRef(0);
+  // Highest capability generation that applied a successful negotiation.
+  // An older 401/403 must not clear feeds this newer success already owns.
+  // An older network/5xx outage must not replace the error that success cleared.
+  const appliedCapabilityGenerationRef = useRef(0);
+  // Highest capability generation that applied a network/5xx outage or a
+  // missing/invalid contract (404 / malformed 200). A newer request merely
+  // starting is not recovery. An older success must not clear a failure this
+  // newer response already applied, or last-good capabilities keep enabling
+  // mutating controls with no stale/error indication.
+  const appliedCapabilityFailureGenerationRef = useRef(0);
+  // Highest capability generation covered by an applied 401/403. An older
+  // overlapping 200 (started before that denial) must not restore cleared
+  // feeds. Re-applying a denial already inside this window must not raise
+  // the watermark, or a recovery request that started after the original
+  // denial would be rejected.
+  const revokedCapabilityGenerationRef = useRef(0);
+  // Periodic capability polls chain after the previous invocation settles and
+  // skip while a request is still in flight. A wall-clock interval that calls
+  // loadCapabilities would advance generation and discard every slower-than-
+  // pollMs success, leaving the console permanently unnegotiated.
+  const capabilityLoadInFlightRef = useRef(false);
+  // Last applied inventory — detect available→unsupported under a stable identity.
+  const appliedCapabilitiesRef = useRef<ConsoleCapabilities | null>(null);
+  // Survives capabilities 404 gated clears (React identity state is nulled so
+  // optional polls stop). Recovery compares against this so a backend/tenant
+  // switch without URL-context change is not mistaken for bootstrap.
+  const lastCapabilityIdentityKeyRef = useRef<string | null>(null);
+  // Last configured context fingerprint; null = uninitialized ("" is valid locally).
+  const configuredContextFingerprintRef = useRef<string | null>(null);
+  const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
+  // Overview poll generation: overlapping filter/explicit loads stay monotonic.
+  // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
+  // superseded paginated response must not overwrite a newer filtered rail.
+  // A completed 401/403 or network/5xx stays authoritative unless a newer
+  // successful overview has already been applied — a newer request merely
+  // starting is not recovery.
+  const overviewRequestGenerationRef = useRef(0);
+  // Highest overview generation that applied a successful list. An older
+  // 401/403 must not clear a rail this newer success already owns. An older
+  // network/5xx outage must not replace the error that success cleared.
+  const appliedOverviewGenerationRef = useRef(0);
+  // Highest overview generation that applied a network/5xx (or other non-auth)
+  // page failure. A newer request merely starting is not recovery. An older
+  // success must not clear a failure this newer response already applied, or
+  // the retained rail stays visible with no stale/error warning.
+  const appliedOverviewFailureGenerationRef = useRef(0);
+  // Highest overview generation covered by an applied 401/403. An in-flight
+  // refresh that started before the denial must not restore cleared rail,
+  // inspector, or logs. A request that starts after this watermark may recover.
+  const revokedOverviewGenerationRef = useRef(0);
+  // Periodic polls chain after the previous invocation settles and skip while a
+  // collection is still paging. A wall-clock interval that calls loadOverview
+  // would advance generation and cancel that collector; if every page walk
+  // exceeds pollMs, the rail stays empty or permanently stale.
+  const overviewLoadInFlightRef = useRef(false);
+  // Summary poll generation: older success must not replace newer state.
+  // A completed 401/403 or network/5xx stays authoritative unless a newer
+  // success has already been applied — a newer request merely starting is not
+  // recovery.
+  const dashboardSummaryRequestGenerationRef = useRef(0);
+  // Cloud-runtime poll generation: overlapping interval/manual ticks stay monotonic.
+  // Failures apply until a newer success lands, same contract as dashboard-summary.
+  const cloudRuntimeRequestGenerationRef = useRef(0);
+  // Merge-queue poll generation: feed-level 401/403 clear must not lose to an
+  // older in-flight 200 (capabilities may still keep the panel mounted).
+  // A completed failure is not discarded solely because a newer request started.
+  const mergeQueueRequestGenerationRef = useRef(0);
+  // Resource-capacity / reliability / failures poll generations: same feed-level
+  // 401/403 + overlapping-poll contract as merge-queue / dashboard-summary.
+  const resourceSaturationRequestGenerationRef = useRef(0);
+  const workspaceSummaryRequestGenerationRef = useRef(0);
+  const failureSummaryRequestGenerationRef = useRef(0);
+  // Filled by useConsoleFleetFeeds after the withdrawal generation bump.
+  const noteFleetFeedCapabilityWithdrawalRef = useRef<
+    (plan: CapabilityFeedWithdrawal) => void
+  >(() => {});
+  // Filled by useWorkspaceDetailLoader. Runtime/operations denial ownership
+  // is hook-local; withdrawing the feed must release it or the banner sticks.
+  const releaseWithdrawnOptionalFeedDenialRef = useRef<
+    (feeds: { runtime: boolean; operations: boolean; events: boolean }) => void
+  >(() => {});
+  // Gated detail generation: bumped on capabilities 404 / same-identity
+  // inspector-detail withdrawal without touching authorizedFeedEpochRef.
+  // Inspector optional feeds discard on mismatch; the basic workspace GET still
+  // applies. Fleet snapshots do not consult this ref — they already invalidate
+  // their own request generations. Unrelated fleet withdrawals must not bump
+  // this, or an in-flight detail load would ignore still-advertised failures.
+  const gatedDetailFeedGenerationRef = useRef(0);
+  const gatedDetailDroppedFeedsRef = useRef<GatedDetailDropStamp[]>([]);
 
   const [retainedAgents, setRetainedAgents] = useState<string[]>([]);
   const [retainedModels, setRetainedModels] = useState<string[]>([]);
@@ -193,538 +283,853 @@ const searchParams = useSearchParams();
     return Array.from(new Set([...retainedAgents, ...currentAgents])).sort();
   }, [overview, retainedAgents]);
 
-
   useEffect(() => {
     selectedStreamsRef.current = selectedStreams;
   }, [selectedStreams]);
 
-  useEffect(() => {
-    setOperatorPreferences(readStoredOperatorPreferences());
-    setOperatorPreferencesHydrated(true);
-  }, []);
-
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const updateSystemTheme = () => setSystemTheme(media.matches ? "dark" : "light");
-    updateSystemTheme();
-    media.addEventListener("change", updateSystemTheme);
-    return () => media.removeEventListener("change", updateSystemTheme);
-  }, []);
-
-  useEffect(() => {
-    if (!operatorPreferencesHydrated) {
-      return;
-    }
-    applyOperatorPreferenceAttributes(operatorPreferences, systemTheme);
-    writeStoredOperatorPreferences(operatorPreferences);
-  }, [operatorPreferences, operatorPreferencesHydrated, systemTheme]);
-
-  const updateOperatorPreferences = useCallback((next: Partial<OperatorPreferences>) => {
-    setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));
-  }, []);
-
-  const overviewPath = useMemo(() => {
-    const params: Record<string, string | number> = { limit: 100 };
-    if (statusFilters.length === 1) {
-      params.status = statusFilters[0];
-    }
-    if (agentFilters.length === 1) {
-      params.agent = agentFilters[0];
-    }
-    if (repoFilter.trim()) {
-      params.repo_url = repoFilter.trim();
-    }
-    return awfPath("workspaces/overview", params);
-  }, [agentFilters, repoFilter, statusFilters]);
-
   const loadOverview = useCallback(async () => {
-    const health = await apiGet<{ status: string }>(awfPath("health"));
-    setApiState(health.ok ? "ok" : "error");
-
-    const result = await apiGet<ListEnvelope<WorkspaceOverview>>(overviewPath);
-    if (!result.ok) {
-      setError(result.message);
+    const epoch = authorizedFeedEpochRef.current;
+    // Auth revocation must not refill previously authorized workspace rows.
+    // Non-auth capability failures keep legacy-safe overview navigation.
+    if (consoleAuthDeniedRef.current) {
       setOverview([]);
       return;
     }
-    setError(null);
-    setOverview(
-      result.data.items.map((item) => ({
-        ...item,
-        task_prompt: item.task_prompt ?? "",
-        lifecycle: item.lifecycle ?? [],
-        llm_usage: fallbackLlmUsage(item.llm_usage),
-        recovery: item.recovery ?? null,
-      })),
-    );
-    setLastRefresh(new Date());
-    const currentSelectedId = selectedIdRef.current;
-    if (currentSelectedId && !result.data.items.some((item) => item.workspace_id === currentSelectedId)) {
-      setSelectedId(null);
-    }
-  }, [overviewPath, setSelectedId]);
-
-  const loadResourceSaturation = useCallback(async () => {
-    const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
-    if (!result.ok) {
-      setResourceError(result.message);
-      return;
-    }
-    setResourceError(null);
-    setResourceSaturation(fallbackResourceSaturation(result.data));
-  }, []);
-
-  const loadWorkspaceSummary = useCallback(async () => {
-    const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
-    if (!result.ok) {
-      setWorkspaceSummaryError(result.message);
-      return;
-    }
-    setWorkspaceSummaryError(null);
-    setWorkspaceSummary(result.data);
-  }, []);
-
-  const loadMergeQueue = useCallback(async () => {
-    const result = await apiGet<ListEnvelope<MergeQueueItem>>(
-      awfPath("merge-queue", { limit: mergeQueueLimit }),
-    );
-    if (!result.ok) {
-      setMergeQueueError(result.message);
-      setMergeQueueStatus("error");
-      return;
-    }
-    setMergeQueueError(null);
-    setMergeQueue(result.data.items);
-    setMergeQueueHasMore(result.data.has_more);
-    setMergeQueueStatus("success");
-  }, []);
-
-  const loadFailureSummary = useCallback(async () => {
-    const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
-    if (!result.ok) {
-      if (result.status === 404 || result.status === 503) {
-        setFailureSummaryStatus("unavailable");
-      } else {
-        setFailureSummaryStatus("error");
-        setFailureSummaryError(result.message);
-      }
-      return;
-    }
-    setFailureSummary(result.data);
-    setFailureSummaryStatus("success");
-    setFailureSummaryError(null);
-  }, []);
-
-  const loadWorkspace = useCallback(async (workspaceId: string) => {
-    const [workspace, runtime, events, operations, streams] = await Promise.all([
-      apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`)),
-      apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`)),
-      apiGet<ListEnvelope<WorkspaceEvent>>(
-        awfPath(`workspaces/${workspaceId}/events`, { limit: 100 }),
-      ),
-      apiGet<ListEnvelope<Operation>>(
-        awfPath(`workspaces/${workspaceId}/operations`, { limit: 50 }),
-      ),
-      apiGet<ListEnvelope<WorkspaceLogStream>>(awfPath(`workspaces/${workspaceId}/logs`)),
-    ]);
-
-    if (selectedIdRef.current !== workspaceId) {
-      return;
-    }
-
-    const firstFailure = [workspace, runtime, events, operations, streams].find((item) => !item.ok);
-    if (firstFailure && !firstFailure.ok) {
-      setError(firstFailure.message);
-    } else {
-      setError(null);
-    }
-
-    setDetail({
-      workspace: workspace.ok
-        ? {
-            ...workspace.data,
-            lifecycle: workspace.data.lifecycle ?? [],
-            llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
-            recovery: workspace.data.recovery ?? null,
-          }
-        : null,
-      runtime: runtime.ok ? runtime.data : null,
-      events: events.ok ? events.data.items : [],
-      operations: operations.ok ? operations.data.items : [],
-      streams: streams.ok ? streams.data.items : [],
-    });
-
-    if (streams.ok) {
-      logStreamActivityRef.current = updateLogStreamActivity(
-        logStreamActivityRef.current,
-        workspaceId,
-        streams.data.items,
-      );
-      setSelectedStreams((current) => {
-        return pickWorkspaceLogStreams(streams.data.items, current);
-      });
-    }
-  }, []);
-
-  const retrySelectedWorkspace = useCallback(async () => {
-    const workspaceId = selectedId;
-    if (!workspaceId) {
-      return;
-    }
-    setRetryState({ status: "submitting" });
-    const result = await apiPost<WorkspaceRetryResponse>(
-      awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
-    );
-    if (!result.ok) {
-      if (selectedIdRef.current !== workspaceId) {
+    // Stamp after the auth-denial early return so a denied no-op cannot invalidate
+    // an in-flight recovery load that already cleared the latch and advanced.
+    // Capture the query snapshot with the generation so pagination stays pinned to
+    // the filters that started this load; repoFilter is server-side only.
+    const generation = ++overviewRequestGenerationRef.current;
+    overviewLoadInFlightRef.current = true;
+    try {
+      const capturedQuery = overviewQueryRef.current;
+      const health = await apiGet<{ status: string }>(awfPath("health"));
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
+      ) {
         return;
       }
-      setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
-      return;
-    }
-    if (selectedIdRef.current !== workspaceId) {
-      await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
-      return;
-    }
-    setRetryState({
-      status: "success",
-      newWorkspaceId: result.data.new_workspace_id,
-      operationId: result.data.operation_id,
-    });
-    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
-  }, [loadMergeQueue, loadOverview, loadResourceSaturation, loadFailureSummary, loadWorkspaceSummary, selectedId]);
+      setApiState(health.ok ? "ok" : "error");
 
-  const runWorkspaceOperatorAction = useCallback(
-    async (action: WorkspaceOperatorAction, requestedTier?: number) => {
-      const workspaceId = selectedId;
-      if (!workspaceId || operatorActionState.status === "submitting") {
-        return;
-      }
-      setOperatorActionState({ status: "submitting", action });
-      const payload: WorkspaceOperatorRequest = {
-        reason: operatorActionReason(action),
-        workspace_version: detail.workspace?.version,
-        idempotency_key: operatorIdempotencyKey(action, workspaceId),
+      // Build per request so hosted context query keys (org_id/project_id) are
+      // read from the current page search after client-side tenant switches —
+      // do not memoize on filter state alone. Filter values come from the captured
+      // snapshot so this callback identity stays stable across filter edits.
+      const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
+        capturedQuery;
+      const filters = {
+        status: statuses.length === 1 ? statuses[0] : undefined,
+        agent: agents.length === 1 ? agents[0] : undefined,
+        repo_url: repo.trim() || undefined,
       };
-      if (action === "revalidate") {
-        payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
-      }
-
-      const result = await apiPost<WorkspaceControlResponse | Operation>(
-        operatorActionPath(action, workspaceId),
-        payload,
-      );
-      if (!result.ok) {
-        if (selectedIdRef.current !== workspaceId) {
-          return;
+      // Overview is cursor-paginated; accumulate pages so the rail, client search,
+      // multi-value filters, and log selection see every matching workspace.
+      let pageError: string | null = null;
+      let pageAuthDenied = false;
+      let pageOutage = false;
+      const applyOverviewAuthDenial = (deniedGeneration: number, message: string): boolean => {
+        // A tenant/backend switch or console-level denial already wiped
+        // authorized surfaces. An older context's 401/403 must not latch onto
+        // the new epoch.
+        if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+          return false;
         }
-        const failure = summarizeWorkspaceOperatorFailure(result);
-        setOperatorActionState({
-          status: "error",
-          action,
-          errorCode: failure.errorCode,
-          message: failure.message,
-        });
-        return;
-      }
-
-      const success = summarizeWorkspaceOperatorSuccess(action, result.data);
-      if (selectedIdRef.current !== workspaceId) {
-        await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
-        return;
-      }
-      setOperatorActionState({
-        status: "success",
-        action,
-        operationId: success.operationId,
-        operationStatus: success.status,
-        message: success.message,
-        warnings: success.warnings,
-      });
-      await Promise.all([
-        loadOverview(),
-        loadResourceSaturation(),
-        loadMergeQueue(),
-        loadFailureSummary(),
-        loadWorkspaceSummary(),
-        loadWorkspace(workspaceId),
-      ]);
-    },
-    [
-      detail.workspace?.version,
-      loadFailureSummary,
-      loadMergeQueue,
-      loadOverview,
-      loadResourceSaturation,
-      loadWorkspace,
-      loadWorkspaceSummary,
-      operatorActionState.status,
-      selectedId,
-    ],
-  );
-
-  const loadLogTail = useCallback(
-    async (workspaceId: string, stream: WorkspaceLogStream, selectedStreamIds: readonly string[]) => {
-      const offset = Math.max(stream.byte_count - 65_536, 0);
-      const activity = logStreamActivityFor(logStreamActivityRef.current, workspaceId, stream);
-      const result = await apiGet<WorkspaceLogRead>(
-        awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
-          offset,
-          limit_bytes: 65536,
-        }),
-      );
-      if (!result.ok) {
-        setLogEntries((current) =>
-          trimLogEntries(
-            [
-            ...current.filter(
-              (entry) => !(entry.workspaceId === workspaceId && entry.streamId === stream.stream_id),
-            ),
-            {
-              key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
-              workspaceId,
-              streamId: stream.stream_id,
-              source: stream.source,
-              fd: null,
-              offset,
-              data: `Unable to load log stream: ${result.message}`,
-              occurredAt: new Date().toISOString(),
-              order: Date.now(),
-              kind: "tail",
-            },
-            ],
-            selectedStreamIds,
-          ),
+        // A newer successful overview already owns the rail. A late 401/403
+        // from an older request must not clear it.
+        if (deniedGeneration < appliedOverviewGenerationRef.current) {
+          return false;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark would reject a recovery request that started
+        // after the original denial.
+        if (deniedGeneration <= revokedOverviewGenerationRef.current) {
+          return false;
+        }
+        // Cover every overview request that has already started so an in-flight
+        // refresh cannot restore cleared rail, inspector, or logs. A request
+        // that starts after this watermark may recover.
+        revokedOverviewGenerationRef.current = Math.max(
+          revokedOverviewGenerationRef.current,
+          overviewRequestGenerationRef.current,
         );
+        // Overview feed auth denial: drop the rail and close dependent workspace
+        // surfaces (selection, inspector, logs, fullscreen). Do not call
+        // clearAuthorizedConsoleFeeds — other feeds clear themselves, and
+        // capabilities may still succeed without an auth-denial latch thrashing
+        // overview refill. Bump gated-detail generation so in-flight
+        // loadWorkspace / log-tail cannot restore revoked caches.
+        noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
+        setOverviewError(message);
+        setOverview([]);
+        setOverviewTruncationWarning(null);
+        // Inspector surfaces are wiped with the rail; drop the detail warning
+        // so a retained diagnostic error does not outlive the cleared snapshot.
+        setWorkspaceDetailError(null);
+        workspaceDetailAuthDeniedRef.current = false;
+        setWorkspaceDetailAuthDenied(false);
+        workspaceBaseDetailAuthDeniedRef.current = false;
+        eventFeedAuthDeniedRef.current = false;
+        setEventFeedAuthDenied(false);
+        // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
+        // retained agent/model options stay visible on the rail, and an
+        // active prior filter can keep a later recovered list empty.
+        setRetainedAgents([]);
+        setRetainedModels([]);
+        setAgentFilters([]);
+        setModelFilters([]);
+        setRepoFilter("");
+        setSearchText("");
+        setSelectedId(null);
+        setDetail(emptyDetail);
+        logListingAuthDeniedRef.current = false;
+        setLogListingAuthDenied(false);
+        logTailAuthDeniedRef.current = false;
+        setLogTailAuthDenied(false);
+        selectedStreamsRef.current = [];
+        setSelectedStreams([]);
+        setLogEntries([]);
+        setStreamOffsets({});
+        setLogsFullscreen(false);
+        setWorkspaceLogSelection([]);
+        setFullscreenWorkspaceIds([]);
+        setTaskDetailsWorkspaceId(null);
+        setStreamState("idle");
+        setRetryState({ status: "idle" });
+        setOperatorActionState({ status: "idle" });
+        logStreamActivityRef.current = {};
+        return true;
+      };
+      const applyOverviewOutage = (failedGeneration: number, message: string): boolean => {
+        // A tenant/backend switch or console-level denial already wiped
+        // authorized surfaces. An older context's network/5xx must not latch
+        // an outage onto the new epoch or replace the authorization reason.
+        if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+          return false;
+        }
+        // A newer successful overview already owns the rail. A late 5xx from
+        // an older request must not re-latch overviewError.
+        if (failedGeneration < appliedOverviewGenerationRef.current) {
+          return false;
+        }
+        // A newer outage already owns the warning.
+        if (failedGeneration < appliedOverviewFailureGenerationRef.current) {
+          return false;
+        }
+        // A 401/403 already covers this generation. Do not replace the
+        // authorization reason.
+        if (failedGeneration <= revokedOverviewGenerationRef.current) {
+          return false;
+        }
+        appliedOverviewFailureGenerationRef.current = Math.max(
+          appliedOverviewFailureGenerationRef.current,
+          failedGeneration,
+        );
+        // Re-check in the updater: a newer success or denial can settle after
+        // this outage is queued. Retain the last-good rail; only 401/403 clears it.
+        setOverviewError((current) =>
+          epoch !== authorizedFeedEpochRef.current ||
+          failedGeneration < appliedOverviewGenerationRef.current ||
+          failedGeneration < appliedOverviewFailureGenerationRef.current ||
+          failedGeneration <= revokedOverviewGenerationRef.current ||
+          consoleAuthDeniedRef.current
+            ? current
+            : message,
+        );
+        return true;
+      };
+      const collected = await collectOverviewPages(async (cursor) => {
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          consoleAuthDeniedRef.current ||
+          generation !== overviewRequestGenerationRef.current ||
+          overviewQueryRef.current !== capturedQuery
+        ) {
+          return null;
+        }
+        const result = await apiGet<ListEnvelope<WorkspaceOverview>>(
+          overviewListPath(filters, cursor),
+        );
+        // A completed 401/403 is route-level revocation. Suppress it only after
+        // a newer successful overview has applied — a newer Refresh that has
+        // merely started, or is hanging, is not recovery.
+        if (!result.ok && (result.status === 401 || result.status === 403)) {
+          pageError = result.message;
+          pageAuthDenied = true;
+          return null;
+        }
+        // Transient page failures (5xx/network) retain the last-good rail.
+        // Record the completed outage before the generation guard: suppress it
+        // only after a newer successful overview has applied. A newer Refresh
+        // that has merely started, or is hanging, is not recovery.
+        if (!result.ok) {
+          pageError = result.message;
+          pageOutage = true;
+          return null;
+        }
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          consoleAuthDeniedRef.current ||
+          generation !== overviewRequestGenerationRef.current ||
+          overviewQueryRef.current !== capturedQuery
+        ) {
+          return null;
+        }
+        return result.data;
+      });
+      if (pageAuthDenied) {
+        applyOverviewAuthDenial(generation, pageError ?? "");
         return;
       }
-      const tailEntry = {
-        key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
-        workspaceId,
-        streamId: stream.stream_id,
-        source: stream.source,
-        fd: null,
-        offset: result.data.offset,
-        data: result.data.data,
-        occurredAt: new Date(activity).toISOString(),
-        order: activity,
-        kind: "tail" as const,
-      };
-      setLogEntries((current) =>
-        trimLogEntries(
-          [
-            ...current.filter(
-              (entry) =>
-                entry.workspaceId !== workspaceId ||
-                entry.streamId !== stream.stream_id ||
-                (entry.kind === "live" && entry.offset >= result.data.next_offset),
-            ),
-            tailEntry,
-          ],
-          selectedStreamIds,
-        ),
+      if (pageOutage) {
+        applyOverviewOutage(generation, pageError ?? "");
+        return;
+      }
+      if (
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
+      ) {
+        return;
+      }
+      if (collected === null) {
+        return;
+      }
+      // A newer 401/403 already covers this generation, a newer success
+      // already owns the rail, or a newer outage already owns the warning.
+      // Do not restore revoked rows or clear a failure that landed after a
+      // newer request started.
+      if (
+        generation <= revokedOverviewGenerationRef.current ||
+        generation < appliedOverviewGenerationRef.current ||
+        generation < appliedOverviewFailureGenerationRef.current
+      ) {
+        return;
+      }
+      appliedOverviewGenerationRef.current = Math.max(
+        appliedOverviewGenerationRef.current,
+        generation,
       );
-      setStreamOffsets((current) => ({
-        ...current,
-        [stream.stream_id]: result.data.next_offset,
-      }));
+      // Never treat a capped prefix as a complete fleet: surface truncation so
+      // rail/search/log selection cannot silently omit later workspaces.
+      // Keep this off both feed error slots so neither poll can clear it.
+      setOverviewTruncationWarning(
+        collected.truncated
+          ? collected.truncationReason === "missing_cursor"
+            ? "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor, so later workspaces cannot be loaded."
+            : "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
+          : null,
+      );
+      // Clear only the overview warning. A still-failing workspace-detail feed
+      // retains last-good inspector data and must keep its own banner. Re-check
+      // in the updater so a newer outage that settled after this success was
+      // claimed cannot be wiped.
+      setOverviewError((current) =>
+        generation < appliedOverviewFailureGenerationRef.current ||
+        generation <= revokedOverviewGenerationRef.current ||
+        consoleAuthDeniedRef.current
+          ? current
+          : null,
+      );
+      setOverview(
+        collected.items.map((item) => ({
+          ...item,
+          task_prompt: item.task_prompt ?? "",
+          lifecycle: item.lifecycle ?? [],
+          llm_usage: fallbackLlmUsage(item.llm_usage),
+          recovery: item.recovery ?? null,
+        })),
+      );
+      setLastRefresh(new Date());
+      const currentSelectedId = selectedIdRef.current;
+      if (currentSelectedId && !collected.items.some((item) => item.workspace_id === currentSelectedId)) {
+        setSelectedId(null);
+      }
+    } finally {
+      // A superseded load must not clear the latch while a newer filter or
+      // refresh load is still paging; periodic polls skip while this stays true.
+      if (generation === overviewRequestGenerationRef.current) {
+        overviewLoadInFlightRef.current = false;
+      }
+    }
+  }, [setSelectedId]);
+
+  const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
+    authorizedFeedEpochRef.current += 1;
+    if (options?.authDenied) {
+      consoleAuthDeniedRef.current = true;
+    } else {
+      // Context and identity resets are not denials. Leaving a prior tenant's
+      // 401/403 latched makes the new context ignore 404, malformed, and
+      // transient capability failures, and loadOverview keeps returning early
+      // with that tenant's authorization error.
+      consoleAuthDeniedRef.current = false;
+      setCapabilityError(null);
+    }
+    setResourceSaturation(null);
+    setResourceError(null);
+    setWorkspaceSummary(null);
+    setWorkspaceSummaryError(null);
+    setMergeQueue([]);
+    setMergeQueueHasMore(false);
+    setMergeQueueStatus("loading");
+    setMergeQueueError(null);
+    setFailureSummary(null);
+    setFailureSummaryStatus("loading");
+    setFailureSummaryError(null);
+    setDashboardSummary(null);
+    setDashboardSummaryError(null);
+    setCloudRuntime(null);
+    setCloudRuntimeError(null);
+    // Workspace list / inspector / logs / events are authorized surfaces too —
+    // wipe them on auth denial or tenant/backend identity change so revocation
+    // and cross-context reuse cannot fail open with prior rows still on screen.
+    setOverview([]);
+    setOverviewError(null);
+    setWorkspaceDetailError(null);
+    workspaceDetailAuthDeniedRef.current = false;
+    setWorkspaceDetailAuthDenied(false);
+    workspaceBaseDetailAuthDeniedRef.current = false;
+    eventFeedAuthDeniedRef.current = false;
+    setEventFeedAuthDenied(false);
+    setOverviewTruncationWarning(null);
+    setRetainedAgents([]);
+    setRetainedModels([]);
+    // Selected agent/model filters are tenant-learned identifiers; WorkspaceFilters
+    // re-injects them into option lists, so leave them active across auth/tenant
+    // clears and the prior context keeps filtering (and often emptying) the new one.
+    // repoFilter is applied server-side on the next overview request; searchText
+    // filters client-side — both must reset or a prior tenant's criteria hide the new list.
+    setAgentFilters([]);
+    setModelFilters([]);
+    setRepoFilter("");
+    setSearchText("");
+    setSelectedId(null);
+    setDetail(emptyDetail);
+    logListingAuthDeniedRef.current = false;
+    setLogListingAuthDenied(false);
+    logTailAuthDeniedRef.current = false;
+    setLogTailAuthDenied(false);
+    selectedStreamsRef.current = [];
+    setSelectedStreams([]);
+    setLogEntries([]);
+    setStreamOffsets({});
+    setLogsFullscreen(false);
+    setWorkspaceLogSelection([]);
+    setFullscreenWorkspaceIds([]);
+    setTaskDetailsWorkspaceId(null);
+    setStreamState("idle");
+    setRetryState({ status: "idle" });
+    setOperatorActionState({ status: "idle" });
+    logStreamActivityRef.current = {};
+    if (options?.clearCapabilities) {
+      appliedCapabilitiesRef.current = null;
+      lastCapabilityIdentityKeyRef.current = null;
+      setCapabilities(null);
+    }
+  }, [setSelectedId, setCapabilityError]);
+
+  // Missing/rolled-back negotiation (capabilities 404): drop optional inventories so
+  // gated polls stop, but keep overview/selection/basic detail. Do not bump
+  // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
+  // concurrent overview loads and blank legacy-safe navigation
+  // (CONSOLE_BACKEND_CONTRACT). Bump gatedDetailFeedGenerationRef only when
+  // leaving a negotiated snapshot, so in-flight optional detail feeds and
+  // log-tails cannot restore cleared data. Fleet inventories use their own
+  // request generations plus a revoke stamp, not that inspector generation.
+  // A persistent
+  // 404 poll must not bump that generation again — doing so discards
+  // overlapping /workspaces/{id} loads whose latency exceeds the capability
+  // interval and leaves the inspector empty. The basic workspace GET still
+  // applies when only that generation changed. Retain
+  // lastCapabilityIdentityKeyRef so a later identity switch is not treated as
+  // bootstrap.
+  const clearCapabilityGatedInventories = useCallback(() => {
+    dashboardSummaryRequestGenerationRef.current += 1;
+    cloudRuntimeRequestGenerationRef.current += 1;
+    mergeQueueRequestGenerationRef.current += 1;
+    resourceSaturationRequestGenerationRef.current += 1;
+    workspaceSummaryRequestGenerationRef.current += 1;
+    failureSummaryRequestGenerationRef.current += 1;
+    // Cover the bumped generations so an in-flight 401/503 cannot restore the
+    // cleared snapshot or error. Fleet loaders do not discard on inspector
+    // gated-detail advances, so this stamp is what keeps 404 from undoing itself.
+    noteFleetFeedCapabilityWithdrawalRef.current({
+      clearDashboardSummary: true,
+      clearResourceCapacity: true,
+      clearCloudRuntime: true,
+      clearReliability: true,
+      clearMergeQueue: true,
+      clearFailures: true,
+      clearRuntime: false,
+      clearEvents: false,
+      clearOperations: false,
+      clearLogs: false,
+    });
+    // Already-cleared negotiation: another 404/malformed poll has no optional
+    // snapshot left to invalidate. Repeating this bump is what starves the
+    // basic workspace GET.
+    if (appliedCapabilitiesRef.current !== null) {
+      noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
+    }
+    setResourceSaturation(null);
+    setResourceError(null);
+    setWorkspaceSummary(null);
+    setWorkspaceSummaryError(null);
+    setMergeQueue([]);
+    setMergeQueueHasMore(false);
+    setMergeQueueStatus("loading");
+    setMergeQueueError(null);
+    setFailureSummary(null);
+    setFailureSummaryStatus("loading");
+    setFailureSummaryError(null);
+    setDashboardSummary(null);
+    setDashboardSummaryError(null);
+    setCloudRuntime(null);
+    setCloudRuntimeError(null);
+    setDetail((current) => ({
+      ...current,
+      runtime: null,
+      events: [],
+      operations: [],
+      streams: [],
+    }));
+    logListingAuthDeniedRef.current = false;
+    setLogListingAuthDenied(false);
+    logTailAuthDeniedRef.current = false;
+    setLogTailAuthDenied(false);
+    if (eventFeedAuthDeniedRef.current && !workspaceDetailAuthDeniedRef.current) {
+      setWorkspaceDetailError(null);
+    }
+    eventFeedAuthDeniedRef.current = false;
+    setEventFeedAuthDenied(false);
+    releaseWithdrawnOptionalFeedDenialRef.current({
+      runtime: true,
+      operations: true,
+      events: true,
+    });
+    selectedStreamsRef.current = [];
+    setSelectedStreams([]);
+    setLogEntries([]);
+    setStreamOffsets({});
+    // Missing/malformed negotiation drops workspace_logs — close fullscreen so
+    // allowFullscreenLogs false does not leave logsFullscreen latched for remount.
+    setLogsFullscreen(false);
+    setFullscreenWorkspaceIds([]);
+    appliedCapabilitiesRef.current = null;
+    setCapabilities(null);
+  }, []);
+
+  // Same-identity inventory can withdraw a feed without changing the epoch key.
+  // Clear that feed's cache and bump gated/read generations so in-flight responses
+  // cannot restore withdrawn data — without advancing authorizedFeedEpochRef, which
+  // would strand in-flight retry/operator mutations in `submitting`.
+  const clearNewlyUnsupportedCapabilityFeeds = useCallback(
+    (previous: ConsoleCapabilities, next: ConsoleCapabilities) => {
+      const plan = planCapabilityFeedWithdrawal(previous, next);
+      if (plan.clearDashboardSummary) {
+        dashboardSummaryRequestGenerationRef.current += 1;
+        setDashboardSummary(null);
+        setDashboardSummaryError(null);
+      }
+      if (plan.clearResourceCapacity) {
+        resourceSaturationRequestGenerationRef.current += 1;
+        setResourceSaturation(null);
+        setResourceError(null);
+      }
+      if (plan.clearCloudRuntime) {
+        cloudRuntimeRequestGenerationRef.current += 1;
+        setCloudRuntime(null);
+        setCloudRuntimeError(null);
+      }
+      if (plan.clearReliability) {
+        workspaceSummaryRequestGenerationRef.current += 1;
+        setWorkspaceSummary(null);
+        setWorkspaceSummaryError(null);
+      }
+      if (plan.clearMergeQueue) {
+        mergeQueueRequestGenerationRef.current += 1;
+        setMergeQueue([]);
+        setMergeQueueHasMore(false);
+        setMergeQueueStatus("loading");
+        setMergeQueueError(null);
+      }
+      if (plan.clearFailures) {
+        failureSummaryRequestGenerationRef.current += 1;
+        setFailureSummary(null);
+        setFailureSummaryStatus("loading");
+        setFailureSummaryError(null);
+      }
+      // Inspector detail feeds: same-identity withdrawal must clear caches and
+      // bump gated-detail generation so in-flight optional feeds cannot restore
+      // withdrawn data. The basic workspace GET still applies (mutations keep
+      // their authorized epoch).
+      if (plan.clearRuntime || plan.clearEvents || plan.clearOperations || plan.clearLogs) {
+        setDetail((current) => ({
+          ...current,
+          runtime: plan.clearRuntime ? null : current.runtime,
+          events: plan.clearEvents ? [] : current.events,
+          operations: plan.clearOperations ? [] : current.operations,
+          streams: plan.clearLogs ? [] : current.streams,
+        }));
+        if (plan.clearLogs) {
+          logListingAuthDeniedRef.current = false;
+          setLogListingAuthDenied(false);
+          logTailAuthDeniedRef.current = false;
+          setLogTailAuthDenied(false);
+          selectedStreamsRef.current = [];
+          setSelectedStreams([]);
+          setLogEntries([]);
+          setStreamOffsets({});
+          // Close (not only omit) fullscreen when listing is withdrawn mid-view.
+          setLogsFullscreen(false);
+          setFullscreenWorkspaceIds([]);
+        }
+        if (plan.clearEvents) {
+          // workspace_events withdrawal leaves no later /events read that can
+          // clear this latch, so a basic-detail 200 must not keep the denial
+          // banner until the workspace or context changes.
+          if (eventFeedAuthDeniedRef.current && !workspaceDetailAuthDeniedRef.current) {
+            setWorkspaceDetailError(null);
+          }
+          eventFeedAuthDeniedRef.current = false;
+          setEventFeedAuthDenied(false);
+        }
+        if (plan.clearRuntime || plan.clearOperations || plan.clearEvents) {
+          // workspace_runtime / workspace_operations withdrawal leaves no later
+          // read that can clear hook-local denial watermarks. workspace_events
+          // withdrawal likewise leaves no later /events read that can clear a
+          // settled network/5xx. Release both so a basic-detail 200 cannot
+          // republish the obsolete banner.
+          releaseWithdrawnOptionalFeedDenialRef.current({
+            runtime: plan.clearRuntime,
+            operations: plan.clearOperations,
+            events: plan.clearEvents,
+          });
+        }
+        // Unrelated fleet/capacity withdrawals bump only their own request
+        // generations. Sharing this generation would make an in-flight detail
+        // load ignore still-advertised runtime/events/operations/log failures.
+        noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, gatedDetailDropFromWithdrawal(plan));
+      }
+      // Stamp revoked so an in-flight 503 cannot restore the cleared error.
+      noteFleetFeedCapabilityWithdrawalRef.current(plan);
     },
     [],
   );
 
-  useEffect(() => {
-    void loadOverview();
-    const interval = window.setInterval(() => void loadOverview(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadOverview]);
+  const invalidateAuthorizedFeedsIfContextChanged = useCallback(
+    (pageSearch?: string): boolean => {
+      const next = configuredContextFingerprint(pageSearch);
+      const previous = configuredContextFingerprintRef.current;
+      configuredContextFingerprintRef.current = next;
+      if (previous === null || previous === next) {
+        return false;
+      }
+      clearAuthorizedConsoleFeeds({ clearCapabilities: true });
+      return true;
+    },
+    [clearAuthorizedConsoleFeeds],
+  );
+
+  const { loadCapabilities } = useConsoleCapabilities({
+    invalidateAuthorizedFeedsIfContextChanged,
+    clearAuthorizedConsoleFeeds,
+    clearCapabilityGatedInventories,
+    clearNewlyUnsupportedCapabilityFeeds,
+    loadOverview,
+    capabilityRequestGenerationRef,
+    configuredContextFingerprintRef,
+    capabilityLoadInFlightRef,
+    appliedCapabilityGenerationRef,
+    consoleAuthDeniedRef,
+    revokedCapabilityGenerationRef,
+    appliedCapabilityFailureGenerationRef,
+    appliedCapabilitiesRef,
+    lastCapabilityIdentityKeyRef,
+    setCapabilityError,
+    setCapabilities,
+    setCapabilitiesReady,
+  });
+
+  const {
+    loadResourceSaturation,
+    loadDashboardSummary,
+    loadCloudRuntime,
+    loadWorkspaceSummary,
+    loadMergeQueue,
+    loadFailureSummary,
+    reloadAvailableFeeds,
+  } = useConsoleFleetFeeds({
+    capabilities,
+    authorizedFeedEpochRef,
+    dashboardSummaryRequestGenerationRef,
+    cloudRuntimeRequestGenerationRef,
+    mergeQueueRequestGenerationRef,
+    resourceSaturationRequestGenerationRef,
+    workspaceSummaryRequestGenerationRef,
+    failureSummaryRequestGenerationRef,
+    noteFleetFeedCapabilityWithdrawalRef,
+    setResourceSaturation,
+    setResourceError,
+    setDashboardSummary,
+    setDashboardSummaryError,
+    setCloudRuntime,
+    setCloudRuntimeError,
+    setWorkspaceSummary,
+    setWorkspaceSummaryError,
+    setMergeQueue,
+    setMergeQueueHasMore,
+    setMergeQueueStatus,
+    setMergeQueueError,
+    setFailureSummary,
+    setFailureSummaryStatus,
+    setFailureSummaryError,
+  });
+
+  const {
+    loadWorkspace,
+    noteWorkspaceStreamAuthorizationDenied,
+    noteWorkspaceStreamAuthorizationRecovered,
+    workspaceStreamAuthDeniedRef,
+  } = useWorkspaceDetailLoader({
+    selectedId,
+    selectedIdRef,
+    capabilities,
+    authorizedFeedEpochRef,
+    gatedDetailFeedGenerationRef,
+    gatedDetailDroppedFeedsRef,
+    logStreamActivityRef,
+    selectedStreamsRef,
+    logListingAuthDeniedRef,
+    setLogListingAuthDenied,
+    workspaceDetailAuthDeniedRef,
+    setWorkspaceDetailAuthDenied,
+    workspaceBaseDetailAuthDeniedRef,
+    eventFeedAuthDeniedRef,
+    setEventFeedAuthDenied,
+    releaseWithdrawnOptionalFeedDenialRef,
+    setError: setWorkspaceDetailError,
+    setDetail,
+    setSelectedStreams,
+    setLogEntries,
+    setStreamOffsets,
+  });
+
+  const mutatingCapabilities = useMemo(
+    () => capabilitiesForMutatingControls(capabilities, capabilityError),
+    [capabilities, capabilityError],
+  );
+
+  const { retrySelectedWorkspace, runWorkspaceOperatorAction } = useWorkspaceMutatingControls({
+    selectedId,
+    selectedIdRef,
+    authorizedFeedEpochRef,
+    mutatingCapabilities,
+    capabilitiesReady,
+    workspaceVersion: detail.workspace?.version,
+    operatorActionState,
+    setRetryState,
+    setOperatorActionState,
+    loadCapabilities,
+    loadOverview,
+    loadWorkspace,
+    reloadAvailableFeeds,
+  });
+
+  // status/agent/repo are read via overviewQueryRef inside loadOverview; listing
+  // them here refreshes overview on filter edits without recreating loadOverview
+  // (which would restart capability polling through loadCapabilities).
+  useSerializedPeriodicLoad(
+    true,
+    loadOverview,
+    overviewLoadInFlightRef,
+    `${statusFilters.join("\0")}\n${agentFilters.join("\0")}\n${repoFilter}`,
+  );
+
+  // Capability polls chain after settle. A wall-clock interval would advance
+  // generation on every pollMs tick and discard slower successes, so the
+  // console stays unnegotiated. Explicit refresh and context-sync still call
+  // loadCapabilities directly so a newer request can supersede.
+  useSerializedPeriodicLoad(true, loadCapabilities, capabilityLoadInFlightRef, "");
 
   useEffect(() => {
-    void loadResourceSaturation();
-    const interval = window.setInterval(() => void loadResourceSaturation(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadResourceSaturation]);
+    const syncConfiguredContext = () => {
+      if (!invalidateAuthorizedFeedsIfContextChanged()) {
+        return;
+      }
+      // Sequence overview after capabilities so an identity-change clear cannot
+      // advance the epoch mid-flight and discard a concurrent overview response
+      // (blank tenant list until the next poll). loadCapabilities also restarts
+      // overview on identity clear for the independent poll-effect race.
+      void (async () => {
+        await loadCapabilities();
+        await loadOverview();
+      })();
+    };
+    // Seed fingerprint from the current URL without clearing on first mount.
+    invalidateAuthorizedFeedsIfContextChanged();
 
-  useEffect(() => {
-    void loadWorkspaceSummary();
-    const interval = window.setInterval(() => void loadWorkspaceSummary(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadWorkspaceSummary]);
+    window.addEventListener("popstate", syncConfiguredContext);
 
-  useEffect(() => {
-    void loadMergeQueue();
-    const interval = window.setInterval(() => void loadMergeQueue(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadMergeQueue]);
+    const { history } = window;
+    const originalPushState = history.pushState.bind(history);
+    const originalReplaceState = history.replaceState.bind(history);
+    history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
+      originalPushState(data, unused, url);
+      syncConfiguredContext();
+    }) as History["pushState"];
+    history.replaceState = ((data: unknown, unused: string, url?: string | URL | null) => {
+      originalReplaceState(data, unused, url);
+      syncConfiguredContext();
+    }) as History["replaceState"];
 
-  useEffect(() => {
-    void loadFailureSummary();
-    const interval = window.setInterval(() => void loadFailureSummary(), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadFailureSummary]);
+    return () => {
+      window.removeEventListener("popstate", syncConfiguredContext);
+      history.pushState = originalPushState;
+      history.replaceState = originalReplaceState;
+    };
+  }, [invalidateAuthorizedFeedsIfContextChanged, loadCapabilities, loadOverview]);
+
+  const pollDashboardSummary = useCallback(() => {
+    if (!capabilities) {
+      return;
+    }
+    return loadDashboardSummary(capabilities);
+  }, [capabilities, loadDashboardSummary]);
+
+  const pollCloudRuntime = useCallback(() => {
+    if (!capabilities) {
+      return;
+    }
+    return loadCloudRuntime(capabilities);
+  }, [capabilities, loadCloudRuntime]);
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "fleet_summary")),
+    pollDashboardSummary,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "resource_capacity")),
+    loadResourceSaturation,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isWidgetAvailable(capabilities, "cloud_runtime")),
+    pollCloudRuntime,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "reliability")),
+    loadWorkspaceSummary,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "merge_queue")),
+    loadMergeQueue,
+  );
+
+  useCapabilityGatedPoll(
+    Boolean(capabilitiesReady && capabilities && isDiagnosticAvailable(capabilities, "failures")),
+    loadFailureSummary,
+  );
 
   useLayoutEffect(() => {
     selectedIdRef.current = selectedId;
+    logListingAuthDeniedRef.current = false;
+    setLogListingAuthDenied(false);
+    logTailAuthDeniedRef.current = false;
+    setLogTailAuthDenied(false);
+    workspaceDetailAuthDeniedRef.current = false;
+    setWorkspaceDetailAuthDenied(false);
+    workspaceBaseDetailAuthDeniedRef.current = false;
+    eventFeedAuthDeniedRef.current = false;
+    setEventFeedAuthDenied(false);
+    selectedStreamsRef.current = [];
     setDetail(emptyDetail);
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
+    setWorkspaceDetailError(null);
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
   }, [selectedId]);
 
-  useEffect(() => {
-    if (!selectedId) {
-      setDetail(emptyDetail);
-      return;
-    }
-    void loadWorkspace(selectedId);
-    const interval = window.setInterval(() => void loadWorkspace(selectedId), pollMs);
-    return () => window.clearInterval(interval);
-  }, [loadWorkspace, selectedId]);
+  useWorkspaceLiveStream({
+    selectedId,
+    capabilities,
+    authorizedFeedEpochRef,
+    selectedIdRef,
+    selectedStreamsRef,
+    logListingAuthDenied,
+    logListingAuthDeniedRef,
+    logTailAuthDenied,
+    logTailAuthDeniedRef,
+    workspaceDetailAuthDenied,
+    workspaceDetailAuthDeniedRef,
+    setWorkspaceDetailAuthDenied,
+    workspaceBaseDetailAuthDeniedRef,
+    workspaceStreamAuthDeniedRef,
+    noteWorkspaceStreamAuthorizationDenied,
+    noteWorkspaceStreamAuthorizationRecovered,
+    eventFeedAuthDeniedRef,
+    setStreamState,
+    setDetail,
+    setLogEntries,
+    setStreamOffsets,
+    setError: setWorkspaceDetailError,
+  });
 
-  useEffect(() => {
-    if (!selectedId || selectedStreams.length === 0) {
-      return;
-    }
-    for (const stream of detail.streams) {
-      if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream, selectedStreams);
-      }
-    }
-  }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
-
-  useEffect(() => {
-    if (!selectedId) {
-      setStreamState("idle");
-      return;
-    }
-    setStreamState("connecting");
-    const source = new EventSource(
-      awfPath(`workspaces/${selectedId}/stream`, {
-        channels: "events,agent,validation,services",
-        tail_bytes: 65536,
+  const filteredOverview = useMemo(
+    () =>
+      filterAndSortOverview(overview, {
+        searchText,
+        statusFilters,
+        agentFilters,
+        modelFilters,
+        sortKey,
+        sortDirection,
       }),
-    );
-    let closedByServer = false;
-    let terminalError = false;
+    [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters],
+  );
 
-    source.onmessage = (message) => {
-      const frame = parseFrame(message.data);
-      if (!frame) {
-        return;
-      }
-      if (frame.type === "connected" || frame.type === "heartbeat") {
-        setStreamState("live");
-        return;
-      }
-      if (frame.type === "snapshot") {
-        setStreamState("live");
-        setDetail((current) => ({
-          ...current,
-          workspace: {
-            ...frame.workspace,
-            lifecycle: frame.workspace.lifecycle ?? [],
-            llm_usage: fallbackLlmUsage(frame.workspace.llm_usage),
-            recovery: frame.workspace.recovery ?? null,
-          },
-        }));
-        return;
-      }
-      if (frame.type === "event") {
-        setStreamState("live");
-        setDetail((current) => ({
-          ...current,
-          events: mergeEvent(current.events, frame.event),
-        }));
-        return;
-      }
-      if (frame.type === "log") {
-        setStreamState("live");
-        setLogEntries((current) =>
-          trimLogEntries(
-            [
-            ...current,
-            {
-              key: `live:${frame.workspace_id}:${frame.stream_id}:${frame.offset}:${frame.next_offset ?? frame.offset}:${frame.seq}`,
-              workspaceId: frame.workspace_id,
-              streamId: frame.stream_id,
-              source: frame.source,
-              fd: frame.fd,
-              offset: frame.offset,
-              data: frame.data,
-              occurredAt: frame.occurred_at ?? new Date().toISOString(),
-              order: Date.parse(frame.occurred_at ?? "") || Date.now(),
-              kind: "live",
-            },
-            ],
-            selectedStreamsRef.current,
-          ),
-        );
-        setStreamOffsets((current) => ({
-          ...current,
-          [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
-        }));
-        return;
-      }
-      if (frame.type === "error") {
-        terminalError = true;
-        setStreamState("error");
-        setError(frame.message);
-        source.close();
-        return;
-      }
-      if (frame.type === "closed") {
-        closedByServer = true;
-        setStreamState("idle");
-        source.close();
-      }
-    };
-
-    source.onerror = () => {
-      if (terminalError) {
-        setStreamState("error");
-        return;
-      }
-      setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
-    };
-
-    return () => source.close();
-  }, [selectedId]);
-
-  const filteredOverview = useMemo(() => {
-    const needle = searchText.trim().toLowerCase();
-    let filtered = overview;
-    if (statusFilters.length > 0) {
-      filtered = filtered.filter((item) => statusFilters.includes(item.status));
-    }
-    if (agentFilters.length > 0) {
-      filtered = filtered.filter((item) => agentFilters.includes(item.agent));
-    }
-    if (modelFilters.length > 0) {
-      filtered = filtered.filter((item) => item.agent_model !== null && modelFilters.includes(item.agent_model));
-    }
-    if (needle) {
-      filtered = filtered.filter((item) =>
-        [
-          item.workspace_id,
-          item.task_id,
-          item.title,
-          item.repo_url,
-          item.base_branch,
-          item.agent,
-          item.agent_model ?? "",
-          item.agent_effort ?? "",
-          item.status,
-          item.recovery?.reason_code ?? "",
-          item.recovery?.recovery_mode ?? "",
-        ]
-          .join(" ")
-          .toLowerCase()
-          .includes(needle),
-      );
-    }
-    return [...filtered].sort((left, right) => compareWorkspaceDates(left, right, sortKey, sortDirection));
-  }, [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters]);
+  const {
+    logTailRefreshError,
+    reloadSelectedLogs,
+    openWorkspaceLogs,
+    openCurrentWorkspaceLogs,
+    openSelectedWorkspaceLogs,
+    removeFullscreenWorkspace,
+  } = useWorkspaceLogTails({
+    selectedId,
+    selectedIdRef,
+    setSelectedId,
+    detailStreams: detail.streams,
+    selectedStreams,
+    workspaceLogSelection,
+    filteredOverview,
+    fullscreenWorkspaceIds,
+    authorizedFeedEpochRef,
+    gatedDetailFeedGenerationRef,
+    gatedDetailDroppedFeedsRef,
+    logStreamActivityRef,
+    logListingAuthDenied,
+    logListingAuthDeniedRef,
+    workspaceDetailAuthDeniedRef,
+    logTailAuthDeniedRef,
+    setLogTailAuthDenied,
+    setDetail,
+    setSelectedStreams,
+    setLogEntries,
+    setStreamOffsets,
+    setLogTailSignal,
+    setFullscreenWorkspaceIds,
+    setLogsFullscreen,
+  });
 
   useEffect(() => {
     if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
@@ -745,9 +1150,18 @@ const searchParams = useSearchParams();
             workspace: detail.workspace,
             mergeQueueItem: selectedMergeQueueItem,
             operations: detail.operations,
+            capabilities: mutatingCapabilities,
+            capabilitiesReady,
           })
         : [],
-    [detail.operations, detail.workspace, selectedMergeQueueItem, selectedOverview],
+    [
+      capabilitiesReady,
+      detail.operations,
+      detail.workspace,
+      mutatingCapabilities,
+      selectedMergeQueueItem,
+      selectedOverview,
+    ],
   );
   const selectedLogEntries = useMemo(
     () => {
@@ -770,60 +1184,6 @@ const searchParams = useSearchParams();
     () => fullscreenWorkspaceIds.map((workspaceId) => toLogWorkspaceTarget(workspaceId, overview)),
     [fullscreenWorkspaceIds, overview],
   );
-  const reloadSelectedLogs = useCallback(() => {
-    if (!selectedId) {
-      return;
-    }
-    setLogTailSignal((current) => current + 1);
-    for (const stream of detail.streams) {
-      if (selectedStreams.includes(stream.stream_id)) {
-        void loadLogTail(selectedId, stream, selectedStreams);
-      }
-    }
-  }, [detail.streams, loadLogTail, selectedId, selectedStreams]);
-  const openWorkspaceLogs = useCallback(
-    (workspaceId: string) => {
-      if (workspaceId !== selectedId) {
-        setDetail(emptyDetail);
-        setSelectedStreams([]);
-        setLogEntries([]);
-        setStreamOffsets({});
-        setSelectedId(workspaceId);
-      }
-      setFullscreenWorkspaceIds([workspaceId]);
-      setLogsFullscreen(true);
-    },
-    [selectedId, setSelectedId],
-  );
-  const openCurrentWorkspaceLogs = useCallback(() => {
-    if (!selectedId) {
-      return;
-    }
-    setFullscreenWorkspaceIds([selectedId]);
-    setLogsFullscreen(true);
-  }, [selectedId]);
-  const openSelectedWorkspaceLogs = useCallback(() => {
-    if (workspaceLogSelection.length === 0) {
-      return;
-    }
-    const selected = new Set(workspaceLogSelection);
-    const orderedVisible = filteredOverview
-      .filter((workspace) => selected.has(workspace.workspace_id))
-      .map((workspace) => workspace.workspace_id);
-    const remaining = workspaceLogSelection.filter((workspaceId) => !orderedVisible.includes(workspaceId));
-    setFullscreenWorkspaceIds([...orderedVisible, ...remaining]);
-    setLogsFullscreen(true);
-  }, [filteredOverview, workspaceLogSelection]);
-  const removeFullscreenWorkspace = useCallback(
-    (workspaceId: string) => {
-      const next = fullscreenWorkspaceIds.filter((id) => id !== workspaceId);
-      setFullscreenWorkspaceIds(next);
-      if (next.length === 0) {
-        setLogsFullscreen(false);
-      }
-    },
-    [fullscreenWorkspaceIds],
-  );
   const taskDetailsWorkspace = useMemo(
     () => overview.find((workspace) => workspace.workspace_id === taskDetailsWorkspaceId) ?? null,
     [overview, taskDetailsWorkspaceId],
@@ -836,127 +1196,49 @@ const searchParams = useSearchParams();
   // outage still fails each feed's poll and sets its own error.
   const saturationStale = resourceError != null && resourceSaturation != null;
   const summaryStale = workspaceSummaryError != null && workspaceSummary != null;
+  const dashboardSummaryStale = dashboardSummaryError != null && dashboardSummary != null;
+  const cloudRuntimeStale = cloudRuntimeError != null && cloudRuntime != null;
 
-  const fleetKpis = useMemo<FleetKpi[]>(() => {
-    const counts = resourceSaturation?.workspace_counts ?? null;
-    const capacity = resourceSaturation ? capacityUtilizationPct(resourceSaturation) : null;
-    const queued = resourceSaturation?.capacity_queue.queued_workspace_count ?? null;
-    const oldestWait = resourceSaturation?.capacity_queue.oldest_wait_seconds ?? null;
-    // Windowed reliability counts (default 24h) — actionable, unlike the
-    // ever-growing cumulative failed total. Only meaningful once the summary
-    // has loaded, so the window hint is omitted while the value is unknown.
-    const windowHint = workspaceSummary ? `last ${workspaceSummary.since_hours}h` : undefined;
-    const completed = workspaceSummary?.completed_count;
-    const cancelled = workspaceSummary?.cancelled_count;
-    const failed = workspaceSummary?.failed_count;
-    const dash = "—";
-    return [
-      { id: "active", label: "Active", value: counts ? counts.active_total : dash, stale: saturationStale },
-      {
-        id: "running",
-        label: "Running",
-        // "Running" is the active-execution phase (running + validating + pushing) so a
-        // workspace does not vanish from this KPI while it validates or pushes.
-        value: counts ? counts.running + counts.validating + counts.pushing : dash,
-        tone:
-          counts && counts.running + counts.validating + counts.pushing > 0
-            ? "info"
-            : undefined,
-        stale: saturationStale,
-      },
-      {
-        id: "monitoring_pr",
-        label: "Monitoring PR",
-        value: counts ? counts.monitoring_pr : dash,
-        tone: counts?.monitoring_pr ? "info" : undefined,
-        stale: saturationStale,
-      },
-      {
-        // Protected-file pause: a `blocked` workspace is awaiting an operator
-        // guide decision while it still holds its slot + stack. It counts inside
-        // Active (server-side, via active_total) but deliberately NOT inside
-        // Running (running+validating+pushing, the PR #598 contract) — it is
-        // halted, not executing.
-        id: "blocked",
-        label: "Awaiting operator",
-        value: counts ? (counts.blocked ?? 0) : dash,
-        tone: counts?.blocked ? "warn" : undefined,
-        stale: saturationStale,
-      },
-      {
-        // In-place provider retry: a `recovering` workspace auto-heals after the
-        // provider cooldown (resumes in place, no operator action) while it still
-        // holds its slot + stack. Like `blocked` it counts inside Active
-        // (active_total) but NOT inside Running — it is paused, not executing.
-        // The `info` tone (vs blocked's `warn`) signals "no action needed".
-        id: "recovering",
-        label: "Auto-retrying",
-        value: counts ? (counts.recovering ?? 0) : dash,
-        tone: counts?.recovering ? "info" : undefined,
-        stale: saturationStale,
-      },
-      {
-        // PR-monitor HUMAN_WAIT escalation: a `monitoring_pr` workspace flagged
-        // awaiting a human (blocking review / deferred-human / merge BLOCKED). It
-        // is NOT a pause — the monitor keeps polling and auto-recovers — so it
-        // stays in `monitoring_pr` and counts inside Active (via active_total) but
-        // deliberately NOT inside Running, the same non-Running rule as blocked.
-        // `warn` tone because it needs an operator (mirrors "Awaiting operator").
-        id: "awaiting_human",
-        label: "Awaiting human",
-        value: counts ? (counts.awaiting_human ?? 0) : dash,
-        tone: counts?.awaiting_human ? "warn" : undefined,
-        stale: saturationStale,
-      },
-      {
-        id: "queued",
-        label: "Queued",
-        value: queued ?? dash,
-        tone: queued ? "warn" : undefined,
-        hint:
-          queued && queued > 0
-            ? oldestWait != null
-              ? `oldest ${compactDuration(oldestWait)}`
-              : "awaiting capacity"
-            : undefined,
-        stale: saturationStale,
-      },
-      {
-        id: "completed",
-        label: "Completed",
-        value: completed ?? dash,
-        tone: completed ? "good" : undefined,
-        hint: completed != null ? windowHint : undefined,
-        stale: summaryStale,
-      },
-      {
-        id: "cancelled",
-        label: "Cancelled",
-        value: cancelled ?? dash,
-        tone: cancelled ? "warn" : undefined,
-        hint: cancelled != null ? windowHint : undefined,
-        stale: summaryStale,
-      },
-      {
-        id: "failed",
-        label: "Failed",
-        value: failed ?? dash,
-        tone: failed ? "bad" : undefined,
-        hint: failed != null ? windowHint : undefined,
-        stale: summaryStale,
-      },
-      {
-        id: "capacity",
-        label: "Capacity",
-        value: capacity ?? dash,
-        suffix: capacity != null ? "%" : undefined,
-        // Only flag pressure (warn/bad). Low/idle utilization stays neutral so a
-        // value below the warn threshold is not styled like an active signal.
-        tone: capacity != null ? (capacity >= 90 ? "bad" : capacity >= 75 ? "warn" : undefined) : undefined,
-        stale: saturationStale,
-      },
-    ];
-  }, [resourceSaturation, workspaceSummary, saturationStale, summaryStale]);
+  const {
+    showResourceCapacity,
+    showCloudRuntime,
+    showReliability,
+    showMergeQueue,
+    showFailures,
+    showCapacitySection,
+    showWorkspaceRuntime,
+    showWorkspaceEvents,
+    showWorkspaceOperations,
+    showWorkspaceLogs,
+    allowFullscreenLogs,
+    allowFullscreenStreamLogs,
+    fleetSummaryAvailable,
+  } = resolveDashboardPanelVisibility(capabilities);
+  const fleetKpis = useMemo<FleetKpi[]>(
+    () =>
+      fleetKpisFromDashboardSummary({
+        // Render-time gate: never surface a retained summary after inventory withdraws
+        // fleet_summary (clearNewlyUnsupportedCapabilityFeeds wipes + bumps
+        // dashboard-summary request generation only — not gated-detail).
+        // Unsupported/omitted fleet_summary omits summary counters; capacity stays independent.
+        summary: fleetSummaryAvailable ? dashboardSummary : null,
+        summaryStale: fleetSummaryAvailable && dashboardSummaryStale,
+        saturation: resourceSaturation,
+        saturationStale,
+        showCapacity: showResourceCapacity,
+        includeSummary: fleetSummaryAvailable,
+      }),
+    [
+      dashboardSummary,
+      dashboardSummaryStale,
+      fleetSummaryAvailable,
+      resourceSaturation,
+      saturationStale,
+      showResourceCapacity,
+    ],
+  );
+  const showFleetHealthStrip =
+    fleetKpis.length > 0 || (fleetSummaryAvailable && Boolean(dashboardSummaryError));
 
   // Panel-level stale dimming: a panel dims only when it is actually showing a
   // previously-loaded snapshot AND its feed errored. On first-load failures
@@ -968,6 +1250,24 @@ const searchParams = useSearchParams();
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
 
+  const refreshDashboard = () => {
+    startTransition(() => {
+      void (async () => {
+        const selectedWorkspaceId = selectedIdRef.current;
+        // Supersede periodic detail loads before waiting for capabilities.
+        const detailReload = selectedWorkspaceId
+          ? loadWorkspace(selectedWorkspaceId)
+          : Promise.resolve();
+        const caps = await loadCapabilities();
+        // Capability failures must not skip the list refresh.
+        await Promise.all([loadOverview(), detailReload]);
+        if (caps) {
+          await reloadAvailableFeeds(caps);
+        }
+      })();
+    });
+  };
+
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
@@ -977,188 +1277,161 @@ const searchParams = useSearchParams();
         selectedId={selectedId}
         preferences={operatorPreferences}
         onPreferencesChange={updateOperatorPreferences}
-        onRefresh={() =>
-          startTransition(() => {
-            void loadOverview();
-            void loadResourceSaturation();
-            void loadMergeQueue();
-            void loadWorkspaceSummary();
-          })
-        }
+        onRefresh={refreshDashboard}
         isPending={isPending}
       />
 
-      <FleetHealthStrip kpis={fleetKpis} />
-      <SectionNav />
+      {showFleetHealthStrip ? (
+        <FleetHealthStrip
+          kpis={fleetKpis}
+          error={fleetSummaryAvailable ? dashboardSummaryError : null}
+          lastSuccessAt={
+            fleetSummaryAvailable ? (dashboardSummary?.last_success_at ?? null) : null
+          }
+          coverageStatus={
+            fleetSummaryAvailable ? (dashboardSummary?.coverage.status ?? null) : null
+          }
+          coverageNotes={
+            fleetSummaryAvailable ? (dashboardSummary?.coverage.notes ?? null) : null
+          }
+        />
+      ) : null}
+      <SectionNav
+        showCapacity={showCapacitySection}
+        showMergeQueue={showMergeQueue}
+        showFailures={showFailures}
+      />
 
       <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
-        <aside
-          id="awf-workspaces"
-          className="min-w-0 scroll-mt-14 border-b border-[var(--border)] bg-surface xl:border-r xl:border-b-0"
-        >
-          <WorkspaceFilters
-            statusFilters={statusFilters}
-            agentFilters={agentFilters}
-            modelFilters={modelFilters}
-            availableModels={availableModels}
-            availableAgents={availableAgents}
-            repoFilter={repoFilter}
-            searchText={searchText}
-            sortKey={sortKey}
-            sortDirection={sortDirection}
-            onStatusFilters={setStatusFilters}
-            onAgentFilters={setAgentFilters}
-            onModelFilters={setModelFilters}
-            onRepoFilter={setRepoFilter}
-            onSearchText={setSearchText}
-            onSortKey={setSortKey}
-            onSortDirection={setSortDirection}
-            expanded={filtersExpanded}
-            onToggleExpanded={() => setFiltersExpanded((current) => !current)}
-          />
-          <WorkspaceSelectionToolbar
-            selectedCount={workspaceLogSelection.length}
-            onOpen={openSelectedWorkspaceLogs}
-            onClear={() => setWorkspaceLogSelection([])}
-          />
-          <WorkspaceList
-            items={filteredOverview}
-            selectedId={selectedId}
-            selectedWorkspaceIds={workspaceLogSelection}
-            onSelect={setSelectedId}
-            onToggleWorkspaceSelection={(workspaceId, checked) =>
-              setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked))
-            }
-            onOpenDetails={setTaskDetailsWorkspaceId}
-            onOpenLogs={openWorkspaceLogs}
-          />
-        </aside>
+        <ConsoleDashboardWorkspaceRail
+          statusFilters={statusFilters}
+          agentFilters={agentFilters}
+          modelFilters={modelFilters}
+          availableModels={availableModels}
+          availableAgents={availableAgents}
+          repoFilter={repoFilter}
+          searchText={searchText}
+          sortKey={sortKey}
+          sortDirection={sortDirection}
+          filtersExpanded={filtersExpanded}
+          onStatusFilters={setStatusFilters}
+          onAgentFilters={setAgentFilters}
+          onModelFilters={setModelFilters}
+          onRepoFilter={setRepoFilter}
+          onSearchText={setSearchText}
+          onSortKey={setSortKey}
+          onSortDirection={setSortDirection}
+          onToggleExpanded={() => setFiltersExpanded((current) => !current)}
+          showWorkspaceLogs={showWorkspaceLogs}
+          workspaceLogSelection={workspaceLogSelection}
+          onOpenSelectedLogs={openSelectedWorkspaceLogs}
+          onClearLogSelection={() => setWorkspaceLogSelection([])}
+          filteredOverview={filteredOverview}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onToggleWorkspaceSelection={(workspaceId, checked) =>
+            setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked))
+          }
+          onOpenDetails={setTaskDetailsWorkspaceId}
+          onOpenLogs={openWorkspaceLogs}
+        />
 
         <section className="min-w-0">
-          {error ? <ErrorBanner message={error} /> : null}
-          <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <div id="awf-capacity" className="min-w-0 scroll-mt-14">
-              <ResourceCapacityPanel
-                saturation={resourceSaturation}
-                error={resourceError}
-                stale={capacityStale}
-                summaryStale={summaryStale}
-                workspaceSummary={workspaceSummary}
-                workspaceSummaryError={workspaceSummaryError}
-              />
-            </div>
-            {/* 2xl: the panel overlays the cell (absolute) so the long merge
-                list never drives the row height — Capacity sets the height and
-                the list scrolls to fill it. Below 2xl it is normal flow. */}
-            <div id="awf-merge-queue" className="min-w-0 scroll-mt-14 2xl:relative">
-              <div className="2xl:absolute 2xl:inset-0">
-                <MergeQueuePanel
-                  items={mergeQueue}
-                  hasMore={mergeQueueHasMore}
-                  status={mergeQueueStatus}
-                  error={mergeQueueError}
-                  stale={mergeStale}
-                />
-              </div>
-            </div>
-            <div id="awf-failures" className="scroll-mt-14 2xl:col-span-2">
-              <FailureAnalysisPanel
-                summary={failureSummary}
-                status={failureSummaryStatus}
-                error={failureSummaryError}
-                stale={failureStale}
-              />
-            </div>
-          </div>
+          {capabilityError ? <ErrorBanner message={capabilityError} /> : null}
+          {overviewTruncationWarning ? <ErrorBanner message={overviewTruncationWarning} /> : null}
+          {overviewError ? <ErrorBanner message={overviewError} /> : null}
+          {workspaceDetailError ? <ErrorBanner message={workspaceDetailError} /> : null}
+          <ConsoleDashboardFleetPanels
+            showCapacitySection={showCapacitySection}
+            showReliability={showReliability}
+            showResourceCapacity={showResourceCapacity}
+            showCloudRuntime={showCloudRuntime}
+            showMergeQueue={showMergeQueue}
+            showFailures={showFailures}
+            workspaceSummary={workspaceSummary}
+            workspaceSummaryError={workspaceSummaryError}
+            summaryStale={summaryStale}
+            resourceSaturation={resourceSaturation}
+            resourceError={resourceError}
+            capacityStale={capacityStale}
+            cloudRuntime={cloudRuntime}
+            cloudRuntimeError={cloudRuntimeError}
+            cloudRuntimeStale={cloudRuntimeStale}
+            mergeQueue={mergeQueue}
+            mergeQueueHasMore={mergeQueueHasMore}
+            mergeQueueStatus={mergeQueueStatus}
+            mergeQueueError={mergeQueueError}
+            mergeStale={mergeStale}
+            failureSummary={failureSummary}
+            failureSummaryStatus={failureSummaryStatus}
+            failureSummaryError={failureSummaryError}
+            failureStale={failureStale}
+          />
 </section>
 
-      <WorkspaceInspector
-        isOpen={!!(selectedId && selectedOverview)}
+      <ConsoleDashboardInspector
+        selectedId={selectedId}
+        selectedOverview={selectedOverview}
+        selectedMergeQueueItem={selectedMergeQueueItem}
+        detail={detail}
+        retryState={retryState}
+        operatorControls={operatorControls}
+        operatorActionState={operatorActionState}
+        capabilities={mutatingCapabilities}
+        capabilitiesReady={capabilitiesReady}
+        showWorkspaceRuntime={showWorkspaceRuntime}
+        showWorkspaceEvents={showWorkspaceEvents}
+        showWorkspaceOperations={showWorkspaceOperations}
+        showWorkspaceLogs={showWorkspaceLogs}
+        selectedStreams={selectedStreams}
+        selectedStreamMetas={selectedStreamMetas}
+        selectedLogEntries={selectedLogEntries}
+        streamOffsets={streamOffsets}
+        logSortDirection={logSortDirection}
+        logTailSignal={logTailSignal}
+        logTailRefreshError={logTailRefreshError}
+        workspaceDetailError={workspaceDetailError}
         onClose={() => setSelectedId(null)}
-        title={selectedOverview ? selectedOverview.title : "Workspace Details"}
-      >
-        <PanelContext.Provider value="ghost">
-          {selectedId && selectedOverview ? (
-            <div className="grid min-w-0 gap-4 min-[1700px]:grid-cols-[minmax(0,1fr)_minmax(400px,0.8fr)]">
-              <div className="grid min-w-0 content-start gap-4">
-                <WorkspaceSummary
-                  overview={selectedOverview}
-                  workspace={detail.workspace}
-                  mergeQueueItem={selectedMergeQueueItem}
-                  retryState={retryState}
-                  operatorControls={operatorControls}
-                  operatorActionState={operatorActionState}
-                  onRetry={retrySelectedWorkspace}
-                  onOperatorAction={runWorkspaceOperatorAction}
-                />
-                <LifecycleRail
-                  status={selectedOverview.status}
-                  lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle ?? []}
-                  terminalSourceStage={terminalLifecycleSourceStage(
-                    selectedOverview.status,
-                    detail.events,
-                    selectedOverview.last_event,
-                    selectedOverview.current_phase,
-                  )}
-                />
-                <RuntimePanel runtime={detail.runtime} />
-                <SecurityEgressPanel
-                  resolvedProfile={detail.workspace?.resolved_profile ?? null}
-                  policyFindings={detail.workspace?.policy_findings}
-                  egressAudit={detail.workspace?.egress_audit}
-                />
-                <SecretsLeasesPanel
-                  resolvedProfile={detail.workspace?.resolved_profile ?? null}
-                  secretLeases={detail.workspace?.secret_leases ?? null}
-                />
-                <OperationsPanel operations={detail.operations} />
-              </div>
-              <div className="grid min-w-0 content-start gap-4">
-                <EventsPanel events={detail.events} />
-                <LogsPanel
-                  streams={detail.streams}
-                  selectedStreams={selectedStreams}
-                  selectedStreamMetas={selectedStreamMetas}
-                  entries={selectedLogEntries}
-                  offsets={streamOffsets}
-                  sortDirection={logSortDirection}
-                  tailSignal={logTailSignal}
-                  onToggleStream={(streamId, checked) =>
-                    setSelectedStreams((current) => toggleStream(current, streamId, checked))
-                  }
-                  onSelectAll={() => setSelectedStreams(detail.streams.map((stream) => stream.stream_id))}
-                  onClear={() => setSelectedStreams([])}
-                  onReload={reloadSelectedLogs}
-                  onOpenFullscreen={openCurrentWorkspaceLogs}
-                  onToggleSortDirection={() =>
-                    setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
-                  }
-                />
-              </div>
-            </div>
-          ) : null}
-        </PanelContext.Provider>
-      </WorkspaceInspector>
+        onRefresh={refreshDashboard}
+        onRetry={() => {
+          void retrySelectedWorkspace();
+        }}
+        onOperatorAction={(action, requestedTier) => {
+          void runWorkspaceOperatorAction(action, requestedTier);
+        }}
+        onToggleStream={(streamId, checked) =>
+          setSelectedStreams((current) => toggleStream(current, streamId, checked))
+        }
+        onSelectAllStreams={() =>
+          setSelectedStreams(
+            showWorkspaceLogs ? detail.streams.map((stream) => stream.stream_id) : [],
+          )
+        }
+        onClearStreams={() => setSelectedStreams([])}
+        onReloadLogs={reloadSelectedLogs}
+        onOpenFullscreen={openCurrentWorkspaceLogs}
+        onToggleSortDirection={() =>
+          setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+        }
+      />
       </div>
-      {logsFullscreen && fullscreenWorkspaces.length > 0 ? (
-        <MultiWorkspaceLogsFullscreen
-          workspaces={fullscreenWorkspaces}
-          sortDirection={logSortDirection}
-          tailSignal={fullscreenTailSignal}
-          onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
-          onToggleSortDirection={() =>
-            setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
-          }
-          onRemoveWorkspace={removeFullscreenWorkspace}
-          onClose={() => setLogsFullscreen(false)}
-        />
-      ) : null}
-      {taskDetailsWorkspace ? (
-        <TaskDetailsModal
-          workspace={taskDetailsWorkspace}
-          onClose={() => setTaskDetailsWorkspaceId(null)}
-        />
-      ) : null}
+      <ConsoleDashboardOverlays
+        logsFullscreen={logsFullscreen}
+        fullscreenWorkspaces={fullscreenWorkspaces}
+        logSortDirection={logSortDirection}
+        fullscreenTailSignal={fullscreenTailSignal}
+        allowFullscreenLogs={allowFullscreenLogs}
+        allowFullscreenStreamLogs={allowFullscreenStreamLogs}
+        capabilities={capabilities}
+        onTailAll={() => setFullscreenTailSignal((current) => current + 1)}
+        onToggleSortDirection={() =>
+          setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+        }
+        onRemoveWorkspace={removeFullscreenWorkspace}
+        onCloseFullscreen={() => setLogsFullscreen(false)}
+        taskDetailsWorkspace={taskDetailsWorkspace}
+        onCloseTaskDetails={() => setTaskDetailsWorkspaceId(null)}
+      />
     </main>
   );
 }

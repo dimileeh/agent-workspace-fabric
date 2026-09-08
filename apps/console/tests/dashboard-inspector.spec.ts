@@ -1,5 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 
+import { fulfillJson, localCapabilities } from "./fixtures/console-api";
+
 async function clickWorkspaceTitle(page: Page, workspaceId: string) {
   const workspaceTitle = page.getByTestId(`workspace-title-${workspaceId}`);
   await workspaceTitle.waitFor({ state: "visible" });
@@ -18,7 +20,37 @@ test.describe("Dashboard Workspace Inspector", () => {
       await route.fulfill({ json: { status: "ok" } });
     });
 
-    await page.route("/api/awf/metrics/resources/saturation", async (route) => {
+
+  await page.route("/api/awf/console/capabilities", async (route) => {
+    // workspace_logs / workspace_stream must be advertised or inspector tails stay empty.
+    await fulfillJson(route, localCapabilities());
+  });
+  await page.route("/api/awf/console/dashboard-summary", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        schema_version: 1,
+        scope: "local",
+        generated_at: "2026-09-06T17:00:00Z",
+        as_of: "2026-09-06T17:00:00Z",
+        last_success_at: "2026-09-06T17:00:00Z",
+        window: { anchor: "generated_at", since_hours: 24, start: "2026-09-05T17:00:00Z" },
+        coverage: { status: "complete", notes: [] },
+        counts: {
+          active: 0, executing: 0, monitoring_pr: 0, awaiting_operator: 0, awaiting_human: 0, retrying: 0, queued: 0,
+          completed_last_window: 0, cancelled_last_window: 0, failed_last_window: 0,
+        },
+        overlap: {
+          awaiting_human_subset_of_monitoring_pr: true,
+          awaiting_operator_in_active_not_executing: true,
+          retrying_in_active_not_executing: true,
+        },
+      }),
+    });
+  });
+
+  await page.route("/api/awf/metrics/resources/saturation", async (route) => {
       await route.fulfill({ json: { generated_at: new Date().toISOString() } });
     });
 

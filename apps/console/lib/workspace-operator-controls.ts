@@ -1,5 +1,6 @@
 import type {
   ApiEnvelope,
+  ConsoleCapabilities,
   MergeQueueItem,
   Operation,
   ValidationTier,
@@ -9,6 +10,10 @@ import type {
   WorkspaceOperatorAction,
   WorkspaceOverview,
 } from "./types.ts";
+import {
+  controlUnsupportedReason,
+  isControlAvailable,
+} from "./console-capabilities.ts";
 
 export interface WorkspaceOperatorControl {
   action: WorkspaceOperatorAction;
@@ -24,6 +29,9 @@ export interface WorkspaceOperatorContext {
   workspace?: Workspace | null;
   mergeQueueItem?: MergeQueueItem | null;
   operations?: Operation[];
+  /** When absent/failed, controls fail closed. */
+  capabilities?: ConsoleCapabilities | null;
+  capabilitiesReady?: boolean;
 }
 
 export interface WorkspaceOperatorSuccessSummary {
@@ -80,17 +88,56 @@ export function getWorkspaceOperatorControls(context: WorkspaceOperatorContext):
     cancelControl(context),
   ];
 
-  if (!active) {
-    return controls;
-  }
+  const withActiveOps = !active
+    ? controls
+    : controls.map((control) => ({
+        ...control,
+        enabled: control.action === "cancel" ? (cancelling ? false : control.enabled) : false,
+        visible: control.visible || eligibleEnoughForActiveReason(control.action, context),
+        reason:
+          control.action === "cancel"
+            ? cancelling
+              ? "cancel/stop already active"
+              : control.reason
+            : "active operation",
+      }));
 
-  return controls.map((control) => ({
-    ...control,
-    enabled: control.action === "cancel" ? (cancelling ? false : control.enabled) : false,
-    visible: control.visible || eligibleEnoughForActiveReason(control.action, context),
-    reason:
-      control.action === "cancel" ? (cancelling ? "cancel/stop already active" : control.reason) : "active operation",
-  }));
+  return withActiveOps.map((control) => applyCapabilityGate(control, context));
+}
+
+function applyCapabilityGate(
+  control: WorkspaceOperatorControl,
+  context: WorkspaceOperatorContext,
+): WorkspaceOperatorControl {
+  // When callers omit capability fields (unit eligibility tests), leave status-based
+  // enablement unchanged. Production dashboard always passes capabilitiesReady.
+  if (context.capabilitiesReady === undefined && context.capabilities === undefined) {
+    return control;
+  }
+  if (!context.capabilitiesReady) {
+    return {
+      ...control,
+      enabled: false,
+      reason: control.reason ?? "waiting for console capabilities",
+    };
+  }
+  if (!context.capabilities) {
+    return {
+      ...control,
+      enabled: false,
+      reason: control.reason ?? "console capabilities unavailable",
+    };
+  }
+  if (!isControlAvailable(context.capabilities, control.action)) {
+    return {
+      ...control,
+      enabled: false,
+      reason:
+        controlUnsupportedReason(context.capabilities, control.action) ??
+        "unsupported by backend",
+    };
+  }
+  return control;
 }
 
 export function summarizeWorkspaceOperatorSuccess(

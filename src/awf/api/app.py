@@ -27,6 +27,7 @@ from awf.api.deps import (
 from awf.api.routes import (
     artifacts,
     callbacks,
+    console,
     controls,
     discovery,
     events,
@@ -129,6 +130,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     app.include_router(validation.router)
     app.include_router(merge_queue.router)
     app.include_router(metrics.router)
+    app.include_router(console.router)
     app.include_router(operations.router)
     app.include_router(controls.router)
     app.include_router(service.router)

@@ -1,0 +1,321 @@
+{
+  "description": "Shared identity.tenant_id nonblank matrix for OpenAPI Draft202012, Pydantic, and TS parseConsoleCapabilities. Accepts local optional/null identity; rejects blank/whitespace tenant_id whenever a string is provided; hosted still requires complete identity.",
+  "cases": [
+    {
+      "name": "hosted_complete",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": "tenant_a"
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_identity_omitted",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_identity_null",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": null,
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_tenant_id_omitted",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "local-awf",
+          "scope": "local"
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_tenant_id_null",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "local-awf",
+          "scope": "local",
+          "tenant_id": null
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_tenant_id_valid",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "local-awf",
+          "scope": "local",
+          "tenant_id": "local-tenant"
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_identity_omitted",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_identity_null",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": null,
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_omitted",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant"
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_null",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": null
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_empty",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": ""
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_spaces",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": "   "
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_tab",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": "\t"
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_newline",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": "\n"
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_mixed_whitespace",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": " \t\n "
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_tenant_id_wrong_type",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "awf-cloud",
+          "scope": "tenant",
+          "tenant_id": 123
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "hosted_identity_wrong_type",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": ["not", "an", "object"],
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_tenant_id_empty",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "local-awf",
+          "scope": "local",
+          "tenant_id": ""
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_tenant_id_spaces",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "local-awf",
+          "scope": "local",
+          "tenant_id": "   "
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "local_tenant_id_wrong_type",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "local",
+        "generated_at": "2026-09-06T17:00:00Z",
+        "identity": {
+          "backend_id": "local-awf",
+          "scope": "local",
+          "tenant_id": false
+        },
+        "widgets": [],
+        "diagnostics": [],
+        "controls": []
+      }
+    }
+  ]
+}

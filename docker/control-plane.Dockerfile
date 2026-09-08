@@ -49,6 +49,7 @@ COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2
 COPY apps/console/Dockerfile apps/console/next.config.ts apps/console/package-lock.json apps/console/package.json apps/console/postcss.config.mjs apps/console/tsconfig.json ./apps/console/
 COPY apps/console/app ./apps/console/app
 COPY apps/console/components ./apps/console/components
+COPY apps/console/hooks ./apps/console/hooks
 COPY apps/console/lib ./apps/console/lib
 COPY apps/console/scripts ./apps/console/scripts
 COPY src ./src

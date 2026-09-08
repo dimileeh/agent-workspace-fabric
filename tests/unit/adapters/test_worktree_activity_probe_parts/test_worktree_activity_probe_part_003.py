@@ -17,6 +17,7 @@ import sys
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,60 @@ from tests.unit.adapters.test_worktree_activity_probe_parts.helpers import (
     SRC_ROOT,
     _await_scan_gate,
 )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_scan_returns_slot_to_its_original_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
+) -> None:
+    owner = worktree_activity._LiveScanThreads(1)
+    replacement = worktree_activity._LiveScanThreads(1)
+    pending: list[Callable[[], None]] = []
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", owner)
+    monkeypatch.setattr(worktree_activity, "_start_scan_thread", pending.append)
+    scan = asyncio.create_task(
+        worktree_activity._run_scan(
+            lambda: "scanned", worktree_path="/ws/counter-owner", gate=worktree_activity._ScanGate()
+        )
+    )
+    await asyncio.sleep(0)
+    assert owner._live == 1
+    if cancelled:
+        scan.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await scan
+        await asyncio.sleep(0)
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", replacement)
+    assert len(pending) == 1
+    pending[0]()
+    if not cancelled:
+        assert await scan == "scanned"
+    assert owner._live == 0
+    assert replacement._live == 0
+
+
+@pytest.mark.unit
+async def test_scan_start_failure_returns_slot_to_its_original_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = worktree_activity._LiveScanThreads(1)
+    replacement = worktree_activity._LiveScanThreads(1)
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", owner)
+
+    def fail_start(_deliver: Callable[[], None]) -> None:
+        assert owner._live == 1
+        monkeypatch.setattr(worktree_activity, "_live_scan_threads", replacement)
+        raise RuntimeError("cannot start scan thread")
+
+    monkeypatch.setattr(worktree_activity, "_start_scan_thread", fail_start)
+    with pytest.raises(worktree_activity._ScanCapacityError, match="cannot start scan thread"):
+        await worktree_activity._run_scan(
+            lambda: "scanned", worktree_path="/ws/start-failure", gate=worktree_activity._ScanGate()
+        )
+    assert owner._live == 0
+    assert replacement._live == 0
 
 
 @pytest.mark.unit
@@ -255,6 +310,12 @@ async def test_probe_starts_no_second_thread_while_a_scan_is_still_running(
 
         with structlog.testing.capture_logs() as captured:
             assert await probe() is None
+        fresh = [
+            thread
+            for thread in threading.enumerate()
+            if thread not in before and thread.name.startswith("awf-worktree-scan")
+        ]
+        assert len(fresh) == 1
     finally:
         release.set()
 
@@ -267,12 +328,6 @@ async def test_probe_starts_no_second_thread_while_a_scan_is_still_running(
     assert len(gated) == 1
     assert gated[0]["worktree_path"] == str(worktree)
     assert gated[0]["log_level"] == "warning"
-    fresh = [
-        thread
-        for thread in threading.enumerate()
-        if thread not in before and thread.name.startswith("awf-worktree-scan")
-    ]
-    assert len(fresh) == 1
 
 
 @pytest.mark.unit
@@ -364,7 +419,9 @@ async def test_probe_starts_no_thread_once_the_worker_wide_ceiling_is_full(
 
 
 @pytest.mark.unit
-async def test_finished_scans_return_their_worker_wide_slot(worktree: Path) -> None:
+async def test_finished_scans_return_their_worker_wide_slot(
+    worktree: Path, settle_scan_threads: Callable[[], None]
+) -> None:
     """The ceiling counts *live* threads, so ordinary probing cannot drain it.
 
     A slot leaked per completed scan would wedge every worktree on the worker
@@ -377,6 +434,7 @@ async def test_finished_scans_return_their_worker_wide_slot(worktree: Path) -> N
     assert await probe() is False
     assert await probe() is False
 
+    settle_scan_threads()
     assert worktree_activity._live_scan_threads._live == 0
 
 
@@ -414,6 +472,7 @@ async def test_priming_without_a_worker_wide_slot_still_starts_the_run(
 async def test_a_thread_that_cannot_start_frees_the_slot_it_reserved(
     worktree: Path,
     monkeypatch: pytest.MonkeyPatch,
+    settle_scan_threads: Callable[[], None],
 ) -> None:
     """``Thread.start`` can still fail below the ceiling; that must not latch.
 
@@ -424,6 +483,7 @@ async def test_a_thread_that_cannot_start_frees_the_slot_it_reserved(
     """
     probe = await make_worktree_activity_probe(worktree)
     assert probe is not None
+    settle_scan_threads()
 
     def _cannot_start(_deliver: object) -> None:
         raise RuntimeError("can't start new thread")

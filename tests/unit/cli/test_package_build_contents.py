@@ -47,6 +47,7 @@ _CONSOLE_BUILD_ASSETS = (
     "tsconfig.json",
     "app",
     "components",
+    "hooks",
     "lib",
     "scripts",
 )
