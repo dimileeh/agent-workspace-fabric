@@ -243,6 +243,11 @@ export function ConsoleDashboard() {
   const noteFleetFeedCapabilityWithdrawalRef = useRef<
     (plan: CapabilityFeedWithdrawal) => void
   >(() => {});
+  // Filled by useWorkspaceDetailLoader. Runtime/operations denial ownership
+  // is hook-local; withdrawing the feed must release it or the banner sticks.
+  const releaseWithdrawnOptionalFeedDenialRef = useRef<
+    (feeds: { runtime: boolean; operations: boolean }) => void
+  >(() => {});
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // inspector-detail withdrawal without touching authorizedFeedEpochRef.
   // Optional feeds discard on mismatch; the basic workspace GET still applies.
@@ -672,6 +677,7 @@ export function ConsoleDashboard() {
     }
     eventFeedAuthDeniedRef.current = false;
     setEventFeedAuthDenied(false);
+    releaseWithdrawnOptionalFeedDenialRef.current({ runtime: true, operations: true });
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -758,6 +764,15 @@ export function ConsoleDashboard() {
           }
           eventFeedAuthDeniedRef.current = false;
           setEventFeedAuthDenied(false);
+        }
+        if (plan.clearRuntime || plan.clearOperations) {
+          // workspace_runtime / workspace_operations withdrawal leaves no later
+          // read that can clear hook-local denial watermarks. Release them so
+          // a basic-detail 200 can drop the obsolete authorization banner.
+          releaseWithdrawnOptionalFeedDenialRef.current({
+            runtime: plan.clearRuntime,
+            operations: plan.clearOperations,
+          });
         }
         // Unrelated fleet/capacity withdrawals bump only their own request
         // generations. Sharing this generation would make an in-flight detail
@@ -1092,6 +1107,7 @@ export function ConsoleDashboard() {
     setWorkspaceDetailAuthDenied,
     eventFeedAuthDeniedRef,
     setEventFeedAuthDenied,
+    releaseWithdrawnOptionalFeedDenialRef,
     setError: setWorkspaceDetailError,
     setDetail,
     setSelectedStreams,

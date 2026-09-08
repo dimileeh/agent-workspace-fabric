@@ -2228,6 +2228,11 @@ test("same-identity feed withdrawal invalidates gated reads without advancing au
     /if \(plan\.clearEvents\) \{[\s\S]*?eventFeedAuthDeniedRef\.current = false;\s*setEventFeedAuthDenied\(false\);/,
     "Expected workspace_events withdrawal to clear the event-denial latch so a basic-detail 200 can drop the stale authorization banner",
   );
+  assert.match(
+    withdrawBody,
+    /if \(plan\.clearRuntime \|\| plan\.clearOperations\) \{[\s\S]*?releaseWithdrawnOptionalFeedDenialRef\.current\(\{\s*runtime: plan\.clearRuntime,\s*operations: plan\.clearOperations,\s*\}\);/,
+    "Expected workspace_runtime/workspace_operations withdrawal to release hook-local denial ownership so a basic-detail 200 can drop the stale authorization banner",
+  );
   assert.doesNotMatch(
     withdrawBody,
     /if \(capabilityFeedWithdrawalCleared\(plan\)\) \{\s*gatedDetailFeedGenerationRef\.current \+= 1;\s*\}/,
@@ -2247,6 +2252,39 @@ test("same-identity feed withdrawal invalidates gated reads without advancing au
     withdrawBody,
     /if \(plan\.clearMergeQueue\) \{[\s\S]*?mergeQueueRequestGenerationRef\.current \+= 1;/,
     "Expected merge_queue withdrawal to bump merge-queue request generation",
+  );
+});
+
+test("runtime and operations withdrawal releases hook-local denial ownership", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gHXlz: a settled
+  // runtime/operations 401/403 owns the banner via generation watermarks.
+  // Withdrawing the feed leaves no later read that can recover it, so the
+  // watermark must be cleared or a basic-detail 200 cannot drop the banner.
+  const loader = dashboardSource.detailLoader;
+  const releaseStart = loader.indexOf("const releaseWithdrawnOptionalFeedDenial = useCallback");
+  assert.ok(releaseStart > 0, "Expected a hook callback that releases withdrawn optional-feed denial");
+  const releaseEnd = loader.indexOf("useLayoutEffect(() => {", releaseStart);
+  assert.ok(releaseEnd > releaseStart, "Expected the release callback to be installed in a layout effect");
+  const releaseBody = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    releaseBody,
+    /if \(feeds\.runtime\) \{\s*revokedRuntimeGenerationRef\.current = 0;\s*\}/,
+    "Expected workspace_runtime withdrawal to clear revokedRuntimeGenerationRef ownership",
+  );
+  assert.match(
+    releaseBody,
+    /if \(feeds\.operations\) \{\s*revokedOperationsGenerationRef\.current = 0;\s*\}/,
+    "Expected workspace_operations withdrawal to clear revokedOperationsGenerationRef ownership",
+  );
+  assert.match(
+    releaseBody,
+    /!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current &&\s*!runtimeStillHeld &&\s*!operationsStillHeld/,
+    "Expected withdrawal to clear the authorization banner only when no other denial still owns it",
+  );
+  assert.match(
+    loader,
+    /releaseWithdrawnOptionalFeedDenialRef\.current = releaseWithdrawnOptionalFeedDenial;/,
+    "Expected the release callback to be installed for the dashboard withdrawal path",
   );
 });
 

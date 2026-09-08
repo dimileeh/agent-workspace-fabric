@@ -56,6 +56,9 @@ type UseWorkspaceDetailLoaderArgs = {
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setEventFeedAuthDenied: Dispatch<SetStateAction<boolean>>;
+  releaseWithdrawnOptionalFeedDenialRef: MutableRefObject<
+    (feeds: { runtime: boolean; operations: boolean }) => void
+  >;
   setError: Dispatch<SetStateAction<string | null>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
@@ -106,7 +109,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * That applied runtime or operations revocation owns the inspector banner
  * the same way a workspace, event-feed, or listing 401/403 does: a sibling
  * network/5xx is not recovery and must not replace the authorization reason
- * while another request still hangs.
+ * while another request still hangs. Withdrawing workspace_runtime or
+ * workspace_operations leaves no later read that can recover that watermark,
+ * so the dashboard must release it or a basic-detail 200 cannot clear the
+ * obsolete authorization banner.
  * Selection changes start a new visit and advance request generation. A late
  * 401/403 from the previous visit must not latch denial or stamp the watermark
  * onto the re-opened workspace's in-flight GET, even when selectedId matches
@@ -131,6 +137,7 @@ export function useWorkspaceDetailLoader({
   setWorkspaceDetailAuthDenied,
   eventFeedAuthDeniedRef,
   setEventFeedAuthDenied,
+  releaseWithdrawnOptionalFeedDenialRef,
   setError,
   setDetail,
   setSelectedStreams,
@@ -1511,6 +1518,55 @@ export function useWorkspaceDetailLoader({
     setSelectedStreams,
     setStreamOffsets,
   ]);
+
+  // Same-identity withdrawal (and capabilities 404) drops the feed with no
+  // later /runtime or /operations read that can recover a settled 401/403.
+  // Zero the watermark the way event and log withdrawal clear their latches,
+  // or runtimeAuthDenialHeld/operationsAuthDenialHeld keeps the authorization
+  // banner until the workspace changes.
+  const releaseWithdrawnOptionalFeedDenial = useCallback(
+    (feeds: { runtime: boolean; operations: boolean }) => {
+      if (!feeds.runtime && !feeds.operations) {
+        return;
+      }
+      const runtimeHeld =
+        revokedRuntimeGenerationRef.current > 0 &&
+        appliedRuntimeGenerationRef.current <= revokedRuntimeGenerationRef.current;
+      const operationsHeld =
+        revokedOperationsGenerationRef.current > 0 &&
+        appliedOperationsGenerationRef.current <= revokedOperationsGenerationRef.current;
+      if (feeds.runtime) {
+        revokedRuntimeGenerationRef.current = 0;
+      }
+      if (feeds.operations) {
+        revokedOperationsGenerationRef.current = 0;
+      }
+      const withdrawnDenialHeld =
+        (feeds.runtime && runtimeHeld) || (feeds.operations && operationsHeld);
+      const runtimeStillHeld = !feeds.runtime && runtimeHeld;
+      const operationsStillHeld = !feeds.operations && operationsHeld;
+      if (
+        withdrawnDenialHeld &&
+        !workspaceDetailAuthDeniedRef.current &&
+        !eventFeedAuthDeniedRef.current &&
+        !logListingAuthDeniedRef.current &&
+        !runtimeStillHeld &&
+        !operationsStillHeld
+      ) {
+        setError(null);
+      }
+    },
+    [
+      eventFeedAuthDeniedRef,
+      logListingAuthDeniedRef,
+      setError,
+      workspaceDetailAuthDeniedRef,
+    ],
+  );
+
+  useLayoutEffect(() => {
+    releaseWithdrawnOptionalFeedDenialRef.current = releaseWithdrawnOptionalFeedDenial;
+  }, [releaseWithdrawnOptionalFeedDenial, releaseWithdrawnOptionalFeedDenialRef]);
 
   const loadSelectedWorkspace = useCallback(() => {
     if (!selectedId) {
