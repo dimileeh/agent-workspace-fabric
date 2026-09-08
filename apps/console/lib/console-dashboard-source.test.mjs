@@ -988,7 +988,12 @@ test("authorized feed clear and overview auth denial wipe truncation with the ov
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);/,
+    "Expected loadOverview to wipe overview auth denial through applyOverviewAuthDenial",
+  );
+  assert.match(
+    dashboard,
+    /const applyOverviewAuthDenial = \(deniedGeneration: number, message: string\): boolean => \{[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);/,
     "Expected overview auth denial to wipe truncation with the overview",
   );
 });
@@ -998,11 +1003,12 @@ test("loadOverview auth denial closes dependent workspace surfaces", () => {
   // feed-level 401/403 must close selection/inspector/logs/fullscreen rather
   // than clearing only the rail while capabilities still advertise logs.
   const dashboard = dashboardSource.dashboard;
-  const authDeniedIdx = dashboard.indexOf("if (pageAuthDenied) {");
-  assert.ok(authDeniedIdx > 0, "Expected pageAuthDenied clear path in loadOverview");
-  const loadOverviewEnd = dashboard.indexOf("}, [setSelectedId]);", authDeniedIdx);
-  assert.ok(loadOverviewEnd > authDeniedIdx, "Expected loadOverview callback end after pageAuthDenied");
-  const authDeniedBody = dashboard.slice(authDeniedIdx, loadOverviewEnd);
+  const authDeniedBody = overviewAuthDenialHelperBody(dashboard);
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;/,
+    "Expected loadOverview to close dependent surfaces by calling applyOverviewAuthDenial",
+  );
   assert.match(
     authDeniedBody,
     /noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);[\s\S]*?setOverviewTruncationWarning\(null\);[\s\S]*?setSelectedId\(null\);[\s\S]*?setDetail\(emptyDetail\);[\s\S]*?setLogsFullscreen\(false\);[\s\S]*?setFullscreenWorkspaceIds\(\[\]\);/,
@@ -1027,11 +1033,12 @@ test("loadOverview auth denial clears retained agent/model filters", () => {
   // filters intact exposes prior identifiers and can keep a later recovered
   // list empty. Mirror clearAuthorizedConsoleFeeds without calling it.
   const dashboard = dashboardSource.dashboard;
-  const authDeniedIdx = dashboard.indexOf("if (pageAuthDenied) {");
-  assert.ok(authDeniedIdx > 0, "Expected pageAuthDenied clear path in loadOverview");
-  const loadOverviewEnd = dashboard.indexOf("}, [setSelectedId]);", authDeniedIdx);
-  assert.ok(loadOverviewEnd > authDeniedIdx, "Expected loadOverview callback end after pageAuthDenied");
-  const authDeniedBody = dashboard.slice(authDeniedIdx, loadOverviewEnd);
+  const authDeniedBody = overviewAuthDenialHelperBody(dashboard);
+  assert.match(
+    dashboard,
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);/,
+    "Expected loadOverview to clear retained filters by calling applyOverviewAuthDenial",
+  );
   assert.match(
     authDeniedBody,
     /setRetainedAgents\(\[\]\);\s*setRetainedModels\(\[\]\);[\s\S]*?setAgentFilters\(\[\]\);\s*setModelFilters\(\[\]\);\s*setRepoFilter\(""\);\s*setSearchText\(""\);/,
@@ -1043,20 +1050,38 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(!result\.ok\) \{[\s\S]*?if \(result\.status === 401 \|\| result\.status === 403\) \{\s*pageAuthDenied = true;\s*\}/,
+    /const loadOverview = useCallback\([\s\S]*?if \(!result\.ok && \(result\.status === 401 \|\| result\.status === 403\)\) \{\s*pageError = result\.message;\s*pageAuthDenied = true;/,
     "Expected loadOverview to mark feed-level 401/403 as auth denial rather than a transient outage",
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}\s*if \(pageAuthDenied\) \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
-    "Expected loadOverview to clear overview and dependent surfaces on page auth denial and retain last-good on other page failures",
+    /const loadOverview = useCallback\([\s\S]*?if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(collected === null\) \{[\s\S]*?if \(pageError !== null\) \{\s*setOverviewError\(pageError\);\s*\}\s*return;/,
+    "Expected loadOverview to apply auth denial before the transient last-good path",
   );
-  assert.doesNotMatch(
+  assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(collected === null\) \{[\s\S]*?setOverviewError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
+    /const applyOverviewAuthDenial = \(deniedGeneration: number, message: string\): boolean => \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);\s*setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
+    "Expected overview auth denial to clear overview and dependent surfaces",
+  );
+  const loadOverviewStart = dashboard.indexOf("const loadOverview = useCallback");
+  const loadOverviewEnd = dashboard.indexOf("}, [setSelectedId]);", loadOverviewStart);
+  assert.ok(loadOverviewEnd > loadOverviewStart, "Expected loadOverview callback end");
+  assert.doesNotMatch(
+    dashboard.slice(loadOverviewStart, loadOverviewEnd),
+    /if \(collected === null\) \{[\s\S]*?setOverviewError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
     "Expected loadOverview not to blank the authorized overview on every collectOverviewPages null",
   );
 });
+
+function overviewAuthDenialHelperBody(dashboard) {
+  const helperStart = dashboard.indexOf(
+    "const applyOverviewAuthDenial = (deniedGeneration: number, message: string): boolean => {",
+  );
+  assert.ok(helperStart > 0, "Expected applyOverviewAuthDenial helper for overview auth denial");
+  const helperEnd = dashboard.indexOf("const collected = await collectOverviewPages", helperStart);
+  assert.ok(helperEnd > helperStart, "Expected collectOverviewPages after applyOverviewAuthDenial");
+  return dashboard.slice(helperStart, helperEnd);
+}
 
 test("loadDashboardSummary discards stale success and error via request generation", () => {
   const dashboard = dashboardSource.dashboard;
