@@ -420,6 +420,10 @@ export function WorkspaceLogColumn({
   // the watermark, or a recovery request that started after the original
   // denial would be rejected.
   const revokedTailGenerationRef = useRef(0);
+  // Per-stream generation of the newest network/5xx warning copied into
+  // tailRefreshErrors. An older failure's queued updater must not overwrite a
+  // newer warning, or re-stamp one a later success already cleared.
+  const appliedTailFailureGenerationRef = useRef<Record<string, number>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
   const [listingDenied, setListingDenied] = useState(false);
 
@@ -514,6 +518,7 @@ export function WorkspaceLogColumn({
       tailAuthDeniedRef.current = true;
       sawAuthDenial = true;
       setTailAuthDenied(true);
+      appliedTailFailureGenerationRef.current = {};
       setTailRefreshErrors({});
       setError(denied.message ?? "Unable to load log stream.");
       eventSourceRef.current?.close();
@@ -531,6 +536,51 @@ export function WorkspaceLogColumn({
       setOffsets((current) => (denialStillOwnsColumn() ? {} : current));
     };
 
+    const applyTailRefreshFailure = (failure: Extract<LogTailReadResult, { ok: false }>) => {
+      // Network/5xx must warn as soon as this read settles. Copying failures
+      // only after Promise.all never runs while a sibling tail hangs, and
+      // apiGet has no timeout, so the column would keep the last snapshot
+      // with no stale/error warning. A newer reload merely starting is not
+      // recovery — discard this warning only when a newer success already
+      // owns the snapshot, a newer failure already owns this stream, or
+      // authorization/listing denial has cleared the column.
+      if (isFullscreenTailAuthFailure(failure.status)) {
+        return;
+      }
+      if (
+        epoch !== columnEpochRef.current ||
+        listingDeniedRef.current ||
+        tailAuthDeniedRef.current ||
+        sawAuthDenial ||
+        generation < appliedTailGenerationRef.current ||
+        generation <= revokedTailGenerationRef.current
+      ) {
+        return;
+      }
+      const prior = appliedTailFailureGenerationRef.current[failure.streamId] ?? 0;
+      if (generation < prior) {
+        return;
+      }
+      appliedTailFailureGenerationRef.current[failure.streamId] = generation;
+      const message = fullscreenTailRefreshMessage(failure.message);
+      setTailRefreshErrors((current) => {
+        if (
+          epoch !== columnEpochRef.current ||
+          listingDeniedRef.current ||
+          tailAuthDeniedRef.current ||
+          generation < appliedTailGenerationRef.current ||
+          generation <= revokedTailGenerationRef.current ||
+          appliedTailFailureGenerationRef.current[failure.streamId] !== generation
+        ) {
+          return current;
+        }
+        if (current[failure.streamId] === message) {
+          return current;
+        }
+        return { ...current, [failure.streamId]: message };
+      });
+    };
+
     const readSelectedTail = async (stream: (typeof selected)[number]): Promise<LogTailReadResult> => {
       try {
         const result = await readLogTailEntry(
@@ -541,16 +591,20 @@ export function WorkspaceLogColumn({
         inFlightStreamIds.delete(result.ok ? result.entry.streamId : result.streamId);
         if (!result.ok && isFullscreenTailAuthFailure(result.status)) {
           applyTailAuthDenial(result);
+        } else if (!result.ok) {
+          applyTailRefreshFailure(result);
         }
         return result;
       } catch (cause) {
         inFlightStreamIds.delete(stream.stream_id);
-        return {
+        const failure: Extract<LogTailReadResult, { ok: false }> = {
           ok: false,
           status: 0,
           message: cause instanceof Error ? cause.message : "Unable to refresh log tails.",
           streamId: stream.stream_id,
         };
+        applyTailRefreshFailure(failure);
+        return failure;
       }
     };
 
@@ -623,6 +677,14 @@ export function WorkspaceLogColumn({
       setTailAuthDenied(false);
     }
     setError(null);
+    // Drop failure stamps for streams this success recovered before the
+    // queued write, so an older failure updater cannot re-stamp the warning.
+    for (const success of successes) {
+      const stamped = appliedTailFailureGenerationRef.current[success.entry.streamId];
+      if (stamped != null && stamped <= generation) {
+        delete appliedTailFailureGenerationRef.current[success.entry.streamId];
+      }
+    }
     setTailRefreshErrors((current) => {
       if (
         epoch !== columnEpochRef.current ||
@@ -692,6 +754,7 @@ export function WorkspaceLogColumn({
     if (!allowLogs) {
       setStreams([]);
       setSelectedStreams([]);
+      appliedTailFailureGenerationRef.current = {};
       setTailRefreshErrors({});
       return;
     }
@@ -716,6 +779,7 @@ export function WorkspaceLogColumn({
         return;
       }
       setError(message);
+      appliedTailFailureGenerationRef.current = {};
       setTailRefreshErrors({});
       columnEpochRef.current += 1;
       revokedListingGenerationRef.current = Math.max(
