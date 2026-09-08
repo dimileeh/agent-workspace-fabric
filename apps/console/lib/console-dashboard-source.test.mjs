@@ -2174,7 +2174,10 @@ test("fullscreen listing refresh retries denied tails when metadata is unchanged
   const logs = dashboardSource.logs;
   const effectStart = logs.indexOf("if (!selectedTailRefreshKey) {");
   assert.ok(effectStart > 0, "Expected the fullscreen tail refresh-key effect");
-  const effectEnd = logs.indexOf("}, [loadSelectedTails, selectedTailRefreshKey]);", effectStart);
+  const effectEnd = logs.indexOf(
+    "}, [appliedListingGeneration, loadSelectedTails, selectedTailRefreshKey]);",
+    effectStart,
+  );
   assert.ok(effectEnd > effectStart, "Expected the fullscreen tail refresh-key effect to end");
   const effectBody = logs.slice(effectStart, effectEnd);
 
@@ -2216,7 +2219,10 @@ test("fullscreen listing refresh retries network/5xx tail errors when metadata i
   const logs = dashboardSource.logs;
   const effectStart = logs.indexOf("if (!selectedTailRefreshKey) {");
   assert.ok(effectStart > 0, "Expected the fullscreen tail refresh-key effect");
-  const effectEnd = logs.indexOf("}, [loadSelectedTails, selectedTailRefreshKey]);", effectStart);
+  const effectEnd = logs.indexOf(
+    "}, [appliedListingGeneration, loadSelectedTails, selectedTailRefreshKey]);",
+    effectStart,
+  );
   assert.ok(effectEnd > effectStart, "Expected the fullscreen tail refresh-key effect to end");
   const effectBody = logs.slice(effectStart, effectEnd);
 
@@ -2224,6 +2230,11 @@ test("fullscreen listing refresh retries network/5xx tail errors when metadata i
     effectBody,
     /selectedStreamsRef\.current\.some\(\(streamId\) =>\s*tailRefreshErrorStreamIdsRef\.current\.has\(streamId\),\s*\)/,
     "Expected unchanged stream metadata to retry a stream that still has a tailRefreshError",
+  );
+  assert.match(
+    logs,
+    /setAppliedListingGeneration\(appliedListingGenerationRef\.current\)/,
+    "Expected each applied listing 200 to re-enter the tail refresh-key effect",
   );
   assert.doesNotMatch(
     effectBody,

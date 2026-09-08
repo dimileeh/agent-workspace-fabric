@@ -433,6 +433,11 @@ export function WorkspaceLogColumn({
   const appliedTailFailureGenerationRef = useRef<Record<string, number>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
   const [listingDenied, setListingDenied] = useState(false);
+  // Applied listing 200 generation. A static or closed listing does not change
+  // selectedTailRefreshKey, and replacing the stream list does not have to
+  // change loadSelectedTails identity either. The refresh-key effect still
+  // must re-enter so a network/5xx tailRefreshError can retry without Tail all.
+  const [appliedListingGeneration, setAppliedListingGeneration] = useState(0);
 
   const selectedStreamMetas = useMemo(
     () => streams.filter((stream) => selectedStreams.includes(stream.stream_id)),
@@ -885,6 +890,10 @@ export function WorkspaceLogColumn({
       appliedListingGenerationRef.current,
       generation,
     );
+    // Re-enter the tail refresh-key effect even when this 200's metadata
+    // fingerprint matches the previous poll. A static/closed stream with a
+    // tailRefreshError would otherwise keep the stale snapshot until Tail all.
+    setAppliedListingGeneration(appliedListingGenerationRef.current);
     // Listing 200 does not clear a tail 401/403 latch or its banner.
     // Route-scoped tail permission can stay revoked while the stream list
     // remains authorized; wiping the denial message leaves an empty column.
@@ -944,9 +953,11 @@ export function WorkspaceLogColumn({
     // Two failures still retry on the next listing refresh: a 401/403 latch
     // (only that stream's own 200 clears it) and a network/5xx
     // tailRefreshError (the denial set stays empty, so a static or closed
-    // stream would otherwise keep the stale snapshot until Tail all). Do not
-    // start a second reload while one is already in flight — a newer
-    // generation would discard the slower success.
+    // stream would otherwise keep the stale snapshot until Tail all).
+    // appliedListingGeneration re-enters this effect on each applied listing
+    // 200 even when the fingerprint and loadSelectedTails identity are
+    // unchanged. Do not start a second reload while one is already in flight
+    // — a newer generation would discard the slower success.
     const retryOutstandingTailFailure =
       tailDeniedStreamIdsRef.current.size > 0 ||
       selectedStreamsRef.current.some((streamId) =>
@@ -960,7 +971,7 @@ export function WorkspaceLogColumn({
     }
     previousTailRefreshKey.current = selectedTailRefreshKey;
     void loadSelectedTails();
-  }, [loadSelectedTails, selectedTailRefreshKey]);
+  }, [appliedListingGeneration, loadSelectedTails, selectedTailRefreshKey]);
 
   useEffect(() => {
     if (previousTailSignal.current === tailSignal) {
