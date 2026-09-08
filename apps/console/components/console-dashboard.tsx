@@ -159,14 +159,20 @@ export function ConsoleDashboard() {
   const authorizedFeedEpochRef = useRef(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
   const consoleAuthDeniedRef = useRef(false);
-  // Capability poll generation: discard stale non-denial responses after a
-  // newer request. A 401/403 is authoritative unless a newer successful
-  // negotiation has already been applied — a newer request merely starting
-  // is not recovery.
+  // Capability poll generation: discard stale 200/404 responses after a newer
+  // request. A 401/403 and a network/5xx outage stay authoritative unless a
+  // newer successful negotiation has already been applied — a newer request
+  // merely starting is not recovery.
   const capabilityRequestGenerationRef = useRef(0);
   // Highest capability generation that applied a successful negotiation.
   // An older 401/403 must not clear feeds this newer success already owns.
+  // An older network/5xx outage must not replace the error that success cleared.
   const appliedCapabilityGenerationRef = useRef(0);
+  // Highest capability generation that applied a network/5xx outage. A newer
+  // request merely starting is not recovery. An older success must not clear
+  // an outage this newer failure already applied, or last-good capabilities
+  // keep enabling mutating controls with no stale/error indication.
+  const appliedCapabilityFailureGenerationRef = useRef(0);
   // Highest capability generation covered by an applied 401/403. An older
   // overlapping 200 (started before that denial) must not restore cleared
   // feeds. Re-applying a denial already inside this window must not raise
@@ -670,12 +676,69 @@ export function ConsoleDashboard() {
         setCapabilities(null);
         setCapabilitiesReady(true);
       };
+      const applyTransientCapabilityOutage = (failedGeneration: number, message: string) => {
+        // A soft tenant switch already owns the console. An older context's
+        // network/5xx must not latch an outage onto the new fingerprint.
+        if (contextFingerprint !== configuredContextFingerprintRef.current) {
+          return false;
+        }
+        // A newer successful negotiation already owns the console. A late
+        // 5xx from an older request must not re-latch capabilityError.
+        if (failedGeneration < appliedCapabilityGenerationRef.current) {
+          return false;
+        }
+        // A newer outage already owns the warning.
+        if (failedGeneration < appliedCapabilityFailureGenerationRef.current) {
+          return false;
+        }
+        // A 401/403 already covers this generation. Do not replace the
+        // authorization reason or restore cleared capabilities.
+        if (
+          failedGeneration <= revokedCapabilityGenerationRef.current ||
+          consoleAuthDeniedRef.current
+        ) {
+          return false;
+        }
+        appliedCapabilityFailureGenerationRef.current = Math.max(
+          appliedCapabilityFailureGenerationRef.current,
+          failedGeneration,
+        );
+        // Re-check in the updater: a newer success or denial can settle after
+        // this outage is queued.
+        setCapabilityError((current) =>
+          failedGeneration < appliedCapabilityGenerationRef.current ||
+          failedGeneration < appliedCapabilityFailureGenerationRef.current ||
+          consoleAuthDeniedRef.current
+            ? current
+            : message,
+        );
+        setCapabilitiesReady(true);
+        // Transient capability-endpoint outage (5xx/network): keep the last successful
+        // negotiation so fleet KPIs and inspector detail retain last-good snapshots
+        // while the error is shown. Mutating controls fail closed via
+        // capabilitiesForMutatingControls(capabilities, capabilityError) until
+        // negotiation succeeds again. Auth denial and never-negotiated stay fail-closed.
+        const retained = appliedCapabilitiesRef.current;
+        if (retained === null) {
+          setCapabilities(null);
+        }
+        return true;
+      };
       // Apply even if a newer request has started but has not yet established
       // recovery. A newer request merely starting, hanging, or failing
       // transiently is not recovery.
       if (!result.ok && (result.status === 401 || result.status === 403)) {
         applyAuthoritativeCapabilityDenial(generation, result.message);
         return null;
+      }
+      // Transient failures follow the same rule as 401/403: suppress only after
+      // a newer successful negotiation has applied. Discarding a completed
+      // network/5xx only because Refresh started a newer request leaves
+      // capabilityError null, so retained capabilities keep enabling mutating
+      // controls if that newer request hangs.
+      if (!result.ok && result.status !== 404) {
+        const applied = applyTransientCapabilityOutage(generation, result.message);
+        return applied ? appliedCapabilitiesRef.current : null;
       }
       if (
         generation !== capabilityRequestGenerationRef.current ||
@@ -684,29 +747,22 @@ export function ConsoleDashboard() {
       ) {
         return null;
       }
+      // A newer network/5xx already applied the outage. This older 404/200
+      // must not clear it, or last-good capabilities stay current with no error.
+      if (generation < appliedCapabilityFailureGenerationRef.current) {
+        return null;
+      }
       if (!result.ok) {
+        // Missing/rolled-back negotiation: clear gated inventories so optional
+        // feeds stop polling, without wiping legacy-safe workspace navigation
+        // (CONSOLE_BACKEND_CONTRACT — no inferred privileges). Non-404 failures
+        // already applied above; this return keeps result narrowed for success.
         if (result.status === 404) {
-          // Missing/rolled-back negotiation: clear gated inventories so optional
-          // feeds stop polling, without wiping legacy-safe workspace navigation
-          // (CONSOLE_BACKEND_CONTRACT — no inferred privileges).
           clearCapabilityGatedInventories();
           setCapabilityError(result.message);
           setCapabilitiesReady(true);
-          return null;
         }
-        // Transient capability-endpoint outage (5xx/network): keep the last successful
-        // negotiation so fleet KPIs and inspector detail retain last-good snapshots
-        // while the error is shown. Mutating controls fail closed via
-        // capabilitiesForMutatingControls(capabilities, capabilityError) until
-        // negotiation succeeds again. Auth denial and never-negotiated stay fail-closed.
-        setCapabilityError(result.message);
-        setCapabilitiesReady(true);
-        const retained = appliedCapabilitiesRef.current;
-        if (retained === null) {
-          setCapabilities(null);
-          return null;
-        }
-        return retained;
+        return null;
       }
 
       const parsed = parseConsoleCapabilities(result.data);
@@ -765,7 +821,9 @@ export function ConsoleDashboard() {
       appliedCapabilitiesRef.current = nextCapabilities;
       lastCapabilityIdentityKeyRef.current = parsed.identityKey;
       setCapabilities(nextCapabilities);
-      setCapabilityError(null);
+      setCapabilityError((current) =>
+        generation < appliedCapabilityFailureGenerationRef.current ? current : null,
+      );
       setCapabilitiesReady(true);
       if (wasAuthDenied || identityChanged) {
         void loadOverview();

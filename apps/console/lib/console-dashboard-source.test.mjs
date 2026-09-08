@@ -1254,6 +1254,40 @@ test("loadCapabilities applies superseded 401/403 unless a newer success recover
   );
 });
 
+test("loadCapabilities applies superseded network/5xx until a newer success lands", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gDcw4: a periodic
+  // capability request can return network/5xx after Refresh has only started
+  // a newer request. Discarding that outage because generation !== current
+  // leaves capabilityError null if the newer request hangs, so retained
+  // capabilities keep enabling mutating controls.
+  const dashboard = dashboardSource.dashboard;
+  const loadStart = dashboard.indexOf("const loadCapabilities = useCallback");
+  assert.ok(loadStart > 0, "Expected loadCapabilities");
+  const loadEnd = dashboard.indexOf("const loadResourceSaturation = useCallback", loadStart);
+  assert.ok(loadEnd > loadStart, "Expected loadCapabilities body before loadResourceSaturation");
+  const loadBody = dashboard.slice(loadStart, loadEnd);
+  assert.match(
+    dashboard,
+    /const appliedCapabilityFailureGenerationRef = useRef\(0\);/,
+    "Expected a capability failure-generation watermark so a newer start is not recovery",
+  );
+  assert.match(
+    loadBody,
+    /if \(!result\.ok && result\.status !== 404\) \{\s*const applied = applyTransientCapabilityOutage\(generation, result\.message\);\s*return applied \? appliedCapabilitiesRef\.current : null;\s*\}[\s\S]*?if \(\s*generation !== capabilityRequestGenerationRef\.current/,
+    "Expected network/5xx outages to apply before discarding a non-latest generation",
+  );
+  assert.match(
+    loadBody,
+    /if \(failedGeneration < appliedCapabilityGenerationRef\.current\) \{\s*return false;\s*\}/,
+    "Expected an older capability outage to leave a newer applied success in place",
+  );
+  assert.match(
+    loadBody,
+    /if \(generation < appliedCapabilityFailureGenerationRef\.current\) \{\s*return null;\s*\}/,
+    "Expected an older capability success to leave a newer applied outage in place",
+  );
+});
+
 test("loadCapabilities reloads overview after clearing a latched auth denial", () => {
   const dashboard = dashboardSource.dashboard;
   // Successful negotiation must not leave the workspace list empty until the
@@ -1347,8 +1381,13 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /if \(result\.status === 404\) \{[\s\S]*?clearCapabilityGatedInventories\(\);[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{[\s\S]*?setCapabilities\(null\);[\s\S]*?return null;[\s\S]*?return retained;/,
+    /const applyTransientCapabilityOutage = \(failedGeneration: number, message: string\) => \{[\s\S]*?const retained = appliedCapabilitiesRef\.current;[\s\S]*?if \(retained === null\) \{\s*setCapabilities\(null\);\s*\}[\s\S]*?return true;/,
     "Expected 5xx/network capability outages to keep appliedCapabilitiesRef rather than nulling negotiated feeds",
+  );
+  assert.match(
+    dashboard,
+    /if \(!result\.ok && result\.status !== 404\) \{\s*const applied = applyTransientCapabilityOutage\(generation, result\.message\);\s*return applied \? appliedCapabilitiesRef\.current : null;\s*\}/,
+    "Expected transient capability outages to apply before a superseded-generation discard",
   );
   assert.match(
     dashboard,
@@ -1432,10 +1471,19 @@ test("loadCapabilities 404 clears gated inventories without wiping overview navi
     /\/\/ Transient capability-endpoint outage \(5xx\/network\):/,
     "Expected retention comments to name 5xx/network only, not 404",
   );
-  // 404 branch must appear before the retain path.
+  // 404 is a distinct gated-clear path; transient retain must not call it.
   const idx404 = dashboard.indexOf("if (result.status === 404)");
   const idxRetain = dashboard.indexOf("const retained = appliedCapabilitiesRef.current");
-  assert.ok(idx404 > 0 && idxRetain > idx404, "Expected 404 clear before 5xx/network retain");
+  assert.ok(idx404 > 0 && idxRetain > 0, "Expected both 404 clear and 5xx/network retain");
+  const retainBody = dashboard.slice(
+    dashboard.indexOf("const applyTransientCapabilityOutage"),
+    dashboard.indexOf("if (!result.ok && (result.status === 401 || result.status === 403))"),
+  );
+  assert.equal(
+    retainBody.includes("clearCapabilityGatedInventories"),
+    false,
+    "Expected transient capability retain not to clear gated inventories like 404",
+  );
 });
 test("workspace rail omits log actions when showWorkspaceLogs is false", () => {
   const dashboard = dashboardSource.dashboard;
