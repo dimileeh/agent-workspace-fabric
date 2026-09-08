@@ -145,16 +145,16 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.147.0
+ARG CODEX_VERSION=0.153.4
 # 2.1.226+ is required for Claude Opus 5 (the default model in defaults.py);
 # older CLIs reject `--model claude-opus-5`. Keep this >= the default model's
 # minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.226
-ARG OPENCODE_VERSION=1.17.18
-ARG GROK_VERSION=0.2.94
-ARG CURSOR_VERSION=2026.07.20-8cc9c0b
-ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4
-ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb
+ARG CLAUDE_CODE_VERSION=2.1.263
+ARG OPENCODE_VERSION=1.18.29
+ARG GROK_VERSION=1.0.13
+ARG CURSOR_VERSION=2026.09.02-c22c1a3
+ARG CURSOR_X64_SHA256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c
+ARG CURSOR_ARM64_SHA256=fb7bc635be6172ebcf68f907fd9217e3614da51916455c6d7fdb66690997884c
 # Antigravity CLI (agy). Pinned by GitHub release asset + sha256 per arch.
 # Operator must verify the arm64 sha before merge; CI validates linux/amd64 only.
 ARG ANTIGRAVITY_VERSION=1.1.13
@@ -162,7 +162,7 @@ ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd
 ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
-ARG CCUSAGE_VERSION=20.0.3
+ARG CCUSAGE_VERSION=20.0.20
 
 # Install a pinned Cursor CLI release only after verifying its architecture-
 # specific checksum. The official convenience installer is mutable.
