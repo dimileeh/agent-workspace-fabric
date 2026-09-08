@@ -177,6 +177,12 @@ export function useWorkspaceDetailLoader({
   // request that starts after this watermark may recover.
   const revokedRuntimeGenerationRef = useRef(0);
   const revokedOperationsGenerationRef = useRef(0);
+  // Highest detail generation started before workspace_runtime / workspace_operations
+  // withdrawal released denial ownership. Zeroing revoked* alone lets a request
+  // that already started re-raise the watermark and stick the authorization
+  // banner; those generations must not apply a denial or restore the snapshot.
+  const runtimeDenialReleasedThroughRef = useRef(0);
+  const operationsDenialReleasedThroughRef = useRef(0);
   // Highest detail generation that recorded a settled network/5xx warning.
   // An older outage must not replace a newer one after a sibling hang delayed
   // that older request past the newer warning.
@@ -231,8 +237,10 @@ export function useWorkspaceDetailLoader({
     appliedEventFeedGenerationRef.current = 0;
     revokedRuntimeGenerationRef.current = 0;
     appliedRuntimeGenerationRef.current = 0;
+    runtimeDenialReleasedThroughRef.current = 0;
     revokedOperationsGenerationRef.current = 0;
     appliedOperationsGenerationRef.current = 0;
+    operationsDenialReleasedThroughRef.current = 0;
     appliedDetailFailureGenerationRef.current = 0;
     settledDetailOutagesRef.current = {};
     revokedLogListingGenerationRef.current = 0;
@@ -971,6 +979,16 @@ export function useWorkspaceDetailLoader({
         if (!optionalFeedContextCurrent() || !optionalFeedStillAdvertised(feed)) {
           return;
         }
+        const releasedThrough =
+          feed === "runtime"
+            ? runtimeDenialReleasedThroughRef.current
+            : operationsDenialReleasedThroughRef.current;
+        // Withdrawal zeros the watermark so a basic-detail 200 can drop the
+        // banner. A request that started before that release must not raise
+        // it again — no later read of the withdrawn feed will recover it.
+        if (generation <= releasedThrough) {
+          return;
+        }
         // A newer successful read already owns this snapshot. Applying the
         // older 401/403 would wipe it and stamp an error the recovered feed
         // already replaced.
@@ -1041,7 +1059,10 @@ export function useWorkspaceDetailLoader({
         if (!optionalFeedContextCurrent() || !optionalFeedStillAdvertised("runtime")) {
           return;
         }
-        if (generation <= revokedRuntimeGenerationRef.current) {
+        if (
+          generation <= revokedRuntimeGenerationRef.current ||
+          generation <= runtimeDenialReleasedThroughRef.current
+        ) {
           return;
         }
         if (!publishOptionalFeedRecovered(appliedRuntimeGenerationRef, revokedRuntimeGenerationRef)) {
@@ -1065,7 +1086,10 @@ export function useWorkspaceDetailLoader({
         if (!optionalFeedContextCurrent() || !optionalFeedStillAdvertised("operations")) {
           return;
         }
-        if (generation <= revokedOperationsGenerationRef.current) {
+        if (
+          generation <= revokedOperationsGenerationRef.current ||
+          generation <= operationsDenialReleasedThroughRef.current
+        ) {
           return;
         }
         if (
@@ -1326,7 +1350,11 @@ export function useWorkspaceDetailLoader({
       let runtimeRecoveryOwned = false;
       if (allowRuntime && runtime != null && feedAuthDenied(runtime)) {
         applyRuntimeAuthDenial(runtime);
-      } else if (allowRuntime && runtime?.ok) {
+      } else if (
+        allowRuntime &&
+        runtime?.ok &&
+        generation > runtimeDenialReleasedThroughRef.current
+      ) {
         runtimeRecoveryOwned = publishOptionalFeedRecovered(
           appliedRuntimeGenerationRef,
           revokedRuntimeGenerationRef,
@@ -1336,7 +1364,11 @@ export function useWorkspaceDetailLoader({
       let operationsRecoveryOwned = false;
       if (allowOperations && operations != null && feedAuthDenied(operations)) {
         applyOperationsAuthDenial(operations);
-      } else if (allowOperations && operations?.ok) {
+      } else if (
+        allowOperations &&
+        operations?.ok &&
+        generation > operationsDenialReleasedThroughRef.current
+      ) {
         operationsRecoveryOwned = publishOptionalFeedRecovered(
           appliedOperationsGenerationRef,
           revokedOperationsGenerationRef,
@@ -1535,11 +1567,22 @@ export function useWorkspaceDetailLoader({
       const operationsHeld =
         revokedOperationsGenerationRef.current > 0 &&
         appliedOperationsGenerationRef.current <= revokedOperationsGenerationRef.current;
+      const releasedThrough = workspaceDetailRequestGenerationRef.current;
       if (feeds.runtime) {
+        runtimeDenialReleasedThroughRef.current = Math.max(
+          runtimeDenialReleasedThroughRef.current,
+          releasedThrough,
+        );
         revokedRuntimeGenerationRef.current = 0;
+        delete settledDetailOutagesRef.current.runtime;
       }
       if (feeds.operations) {
+        operationsDenialReleasedThroughRef.current = Math.max(
+          operationsDenialReleasedThroughRef.current,
+          releasedThrough,
+        );
         revokedOperationsGenerationRef.current = 0;
+        delete settledDetailOutagesRef.current.operations;
       }
       const withdrawnDenialHeld =
         (feeds.runtime && runtimeHeld) || (feeds.operations && operationsHeld);

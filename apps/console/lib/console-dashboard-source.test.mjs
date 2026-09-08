@@ -2268,13 +2268,28 @@ test("runtime and operations withdrawal releases hook-local denial ownership", (
   const releaseBody = loader.slice(releaseStart, releaseEnd);
   assert.match(
     releaseBody,
-    /if \(feeds\.runtime\) \{\s*revokedRuntimeGenerationRef\.current = 0;\s*\}/,
-    "Expected workspace_runtime withdrawal to clear revokedRuntimeGenerationRef ownership",
+    /if \(feeds\.runtime\) \{\s*runtimeDenialReleasedThroughRef\.current = Math\.max\(\s*runtimeDenialReleasedThroughRef\.current,\s*releasedThrough,\s*\);\s*revokedRuntimeGenerationRef\.current = 0;\s*delete settledDetailOutagesRef\.current\.runtime;\s*\}/,
+    "Expected workspace_runtime withdrawal to clear revokedRuntimeGenerationRef ownership and fence in-flight requests",
   );
   assert.match(
     releaseBody,
-    /if \(feeds\.operations\) \{\s*revokedOperationsGenerationRef\.current = 0;\s*\}/,
-    "Expected workspace_operations withdrawal to clear revokedOperationsGenerationRef ownership",
+    /if \(feeds\.operations\) \{\s*operationsDenialReleasedThroughRef\.current = Math\.max\(\s*operationsDenialReleasedThroughRef\.current,\s*releasedThrough,\s*\);\s*revokedOperationsGenerationRef\.current = 0;\s*delete settledDetailOutagesRef\.current\.operations;\s*\}/,
+    "Expected workspace_operations withdrawal to clear revokedOperationsGenerationRef ownership and fence in-flight requests",
+  );
+  assert.match(
+    loader,
+    /generation <= releasedThrough/,
+    "Expected a request started before withdrawal not to re-raise runtime or operations denial ownership",
+  );
+  assert.match(
+    loader,
+    /generation > runtimeDenialReleasedThroughRef\.current/,
+    "Expected an in-flight runtime success started before withdrawal not to restore the withdrawn snapshot",
+  );
+  assert.match(
+    loader,
+    /generation > operationsDenialReleasedThroughRef\.current/,
+    "Expected an in-flight operations success started before withdrawal not to restore the withdrawn snapshot",
   );
   assert.match(
     releaseBody,
