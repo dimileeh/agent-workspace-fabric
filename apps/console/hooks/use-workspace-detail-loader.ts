@@ -873,8 +873,12 @@ export function useWorkspaceDetailLoader({
 
       // Cross-generation view of outstanding outages. The local map only sees
       // this load; a newer success must drop a feed the older load already stamped.
+      // The newest eligible failure owns the banner. Feed order only breaks ties
+      // within one generation, so a sibling success cannot republish a retained
+      // older runtime warning over a newer events outage that has not recovered.
       const preferredOutstandingOutage = () => {
         const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
+        let selected: { generation: number; message: string } | null = null;
         for (const feed of order) {
           const record = settledDetailOutagesRef.current[feed];
           if (record == null || record.generation < appliedSuccessGeneration(feed)) {
@@ -904,9 +908,14 @@ export function useWorkspaceDetailLoader({
           ) {
             continue;
           }
-          return record.message;
+          // Strictly newer than the current pick. Equal generations keep the
+          // earlier feed so same-load failures stay in inspector order.
+          if (selected != null && record.generation <= selected.generation) {
+            continue;
+          }
+          selected = record;
         }
-        return null;
+        return selected?.message ?? null;
       };
 
       const preferredSettledOutage = () => {

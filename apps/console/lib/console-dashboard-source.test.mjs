@@ -831,6 +831,30 @@ test("detail feed outages are retained by per-feed failure generation", () => {
   );
 });
 
+test("sibling success republishes the newest outstanding outage, not feed priority", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gK4B0: a retained
+  // older runtime warning stays in settledDetailOutagesRef. outstandingOutageNewerThan
+  // only suppresses when some record is newer than the caller, so a sibling
+  // success of the same or a still-newer load publishes preferredOutstandingOutage.
+  // That picker must not let the older runtime warning replace a newer events
+  // outage that has not recovered.
+  const loader = dashboardSource.detailLoader;
+  const start = loader.indexOf("const preferredOutstandingOutage = ");
+  const end = loader.indexOf("const preferredSettledOutage = ", start);
+  assert.ok(start > 0 && end > start, "Expected preferredOutstandingOutage before preferredSettledOutage");
+  const helper = loader.slice(start, end);
+  assert.match(
+    helper,
+    /if \(selected != null && record\.generation <= selected\.generation\) \{\s*continue;\s*\}/,
+    "Expected the newest settled failure to own the banner, with feed order only breaking same-generation ties",
+  );
+  assert.doesNotMatch(
+    helper,
+    /return record\.message;/,
+    "Expected preferredOutstandingOutage not to return the first feed-priority match",
+  );
+});
+
 test("loadLogTail retains last-successful tails on transient refresh failure", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAHZU: automatic
   // selected-stream tail refresh must not wipe prior tails/live entries on

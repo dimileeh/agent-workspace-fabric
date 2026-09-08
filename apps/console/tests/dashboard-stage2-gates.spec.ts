@@ -1073,6 +1073,239 @@ test("older detail feed outage survives a newer outage on a different feed", asy
   }
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gK4B0: a retained older
+// runtime warning must not replace a newer events outage when a sibling success
+// of that newer load republishes the outstanding banner. Feed priority is only
+// a same-generation tie-break.
+test("sibling success does not let an older runtime outage steal a newer events banner", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let phase: "bootstrap" | "overlap" | "hold" = "bootstrap";
+  let overlapRuntime = 0;
+  let overlapEvents = 0;
+  let overlapOperations = 0;
+  const olderRuntime: Route[] = [];
+  const hungRuntime: Route[] = [];
+  const siblingOperations: Route[] = [];
+  const heldAfter: Route[] = [];
+  const workspaceId = "ws_older_outage_banner_steal";
+  const retainedRuntime = "retained-runtime-across-sibling-success";
+  const eventsOutage = "events outage owns banner across sibling success";
+  const runtimeOutage = "older runtime warning must not steal banner";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Older outage banner steal workspace",
+    repo_url: "https://github.com/example/older-outage-banner",
+    base_branch: "main",
+    branch_name: "older-outage-banner-branch",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Keep a newer events outage on the banner after a sibling success",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const workspaceBody = {
+    ...overviewItem,
+    id: workspaceId,
+    version: 1,
+  };
+  const runtimeBody = {
+    workspace_id: workspaceId,
+    compose_project_name: retainedRuntime,
+    stack_state: "running",
+    services: [],
+    app_endpoints: [],
+    logs_available: true,
+    control_available: true,
+    reason: null,
+  };
+  const emptyList = { items: [], next_cursor: null, has_more: false };
+  const outageBody = (message: string) => ({
+    detail: { error_code: "UPSTREAM_UNAVAILABLE", message },
+  });
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, {
+        total_failures: 0,
+        since_hours: 24,
+        taxonomy: [],
+        latest_examples: [],
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceBody);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      if (phase === "bootstrap") {
+        await fulfillJson(route, runtimeBody);
+        return;
+      }
+      if (phase === "overlap") {
+        overlapRuntime += 1;
+        if (overlapRuntime === 1) {
+          olderRuntime.push(route);
+          return;
+        }
+        hungRuntime.push(route);
+        return;
+      }
+      hungRuntime.push(route);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      if (phase === "bootstrap") {
+        await fulfillJson(route, emptyList);
+        return;
+      }
+      if (phase === "overlap") {
+        overlapEvents += 1;
+        if (overlapEvents === 1) {
+          await fulfillJson(route, emptyList);
+          return;
+        }
+        await fulfillJson(route, outageBody(eventsOutage), 503);
+        return;
+      }
+      heldAfter.push(route);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      if (phase === "bootstrap") {
+        await fulfillJson(route, emptyList);
+        return;
+      }
+      if (phase === "overlap") {
+        overlapOperations += 1;
+        if (overlapOperations === 1) {
+          await fulfillJson(route, emptyList);
+          return;
+        }
+        siblingOperations.push(route);
+        return;
+      }
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, emptyList);
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  try {
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).click();
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    phase = "overlap";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect.poll(() => olderRuntime.length, { timeout: 10_000 }).toBe(1);
+    await expect.poll(() => overlapEvents, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+
+    // A Playwright click while the older GET is pending does not dispatch the
+    // React refresh handler. A DOM click still starts the newer generation.
+    await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(inspector.getByText(eventsOutage)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => siblingOperations.length, { timeout: 10_000 }).toBe(1);
+
+    // Later polls must not recover events or runtime before the sibling 200.
+    phase = "hold";
+    await fulfillJson(olderRuntime[0], outageBody(runtimeOutage), 503);
+    await expect(inspector.getByText(eventsOutage)).toBeVisible();
+    await expect(inspector.getByText(runtimeOutage)).toHaveCount(0);
+
+    phase = "hold";
+    // Same-load operations 200 settles after the older runtime warning is
+    // recorded. That sibling success republishes the outstanding banner.
+    await fulfillJson(siblingOperations[0], emptyList);
+    await expect(inspector.getByText(eventsOutage)).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByText(runtimeOutage)).toHaveCount(0);
+    await expect(inspector.getByText(retainedRuntime, { exact: true })).toBeVisible();
+  } finally {
+    await fulfillJson(olderRuntime[0], outageBody(runtimeOutage), 503).catch(() => undefined);
+    for (const held of siblingOperations) {
+      await fulfillJson(held, emptyList).catch(() => undefined);
+    }
+    for (const held of hungRuntime) {
+      await fulfillJson(held, runtimeBody).catch(() => undefined);
+    }
+    for (const held of heldAfter) {
+      await fulfillJson(held, emptyList).catch(() => undefined);
+    }
+  }
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAjDt: a later overview
 // success must not clear a retained workspace-detail warning, or the last-good
 // inspector snapshot looks current while the diagnostic feed is still down.
