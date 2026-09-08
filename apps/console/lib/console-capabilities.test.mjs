@@ -1271,6 +1271,63 @@ test("parseConsoleCapabilities rejects malformed optional metadata on available 
   assert.equal(isControlAvailable(typedOptional.capabilities, "retry"), true);
 });
 
+test("parseConsoleCapabilities rejects unknown envelope and identity properties", () => {
+  // ConsoleCapabilitiesResponse and ConsoleCapabilitiesIdentityResponse declare
+  // extra=forbid. Item unknown keys already fail closed; envelope and identity
+  // extras must not cast through as ok and leave advertised controls enabled.
+  const prior = parseConsoleCapabilities(hostedCapabilities);
+  assert.equal(prior.ok, true);
+  if (!prior.ok) return;
+
+  const unknownEnvelope = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    unexpected: "not-in-schema",
+  });
+  assert.equal(unknownEnvelope.ok, false);
+  if (unknownEnvelope.ok) return;
+  assert.equal(unknownEnvelope.kind, "malformed");
+  assert.match(unknownEnvelope.message, /unknown property/i);
+  assert.equal(unknownEnvelope.trustedIdentityKey, prior.identityKey);
+  assert.equal(
+    resolveCapabilityParseFailureClear({
+      priorIdentityKey: prior.identityKey,
+      trustedIdentityKey: unknownEnvelope.trustedIdentityKey,
+    }),
+    "clear_gated",
+  );
+
+  const unknownIdentity = parseConsoleCapabilities({
+    ...hostedCapabilities,
+    identity: {
+      ...hostedCapabilities.identity,
+      region: "us-east-1",
+    },
+  });
+  assert.equal(unknownIdentity.ok, false);
+  if (unknownIdentity.ok) return;
+  assert.equal(unknownIdentity.kind, "identity_malformed");
+  assert.match(unknownIdentity.message, /unknown property/i);
+  assert.equal(unknownIdentity.trustedIdentityKey, undefined);
+
+  const localUnknownEnvelope = parseConsoleCapabilities({
+    ...localCapabilities,
+    notes: "extra",
+  });
+  assert.equal(localUnknownEnvelope.ok, false);
+  if (localUnknownEnvelope.ok) return;
+  assert.equal(localUnknownEnvelope.kind, "malformed");
+  assert.match(localUnknownEnvelope.message, /unknown property notes/i);
+
+  const localUnknownIdentity = parseConsoleCapabilities({
+    ...localCapabilities,
+    identity: { backend_id: "local-awf", scope: "local", extra: true },
+  });
+  assert.equal(localUnknownIdentity.ok, false);
+  if (localUnknownIdentity.ok) return;
+  assert.equal(localUnknownIdentity.kind, "identity_malformed");
+  assert.match(localUnknownIdentity.message, /unknown property extra/i);
+});
+
 test("capabilityIdentityKey treats whitespace hosted tenant as missing discriminator", () => {
   const blankish = capabilityIdentityKey({
     ...hostedCapabilities,

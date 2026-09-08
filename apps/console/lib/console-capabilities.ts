@@ -239,6 +239,20 @@ const CAPABILITY_ITEM_KEYS = new Set([
   "message",
 ]);
 
+/** Envelope keys published by ConsoleCapabilitiesResponse (extra=forbid). */
+const CAPABILITY_ENVELOPE_KEYS = new Set([
+  "schema_version",
+  "backend_kind",
+  "generated_at",
+  "identity",
+  "widgets",
+  "diagnostics",
+  "controls",
+]);
+
+/** Identity keys published by ConsoleCapabilitiesIdentityResponse (extra=forbid). */
+const CAPABILITY_IDENTITY_KEYS = new Set(["backend_id", "scope", "tenant_id"]);
+
 const OPTIONAL_CAPABILITY_FIELDS = ["reason_code", "message", "route"] as const;
 
 /**
@@ -270,6 +284,19 @@ function isNonBlankString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
 
+function unknownRecordProperty(
+  record: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  label: string,
+): string | null {
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      return `Console capabilities ${label} has unknown property ${key}.`;
+    }
+  }
+  return null;
+}
+
 function validateIdentityTenantId(identity: Record<string, unknown>): string | null {
   if (!("tenant_id" in identity) || identity.tenant_id == null) {
     return null;
@@ -294,7 +321,7 @@ function validateHostedIdentity(identity: unknown): string | null {
   if (!isNonBlankString(record.tenant_id)) {
     return "Hosted console capabilities require a non-empty identity.tenant_id.";
   }
-  return null;
+  return unknownRecordProperty(record, CAPABILITY_IDENTITY_KEYS, "identity");
 }
 
 function validateOptionalLocalIdentity(identity: unknown): string | null {
@@ -313,7 +340,11 @@ function validateOptionalLocalIdentity(identity: unknown): string | null {
   if (!isNonEmptyString(record.scope)) {
     return "Console capabilities identity requires a non-empty scope when provided.";
   }
-  return validateIdentityTenantId(record);
+  const tenantError = validateIdentityTenantId(record);
+  if (tenantError) {
+    return tenantError;
+  }
+  return unknownRecordProperty(record, CAPABILITY_IDENTITY_KEYS, "identity");
 }
 
 /**
@@ -577,6 +608,15 @@ export function parseConsoleCapabilities(
     if (error) {
       return { ok: false, kind: "malformed", message: error, trustedIdentityKey };
     }
+  }
+  const envelopeError = unknownRecordProperty(record, CAPABILITY_ENVELOPE_KEYS, "envelope");
+  if (envelopeError) {
+    return {
+      ok: false,
+      kind: "malformed",
+      message: envelopeError,
+      trustedIdentityKey,
+    };
   }
   const capabilities = payload as ConsoleCapabilities;
   return {
