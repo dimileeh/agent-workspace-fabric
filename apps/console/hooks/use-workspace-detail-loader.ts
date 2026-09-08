@@ -671,7 +671,13 @@ export function useWorkspaceDetailLoader({
           selectedIdRef.current !== workspaceId ||
           visit !== workspaceDetailVisitRef.current ||
           generation <= workspaceDetailVisitGenerationFloorRef.current ||
-          generation <= revokedEventFeedGenerationRef.current
+          generation <= revokedEventFeedGenerationRef.current ||
+          // workspace_events withdrawal released settled outage ownership.
+          // This 200 started before that fence, so writing items back and
+          // calling releaseRecoveredDetailOutage would republish the withdrawn
+          // feed through preferredOutstandingOutage. No later /events read
+          // will clear that snapshot or banner.
+          generation <= eventsOutageReleasedThroughRef.current
         ) {
           return;
         }
@@ -1417,10 +1423,15 @@ export function useWorkspaceDetailLoader({
         // if the settlement handler already latched it, so a sibling 200
         // cannot restore events or let live frames refill the panel.
         applyEventFeedAuthDenial(events);
-      } else if (allowEvents && events?.ok) {
+      } else if (
+        allowEvents &&
+        events?.ok &&
+        generation > eventsOutageReleasedThroughRef.current
+      ) {
         // Clear the latch before setDetail so this successful /events read is
         // what restores the panel. A denied generation stays latched and must
-        // not write items back.
+        // not write items back. A request started before workspace_events
+        // withdrawal must not restore the withdrawn snapshot or own recovery.
         eventRecoveryOwned = publishEventFeedRecovered();
       }
 

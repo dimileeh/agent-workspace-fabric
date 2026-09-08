@@ -2468,6 +2468,16 @@ test("withdrawn events outage yields the inspector banner", () => {
     /events: plan\.clearEvents,/,
     "Expected same-identity workspace_events withdrawal to release settled event-outage ownership alongside the latch",
   );
+  assert.match(
+    loader,
+    /generation <= eventsOutageReleasedThroughRef\.current/,
+    "Expected an in-flight /events 200 started before withdrawal not to restore the withdrawn snapshot or republish its outage",
+  );
+  assert.match(
+    loader,
+    /allowEvents &&\s*events\?\.ok &&\s*generation > eventsOutageReleasedThroughRef\.current/,
+    "Expected Promise.all not to treat a pre-withdrawal /events 200 as recovery of the withdrawn feed",
+  );
 });
 
 test("configured context query changes clear authorized state before capability response", () => {
