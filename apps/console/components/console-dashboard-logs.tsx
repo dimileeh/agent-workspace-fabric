@@ -1140,9 +1140,12 @@ export function WorkspaceLogColumn({
       setStreamProbeNonce(0);
       // Denial owned the banner. A listing outage recorded while the stream
       // latch was set is still unrecovered inventory — surface it instead of
-      // clearing the banner so last-good streams look current. Tail recovery
-      // already does this; a later listing 200 is what clears the outage.
-      setError(listingOutageMessageRef.current);
+      // clearing the banner so last-good streams look current. Read the ref
+      // when the update flushes: a listing 200 can clear it, or a listing
+      // 5xx can record it, between this handshake and the write. Tail
+      // recovery already restores the stored outage; only a later listing
+      // 200 clears it.
+      setError(() => listingOutageMessageRef.current);
     };
 
     const applyStreamAuthorizationDenial = (message: string) => {
