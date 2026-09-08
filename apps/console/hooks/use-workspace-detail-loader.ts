@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useLayoutEffect,
   useRef,
   type Dispatch,
   type MutableRefObject,
@@ -75,6 +76,9 @@ type UseWorkspaceDetailLoaderArgs = {
  * request merely starting, hanging, or failing transiently is not recovery.
  * Snapshot frames must not write revoked workspace metadata back while that
  * latch is held.
+ * Selection changes start a new visit. A late 401/403 from the previous visit
+ * must not latch denial or raise the watermark over the re-opened workspace,
+ * even when the operator left and selected the same id again.
  * A gated-detail generation bump drops the union of every stamp recorded after
  * this load captured generation (all of them on capabilities 404). The basic
  * workspace GET still applies. Failures from diagnostics that remain advertised
@@ -114,11 +118,28 @@ export function useWorkspaceDetailLoader({
   // after this watermark may recover. Re-applying a denial already inside
   // this window must not raise the watermark.
   const revokedWorkspaceDetailGenerationRef = useRef(0);
+  // Selection visit that owns the watermarks above. A late 401/403 may still
+  // see the same selectedId after the operator leaves and re-opens that
+  // workspace; it must not stamp the new visit's in-flight GET.
+  const workspaceDetailVisitRef = useRef(0);
+  const workspaceDetailVisitSelectionRef = useRef<string | null | undefined>(undefined);
   const workspaceDetailLoadInFlightRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (workspaceDetailVisitSelectionRef.current === selectedId) {
+      return;
+    }
+    workspaceDetailVisitSelectionRef.current = selectedId;
+    workspaceDetailVisitRef.current += 1;
+    // Previous visit's denial/success must not cover this inspector visit.
+    revokedWorkspaceDetailGenerationRef.current = 0;
+    appliedWorkspaceDetailGenerationRef.current = 0;
+  }, [selectedId]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const epoch = authorizedFeedEpochRef.current;
     const gatedGeneration = gatedDetailFeedGenerationRef.current;
+    const visit = workspaceDetailVisitRef.current;
     const generation = ++workspaceDetailRequestGenerationRef.current;
     workspaceDetailLoadInFlightRef.current = true;
     try {
@@ -222,7 +243,15 @@ export function useWorkspaceDetailLoader({
       // transiently is not recovery — dropping this denial leaves /stream open
       // and lets snapshot frames write revoked workspace metadata back.
       const applyAuthoritativeWorkspaceDetailDenial = (deniedGeneration: number, message: string) => {
-        if (epoch !== authorizedFeedEpochRef.current || selectedIdRef.current !== workspaceId) {
+        // A selection change starts a new visit. Do not latch or raise the
+        // watermark to the current generation when this 401/403 belongs to
+        // the visit the operator already left, even if they re-opened the
+        // same workspace and selectedId matches again.
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current
+        ) {
           return false;
         }
         // A newer successful detail GET already owns the inspector.
@@ -270,6 +299,11 @@ export function useWorkspaceDetailLoader({
         generation !== workspaceDetailRequestGenerationRef.current ||
         selectedIdRef.current !== workspaceId
       ) {
+        return;
+      }
+      // Previous-visit responses can still be the latest generation until the
+      // re-opened workspace starts its own GET. Do not paint them onto this visit.
+      if (visit !== workspaceDetailVisitRef.current) {
         return;
       }
 

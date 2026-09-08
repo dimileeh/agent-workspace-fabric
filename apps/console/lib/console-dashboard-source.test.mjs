@@ -250,6 +250,16 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboardSource.detailLoader,
+    /workspaceDetailVisitRef\.current \+= 1;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;[\s\S]*?appliedWorkspaceDetailGenerationRef\.current = 0;/,
+    "Expected a selection change to start a new detail visit and drop denial watermarks",
+  );
+  assert.match(
+    dashboardSource.detailLoader,
+    /visit !== workspaceDetailVisitRef\.current/,
+    "Expected a late base-detail 401/403 to be ignored after the operator re-opens the workspace",
+  );
+  assert.match(
+    dashboardSource.detailLoader,
     /if \(gatedGeneration !== gatedDetailFeedGenerationRef\.current\) \{[\s\S]*?const dropped = gatedDetailDropsSince\(gatedDetailDroppedFeedsRef\.current, gatedGeneration\);[\s\S]*?if \(allGatedDetailFeedsDropped\(dropped\)\) \{[\s\S]*?setDetail\(\(current\) => \(\{[\s\S]*?workspace: workspaceFromDetailResult\(current\.workspace, workspace\),[\s\S]*?\}\)\)[\s\S]*?return;/,
     "Expected a gated-detail generation bump to union drops since capture, then apply the basic workspace GET and skip optional feeds",
   );
