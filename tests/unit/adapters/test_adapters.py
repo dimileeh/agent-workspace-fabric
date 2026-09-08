@@ -571,7 +571,10 @@ services:
         runner.queue_result(returncode=1, stderr="tagged process still alive")
         adapter = CodexAdapter(runner=runner)
 
-        with pytest.raises(ComposeExecCleanupError) as exc:
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(ComposeExecCleanupError) as exc,
+        ):
             await adapter.run(
                 compose_project=_COMPOSE_PROJECT,
                 compose_file=_COMPOSE_FILE,
@@ -582,6 +585,16 @@ services:
         assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
         assert "tagged process still alive" in str(exc.value)
         assert len(runner.calls) == 2
+        # The cleanup failure replaces the timeout, so it must carry the watchdog
+        # classification: callers preserve timed-out work instead of rolling it
+        # back (#932/#934).
+        assert exc.value.agent_reason_code == "AGENT_TIMEOUT"
+        assert any(
+            event.get("event") == "agent.run.timeout_cleanup_failed"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_cleanup_failed"
+            for event in captured
+        )
 
     @pytest.mark.unit
     async def test_successful_agent_run_does_not_invoke_cleanup(self) -> None:
