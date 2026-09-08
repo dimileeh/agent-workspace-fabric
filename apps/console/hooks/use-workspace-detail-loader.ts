@@ -57,7 +57,7 @@ type UseWorkspaceDetailLoaderArgs = {
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setEventFeedAuthDenied: Dispatch<SetStateAction<boolean>>;
   releaseWithdrawnOptionalFeedDenialRef: MutableRefObject<
-    (feeds: { runtime: boolean; operations: boolean }) => void
+    (feeds: { runtime: boolean; operations: boolean; events: boolean }) => void
   >;
   setError: Dispatch<SetStateAction<string | null>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
@@ -183,6 +183,11 @@ export function useWorkspaceDetailLoader({
   // banner; those generations must not apply a denial or restore the snapshot.
   const runtimeDenialReleasedThroughRef = useRef(0);
   const operationsDenialReleasedThroughRef = useRef(0);
+  // Highest detail generation started before workspace_events withdrawal
+  // released a settled network/5xx. Deleting the outage record alone lets a
+  // request that already started re-raise it through preferredOutstandingOutage;
+  // those generations must not republish the withdrawn feed's error.
+  const eventsOutageReleasedThroughRef = useRef(0);
   // Highest detail generation that recorded a settled network/5xx warning.
   // An older outage must not replace a newer one after a sibling hang delayed
   // that older request past the newer warning.
@@ -241,6 +246,7 @@ export function useWorkspaceDetailLoader({
     revokedOperationsGenerationRef.current = 0;
     appliedOperationsGenerationRef.current = 0;
     operationsDenialReleasedThroughRef.current = 0;
+    eventsOutageReleasedThroughRef.current = 0;
     appliedDetailFailureGenerationRef.current = 0;
     settledDetailOutagesRef.current = {};
     revokedLogListingGenerationRef.current = 0;
@@ -817,7 +823,8 @@ export function useWorkspaceDetailLoader({
             !allowEvents ||
             (dropped != null && dropped.events) ||
             generation < appliedEventFeedGenerationRef.current ||
-            generation <= revokedEventFeedGenerationRef.current
+            generation <= revokedEventFeedGenerationRef.current ||
+            generation <= eventsOutageReleasedThroughRef.current
           );
         }
         if (feed === "operations") {
@@ -883,6 +890,15 @@ export function useWorkspaceDetailLoader({
           if (
             feed === "operations" &&
             record.generation <= operationsDenialReleasedThroughRef.current
+          ) {
+            continue;
+          }
+          // A withdrawn events 5xx must not stay the preferred warning after
+          // the fence. No later /events read will clear it, and a sibling
+          // success would otherwise republish it.
+          if (
+            feed === "events" &&
+            record.generation <= eventsOutageReleasedThroughRef.current
           ) {
             continue;
           }
@@ -1445,14 +1461,17 @@ export function useWorkspaceDetailLoader({
         const operationsDenialOwnsBanner =
           operationsAuthDenialHeld() &&
           !(operations != null && feedAuthDenied(operations) && firstFailure === operations);
-        // A prior runtime/operations 401 or 5xx must not reclaim the banner
-        // after withdrawal. No later read of the dropped feed will clear it,
-        // and stamping it here hides a still-advertised sibling outage.
+        // A prior runtime/operations 401 or 5xx, or a withdrawn events 5xx,
+        // must not reclaim the banner after withdrawal. No later read of the
+        // dropped feed will clear it, and stamping it here hides a
+        // still-advertised sibling outage.
         const withdrawnOptionalFailureOwnsFirst =
           (firstFailure === runtime &&
             generation <= runtimeDenialReleasedThroughRef.current) ||
           (firstFailure === operations &&
-            generation <= operationsDenialReleasedThroughRef.current);
+            generation <= operationsDenialReleasedThroughRef.current) ||
+          (firstFailure === events &&
+            generation <= eventsOutageReleasedThroughRef.current);
         if (
           withdrawnOptionalFailureOwnsFirst &&
           !workspaceDetailAuthDeniedRef.current &&
@@ -1589,15 +1608,15 @@ export function useWorkspaceDetailLoader({
   ]);
 
   // Same-identity withdrawal (and capabilities 404) drops the feed with no
-  // later /runtime or /operations read that can recover a settled 401/403 or
-  // 5xx. Zero the watermark the way event and log withdrawal clear their
-  // latches, drop that feed's settled outage, and republish any still-
+  // later /runtime, /operations, or /events read that can recover a settled
+  // 401/403 or 5xx. Zero the watermark the way event and log withdrawal clear
+  // their latches, drop that feed's settled outage, and republish any still-
   // advertised sibling warning. Otherwise runtimeAuthDenialHeld /
   // operationsAuthDenialHeld or the withdrawn 5xx keeps the inspector banner
   // until the workspace changes, and later advertised-feed outages stay hidden.
   const releaseWithdrawnOptionalFeedDenial = useCallback(
-    (feeds: { runtime: boolean; operations: boolean }) => {
-      if (!feeds.runtime && !feeds.operations) {
+    (feeds: { runtime: boolean; operations: boolean; events: boolean }) => {
+      if (!feeds.runtime && !feeds.operations && !feeds.events) {
         return;
       }
       const runtimeHeld =
@@ -1610,11 +1629,14 @@ export function useWorkspaceDetailLoader({
       const operationsOutage = feeds.operations
         ? settledDetailOutagesRef.current.operations
         : undefined;
+      const eventsOutage = feeds.events ? settledDetailOutagesRef.current.events : undefined;
       const releasedRuntimeOutage = runtimeOutage != null;
       const releasedOperationsOutage = operationsOutage != null;
+      const releasedEventsOutage = eventsOutage != null;
       const releasedOutageGeneration = Math.max(
         runtimeOutage?.generation ?? 0,
         operationsOutage?.generation ?? 0,
+        eventsOutage?.generation ?? 0,
       );
       const releasedThrough = workspaceDetailRequestGenerationRef.current;
       if (feeds.runtime) {
@@ -1632,6 +1654,13 @@ export function useWorkspaceDetailLoader({
         );
         revokedOperationsGenerationRef.current = 0;
         delete settledDetailOutagesRef.current.operations;
+      }
+      if (feeds.events) {
+        eventsOutageReleasedThroughRef.current = Math.max(
+          eventsOutageReleasedThroughRef.current,
+          releasedThrough,
+        );
+        delete settledDetailOutagesRef.current.events;
       }
       const withdrawnDenialHeld =
         (feeds.runtime && runtimeHeld) || (feeds.operations && operationsHeld);
@@ -1662,13 +1691,16 @@ export function useWorkspaceDetailLoader({
       // advertised sibling that settles later. Leave a newer advertised
       // warning's watermark alone.
       if (
-        (releasedRuntimeOutage || releasedOperationsOutage) &&
+        (releasedRuntimeOutage || releasedOperationsOutage || releasedEventsOutage) &&
         releasedOutageGeneration >= appliedDetailFailureGenerationRef.current
       ) {
         appliedDetailFailureGenerationRef.current = remaining.highest;
       }
       if (
-        (withdrawnDenialHeld || releasedRuntimeOutage || releasedOperationsOutage) &&
+        (withdrawnDenialHeld ||
+          releasedRuntimeOutage ||
+          releasedOperationsOutage ||
+          releasedEventsOutage) &&
         !workspaceDetailAuthDeniedRef.current &&
         !eventFeedAuthDeniedRef.current &&
         !logListingAuthDeniedRef.current &&

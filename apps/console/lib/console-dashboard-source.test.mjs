@@ -2288,8 +2288,8 @@ test("same-identity feed withdrawal invalidates gated reads without advancing au
   );
   assert.match(
     withdrawBody,
-    /if \(plan\.clearRuntime \|\| plan\.clearOperations\) \{[\s\S]*?releaseWithdrawnOptionalFeedDenialRef\.current\(\{\s*runtime: plan\.clearRuntime,\s*operations: plan\.clearOperations,\s*\}\);/,
-    "Expected workspace_runtime/workspace_operations withdrawal to release hook-local denial ownership so a basic-detail 200 can drop the stale authorization banner",
+    /if \(plan\.clearRuntime \|\| plan\.clearOperations \|\| plan\.clearEvents\) \{[\s\S]*?releaseWithdrawnOptionalFeedDenialRef\.current\(\{\s*runtime: plan\.clearRuntime,\s*operations: plan\.clearOperations,\s*events: plan\.clearEvents,\s*\}\);/,
+    "Expected workspace_runtime/workspace_operations/workspace_events withdrawal to release hook-local denial and settled-outage ownership so a basic-detail 200 can drop the stale banner",
   );
   assert.doesNotMatch(
     withdrawBody,
@@ -2395,7 +2395,7 @@ test("withdrawn runtime or operations outage yields the inspector banner", () =>
   );
   assert.match(
     releaseBody,
-    /\(withdrawnDenialHeld \|\| releasedRuntimeOutage \|\| releasedOperationsOutage\) &&\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current &&\s*!runtimeStillHeld &&\s*!operationsStillHeld/,
+    /\(withdrawnDenialHeld \|\|\s*releasedRuntimeOutage \|\|\s*releasedOperationsOutage \|\|\s*releasedEventsOutage\) &&\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current &&\s*!runtimeStillHeld &&\s*!operationsStillHeld/,
     "Expected withdrawal to replace the banner only when the withdrawn 401 or 5xx owned it and no other denial remains",
   );
   assert.match(
@@ -2425,8 +2425,48 @@ test("withdrawn runtime or operations outage yields the inspector banner", () =>
   );
   assert.match(
     loader,
-    /const withdrawnOptionalFailureOwnsFirst =\s*\(firstFailure === runtime &&\s*generation <= runtimeDenialReleasedThroughRef\.current\) \|\|\s*\(firstFailure === operations &&\s*generation <= operationsDenialReleasedThroughRef\.current\);[\s\S]*?setError\(preferredOutstandingOutage\(\)\);/,
-    "Expected Promise.all not to restamp a withdrawn runtime or operations 401/5xx over an advertised-feed outage",
+    /const withdrawnOptionalFailureOwnsFirst =\s*\(firstFailure === runtime &&\s*generation <= runtimeDenialReleasedThroughRef\.current\) \|\|\s*\(firstFailure === operations &&\s*generation <= operationsDenialReleasedThroughRef\.current\) \|\|\s*\(firstFailure === events &&\s*generation <= eventsOutageReleasedThroughRef\.current\);[\s\S]*?setError\(preferredOutstandingOutage\(\)\);/,
+    "Expected Promise.all not to restamp a withdrawn runtime, operations, or events 401/5xx over an advertised-feed outage",
+  );
+});
+
+test("withdrawn events outage yields the inspector banner", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gIJVL: a settled
+  // workspace_events network/5xx owns the banner via settledDetailOutagesRef.
+  // Withdrawing the feed clears the authorization latch but leaves no later
+  // /events read that can drop that outage, so sibling successes republish it
+  // through preferredOutstandingOutage until the selection changes.
+  const loader = dashboardSource.detailLoader;
+  const dashboard = dashboardSource.dashboard;
+  const releaseStart = loader.indexOf("const releaseWithdrawnOptionalFeedDenial = useCallback");
+  assert.ok(releaseStart > 0, "Expected a hook callback that releases withdrawn optional-feed denial");
+  const releaseEnd = loader.indexOf("useLayoutEffect(() => {", releaseStart);
+  assert.ok(releaseEnd > releaseStart, "Expected the release callback to be installed in a layout effect");
+  const releaseBody = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    releaseBody,
+    /const eventsOutage = feeds\.events \? settledDetailOutagesRef\.current\.events : undefined;/,
+    "Expected workspace_events withdrawal to observe a settled 5xx before dropping that outage record",
+  );
+  assert.match(
+    releaseBody,
+    /if \(feeds\.events\) \{\s*eventsOutageReleasedThroughRef\.current = Math\.max\(\s*eventsOutageReleasedThroughRef\.current,\s*releasedThrough,\s*\);\s*delete settledDetailOutagesRef\.current\.events;\s*\}/,
+    "Expected workspace_events withdrawal to release settled event-outage ownership and fence in-flight requests",
+  );
+  assert.match(
+    loader,
+    /feed === "events" &&\s*record\.generation <= eventsOutageReleasedThroughRef\.current/,
+    "Expected a withdrawn events outage not to stay the preferred inspector warning",
+  );
+  assert.match(
+    loader,
+    /if \(feed === "events"\) \{\s*return \(\s*!allowEvents \|\|\s*\(dropped != null && dropped\.events\) \|\|\s*generation < appliedEventFeedGenerationRef\.current \|\|\s*generation <= revokedEventFeedGenerationRef\.current \|\|\s*generation <= eventsOutageReleasedThroughRef\.current/,
+    "Expected an in-flight events 5xx started before withdrawal not to re-record the stale reason",
+  );
+  assert.match(
+    dashboard,
+    /events: plan\.clearEvents,/,
+    "Expected same-identity workspace_events withdrawal to release settled event-outage ownership alongside the latch",
   );
 });
 

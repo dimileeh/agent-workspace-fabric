@@ -246,7 +246,7 @@ export function ConsoleDashboard() {
   // Filled by useWorkspaceDetailLoader. Runtime/operations denial ownership
   // is hook-local; withdrawing the feed must release it or the banner sticks.
   const releaseWithdrawnOptionalFeedDenialRef = useRef<
-    (feeds: { runtime: boolean; operations: boolean }) => void
+    (feeds: { runtime: boolean; operations: boolean; events: boolean }) => void
   >(() => {});
   // Gated detail/inventory generation: bumped on capabilities 404 / same-identity
   // inspector-detail withdrawal without touching authorizedFeedEpochRef.
@@ -677,7 +677,11 @@ export function ConsoleDashboard() {
     }
     eventFeedAuthDeniedRef.current = false;
     setEventFeedAuthDenied(false);
-    releaseWithdrawnOptionalFeedDenialRef.current({ runtime: true, operations: true });
+    releaseWithdrawnOptionalFeedDenialRef.current({
+      runtime: true,
+      operations: true,
+      events: true,
+    });
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -765,13 +769,16 @@ export function ConsoleDashboard() {
           eventFeedAuthDeniedRef.current = false;
           setEventFeedAuthDenied(false);
         }
-        if (plan.clearRuntime || plan.clearOperations) {
+        if (plan.clearRuntime || plan.clearOperations || plan.clearEvents) {
           // workspace_runtime / workspace_operations withdrawal leaves no later
-          // read that can clear hook-local denial watermarks. Release them so
-          // a basic-detail 200 can drop the obsolete authorization banner.
+          // read that can clear hook-local denial watermarks. workspace_events
+          // withdrawal likewise leaves no later /events read that can clear a
+          // settled network/5xx. Release both so a basic-detail 200 cannot
+          // republish the obsolete banner.
           releaseWithdrawnOptionalFeedDenialRef.current({
             runtime: plan.clearRuntime,
             operations: plan.clearOperations,
+            events: plan.clearEvents,
           });
         }
         // Unrelated fleet/capacity withdrawals bump only their own request
