@@ -1552,10 +1552,12 @@ export function useWorkspaceDetailLoader({
   ]);
 
   // Same-identity withdrawal (and capabilities 404) drops the feed with no
-  // later /runtime or /operations read that can recover a settled 401/403.
-  // Zero the watermark the way event and log withdrawal clear their latches,
-  // or runtimeAuthDenialHeld/operationsAuthDenialHeld keeps the authorization
-  // banner until the workspace changes.
+  // later /runtime or /operations read that can recover a settled 401/403 or
+  // 5xx. Zero the watermark the way event and log withdrawal clear their
+  // latches, drop that feed's settled outage, and republish any still-
+  // advertised sibling warning. Otherwise runtimeAuthDenialHeld /
+  // operationsAuthDenialHeld or the withdrawn 5xx keeps the inspector banner
+  // until the workspace changes, and later advertised-feed outages stay hidden.
   const releaseWithdrawnOptionalFeedDenial = useCallback(
     (feeds: { runtime: boolean; operations: boolean }) => {
       if (!feeds.runtime && !feeds.operations) {
@@ -1567,6 +1569,16 @@ export function useWorkspaceDetailLoader({
       const operationsHeld =
         revokedOperationsGenerationRef.current > 0 &&
         appliedOperationsGenerationRef.current <= revokedOperationsGenerationRef.current;
+      const runtimeOutage = feeds.runtime ? settledDetailOutagesRef.current.runtime : undefined;
+      const operationsOutage = feeds.operations
+        ? settledDetailOutagesRef.current.operations
+        : undefined;
+      const releasedRuntimeOutage = runtimeOutage != null;
+      const releasedOperationsOutage = operationsOutage != null;
+      const releasedOutageGeneration = Math.max(
+        runtimeOutage?.generation ?? 0,
+        operationsOutage?.generation ?? 0,
+      );
       const releasedThrough = workspaceDetailRequestGenerationRef.current;
       if (feeds.runtime) {
         runtimeDenialReleasedThroughRef.current = Math.max(
@@ -1588,15 +1600,58 @@ export function useWorkspaceDetailLoader({
         (feeds.runtime && runtimeHeld) || (feeds.operations && operationsHeld);
       const runtimeStillHeld = !feeds.runtime && runtimeHeld;
       const operationsStillHeld = !feeds.operations && operationsHeld;
+      const appliedGeneration = {
+        workspace: appliedWorkspaceDetailGenerationRef.current,
+        runtime: appliedRuntimeGenerationRef.current,
+        events: appliedEventFeedGenerationRef.current,
+        operations: appliedOperationsGenerationRef.current,
+        logs: appliedLogListingGenerationRef.current,
+      };
+      const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
+      let highest = 0;
+      let message: string | null = null;
+      for (const feed of order) {
+        const record = settledDetailOutagesRef.current[feed];
+        if (record == null || record.generation < appliedGeneration[feed]) {
+          continue;
+        }
+        highest = Math.max(highest, record.generation);
+        if (message == null) {
+          message = record.message;
+        }
+      }
+      const remaining = { highest, message };
+      // A withdrawn 5xx must not keep the failure watermark above a still-
+      // advertised sibling that settles later. Leave a newer advertised
+      // warning's watermark alone.
       if (
-        withdrawnDenialHeld &&
+        (releasedRuntimeOutage || releasedOperationsOutage) &&
+        releasedOutageGeneration >= appliedDetailFailureGenerationRef.current
+      ) {
+        appliedDetailFailureGenerationRef.current = remaining.highest;
+      }
+      if (
+        (withdrawnDenialHeld || releasedRuntimeOutage || releasedOperationsOutage) &&
         !workspaceDetailAuthDeniedRef.current &&
         !eventFeedAuthDeniedRef.current &&
         !logListingAuthDeniedRef.current &&
         !runtimeStillHeld &&
         !operationsStillHeld
       ) {
-        setError(null);
+        setError((current) => {
+          if (
+            workspaceDetailAuthDeniedRef.current ||
+            eventFeedAuthDeniedRef.current ||
+            logListingAuthDeniedRef.current ||
+            (revokedRuntimeGenerationRef.current > 0 &&
+              appliedRuntimeGenerationRef.current <= revokedRuntimeGenerationRef.current) ||
+            (revokedOperationsGenerationRef.current > 0 &&
+              appliedOperationsGenerationRef.current <= revokedOperationsGenerationRef.current)
+          ) {
+            return current;
+          }
+          return remaining.message;
+        });
       }
     },
     [

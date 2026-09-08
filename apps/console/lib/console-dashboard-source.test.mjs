@@ -2303,6 +2303,50 @@ test("runtime and operations withdrawal releases hook-local denial ownership", (
   );
 });
 
+test("withdrawn runtime or operations outage yields the inspector banner", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gHYSS: a settled
+  // runtime/operations 401 or 5xx owns the banner via watermarks and
+  // settledDetailOutagesRef. Withdrawing the feed leaves no later read that
+  // can clear that reason, so a still-advertised sibling outage stays hidden
+  // until the workspace changes.
+  const loader = dashboardSource.detailLoader;
+  const releaseStart = loader.indexOf("const releaseWithdrawnOptionalFeedDenial = useCallback");
+  assert.ok(releaseStart > 0, "Expected a hook callback that releases withdrawn optional-feed denial");
+  const releaseEnd = loader.indexOf("useLayoutEffect(() => {", releaseStart);
+  assert.ok(releaseEnd > releaseStart, "Expected the release callback to be installed in a layout effect");
+  const releaseBody = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    releaseBody,
+    /const runtimeOutage = feeds\.runtime \? settledDetailOutagesRef\.current\.runtime : undefined;/,
+    "Expected workspace_runtime withdrawal to observe a settled 5xx before dropping that outage record",
+  );
+  assert.match(
+    releaseBody,
+    /const operationsOutage = feeds\.operations\s*\?\s*settledDetailOutagesRef\.current\.operations\s*: undefined;/,
+    "Expected workspace_operations withdrawal to observe a settled 5xx before dropping that outage record",
+  );
+  assert.match(
+    releaseBody,
+    /releasedOutageGeneration >= appliedDetailFailureGenerationRef\.current[\s\S]*?appliedDetailFailureGenerationRef\.current = remaining\.highest;/,
+    "Expected withdrawal to drop a failure watermark owned by the withdrawn feed so a later advertised-feed outage can apply",
+  );
+  assert.match(
+    releaseBody,
+    /const order = \["workspace", "runtime", "events", "operations", "logs"\] as const;/,
+    "Expected withdrawal to republish outstanding advertised-feed outages in inspector order",
+  );
+  assert.match(
+    releaseBody,
+    /\(withdrawnDenialHeld \|\| releasedRuntimeOutage \|\| releasedOperationsOutage\) &&\s*!workspaceDetailAuthDeniedRef\.current &&\s*!eventFeedAuthDeniedRef\.current &&\s*!logListingAuthDeniedRef\.current &&\s*!runtimeStillHeld &&\s*!operationsStillHeld/,
+    "Expected withdrawal to replace the banner only when the withdrawn 401 or 5xx owned it and no other denial remains",
+  );
+  assert.match(
+    releaseBody,
+    /setError\(\(current\) => \{[\s\S]*?return remaining\.message;/,
+    "Expected withdrawal to clear the stale 401/5xx or reveal the next advertised-feed outage",
+  );
+});
+
 test("configured context query changes clear authorized state before capability response", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
