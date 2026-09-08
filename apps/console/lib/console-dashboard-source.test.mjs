@@ -1750,6 +1750,44 @@ test("fullscreen loadSelectedTails retains last-successful tails on transient re
   );
 });
 
+test("fullscreen listing refresh retries denied tails when metadata is unchanged", () => {
+  // Regression for PR #933 review 5135880005: a static /logs listing keeps
+  // selectedTailRefreshKey equal, so the fingerprint return never re-reads a
+  // 401/403 tail. Only that stream's own 200 clears the latch, so the column
+  // EventSource stays closed until Tail all or metadata changes. Retry denied
+  // streams on the next listing refresh, but do not start a second reload
+  // while one is already in flight — a newer generation would discard the
+  // slower success.
+  const logs = dashboardSource.logs;
+  const effectStart = logs.indexOf("if (!selectedTailRefreshKey) {");
+  assert.ok(effectStart > 0, "Expected the fullscreen tail refresh-key effect");
+  const effectEnd = logs.indexOf("}, [loadSelectedTails, selectedTailRefreshKey]);", effectStart);
+  assert.ok(effectEnd > effectStart, "Expected the fullscreen tail refresh-key effect to end");
+  const effectBody = logs.slice(effectStart, effectEnd);
+
+  assert.match(
+    effectBody,
+    /previousTailRefreshKey\.current === selectedTailRefreshKey &&\s*\(\s*tailDeniedStreamIdsRef\.current\.size === 0 \|\|\s*tailReloadInFlightCountRef\.current > 0\s*\)/,
+    "Expected unchanged stream metadata to skip a new fullscreen tail read unless a denied stream can be retried",
+  );
+  assert.doesNotMatch(
+    effectBody,
+    /if \(previousTailRefreshKey\.current === selectedTailRefreshKey\) \{\s*return;\s*\}/,
+    "Expected a static listing fingerprint not to block a retry of a currently denied fullscreen tail",
+  );
+
+  const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
+  const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadSelectedTails callback end");
+  const loadBody = logs.slice(loadIdx, loadEnd);
+  assert.match(
+    loadBody,
+    /tailReloadInFlightCountRef\.current \+= 1;[\s\S]*?finally \{\s*tailReloadInFlightCountRef\.current -= 1;\s*\}/,
+    "Expected a fullscreen tail reload to stay marked in flight until it settles",
+  );
+});
+
 test("same-identity feed withdrawal invalidates gated reads without advancing auth epoch", () => {
   const dashboard = dashboardSource.dashboard;
   const withdrawStart = dashboard.indexOf(

@@ -357,6 +357,10 @@ export function WorkspaceLogColumn({
   const streamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
   const previousTailRefreshKey = useRef("");
+  // Outstanding loadSelectedTails calls. A static listing refresh retries
+  // denied streams, but must not start another reload while one is in flight:
+  // a newer generation would discard the slower 200 that clears the latch.
+  const tailReloadInFlightCountRef = useRef(0);
   // Listing poll generation. A wall-clock interval can start poll N+1 before
   // poll N returns. Discarding every non-latest 401/403 or non-auth failure
   // starves the column when each response is slower than pollMs: cached
@@ -458,6 +462,8 @@ export function WorkspaceLogColumn({
     if (selected.length === 0) {
       return;
     }
+    tailReloadInFlightCountRef.current += 1;
+    try {
     const epoch = columnEpochRef.current;
     const generation = ++tailRequestGenerationRef.current;
     // Siblings still unread when a 401/403 settles. Snapshot them with the
@@ -673,6 +679,9 @@ export function WorkspaceLogColumn({
       }
       return next;
     });
+    } finally {
+      tailReloadInFlightCountRef.current -= 1;
+    }
   }, [allowLogs, selectedStreams, streams, workspace.workspace_id]);
 
   useEffect(() => {
@@ -844,7 +853,15 @@ export function WorkspaceLogColumn({
       previousTailRefreshKey.current = "";
       return;
     }
-    if (previousTailRefreshKey.current === selectedTailRefreshKey) {
+    // Static listing metadata must not restart tails that already landed.
+    // A stream still latched for 401/403 is the exception: listing 200 does
+    // not change this fingerprint, and only that stream's own 200 clears
+    // the latch. Retry it on the next listing refresh, but do not start a
+    // second reload while one is already in flight.
+    if (
+      previousTailRefreshKey.current === selectedTailRefreshKey &&
+      (tailDeniedStreamIdsRef.current.size === 0 || tailReloadInFlightCountRef.current > 0)
+    ) {
       return;
     }
     previousTailRefreshKey.current = selectedTailRefreshKey;
