@@ -978,6 +978,233 @@ for (const deniedStatus of [401, 403] as const) {
   });
 }
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD09A: /workspaces/{id}/events
+// 401/403 clears detail.events, but live event frames must not refill the Events
+// panel while workspace_stream stays advertised. Latch the denial and ignore the
+// event channel until a successful /events read recovers it.
+for (const deniedStatus of [401, 403] as const) {
+  test(`events feed ${deniedStatus} ignores live event frames until the events feed recovers`, async ({
+    page,
+  }) => {
+    test.setTimeout(45_000);
+    let eventsMode: "ok" | "denied" = "ok";
+    let streamConnections = 0;
+    let releaseDeniedStream: () => void = () => undefined;
+    const heldDeniedStream = new Promise<void>((resolve) => {
+      releaseDeniedStream = resolve;
+    });
+    let releaseRecoveredStream: () => void = () => undefined;
+    const heldRecoveredStream = new Promise<void>((resolve) => {
+      releaseRecoveredStream = resolve;
+    });
+    const workspaceId = `ws_events_feed_stream_denial_${deniedStatus}`;
+    const authorizedEvent = "authorized-events-feed-marker";
+    const revokedLiveEvent = "revoked-live-event-must-not-appear";
+    const recoveredLiveEvent = "recovered-live-event-may-appear";
+    const overviewItem = {
+      workspace_id: workspaceId,
+      title: "Events feed stream denial workspace",
+      repo_url: "https://github.com/example/events-feed-stream-denial",
+      base_branch: "main",
+      branch_name: "events-feed-overview-branch",
+      agent: "codex",
+      agent_model: "gpt-5.5",
+      status: "running",
+      created_at: "2026-09-06T17:00:00Z",
+      updated_at: "2026-09-06T17:00:00Z",
+      task_prompt: "Ignore live events after the events feed is denied",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    };
+
+    const eventItem = (eventType: string, id: string) => ({
+      id,
+      workspace_id: workspaceId,
+      event_type: eventType,
+      old_state: null,
+      new_state: "running",
+      reason_code: null,
+      payload: null,
+      occurred_at: "2026-09-06T17:00:00Z",
+    });
+
+    await page.route("**/api/awf/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/awf/health") {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === "/api/awf/console/capabilities") {
+        await fulfillJson(route, localCapabilities());
+        return;
+      }
+      if (path === "/api/awf/console/dashboard-summary") {
+        await fulfillJson(route, localDashboardSummary());
+        return;
+      }
+      if (path === "/api/awf/workspaces/overview") {
+        await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}`) {
+        await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 3 });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+        await fulfillJson(route, {
+          workspace_id: workspaceId,
+          compose_project_name: "awf-ws-events-feed-stream",
+          stack_state: "running",
+          services: [],
+          app_endpoints: [],
+          logs_available: true,
+          control_available: true,
+          reason: null,
+        });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+        if (eventsMode === "denied") {
+          await fulfillJson(
+            route,
+            {
+              detail: {
+                error_code: deniedStatus === 401 ? "UNAUTHORIZED" : "FORBIDDEN",
+                message: "events feed permission revoked",
+              },
+            },
+            deniedStatus,
+          );
+          return;
+        }
+        await fulfillJson(route, {
+          items: [eventItem(authorizedEvent, "evt_events_feed_authorized")],
+          next_cursor: null,
+          has_more: false,
+        });
+        return;
+      }
+      if (
+        path === `/api/awf/workspaces/${workspaceId}/operations` ||
+        path === `/api/awf/workspaces/${workspaceId}/logs`
+      ) {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+        streamConnections += 1;
+        const connection = streamConnections;
+        if (connection === 1) {
+          // Hold the already-open inspector EventSource until event-feed denial
+          // is applied, then deliver an event frame. workspace_stream stays advertised.
+          await heldDeniedStream;
+          await route.fulfill({
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream; charset=utf-8",
+              "cache-control": "no-cache",
+            },
+            body: `data: ${JSON.stringify({
+              type: "event",
+              event: eventItem(revokedLiveEvent, "evt_events_feed_revoked_live"),
+            })}\n\n`,
+          });
+          return;
+        }
+        await heldRecoveredStream;
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+          body: `data: ${JSON.stringify({
+            type: "event",
+            event: eventItem(recoveredLiveEvent, "evt_events_feed_recovered_live"),
+          })}\n\n`,
+        });
+        return;
+      }
+      if (path === "/api/awf/metrics/resources/saturation") {
+        await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+        return;
+      }
+      if (path === "/api/awf/metrics/workspaces/summary") {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === "/api/awf/merge-queue") {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+        return;
+      }
+      if (path === "/api/awf/metrics/failures/summary") {
+        await fulfillJson(route, {
+          total_failures: 0,
+          since_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId(`workspace-card-${workspaceId}`).click();
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector.getByText(authorizedEvent, { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(0);
+
+    eventsMode = "denied";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect(inspector.getByText(/events feed permission revoked/i)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(inspector.getByText(authorizedEvent, { exact: true })).toHaveCount(0);
+    await expect(inspector.getByText("No events recorded.")).toBeVisible();
+    // Event-feed denial must not close the inspector EventSource. Snapshots and
+    // logs remain authorized while workspace_stream stays advertised.
+    await expect(page.getByText("Stream: idle")).toHaveCount(0);
+
+    const connectionsAtDenial = streamConnections;
+    releaseDeniedStream();
+    await expect(page.getByText(revokedLiveEvent)).toHaveCount(0);
+    await page.waitForTimeout(1_500);
+    await expect(page.getByText(revokedLiveEvent)).toHaveCount(0);
+    await expect(inspector.getByText(authorizedEvent, { exact: true })).toHaveCount(0);
+    await expect(inspector.getByText("No events recorded.")).toBeVisible();
+
+    await expect.poll(() => streamConnections, { timeout: 10_000 }).toBeGreaterThan(connectionsAtDenial);
+
+    eventsMode = "ok";
+    await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+    await expect(inspector.getByText(authorizedEvent, { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(inspector.getByText(/events feed permission revoked/i)).toHaveCount(0);
+
+    releaseRecoveredStream();
+    await expect(inspector.getByText(recoveredLiveEvent, { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(revokedLiveEvent)).toHaveCount(0);
+  });
+}
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gD08-: a /workspaces/{id}
 // 401/403 must latch denial and close the inspector EventSource without waiting
 // for a sibling runtime/events/operations request. Promise.all never settled

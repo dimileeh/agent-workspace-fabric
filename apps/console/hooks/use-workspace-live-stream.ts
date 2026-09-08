@@ -27,6 +27,7 @@ type UseWorkspaceLiveStreamArgs = {
   logTailAuthDeniedRef: MutableRefObject<boolean>;
   workspaceDetailAuthDenied: boolean;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
+  eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setStreamState: Dispatch<SetStateAction<StreamState>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setLogEntries: Dispatch<SetStateAction<LogEntry[]>>;
@@ -50,6 +51,7 @@ export function useWorkspaceLiveStream({
   logTailAuthDeniedRef,
   workspaceDetailAuthDenied,
   workspaceDetailAuthDeniedRef,
+  eventFeedAuthDeniedRef,
   setStreamState,
   setDetail,
   setLogEntries,
@@ -125,9 +127,17 @@ export function useWorkspaceLiveStream({
         return;
       }
       if (frame.type === "event") {
+        // /events 401/403 clears detail.events but leaves workspace_stream
+        // advertised. Ignore the event channel until that feed recovers;
+        // snapshots and logs stay on this EventSource.
+        if (eventFeedAuthDeniedRef.current) {
+          return;
+        }
         setStreamState("live");
         setDetail((current) => {
-          if (workspaceDetailAuthDeniedRef.current) {
+          // An event-feed or base-detail 401/403 may land between the frame
+          // check and this updater. Do not refill the cleared Events panel.
+          if (workspaceDetailAuthDeniedRef.current || eventFeedAuthDeniedRef.current) {
             return current;
           }
           return {
@@ -222,6 +232,7 @@ export function useWorkspaceLiveStream({
     logTailAuthDeniedRef,
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
+    eventFeedAuthDeniedRef,
     selectedIdRef,
     selectedStreamsRef,
     setDetail,

@@ -54,6 +54,8 @@ type UseWorkspaceDetailLoaderArgs = {
   setLogListingAuthDenied: Dispatch<SetStateAction<boolean>>;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
+  eventFeedAuthDeniedRef: MutableRefObject<boolean>;
+  setEventFeedAuthDenied: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   setDetail: Dispatch<SetStateAction<DetailState>>;
   setSelectedStreams: Dispatch<SetStateAction<string[]>>;
@@ -83,6 +85,10 @@ type UseWorkspaceDetailLoaderArgs = {
  * authorization was revoked.
  * Snapshot frames must not write revoked workspace metadata back while that
  * latch is held.
+ * A 401/403 on /workspaces/{id}/events latches event-feed denial and clears
+ * detail.events as soon as that request settles. Live event frames are ignored
+ * until a later successful /events read recovers the feed. A newer request
+ * merely starting, hanging, or failing transiently is not recovery.
  * Selection changes start a new visit and advance request generation. A late
  * 401/403 from the previous visit must not latch denial or stamp the watermark
  * onto the re-opened workspace's in-flight GET, even when selectedId matches
@@ -105,6 +111,8 @@ export function useWorkspaceDetailLoader({
   setLogListingAuthDenied,
   workspaceDetailAuthDeniedRef,
   setWorkspaceDetailAuthDenied,
+  eventFeedAuthDeniedRef,
+  setEventFeedAuthDenied,
   setError,
   setDetail,
   setSelectedStreams,
@@ -126,6 +134,13 @@ export function useWorkspaceDetailLoader({
   // after this watermark may recover. Re-applying a denial already inside
   // this window must not raise the watermark.
   const revokedWorkspaceDetailGenerationRef = useRef(0);
+  // Highest detail generation that applied a successful /events GET. An older
+  // event-feed 401/403 must not clear events this newer success already owns.
+  const appliedEventFeedGenerationRef = useRef(0);
+  // Highest detail generation covered by an applied /events 401/403. An older
+  // or in-flight 200 must not restore revoked events or let live frames refill
+  // the panel. A request that starts after this watermark may recover.
+  const revokedEventFeedGenerationRef = useRef(0);
   // Selection visit that owns the watermarks above. A late 401/403 may still
   // see the same selectedId after the operator leaves and re-opens that
   // workspace; it must not stamp the new visit's in-flight GET.
@@ -152,6 +167,8 @@ export function useWorkspaceDetailLoader({
     // Previous visit's denial/success must not cover this inspector visit.
     revokedWorkspaceDetailGenerationRef.current = 0;
     appliedWorkspaceDetailGenerationRef.current = 0;
+    revokedEventFeedGenerationRef.current = 0;
+    appliedEventFeedGenerationRef.current = 0;
   }, [selectedId]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -352,6 +369,80 @@ export function useWorkspaceDetailLoader({
         }
       };
 
+      const publishEventFeedRecovered = () => {
+        // A denial that landed after this 200 passed the generation check owns
+        // the Events panel. Clearing the latch here would accept live frames
+        // for a request that started before that revocation.
+        if (
+          generation <= revokedEventFeedGenerationRef.current ||
+          generation < appliedEventFeedGenerationRef.current
+        ) {
+          return;
+        }
+        appliedEventFeedGenerationRef.current = Math.max(
+          appliedEventFeedGenerationRef.current,
+          generation,
+        );
+        eventFeedAuthDeniedRef.current = false;
+        setEventFeedAuthDenied(false);
+      };
+
+      // /events 401/403 while workspace_events stays advertised clears
+      // detail.events, but EventSource event frames merge unless this latch
+      // is held. Apply as soon as the request settles so a hanging sibling
+      // cannot leave previously authorized events on screen or let live
+      // frames refill the panel. A newer request merely starting is not
+      // recovery.
+      const applyEventFeedAuthDenial = (result: ApiEnvelope<ListEnvelope<WorkspaceEvent>>) => {
+        if (!allowEvents || !feedAuthDenied(result) || result.ok) {
+          return;
+        }
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          selectedIdRef.current !== workspaceId ||
+          visit !== workspaceDetailVisitRef.current ||
+          generation <= workspaceDetailVisitGenerationFloorRef.current
+        ) {
+          return;
+        }
+        if (generation < appliedEventFeedGenerationRef.current) {
+          return;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark here would reject a recovery that started
+        // after the original denial.
+        if (
+          eventFeedAuthDeniedRef.current &&
+          generation <= revokedEventFeedGenerationRef.current
+        ) {
+          return;
+        }
+        // The first denial covers every detail request that has already
+        // started so an in-flight 200 cannot restore cleared events. A later
+        // 401 must not raise that watermark to the current generation, or it
+        // would reject a recovery that started after the original denial.
+        const denialWatermark = eventFeedAuthDeniedRef.current
+          ? generation
+          : workspaceDetailRequestGenerationRef.current;
+        revokedEventFeedGenerationRef.current = Math.max(
+          revokedEventFeedGenerationRef.current,
+          denialWatermark,
+        );
+        eventFeedAuthDeniedRef.current = true;
+        setEventFeedAuthDenied(true);
+        setDetail((current) => {
+          if (!eventFeedAuthDeniedRef.current) {
+            return current;
+          }
+          return { ...current, events: [] };
+        });
+        // A latched base-detail 401/403 owns the banner. Do not replace it
+        // with the event-feed reason while that revocation is still in force.
+        if (!workspaceDetailAuthDeniedRef.current) {
+          setError(result.message);
+        }
+      };
+
       const workspacePromise = apiGet<Workspace>(awfPath(`workspaces/${workspaceId}`));
       const runtimePromise = allowRuntime
         ? apiGet<WorkspaceRuntime>(awfPath(`workspaces/${workspaceId}/runtime`))
@@ -378,6 +469,11 @@ export function useWorkspaceDetailLoader({
       void streamsPromise.then((result) => {
         if (result != null) {
           applyLogListingAuthDenial(result);
+        }
+      });
+      void eventsPromise.then((result) => {
+        if (result != null) {
+          applyEventFeedAuthDenial(result);
         }
       });
 
@@ -496,6 +592,19 @@ export function useWorkspaceDetailLoader({
         publishWorkspaceDetailAuthDenied(true);
       }
 
+      if (allowEvents && events != null && feedAuthDenied(events)) {
+        // Event-feed 401/403 while workspace_events stays advertised is auth
+        // revocation for the Events panel, not a transient outage. Apply even
+        // if the settlement handler already latched it, so a sibling 200
+        // cannot restore events or let live frames refill the panel.
+        applyEventFeedAuthDenial(events);
+      } else if (allowEvents && events?.ok) {
+        // Clear the latch before setDetail so this successful /events read is
+        // what restores the panel. A denied generation stays latched and must
+        // not write items back.
+        publishEventFeedRecovered();
+      }
+
       // This setter is the workspace-detail slot only. Do not clear overview
       // errors here — an independent overview success must not clear this
       // warning either (CONSOLE_BACKEND_CONTRACT).
@@ -506,7 +615,7 @@ export function useWorkspaceDetailLoader({
         if (!workspaceDetailAuthDeniedRef.current || feedAuthDenied(workspace)) {
           setError(firstFailure.message);
         }
-      } else if (!workspaceDetailAuthDeniedRef.current) {
+      } else if (!workspaceDetailAuthDeniedRef.current && !eventFeedAuthDeniedRef.current) {
         setError(null);
       }
 
@@ -529,9 +638,9 @@ export function useWorkspaceDetailLoader({
 
         const nextEvents = !allowEvents
           ? []
-          : events != null && events.ok
+          : events != null && events.ok && !eventFeedAuthDeniedRef.current
             ? events.data.items
-            : feedAuthDenied(events)
+            : feedAuthDenied(events) || eventFeedAuthDeniedRef.current
               ? []
               : current.events;
 
@@ -595,6 +704,8 @@ export function useWorkspaceDetailLoader({
     logListingAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
+    eventFeedAuthDeniedRef,
+    setEventFeedAuthDenied,
     logStreamActivityRef,
     setLogListingAuthDenied,
     selectedIdRef,
