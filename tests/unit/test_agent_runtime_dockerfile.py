@@ -129,13 +129,13 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
     assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
     assert "ARG GROK_VERSION=0.2.94" in dockerfile
-    assert "ARG ANTIGRAVITY_VERSION=1.1.13" in dockerfile
+    assert "ARG ANTIGRAVITY_VERSION=1.1.27" in dockerfile
     assert (
-        "ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9"
+        "ARG ANTIGRAVITY_AMD64_SHA256=f874d4f6b8a73c2df660f580f25fb656fcb6e64adbfd746e6692e837fd9a20be"
         in dockerfile
     )
     assert (
-        "ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8"
+        "ARG ANTIGRAVITY_ARM64_SHA256=97fc9fe5a6067406cd02cbe4ae6e362c9623a24d33bec486911246c17ceb6a94"
         in dockerfile
     )
     assert "github.com/google-antigravity/antigravity-cli/releases/download/" in dockerfile
