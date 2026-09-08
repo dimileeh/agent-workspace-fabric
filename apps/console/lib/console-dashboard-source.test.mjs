@@ -788,6 +788,49 @@ test("recovered detail success clears a settled outage without waiting for sibli
   }
 });
 
+test("detail feed outages are retained by per-feed failure generation", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gKfUz: a shared
+  // failure watermark must not discard load N's runtime/events/operations/logs
+  // failure after load N+1 records an outage on a different feed. That feed
+  // has not recovered, and a later success of the newer outage must republish
+  // the retained warning when the replacement request hangs.
+  const loader = dashboardSource.detailLoader;
+  const helperStart = loader.indexOf("const applyDetailFeedTransientOutage = ");
+  assert.ok(helperStart > 0, "Expected a settlement-time transient outage helper");
+  const helperEnd = loader.indexOf("const publishOptionalFeedRecovered", helperStart);
+  assert.ok(helperEnd > helperStart, "Expected the transient outage helper to end before optional-feed recovery");
+  const helper = loader.slice(helperStart, helperEnd);
+  assert.match(
+    helper,
+    /if \(detailFeedOutageSuppressed\(feed\)\) \{\s*return;\s*\}[\s\S]*?const existing = settledDetailOutagesRef\.current\[feed\];\s*if \(existing != null && generation < existing\.generation\) \{\s*return;\s*\}/,
+    "Expected an older failure to be dropped only when this feed already recorded a newer outage",
+  );
+  assert.doesNotMatch(
+    helper,
+    /if \(generation < appliedDetailFailureGenerationRef\.current\) \{\s*return;\s*\}/,
+    "Expected the shared failure watermark not to discard a different feed's older outage before it is recorded",
+  );
+  assert.match(
+    helper,
+    /outstandingOutageNewerThan\(generation\)/,
+    "Expected an older recorded outage not to replace a newer outstanding warning, and to publish once that newer warning is gone",
+  );
+  const releaseStart = loader.indexOf("const releaseRecoveredDetailOutage = ");
+  const releaseEnd = loader.indexOf("const applyOptionalFeedAuthDenial", releaseStart);
+  assert.ok(releaseStart > 0 && releaseEnd > releaseStart, "Expected recovered-outage release helper");
+  const release = loader.slice(releaseStart, releaseEnd);
+  assert.match(
+    release,
+    /outstandingOutageNewerThan\(generation\)/,
+    "Expected recovery of a newer feed to republish a retained older outage instead of clearing on the shared watermark",
+  );
+  assert.doesNotMatch(
+    release,
+    /generation < appliedDetailFailureGenerationRef\.current/,
+    "Expected recovery not to suppress a retained older outage solely because the shared watermark is newer",
+  );
+});
+
 test("loadLogTail retains last-successful tails on transient refresh failure", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gAHZU: automatic
   // selected-stream tail refresh must not wipe prior tails/live entries on

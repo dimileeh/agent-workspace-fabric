@@ -189,8 +189,9 @@ export function useWorkspaceDetailLoader({
   // those generations must not republish the withdrawn feed's error.
   const eventsOutageReleasedThroughRef = useRef(0);
   // Highest detail generation that recorded a settled network/5xx warning.
-  // An older outage must not replace a newer one after a sibling hang delayed
-  // that older request past the newer warning.
+  // Used when a withdrawn feed owned the banner so a later advertised outage
+  // can apply. It must not discard an eligible failure of a different feed:
+  // that feed keeps its own generation on settledDetailOutagesRef.
   const appliedDetailFailureGenerationRef = useRef(0);
   // Settled network/5xx messages still owning the inspector banner, by feed.
   // Success handlers clear the recovered feed immediately: Promise.all never
@@ -919,6 +920,42 @@ export function useWorkspaceDetailLoader({
         return null;
       };
 
+      // A newer failure of another feed may own the banner, but it must not
+      // erase this feed's record. After that newer outage recovers, the
+      // retained record is what preferredOutstandingOutage republishes.
+      const outstandingOutageNewerThan = (settledGeneration: number) => {
+        const order = ["workspace", "runtime", "events", "operations", "logs"] as const;
+        for (const name of order) {
+          const record = settledDetailOutagesRef.current[name];
+          if (record == null || record.generation <= settledGeneration) {
+            continue;
+          }
+          if (record.generation < appliedSuccessGeneration(name)) {
+            continue;
+          }
+          if (
+            name === "runtime" &&
+            record.generation <= runtimeDenialReleasedThroughRef.current
+          ) {
+            continue;
+          }
+          if (
+            name === "operations" &&
+            record.generation <= operationsDenialReleasedThroughRef.current
+          ) {
+            continue;
+          }
+          if (
+            name === "events" &&
+            record.generation <= eventsOutageReleasedThroughRef.current
+          ) {
+            continue;
+          }
+          return true;
+        }
+        return false;
+      };
+
       // Network/5xx must warn as soon as this request settles. firstFailure
       // only runs after Promise.all, and apiGet has no timeout, so a hanging
       // sibling would leave the last-successful snapshot looking current.
@@ -932,9 +969,8 @@ export function useWorkspaceDetailLoader({
         if (detailFeedOutageSuppressed(feed)) {
           return;
         }
-        if (generation < appliedDetailFailureGenerationRef.current) {
-          return;
-        }
+        // Same-feed recency only. A newer outage on a different feed must not
+        // drop this failure: no later success of that other feed recovers it.
         const existing = settledDetailOutagesRef.current[feed];
         if (existing != null && generation < existing.generation) {
           return;
@@ -952,11 +988,11 @@ export function useWorkspaceDetailLoader({
           return;
         }
         setError((current) => {
-          // A newer outage can own the banner before this update flushes.
-          // A newer success of this feed already recovered the snapshot; do
-          // not restamp the warning that success cleared.
+          // A newer outstanding outage owns the banner until that feed
+          // recovers. A newer success of this feed already recovered the
+          // snapshot; do not restamp the warning that success cleared.
           if (
-            generation < appliedDetailFailureGenerationRef.current ||
+            outstandingOutageNewerThan(generation) ||
             generation < appliedSuccessGeneration(feed)
           ) {
             return current;
@@ -997,8 +1033,10 @@ export function useWorkspaceDetailLoader({
           if (authorizationOwnsDetailBanner()) {
             return current;
           }
-          // A newer outage can own the banner before this update flushes.
-          if (generation < appliedDetailFailureGenerationRef.current) {
+          // A newer outstanding outage can own the banner before this update
+          // flushes. A retained older failure of another feed must still
+          // publish once that newer warning is gone.
+          if (outstandingOutageNewerThan(generation)) {
             return current;
           }
           return preferredOutstandingOutage();
