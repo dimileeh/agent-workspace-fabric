@@ -229,6 +229,35 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+/** Item keys published by ConsoleCapabilityItemResponse (extra=forbid). */
+const CAPABILITY_ITEM_KEYS = new Set([
+  "id",
+  "availability",
+  "semantics",
+  "route",
+  "reason_code",
+  "message",
+]);
+
+/**
+ * Optional metadata is string|null on every availability, not only unsupported.
+ * Wrong types and unknown properties fail closed to match Pydantic/OpenAPI.
+ */
+function validateOptionalCapabilityFields(record: Record<string, unknown>): string | null {
+  for (const key of Object.keys(record)) {
+    if (!CAPABILITY_ITEM_KEYS.has(key)) {
+      return `Console capability entry has unknown property ${key}.`;
+    }
+  }
+  if (record.reason_code != null && typeof record.reason_code !== "string") {
+    return "Console capability reason_code must be a string or null when present.";
+  }
+  if (record.message != null && typeof record.message !== "string") {
+    return "Console capability message must be a string or null when present.";
+  }
+  return null;
+}
+
 /** Matches Python tenant_id_must_not_be_blank / OpenAPI pattern .*\\S.* */
 function isNonBlankString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
@@ -366,6 +395,10 @@ function validateCapabilityEntry(
     return "Console capability entry malformed.";
   }
   const record = item as Record<string, unknown>;
+  const optionalError = validateOptionalCapabilityFields(record);
+  if (optionalError) {
+    return optionalError;
+  }
   if (typeof record.id !== "string" || record.id.length === 0) {
     return "Console capability entry missing id.";
   }

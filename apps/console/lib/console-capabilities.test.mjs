@@ -1135,6 +1135,85 @@ test("parseConsoleCapabilities rejects incomplete unsupported capability reasons
   assert.match(arbitrary.message, /outside the v1 inventory/);
 });
 
+test("parseConsoleCapabilities rejects malformed optional metadata on available entries", () => {
+  // Shared schema (Pydantic extra=forbid, OpenAPI additionalProperties: false)
+  // types reason_code/message as string|null on every item. Available entries
+  // must fail closed on wrong types and unknown properties instead of enabling
+  // advertised controls.
+  const numericReason = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "cancel",
+        availability: "available",
+        semantics: "cancel",
+        reason_code: 42,
+      },
+    ],
+  });
+  assert.equal(numericReason.ok, false);
+  if (numericReason.ok) return;
+  assert.equal(numericReason.kind, "malformed");
+  assert.match(numericReason.message, /reason_code/);
+
+  const numericMessage = parseConsoleCapabilities({
+    ...localCapabilities,
+    widgets: [
+      {
+        id: "fleet_summary",
+        availability: "available",
+        route: "/v1/console/dashboard-summary",
+        semantics: "fleet",
+        message: 42,
+      },
+    ],
+  });
+  assert.equal(numericMessage.ok, false);
+  if (numericMessage.ok) return;
+  assert.equal(numericMessage.kind, "malformed");
+  assert.match(numericMessage.message, /message/);
+
+  const unknownProperty = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "retry",
+        availability: "available",
+        semantics: "retry",
+        notes: "not in schema",
+      },
+    ],
+  });
+  assert.equal(unknownProperty.ok, false);
+  if (unknownProperty.ok) return;
+  assert.equal(unknownProperty.kind, "malformed");
+  assert.match(unknownProperty.message, /unknown property/i);
+
+  const typedOptional = parseConsoleCapabilities({
+    ...localCapabilities,
+    controls: [
+      {
+        id: "cancel",
+        availability: "available",
+        semantics: "cancel",
+        reason_code: "policy_disabled",
+        message: "noted",
+      },
+      {
+        id: "retry",
+        availability: "available",
+        semantics: "retry",
+        reason_code: null,
+        message: null,
+      },
+    ],
+  });
+  assert.equal(typedOptional.ok, true);
+  if (!typedOptional.ok) return;
+  assert.equal(isControlAvailable(typedOptional.capabilities, "cancel"), true);
+  assert.equal(isControlAvailable(typedOptional.capabilities, "retry"), true);
+});
+
 test("capabilityIdentityKey treats whitespace hosted tenant as missing discriminator", () => {
   const blankish = capabilityIdentityKey({
     ...hostedCapabilities,
