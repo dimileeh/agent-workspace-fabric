@@ -175,6 +175,7 @@ async def _address_thread(
     from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
+        _sync_agent_failed_reason,
         _sync_needs_human_reason,
     )
 
@@ -222,8 +223,17 @@ async def _address_thread(
             evidence_item_line=getattr(thread, "line", None),
             evidence_anchor_head=cycle_start_head,
         )
-    except AgentVerdictExecutionError:
-        result = MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        # This seam can only return the bare verdict, so keep the reason code
+        # (and the #932 preserved HEAD) observable instead of dropping it.
+        _log.warning(
+            "monitor.address_thread_agent_failed",
+            workspace_id=workspace_id,
+            thread_id=thread.thread_id,
+            reason_code=exc.reason_code,
+            preserved_head_sha=exc.preserved_head_sha,
+        )
+        result = _agent_failed_result(exc)
     # #935: an accepted item commit must leave a durable audit trail immediately —
     # the batch's ``comment_repair`` operation row is only finalised on push, so a
     # restart between items would otherwise strand this commit with no provenance.
@@ -235,6 +245,13 @@ async def _address_thread(
         item_start_head=operation_start_head,
         operation_id=operation_id,
     )
+    # Stash the failure reason BEFORE the result is narrowed to a bare verdict:
+    # on the #932 timeout path it carries the watchdog reason code and the
+    # preserved HEAD the re-queued attempt resumes from, and nothing downstream
+    # of this seam can recover either from ``agent_failed`` alone
+    # (PRRT_kwDOSJAM6s6fz-6r).
+    if state is not None:
+        _sync_agent_failed_reason(state, thread.thread_id, result)
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -313,7 +330,10 @@ async def _address_review_comment_result(
 ) -> VerdictResult | MonitorVerdictResult:
     """Resolve a review comment while retaining its full monitor result."""
     del base_branch, remote_branch, operation_type, monitor_log
-    from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _review_comment_body_hash,
+        _sync_agent_failed_reason,
+    )
 
     prompt_owned_paths = (
         owned_paths
@@ -351,8 +371,8 @@ async def _address_review_comment_result(
             evidence_item_id=comment.comment_id,
             evidence_body_hash=_review_comment_body_hash(comment),
         )
-    except AgentVerdictExecutionError:
-        result = MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        result = _agent_failed_result(exc)
     # #935: record the accepted item commit before the batch ends (see _address_thread).
     await _record_accepted_item_commit_provenance(
         runner,
@@ -362,13 +382,34 @@ async def _address_review_comment_result(
         item_start_head=operation_start_head,
         operation_id=operation_id,
     )
+    # Same durable record as the thread path: ``_sync_needs_human_reason`` (the
+    # only reason the review-comment caller persists) keeps nothing for
+    # ``agent_failed``, and ``_address_review_comment`` narrows this result to
+    # its verdict.
+    if state is not None:
+        _sync_agent_failed_reason(state, comment.comment_id, result)
     return result
+
+
+def _agent_failed_result(exc: AgentVerdictExecutionError) -> MonitorVerdictResult:
+    """Record ``agent_failed`` while keeping the failure's reason and code.
+
+    On the #932 timeout path ``exc.reason`` names the preserved HEAD, so the
+    re-queued item carries "your work survived, resume from here" instead of a
+    bare verdict.
+    """
+    return MonitorVerdictResult(
+        verdict="agent_failed",
+        reason=exc.reason,
+        reason_code=exc.reason_code,
+        preserved_head_sha=exc.preserved_head_sha,
+    )
 
 
 def _sync_comment_verdict_dependencies() -> None:
     """Keep legacy comment-module monkeypatch seams for verdict invocation tests."""
-    _comment_verdict.mirror_path_for_worktree = mirror_path_for_worktree  # type: ignore[attr-defined]
-    _comment_verdict.repair_agent_runtime_ownership = repair_agent_runtime_ownership  # type: ignore[attr-defined]
+    _comment_verdict.mirror_path_for_worktree = mirror_path_for_worktree
+    _comment_verdict.repair_agent_runtime_ownership = repair_agent_runtime_ownership
     _comment_verdict.repair_mirror_hooks_path = repair_mirror_hooks_path
     _comment_verdict.mirror_hooks_repair_failure_details = mirror_hooks_repair_failure_details  # type: ignore[attr-defined]
 
@@ -443,8 +484,8 @@ async def _invoke_cli_for_verdict_result(
             evidence_item_line=evidence_item_line,
             evidence_anchor_head=evidence_anchor_head,
         )
-    except AgentVerdictExecutionError:
-        return MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        return _agent_failed_result(exc)
 
 
 async def _post_human_notification_once(

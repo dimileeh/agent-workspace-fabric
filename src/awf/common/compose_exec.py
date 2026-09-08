@@ -40,6 +40,16 @@ class ComposeExecCleanupError(RuntimeError):
 
     reason_code = EXEC_PROCESS_CLEANUP_FAILED
 
+    agent_reason_code: str | None = None
+    """Agent failure this cleanup failure is masking, when it followed one.
+
+    Cleanup runs *before* the agent's own error is raised, so a failed cleanup
+    replaces it and the agent classification would otherwise be lost. Callers
+    that treat a watchdog timeout differently from a provider failure — the
+    verdict protocol preserves timed-out work instead of rolling it back (#932)
+    — read this to keep that distinction across a cleanup failure.
+    """
+
     def __init__(
         self,
         *,
@@ -56,6 +66,19 @@ class ComposeExecCleanupError(RuntimeError):
         super().__init__(
             f"{EXEC_PROCESS_CLEANUP_FAILED}: {source} {label} invocation {invocation_id}: {message}"
         )
+
+
+def mark_masked_agent_reason_code(exc: BaseException, reason_code: str) -> None:
+    """Tag ``exc`` with the agent failure whose own error it is masking.
+
+    ``ComposeExecCleanupError.agent_reason_code`` carries this for a cleanup
+    failure. Worker cancellation *during* that same cleanup masks the
+    classification exactly as effectively — it is a ``BaseException`` that
+    escapes before the ``AgentRunError`` is raised — so the adapter tags the
+    escaping ``CancelledError`` through this helper and callers read it back with
+    ``getattr`` (PRRT_kwDOSJAM6s6f0n6B).
+    """
+    exc.agent_reason_code = reason_code  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True)

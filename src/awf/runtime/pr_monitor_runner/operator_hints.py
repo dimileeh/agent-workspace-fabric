@@ -41,6 +41,12 @@ from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _mark_referenced_needs_human_feedback_answered as _mark_referenced_needs_human_feedback_answered,
 )
+from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import (
+    clear_timeout_retry,
+    mark_timeout_retry_used_durably,
+    should_retry_timed_out_hint,
+    timeout_retry_reason_code,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
@@ -275,7 +281,12 @@ async def _run_operator_hint_cycle(
         except AgentVerdictExecutionError as exc:
             verdict = MonitorVerdictResult(
                 verdict="agent_failed",
-                reason=exc.reason_code,
+                # Prefer the #932 preserved-work narrative when there is one;
+                # the bare reason code remains the fallback and stays available
+                # to the retry gate via ``reason_code``.
+                reason=exc.reason or exc.reason_code,
+                reason_code=exc.reason_code,
+                preserved_head_sha=exc.preserved_head_sha,
             )
         except (
             AgentVerdictProtocolError,
@@ -334,6 +345,37 @@ async def _run_operator_hint_cycle(
             if terminal_moot_result is not None:
                 return cast(_GitPushResult, terminal_moot_result)
         if verdict.verdict == "agent_failed":
+            if should_retry_timed_out_hint(state, hint, verdict):
+                # The watchdog fired but the agent's work survived (#932). Spend
+                # the single retry and leave the hint ``pending`` so ``decide()``
+                # returns ``AddressOperatorHint`` again instead of parking the
+                # monitor at ``NotifyHuman`` on the first timeout. Carry the
+                # timeout reason code out on a flagged envelope: a bare no-op
+                # result is indistinguishable from a processed hint, so the loop
+                # would record this cycle as a succeeded ``needs_human`` and the
+                # watchdog failure would vanish from operation history — exactly
+                # the "retries must preserve reason codes" rule (AGENTS.md).
+                #
+                # The marker goes straight to the workspace row, ahead of the
+                # return and every later await: the hint stays durably pending,
+                # so a worker killed before the next ``_persist_state`` (or a
+                # ``_finish_monitor_operation`` fault) would resume with a
+                # pending hint and no budget and grant the "single" retry all
+                # over again (PRRT_kwDOSJAM6s6fzBXq).
+                await mark_timeout_retry_used_durably(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                    hint=hint,
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=False,
+                    returncode=0,
+                    reason_code=timeout_retry_reason_code(verdict),
+                    operator_hint_timeout_retry=True,
+                )
+            clear_timeout_retry(state, hint)
             reason = _operator_hint_block_reason(verdict)
             reblock_result = await _terminal_directive_grant_reblock(
                 self,
@@ -366,6 +408,7 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_agent_failed(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
         if verdict.verdict in {"needs_human", "defer", "false_positive"}:
+            clear_timeout_retry(state, hint)
             reason = _operator_hint_block_reason(verdict)
             reblock_result = await _terminal_directive_grant_reblock(
                 self,

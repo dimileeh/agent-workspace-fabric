@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
     _operator_hint_feedback_storage_key_candidates,
     _operator_hint_review_thread_id_candidates,
 )
+from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import clear_timeout_retry
 
 
 def _finalize_processed_operator_hint(
@@ -51,6 +52,9 @@ def _finalize_processed_operator_hint(
     """
     pending_hint = getattr(state, "pending_operator_hint", None)
     active_hint = pending_hint or hint
+    if active_hint is not None:
+        # Terminal outcome: the #932 single-timeout-retry budget goes with it.
+        clear_timeout_retry(state, active_hint)
     _mark_referenced_needs_human_feedback_answered(
         state, hint=active_hint, acted_text=acted_feedback_text
     )

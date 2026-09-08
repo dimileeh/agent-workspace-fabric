@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -49,6 +49,10 @@ from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.agent_service_recovery_timeout_salvage import (
+    _masked_agent_timeout_reason_code,
+    _record_timeout_rerun_floor,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
@@ -72,7 +76,9 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
-from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+from awf.runtime.worktree_writer_lock import (
+    hold_exclusive_worktree_writer_lock,
+)
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
@@ -93,8 +99,30 @@ async def _run_monitor_agent_with_service_recovery(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
+    timeout_rerun_floor_sink: list[str] | None = None,
+    timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
+    timeout_preservation_sink: list[str] | None = None,
 ) -> AgentRunResult:
-    """Run the monitor agent while recovering from agent-service failures."""
+    """Run the monitor agent while recovering from agent-service failures.
+
+    Callers that roll the worktree back when this raises pass a list as
+    ``timeout_rerun_floor_sink`` and the item's dirty-worktree sink as
+    ``timeout_rerun_dirty_sink``; see ``_record_timeout_rerun_floor``. A dirty
+    sink that reports the timed-out run's edits still stranded gives the rerun
+    up: the failure propagates to the caller's preserve handler instead
+    (PRRT_kwDOSJAM6s6fwTyO). So does a floor that cannot be published at all —
+    the caller would otherwise roll back to the attempt start
+    (PRRT_kwDOSJAM6s6fxp80). A recovery that abandons a timeout-tagged cleanup
+    failure answers the same way: unsecured preservation escalates that cleanup
+    error rather than the recovery exit, because only the cleanup error's caller
+    handler preserves instead of rolling back (PRRT_kwDOSJAM6s6fyEEr).
+
+    ``timeout_preservation_sink`` is the caller's "no rollback floor applies"
+    channel — the one its cancellation branch reads. The bookkeeping above spends
+    awaits keeping the timed-out run's work while neither that channel nor the
+    floor sink is populated, so it is marked for the duration
+    (PRRT_kwDOSJAM6s6fy7ju).
+    """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
         return await _run_monitor_agent_with_service_recovery_locked(
@@ -108,6 +136,9 @@ async def _run_monitor_agent_with_service_recovery(
             operation_start_head=operation_start_head,
             state=state,
             git_preparation=git_preparation,
+            timeout_rerun_floor_sink=timeout_rerun_floor_sink,
+            timeout_rerun_dirty_sink=timeout_rerun_dirty_sink,
+            timeout_preservation_sink=timeout_preservation_sink,
         )
 
 
@@ -123,6 +154,9 @@ async def _run_monitor_agent_with_service_recovery_locked(
     operation_start_head: str | None = None,
     state: Any | None = None,
     git_preparation: AgentRuntimeGitPreparation | None = None,
+    timeout_rerun_floor_sink: list[str] | None = None,
+    timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
+    timeout_preservation_sink: list[str] | None = None,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -172,6 +206,10 @@ async def _run_monitor_agent_with_service_recovery_locked(
                     "prompt": prompt,
                     "workspace_id": workspace_id,
                     "log_source": log_source,
+                    # Monitor repair runs need the idle watchdog's worktree
+                    # activity probe too; the hosted branch above already
+                    # passes this (#932).
+                    "worktree_path": self._worktrees_root / workspace_id,
                 }
                 profile = getattr(self, "_workspace_profile", None)
                 if profile is not None:
@@ -215,6 +253,24 @@ async def _run_monitor_agent_with_service_recovery_locked(
             if recovered is None:
                 raise
             restart_attempts = recovered
+            if not await _record_timeout_rerun_floor(
+                self,
+                workspace_id=workspace_id,
+                sink=timeout_rerun_floor_sink,
+                dirty_sink=timeout_rerun_dirty_sink,
+                timeout_reason_code=exc.reason_code,
+                preservation_sink=timeout_preservation_sink,
+            ):
+                # Preservation could not be secured: either the timed-out run's
+                # edits are still dirty and no SHA floor can cover them
+                # (PRRT_kwDOSJAM6s6fwTyO), or no floor could be published at all
+                # and the caller's stays at the attempt start
+                # (PRRT_kwDOSJAM6s6fxp80). Rerunning would hand a provider failure
+                # or non-FIXED verdict on the rerun a ``reset --hard`` straight
+                # through work #932 promised to keep, so give the rerun up and let
+                # the timeout reach the caller's preserve handler, which leaves
+                # that work in place.
+                raise
             if self._deps.adapter.is_hosted and state is not None:
                 hosted_pr_identity = await _hosted_pr_identity_for_workspace(
                     self,
@@ -230,23 +286,88 @@ async def _run_monitor_agent_with_service_recovery_locked(
             )
             continue
         except ComposeExecCleanupError as exc:
-            recovered = await _recover_monitor_agent_service_after_cleanup_error(
-                self,
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                exc=exc,
-                restart_attempts=restart_attempts,
-                command_evidence=command_evidence,
-                operation_start_head=operation_start_head,
-            )
+            # A cleanup failure that follows a watchdog timeout carries that
+            # classification (``agent_reason_code``) because the adapter tears the
+            # exec stack down before raising the agent's own error. Recovering it
+            # here reruns over a timed-out run exactly like the ``AgentRunError``
+            # branch above, so it owes the same #932 bookkeeping — otherwise a
+            # provider failure or non-FIXED verdict on the rerun rewinds to the
+            # attempt start and deletes that run's commits and edits before the
+            # caller's preserve handler ever sees the timeout
+            # (PRRT_kwDOSJAM6s6fvw8t).
+            masked_timeout_reason_code = _masked_agent_timeout_reason_code(exc)
+            try:
+                recovered = await _recover_monitor_agent_service_after_cleanup_error(
+                    self,
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    exc=exc,
+                    restart_attempts=restart_attempts,
+                    command_evidence=command_evidence,
+                    operation_start_head=operation_start_head,
+                )
+            except (
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentServiceRecoverySupersededError,
+                _MonitorHeadObjectMissingError,
+                _MonitorMirrorHooksPathRepairFailedError,
+            ) as recovery_exc:
+                # Recovery gives up *after* it has begun restarting the service
+                # and repairing Git, so the timed-out run's commits and edits are
+                # still in the worktree — and every one of these exits lands in a
+                # caller handler that rolls back to its floor before propagating.
+                # Only the ``recovered is None`` return below reaches the caller's
+                # #932 preserve handler untouched; these do not, so they owe the
+                # same bookkeeping as a rerun.
+                if masked_timeout_reason_code is not None:
+                    preserved = await _record_timeout_rerun_floor(
+                        self,
+                        workspace_id=workspace_id,
+                        sink=timeout_rerun_floor_sink,
+                        dirty_sink=timeout_rerun_dirty_sink,
+                        timeout_reason_code=masked_timeout_reason_code,
+                        preservation_sink=timeout_preservation_sink,
+                    )
+                    if not preserved:
+                        # Bookkeeping alone cannot keep this exit's rollback off
+                        # the work #932 protects: the caller resets to the
+                        # published floor over edits the salvage left stranded
+                        # (PRRT_kwDOSJAM6s6fwTyO), or — when nothing could be
+                        # published — to the attempt start, over the timed-out
+                        # run's commits (PRRT_kwDOSJAM6s6fxp80). Escalate the
+                        # timeout-tagged cleanup error instead: its caller handler
+                        # preserves that work rather than rolling back, and the
+                        # abandoned recovery stays on as the cause. Same give-up
+                        # the rerun branches make (PRRT_kwDOSJAM6s6fyEEr).
+                        raise exc from recovery_exc
+                raise
             if recovered is None:
                 raise
             restart_attempts = recovered
+            if masked_timeout_reason_code is not None and not await _record_timeout_rerun_floor(
+                self,
+                workspace_id=workspace_id,
+                sink=timeout_rerun_floor_sink,
+                dirty_sink=timeout_rerun_dirty_sink,
+                timeout_reason_code=masked_timeout_reason_code,
+                preservation_sink=timeout_preservation_sink,
+            ):
+                # Unsecured preservation gives the rerun up here too, exactly as in
+                # the ``AgentRunError`` branch above (PRRT_kwDOSJAM6s6fwTyO,
+                # PRRT_kwDOSJAM6s6fxp80).
+                raise
             await _rerun_monitor_agent_pre_launch_guards(
                 self,
                 workspace_id=workspace_id,
-                source_reason_code=exc.reason_code,
+                # ``exc.reason_code`` is only EXEC_PROCESS_CLEANUP_FAILED here, the
+                # mask the adapter left over the watchdog timeout. A supersession
+                # abort inside these guards publishes this as
+                # ``source_reason_code``, so pass the masked classification through
+                # or the operation's logs and events lose the timeout the rerun was
+                # recovering (PRRT_kwDOSJAM6s6f_MmO). Same carry the executor's
+                # restart path makes (PRRT_kwDOSJAM6s6fz-6n).
+                source_reason_code=masked_timeout_reason_code or exc.reason_code,
                 service_healthy=False,
                 restart_attempts=restart_attempts,
             )

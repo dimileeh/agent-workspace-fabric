@@ -43,8 +43,8 @@ def _timeout_error(reason_code: str) -> AgentRunError:
     )
 
 
-def _cleanup_error() -> ComposeExecCleanupError:
-    return ComposeExecCleanupError(
+def _cleanup_error(*, agent_reason_code: str | None = None) -> ComposeExecCleanupError:
+    exc = ComposeExecCleanupError(
         invocation_id="agent-timeout-cleanup",
         source="agent",
         label="codex",
@@ -55,6 +55,8 @@ def _cleanup_error() -> ComposeExecCleanupError:
             stderr='service "agent" is not running',
         ),
     )
+    exc.agent_reason_code = agent_reason_code
+    return exc
 
 
 def _cleanup_error_message_only() -> ComposeExecCleanupError:
