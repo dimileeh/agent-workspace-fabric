@@ -1916,6 +1916,28 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
     /generation <= revokedWorkspaceDetailGenerationRef\.current \|\|[\s\S]*?workspaceStreamAuthDeniedRef\.current/,
     "Expected an in-flight or later workspace GET not to restore a stream-revoked snapshot",
   );
+  const mergeGuardStart = detail.indexOf(
+    "// A newer base-detail 401/403 already covers this generation. Do not\n      // restore revoked workspace metadata",
+  );
+  assert.ok(mergeGuardStart > 0, "Expected the post-merge revoke watermark guard");
+  const mergeGuardEnd = detail.indexOf("const firstFailure = ", mergeGuardStart);
+  assert.ok(mergeGuardEnd > mergeGuardStart, "Expected the detail merge after the revoke watermark guard");
+  const mergeGuardBody = detail.slice(mergeGuardStart, mergeGuardEnd);
+  assert.match(
+    mergeGuardBody,
+    /workspaceStreamAuthDeniedRef\.current/,
+    "Expected a later detail poll, whose generation is newer than the stream-denial watermark, not to restore cleared inspector data",
+  );
+  const eventSuccessStart = detail.indexOf("const applyEventFeedSuccessIfSettled = ");
+  assert.ok(eventSuccessStart > 0, "Expected applyEventFeedSuccessIfSettled");
+  const eventSuccessEnd = detail.indexOf("const optionalFeedContextCurrent = ", eventSuccessStart);
+  assert.ok(eventSuccessEnd > eventSuccessStart, "Expected optional-feed helper after event success helper");
+  const eventSuccessBody = detail.slice(eventSuccessStart, eventSuccessEnd);
+  assert.match(
+    eventSuccessBody,
+    /workspaceStreamAuthDeniedRef\.current/,
+    "Expected an in-flight or later /events 200 not to refill events cleared by stream denial",
+  );
   assert.match(
     detail,
     /workspaceStreamAuthDeniedRef\.current = false;[\s\S]*?revokedWorkspaceDetailGenerationRef\.current = 0;/,

@@ -693,7 +693,10 @@ export function useWorkspaceDetailLoader({
           // calling releaseRecoveredDetailOutage would republish the withdrawn
           // feed through preferredOutstandingOutage. No later /events read
           // will clear that snapshot or banner.
-          generation <= eventsOutageReleasedThroughRef.current
+          generation <= eventsOutageReleasedThroughRef.current ||
+          // Stream denial cleared events. A later authorized /events read is
+          // not recovery for that route-scoped revocation.
+          workspaceStreamAuthDeniedRef.current
         ) {
           return;
         }
@@ -706,6 +709,7 @@ export function useWorkspaceDetailLoader({
         setDetail((current) => {
           if (
             eventFeedAuthDeniedRef.current ||
+            workspaceStreamAuthDeniedRef.current ||
             generation < appliedEventFeedGenerationRef.current
           ) {
             return current;
@@ -1362,6 +1366,14 @@ export function useWorkspaceDetailLoader({
       // transient failure. The request that just applied the denial continues
       // so remaining latest-generation feed writes stay consistent.
       if (generation <= revokedWorkspaceDetailGenerationRef.current && !denialApplied) {
+        return;
+      }
+      // /stream 401/403 raises the watermark only to requests already started.
+      // A poll that begins afterward has a newer generation, so the check
+      // above does not stop it. That later GET must not recover the latch or
+      // write cleared workspace/events back — the stream route can stay denied
+      // while /workspaces/{id} and /events remain authorized.
+      if (workspaceStreamAuthDeniedRef.current) {
         return;
       }
 
