@@ -667,6 +667,354 @@ test("overview feed-level 403 clears retained filters while capabilities stay re
   await expect(page.getByText("overview permission revoked")).toHaveCount(0);
 });
 
+test("superseded overview 403 clears rail inspector and logs while a newer refresh hangs", async ({
+  page,
+}) => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gEfkI: a periodic
+  // overview request can return 401/403 after Refresh has only started a newer
+  // loadOverview. That completed denial must still drop the rail, inspector,
+  // and logs. A hang is not recovery, and the in-flight newer 200 must not
+  // restore revoked surfaces. A later successful overview may recover.
+  let overviewMode: "ok" | "hold" | "hang" = "ok";
+  const held: Array<(kind: "deny") => Promise<void>> = [];
+  const hanging: Array<() => Promise<void>> = [];
+  let healthRequests = 0;
+  const workspaceId = "ws_overview_superseded_denial";
+  const workspaceTitle = "Superseded overview denial";
+  const eventType = "overview_superseded_denial_event";
+  const logMarker = "overview-authorized-log-marker";
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: workspaceTitle,
+    repo_url: "https://github.com/example/overview-superseded-denial",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Older overview 403 must clear surfaces while a newer refresh hangs",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const logStream = {
+    stream_id: "overview.stdout",
+    source: "agent",
+    name: "overview.stdout",
+    kind: "stdout",
+    path: "/tmp/overview.stdout",
+    byte_count: logMarker.length,
+    line_count: 1,
+    opened_at: "2026-09-06T17:00:00Z",
+    closed_at: null,
+  };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      healthRequests += 1;
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, { ...overviewItem, id: workspaceId, version: 1 });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { status: "running" });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, {
+        items: [
+          {
+            id: "evt_overview_superseded_denial",
+            workspace_id: workspaceId,
+            event_type: eventType,
+            old_state: "ready",
+            new_state: "running",
+            reason_code: null,
+            occurred_at: "2026-09-06T17:00:00Z",
+          },
+        ],
+        next_cursor: null,
+        has_more: false,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, { items: [logStream], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/overview.stdout`) {
+      await fulfillJson(route, {
+        stream_id: "overview.stdout",
+        offset: 0,
+        next_offset: logMarker.length,
+        eof: true,
+        data: logMarker,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  // Dedicated overview route so holding the older GET does not block health or
+  // capabilities. A second overview GET is not delivered while this handler
+  // awaits; the later health request is the signal that the newer loadOverview
+  // has already advanced generation.
+  await page.route("**/api/awf/workspaces/overview*", async (route) => {
+    if (overviewMode === "hold") {
+      await new Promise<void>((resolve) => {
+        held.push(async (kind) => {
+          if (kind === "deny") {
+            await fulfillJson(
+              route,
+              { detail: { error_code: "FORBIDDEN", message: "overview permission revoked" } },
+              403,
+            );
+          }
+          resolve();
+        });
+      });
+      return;
+    }
+    if (overviewMode === "hang") {
+      await new Promise<void>((resolve) => {
+        hanging.push(async () => {
+          await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+          resolve();
+        });
+      });
+      return;
+    }
+    await fulfillJson(route, { items: [overviewItem], next_cursor: null, has_more: false });
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await page.getByTestId(`workspace-card-${workspaceId}`).click();
+  await expect(page.getByRole("heading", { name: workspaceTitle }).nth(1)).toBeVisible();
+  await expect(page.getByText(eventType, { exact: true })).toBeVisible();
+  await page.getByRole("checkbox", { name: "overview.stdout" }).check();
+  const logOutput = page.getByTestId("log-output");
+  await expect(logOutput).toContainText(logMarker);
+
+  overviewMode = "hold";
+  // The open inspector drawer covers the header Refresh control.
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => held.length).toBe(1);
+  const healthBeforeNewerLoad = healthRequests;
+
+  overviewMode = "hang";
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate((button: HTMLButtonElement) => {
+    button.click();
+  });
+  // The newer overview GET is not delivered while the older handler awaits.
+  // Health runs after that loadOverview stamps its generation.
+  await expect.poll(() => healthRequests).toBeGreaterThan(healthBeforeNewerLoad);
+
+  await held[0]("deny");
+  await expect(page.getByText("overview permission revoked").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: workspaceTitle })).toHaveCount(0);
+  await expect(page.getByText(eventType, { exact: true })).toHaveCount(0);
+  await expect(logOutput).toHaveCount(0);
+  await expect(page.getByText(logMarker)).toHaveCount(0);
+  await expect(page.getByText("API: ok")).toBeVisible();
+
+  await expect.poll(() => hanging.length).toBe(1);
+  await hanging[0]();
+  await page.waitForTimeout(500);
+  await expect(page.getByText("overview permission revoked").first()).toBeVisible();
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: workspaceTitle })).toHaveCount(0);
+  await expect(page.getByText(logMarker)).toHaveCount(0);
+
+  overviewMode = "ok";
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("overview permission revoked")).toHaveCount(0);
+});
+
+test("newer successful overview suppresses an older overview 403", async ({ page }) => {
+  // A 401/403 from a request that started before a newer successful overview
+  // applied must not clear that recovered rail.
+  let overviewMode: "ok" | "hold" | "release" = "ok";
+  const held: Array<(kind: "deny" | "ok") => Promise<void>> = [];
+  const workspaceId = "ws_overview_newer_success";
+  const olderTitle = "Older overview still showing";
+  const newerTitle = "Newer overview applied";
+  const olderItem = {
+    workspace_id: workspaceId,
+    title: olderTitle,
+    repo_url: "https://github.com/example/overview-newer-success",
+    base_branch: "main",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Older overview 403 must not clear a newer successful list",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+  const newerItem = { ...olderItem, title: newerTitle };
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      if (overviewMode === "hold" || overviewMode === "release") {
+        await new Promise<void>((resolve) => {
+          held.push(async (kind) => {
+            if (kind === "deny") {
+              await fulfillJson(
+                route,
+                { detail: { error_code: "FORBIDDEN", message: "overview permission revoked" } },
+                403,
+              );
+            } else {
+              await fulfillJson(route, { items: [newerItem], next_cursor: null, has_more: false });
+            }
+            resolve();
+          });
+        });
+        return;
+      }
+      await fulfillJson(route, { items: [olderItem], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, { generated_at: "2026-09-06T17:00:00Z" });
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, {
+        generated_at: "2026-09-06T17:00:00Z",
+        since_hours: 24,
+        completed_count: 0,
+        failed_count: 0,
+        cancelled_count: 0,
+        stuck_count: 0,
+        actionable_reason_count: 0,
+        unactionable_reason_count: 0,
+        active_count: 0,
+        destroying_count: 0,
+        destroyed_count: 0,
+        cleanup_failure_count: 0,
+        status_counts: {},
+        failure_reason_counts: {},
+        window_start: "2026-09-05T17:00:00Z",
+      });
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByText(olderTitle, { exact: true })).toBeVisible();
+
+  overviewMode = "hold";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => held.length).toBe(1);
+
+  overviewMode = "release";
+  await page.getByRole("button", { name: /refresh/i }).click();
+  await expect.poll(() => held.length).toBe(2);
+
+  await held[1]("ok");
+  await expect(page.getByText(newerTitle, { exact: true })).toBeVisible({ timeout: 10_000 });
+
+  await held[0]("deny");
+  await page.waitForTimeout(500);
+  await expect(page.getByText(newerTitle, { exact: true })).toBeVisible();
+  await expect(page.getByTestId(`workspace-card-${workspaceId}`)).toBeVisible();
+  await expect(page.getByText("overview permission revoked")).toHaveCount(0);
+});
+
 test("in-flight dashboard-summary after capability 401 does not restore cleared KPIs", async ({ page }) => {
   let authDenied = false;
   let delaySummary = false;

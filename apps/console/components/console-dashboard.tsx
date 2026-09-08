@@ -197,7 +197,16 @@ export function ConsoleDashboard() {
   // Overview poll generation: overlapping filter/explicit loads stay monotonic.
   // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
   // superseded paginated response must not overwrite a newer filtered rail.
+  // A completed 401/403 stays authoritative unless a newer successful overview
+  // has already been applied — a newer request merely starting is not recovery.
   const overviewRequestGenerationRef = useRef(0);
+  // Highest overview generation that applied a successful list. An older
+  // 401/403 must not clear a rail this newer success already owns.
+  const appliedOverviewGenerationRef = useRef(0);
+  // Highest overview generation covered by an applied 401/403. An in-flight
+  // refresh that started before the denial must not restore cleared rail,
+  // inspector, or logs. A request that starts after this watermark may recover.
+  const revokedOverviewGenerationRef = useRef(0);
   // Periodic polls chain after the previous invocation settles and skip while a
   // collection is still paging. A wall-clock interval that calls loadOverview
   // would advance generation and cancel that collector; if every page walk
@@ -293,6 +302,77 @@ export function ConsoleDashboard() {
       // multi-value filters, and log selection see every matching workspace.
       let pageError: string | null = null;
       let pageAuthDenied = false;
+      const applyOverviewAuthDenial = (deniedGeneration: number, message: string): boolean => {
+        // A tenant/backend switch or console-level denial already wiped
+        // authorized surfaces. An older context's 401/403 must not latch onto
+        // the new epoch.
+        if (epoch !== authorizedFeedEpochRef.current || consoleAuthDeniedRef.current) {
+          return false;
+        }
+        // A newer successful overview already owns the rail. A late 401/403
+        // from an older request must not clear it.
+        if (deniedGeneration < appliedOverviewGenerationRef.current) {
+          return false;
+        }
+        // This request started inside an already-applied denial window.
+        // Raising the watermark would reject a recovery request that started
+        // after the original denial.
+        if (deniedGeneration <= revokedOverviewGenerationRef.current) {
+          return false;
+        }
+        // Cover every overview request that has already started so an in-flight
+        // refresh cannot restore cleared rail, inspector, or logs. A request
+        // that starts after this watermark may recover.
+        revokedOverviewGenerationRef.current = Math.max(
+          revokedOverviewGenerationRef.current,
+          overviewRequestGenerationRef.current,
+        );
+        // Overview feed auth denial: drop the rail and close dependent workspace
+        // surfaces (selection, inspector, logs, fullscreen). Do not call
+        // clearAuthorizedConsoleFeeds — other feeds clear themselves, and
+        // capabilities may still succeed without an auth-denial latch thrashing
+        // overview refill. Bump gated-detail generation so in-flight
+        // loadWorkspace / log-tail cannot restore revoked caches.
+        noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
+        setOverviewError(message);
+        setOverview([]);
+        setOverviewTruncationWarning(null);
+        // Inspector surfaces are wiped with the rail; drop the detail warning
+        // so a retained diagnostic error does not outlive the cleared snapshot.
+        setWorkspaceDetailError(null);
+        workspaceDetailAuthDeniedRef.current = false;
+        setWorkspaceDetailAuthDenied(false);
+        eventFeedAuthDeniedRef.current = false;
+        setEventFeedAuthDenied(false);
+        // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
+        // retained agent/model options stay visible on the rail, and an
+        // active prior filter can keep a later recovered list empty.
+        setRetainedAgents([]);
+        setRetainedModels([]);
+        setAgentFilters([]);
+        setModelFilters([]);
+        setRepoFilter("");
+        setSearchText("");
+        setSelectedId(null);
+        setDetail(emptyDetail);
+        logListingAuthDeniedRef.current = false;
+        setLogListingAuthDenied(false);
+        logTailAuthDeniedRef.current = false;
+        setLogTailAuthDenied(false);
+        selectedStreamsRef.current = [];
+        setSelectedStreams([]);
+        setLogEntries([]);
+        setStreamOffsets({});
+        setLogsFullscreen(false);
+        setWorkspaceLogSelection([]);
+        setFullscreenWorkspaceIds([]);
+        setTaskDetailsWorkspaceId(null);
+        setStreamState("idle");
+        setRetryState({ status: "idle" });
+        setOperatorActionState({ status: "idle" });
+        logStreamActivityRef.current = {};
+        return true;
+      };
       const collected = await collectOverviewPages(async (cursor) => {
         if (
           epoch !== authorizedFeedEpochRef.current ||
@@ -305,6 +385,14 @@ export function ConsoleDashboard() {
         const result = await apiGet<ListEnvelope<WorkspaceOverview>>(
           overviewListPath(filters, cursor),
         );
+        // A completed 401/403 is route-level revocation. Suppress it only after
+        // a newer successful overview has applied — a newer Refresh that has
+        // merely started, or is hanging, is not recovery.
+        if (!result.ok && (result.status === 401 || result.status === 403)) {
+          pageError = result.message;
+          pageAuthDenied = true;
+          return null;
+        }
         if (
           epoch !== authorizedFeedEpochRef.current ||
           consoleAuthDeniedRef.current ||
@@ -315,15 +403,14 @@ export function ConsoleDashboard() {
         }
         if (!result.ok) {
           pageError = result.message;
-          // Feed-level 401/403 is auth revocation for this snapshot, not a
-          // transient pagination outage (CONSOLE_BACKEND_CONTRACT).
-          if (result.status === 401 || result.status === 403) {
-            pageAuthDenied = true;
-          }
           return null;
         }
         return result.data;
       });
+      if (pageAuthDenied) {
+        applyOverviewAuthDenial(generation, pageError ?? "");
+        return;
+      }
       if (
         epoch !== authorizedFeedEpochRef.current ||
         consoleAuthDeniedRef.current ||
@@ -338,53 +425,20 @@ export function ConsoleDashboard() {
         if (pageError !== null) {
           setOverviewError(pageError);
         }
-        if (pageAuthDenied) {
-          // Overview feed auth denial: drop the rail and close dependent workspace
-          // surfaces (selection, inspector, logs, fullscreen). Do not call
-          // clearAuthorizedConsoleFeeds — other feeds clear themselves, and
-          // capabilities may still succeed without an auth-denial latch thrashing
-          // overview refill. Bump gated-detail generation so in-flight
-          // loadWorkspace / log-tail cannot restore revoked caches.
-          noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
-          setOverview([]);
-          setOverviewTruncationWarning(null);
-          // Inspector surfaces are wiped with the rail; drop the detail warning
-          // so a retained diagnostic error does not outlive the cleared snapshot.
-          setWorkspaceDetailError(null);
-          workspaceDetailAuthDeniedRef.current = false;
-          setWorkspaceDetailAuthDenied(false);
-          eventFeedAuthDeniedRef.current = false;
-          setEventFeedAuthDenied(false);
-          // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
-          // retained agent/model options stay visible on the rail, and an
-          // active prior filter can keep a later recovered list empty.
-          setRetainedAgents([]);
-          setRetainedModels([]);
-          setAgentFilters([]);
-          setModelFilters([]);
-          setRepoFilter("");
-          setSearchText("");
-          setSelectedId(null);
-          setDetail(emptyDetail);
-          logListingAuthDeniedRef.current = false;
-          setLogListingAuthDenied(false);
-          logTailAuthDeniedRef.current = false;
-          setLogTailAuthDenied(false);
-          selectedStreamsRef.current = [];
-          setSelectedStreams([]);
-          setLogEntries([]);
-          setStreamOffsets({});
-          setLogsFullscreen(false);
-          setWorkspaceLogSelection([]);
-          setFullscreenWorkspaceIds([]);
-          setTaskDetailsWorkspaceId(null);
-          setStreamState("idle");
-          setRetryState({ status: "idle" });
-          setOperatorActionState({ status: "idle" });
-          logStreamActivityRef.current = {};
-        }
         return;
       }
+      // A newer 401/403 already covers this generation, or a newer success
+      // already owns the rail. Do not restore revoked or older rows.
+      if (
+        generation <= revokedOverviewGenerationRef.current ||
+        generation < appliedOverviewGenerationRef.current
+      ) {
+        return;
+      }
+      appliedOverviewGenerationRef.current = Math.max(
+        appliedOverviewGenerationRef.current,
+        generation,
+      );
       // Never treat a capped prefix as a complete fleet: surface truncation so
       // rail/search/log selection cannot silently omit later workspaces.
       // Keep this off both feed error slots so neither poll can clear it.
