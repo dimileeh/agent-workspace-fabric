@@ -69,6 +69,10 @@ function isFullscreenTailAuthFailure(status: number): boolean {
   return status === 401 || status === 403;
 }
 
+function isFullscreenStreamAuthDenied(frame: { status?: number }): boolean {
+  return frame.status === 401 || frame.status === 403;
+}
+
 function formatFullscreenTailRefreshError(
   errors: Record<string, string>,
   selectedStreamIds: readonly string[],
@@ -415,6 +419,12 @@ export function WorkspaceLogColumn({
   // listing, no longer blocks recovery of the streams still being read.
   const tailAuthDeniedRef = useRef(false);
   const [tailAuthDenied, setTailAuthDenied] = useState(false);
+  // Route-scoped /stream 401/403 while listing and tail stay reachable.
+  // Listing or tail 200 must not clear this latch or restore column caches:
+  // the stream route can stay denied while those reads remain authorized.
+  // The column remounts (and may retry) when the operator reopens it.
+  const streamAuthDeniedRef = useRef(false);
+  const [streamAuthDenied, setStreamAuthDenied] = useState(false);
   const tailDeniedStreamIdsRef = useRef<Set<string>>(new Set());
   // Streams whose last selected-tail read failed with network/5xx. The
   // 401/403 denial set stays empty, and a static or closed listing does not
@@ -583,6 +593,7 @@ export function WorkspaceLogColumn({
         epoch !== columnEpochRef.current ||
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current ||
         sawAuthDenial ||
         generation < appliedTailGenerationRef.current ||
         generation <= revokedTailGenerationRef.current
@@ -601,6 +612,7 @@ export function WorkspaceLogColumn({
           epoch !== columnEpochRef.current ||
           listingDeniedRef.current ||
           tailAuthDeniedRef.current ||
+          streamAuthDeniedRef.current ||
           generation < appliedTailGenerationRef.current ||
           generation <= revokedTailGenerationRef.current ||
           appliedTailFailureGenerationRef.current[failure.streamId] !== generation
@@ -653,7 +665,8 @@ export function WorkspaceLogColumn({
       generation !== tailRequestGenerationRef.current ||
       generation <= revokedTailGenerationRef.current ||
       generation < appliedTailGenerationRef.current ||
-      listingDeniedRef.current
+      listingDeniedRef.current ||
+      streamAuthDeniedRef.current
     ) {
       return;
     }
@@ -695,7 +708,8 @@ export function WorkspaceLogColumn({
             epoch !== columnEpochRef.current ||
             generation !== tailRequestGenerationRef.current ||
             listingDeniedRef.current ||
-            tailAuthDeniedRef.current
+            tailAuthDeniedRef.current ||
+            streamAuthDeniedRef.current
           ) {
             return current;
           }
@@ -706,6 +720,11 @@ export function WorkspaceLogColumn({
           return next;
         });
       }
+      return;
+    }
+    // A /stream 401/403 can latch after this wave passed the post-await gate.
+    // Do not stamp this 200 as recovery or clear the stream-denial banner.
+    if (streamAuthDeniedRef.current) {
       return;
     }
     // Every previously denied stream has now returned 200. Listing 200 must
@@ -751,7 +770,8 @@ export function WorkspaceLogColumn({
         epoch !== columnEpochRef.current ||
         generation !== tailRequestGenerationRef.current ||
         listingDeniedRef.current ||
-        tailAuthDeniedRef.current
+        tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current
       ) {
         return current;
       }
@@ -772,7 +792,8 @@ export function WorkspaceLogColumn({
         epoch !== columnEpochRef.current ||
         generation !== tailRequestGenerationRef.current ||
         listingDeniedRef.current ||
-        tailAuthDeniedRef.current
+        tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current
       ) {
         return current;
       }
@@ -792,7 +813,8 @@ export function WorkspaceLogColumn({
         epoch !== columnEpochRef.current ||
         generation !== tailRequestGenerationRef.current ||
         listingDeniedRef.current ||
-        tailAuthDeniedRef.current
+        tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current
       ) {
         return current;
       }
@@ -901,7 +923,8 @@ export function WorkspaceLogColumn({
       setError((current) =>
         generation < appliedListingGenerationRef.current ||
         generation < appliedListingFailureGenerationRef.current ||
-        tailAuthDeniedRef.current
+        tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current
           ? current
           : result.message,
       );
@@ -941,9 +964,13 @@ export function WorkspaceLogColumn({
     // Route-scoped tail permission can stay revoked while the stream list
     // remains authorized; wiping the denial message leaves an empty column.
     setListingDenied(false);
-    if (!tailAuthDeniedRef.current) {
+    if (!tailAuthDeniedRef.current && !streamAuthDeniedRef.current) {
       setError((current) =>
-        generation < appliedListingFailureGenerationRef.current ? current : null,
+        generation < appliedListingFailureGenerationRef.current ||
+        tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current
+          ? current
+          : null,
       );
     }
     const listingItems = result.data.items;
@@ -1027,9 +1054,10 @@ export function WorkspaceLogColumn({
   useEffect(() => {
     // Listing is required to pick/surface streams; do not open /stream or buffer
     // frames when workspace_logs is unsupported (even if workspace_stream is up).
-    // Listing or tail 401/403 while workspace_logs stays advertised must close
-    // /stream. Tail denial is separate: a later listing 200 must not reopen it.
-    if (!allowStreamLogs || listingDenied || tailAuthDenied) {
+    // Listing, tail, or route-level /stream 401/403 while workspace_logs stays
+    // advertised must close /stream. Tail and stream denial are separate: a
+    // later listing 200 must not reopen either, or restore revoked log text.
+    if (!allowStreamLogs || listingDenied || tailAuthDenied || streamAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -1049,10 +1077,30 @@ export function WorkspaceLogColumn({
     let closedByServer = false;
     let terminalError = false;
 
+    const applyStreamAuthorizationDenial = (message: string) => {
+      // Route-level /stream 401/403 is authorization revocation, not an outage.
+      // Clear column caches and hold this EventSource closed. Listing and tail
+      // can stay authorized; those 200s must not restore revoked log text or
+      // reopen /stream until the operator reopens the column.
+      if (!streamAuthDeniedRef.current) {
+        columnEpochRef.current += 1;
+      }
+      const denialEpoch = columnEpochRef.current;
+      streamAuthDeniedRef.current = true;
+      setStreamAuthDenied(true);
+      setStreamState("idle");
+      setError(message);
+      const denialStillOwnsColumn = () =>
+        denialEpoch === columnEpochRef.current && streamAuthDeniedRef.current;
+      setEntries((current) => (denialStillOwnsColumn() ? [] : current));
+      setOffsets((current) => (denialStillOwnsColumn() ? {} : current));
+    };
+
     source.onmessage = (message) => {
       if (
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current ||
         openedEpoch !== columnEpochRef.current
       ) {
         return;
@@ -1092,6 +1140,7 @@ export function WorkspaceLogColumn({
           if (
             listingDeniedRef.current ||
             tailAuthDeniedRef.current ||
+            streamAuthDeniedRef.current ||
             openedEpoch !== columnEpochRef.current
           ) {
             return current;
@@ -1113,6 +1162,7 @@ export function WorkspaceLogColumn({
           if (
             listingDeniedRef.current ||
             tailAuthDeniedRef.current ||
+            streamAuthDeniedRef.current ||
             openedEpoch !== columnEpochRef.current
           ) {
             return current;
@@ -1126,6 +1176,18 @@ export function WorkspaceLogColumn({
           };
         });
         return;
+      }
+      if (frame.type === "error" || frame.type === "closed") {
+        if (isFullscreenStreamAuthDenied(frame)) {
+          applyStreamAuthorizationDenial(
+            frame.type === "error" ? frame.message : "Workspace stream authorization denied.",
+          );
+          source.close();
+          if (eventSourceRef.current === source) {
+            eventSourceRef.current = null;
+          }
+          return;
+        }
       }
       if (frame.type === "error") {
         terminalError = true;
@@ -1147,6 +1209,7 @@ export function WorkspaceLogColumn({
       if (
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
+        streamAuthDeniedRef.current ||
         openedEpoch !== columnEpochRef.current
       ) {
         setStreamState("idle");
@@ -1165,7 +1228,7 @@ export function WorkspaceLogColumn({
         eventSourceRef.current = null;
       }
     };
-  }, [allowStreamLogs, capabilities, listingDenied, tailAuthDenied, workspace.workspace_id]);
+  }, [allowStreamLogs, capabilities, listingDenied, streamAuthDenied, tailAuthDenied, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">

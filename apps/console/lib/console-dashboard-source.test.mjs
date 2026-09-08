@@ -2130,8 +2130,13 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
   assert.match(
     logs,
-    /if \(!allowStreamLogs \|\| listingDenied \|\| tailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
-    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing or tail has not been auth-denied",
+    /if \(!allowStreamLogs \|\| listingDenied \|\| tailAuthDenied \|\| streamAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing, tail, or route-level stream has not been auth-denied",
+  );
+  assert.match(
+    logs,
+    /const applyStreamAuthorizationDenial = \(message: string\) => \{[\s\S]*?streamAuthDeniedRef\.current = true;[\s\S]*?setStreamAuthDenied\(true\);[\s\S]*?setEntries\(\(current\) => \(denialStillOwnsColumn\(\) \? \[\] : current\)\);[\s\S]*?setOffsets\(\(current\) => \(denialStillOwnsColumn\(\) \? \{\} : current\)\);[\s\S]*?if \(frame\.type === "error" \|\| frame\.type === "closed"\) \{[\s\S]*?if \(isFullscreenStreamAuthDenied\(frame\)\) \{\s*applyStreamAuthorizationDenial\(/,
+    "Expected a fullscreen stream 401/403 frame to latch denial and clear column caches",
   );
 });
 
