@@ -980,7 +980,7 @@ test("tail authorization denial closes the inspector live stream", () => {
 
   assert.match(
     dashboardSource.liveStream,
-    /const streamAuthDenied = \(\) =>\s*workspaceDetailAuthDeniedRef\.current \|\|\s*logListingAuthDeniedRef\.current \|\|\s*logTailAuthDeniedRef\.current;[\s\S]*?if \(frame\.type === "log"\) \{[\s\S]*?if \(streamAuthDenied\(\)\) \{\s*return;\s*\}/,
+    /const streamAuthDenied = \(\) =>\s*workspaceDetailAuthDeniedRef\.current \|\|\s*workspaceBaseDetailAuthDeniedRef\.current \|\|\s*logListingAuthDeniedRef\.current \|\|\s*logTailAuthDeniedRef\.current;[\s\S]*?if \(frame\.type === "log"\) \{[\s\S]*?if \(streamAuthDenied\(\)\) \{\s*return;\s*\}/,
     "Expected live log frames to be dropped while listing, tail, or base-detail authorization is denied",
   );
   assert.match(
@@ -1876,8 +1876,8 @@ test("loadCapabilities outage retains last-successful negotiation", () => {
   );
   assert.match(
     dashboardSource.dashboard,
-    /useWorkspaceLiveStream\(\{[\s\S]*?setWorkspaceDetailAuthDenied,/,
-    "Expected the inspector live stream to publish route-level stream authorization denial",
+    /useWorkspaceLiveStream\(\{[\s\S]*?setWorkspaceDetailAuthDenied,[\s\S]*?workspaceBaseDetailAuthDeniedRef,/,
+    "Expected the inspector live stream to observe the base-detail GET latch separately from stream-route denial",
   );
   assert.match(
     dashboardSource.detailLoader,
@@ -1927,8 +1927,13 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   const recoveredBody = detail.slice(recoveredStart, recoveredEnd);
   assert.match(
     recoveredBody,
-    /workspaceStreamAuthDeniedRef\.current \|\|\s*generation <= revokedWorkspaceDetailGenerationRef\.current/,
-    "Expected a successful workspace GET not to clear a route-scoped stream denial",
+    /generation <= revokedWorkspaceDetailGenerationRef\.current[\s\S]*?workspaceBaseDetailAuthDeniedRef\.current = false;[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*return false;\s*\}/,
+    "Expected a successful workspace GET to drop only the base-detail latch, not a route-scoped stream denial",
+  );
+  assert.match(
+    detail,
+    /const publishWorkspaceDetailAuthDenied = \(denied: boolean\) => \{[\s\S]*?workspaceBaseDetailAuthDeniedRef\.current = denied;/,
+    "Expected a base-detail GET 401/403 to latch separately from stream-route denial",
   );
   const settledStart = detail.indexOf("const applyWorkspaceSuccessIfSettled = ");
   assert.ok(settledStart > 0, "Expected applyWorkspaceSuccessIfSettled");
@@ -1937,7 +1942,7 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   const settledBody = detail.slice(settledStart, settledEnd);
   assert.match(
     settledBody,
-    /generation <= revokedWorkspaceDetailGenerationRef\.current \|\|[\s\S]*?workspaceStreamAuthDeniedRef\.current/,
+    /generation <= revokedWorkspaceDetailGenerationRef\.current[\s\S]*?if \(workspaceStreamAuthDeniedRef\.current\) \{\s*publishWorkspaceDetailRecovered\(\);\s*return;\s*\}/,
     "Expected an in-flight or later workspace GET not to restore a stream-revoked snapshot",
   );
   const mergeGuardStart = detail.indexOf(
@@ -1983,8 +1988,27 @@ test("stream 401/403 does not recover through a later workspace GET", () => {
   );
   assert.match(
     liveStream,
-    /noteWorkspaceStreamAuthorizationRecovered\(\);[\s\S]*?workspaceDetailAuthDeniedRef\.current = false;/,
-    "Expected a successful inspector stream probe to clear the route latch before writing frames",
+    /noteWorkspaceStreamAuthorizationRecovered\(\);[\s\S]*?if \(workspaceBaseDetailAuthDeniedRef\.current\) \{\s*return;\s*\}[\s\S]*?workspaceDetailAuthDeniedRef\.current = false;/,
+    "Expected a successful inspector stream probe to clear the route latch before writing frames, but not a still-held base-detail GET latch",
+  );
+  const probeStart = liveStream.indexOf("const acceptStreamProbe = ");
+  assert.ok(probeStart > 0, "Expected acceptStreamProbe");
+  const probeEnd = liveStream.indexOf("const applyStreamAuthorizationDenial = ", probeStart);
+  const probeBody = liveStream.slice(probeStart, probeEnd);
+  assert.match(
+    probeBody,
+    /if \(workspaceBaseDetailAuthDeniedRef\.current\) \{\s*return;\s*\}/,
+    "Expected acceptStreamProbe not to clear workspaceDetailAuthDenied or the inspector error while a base-detail GET 401/403 is latched",
+  );
+  assert.doesNotMatch(
+    probeBody,
+    /workspaceBaseDetailAuthDeniedRef\.current = false/,
+    "Expected a stream handshake not to clear the base-detail GET latch",
+  );
+  assert.match(
+    liveStream,
+    /if \(workspaceBaseDetailAuthDeniedRef\.current\) \{[\s\S]*?setStreamState\("idle"\);\s*source\.close\(\);\s*return;\s*\}[\s\S]*?if \(workspaceDetailAuthDeniedRef\.current \|\| workspaceBaseDetailAuthDeniedRef\.current\)/,
+    "Expected a stream snapshot not to write workspace metadata while a base-detail GET 401/403 is still latched",
   );
   assert.match(
     liveStream,

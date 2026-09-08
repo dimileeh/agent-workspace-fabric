@@ -32,6 +32,7 @@ type UseWorkspaceLiveStreamArgs = {
   workspaceDetailAuthDenied: boolean;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
+  workspaceBaseDetailAuthDeniedRef: MutableRefObject<boolean>;
   workspaceStreamAuthDeniedRef: MutableRefObject<boolean>;
   noteWorkspaceStreamAuthorizationDenied: () => void;
   noteWorkspaceStreamAuthorizationRecovered: () => void;
@@ -60,6 +61,7 @@ export function useWorkspaceLiveStream({
   workspaceDetailAuthDenied,
   workspaceDetailAuthDeniedRef,
   setWorkspaceDetailAuthDenied,
+  workspaceBaseDetailAuthDeniedRef,
   workspaceStreamAuthDeniedRef,
   noteWorkspaceStreamAuthorizationDenied,
   noteWorkspaceStreamAuthorizationRecovered,
@@ -148,6 +150,7 @@ export function useWorkspaceLiveStream({
 
     const streamAuthDenied = () =>
       workspaceDetailAuthDeniedRef.current ||
+      workspaceBaseDetailAuthDeniedRef.current ||
       logListingAuthDeniedRef.current ||
       logTailAuthDeniedRef.current;
 
@@ -157,10 +160,15 @@ export function useWorkspaceLiveStream({
       }
       // The probe connected. Clear the route latch so a later detail GET may
       // refresh, but leave the revoke watermark covering in-flight GETs.
+      // A base-detail GET 401/403 is a separate latch: this handshake must not
+      // hide that denial or let the next snapshot write workspace metadata.
       noteWorkspaceStreamAuthorizationRecovered();
+      setStreamProbeNonce(0);
+      if (workspaceBaseDetailAuthDeniedRef.current) {
+        return;
+      }
       workspaceDetailAuthDeniedRef.current = false;
       setWorkspaceDetailAuthDenied(false);
-      setStreamProbeNonce(0);
       setError(null);
     };
 
@@ -225,6 +233,13 @@ export function useWorkspaceLiveStream({
       } else if (workspaceStreamAuthDeniedRef.current) {
         acceptStreamProbe();
       }
+      if (workspaceBaseDetailAuthDeniedRef.current) {
+        // The handshake proved /stream, not /workspaces/{id}. Drop this frame
+        // so a snapshot cannot restore metadata the GET still denies.
+        setStreamState("idle");
+        source.close();
+        return;
+      }
       if (frame.type === "connected" || frame.type === "heartbeat") {
         setStreamState("live");
         return;
@@ -233,8 +248,9 @@ export function useWorkspaceLiveStream({
         setStreamState("live");
         setDetail((current) => {
           // A base-detail 401/403 may land between the frame check and this
-          // updater. Do not write revoked workspace metadata back.
-          if (workspaceDetailAuthDeniedRef.current) {
+          // updater, including after a stream probe cleared only the route
+          // latch. Do not write revoked workspace metadata back.
+          if (workspaceDetailAuthDeniedRef.current || workspaceBaseDetailAuthDeniedRef.current) {
             return current;
           }
           return {
@@ -262,7 +278,11 @@ export function useWorkspaceLiveStream({
         setDetail((current) => {
           // An event-feed or base-detail 401/403 may land between the frame
           // check and this updater. Do not refill the cleared Events panel.
-          if (workspaceDetailAuthDeniedRef.current || eventFeedAuthDeniedRef.current) {
+          if (
+            workspaceDetailAuthDeniedRef.current ||
+            workspaceBaseDetailAuthDeniedRef.current ||
+            eventFeedAuthDeniedRef.current
+          ) {
             return current;
           }
           return {
@@ -366,6 +386,7 @@ export function useWorkspaceLiveStream({
     logTailAuthDeniedRef,
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
+    workspaceBaseDetailAuthDeniedRef,
     workspaceStreamAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
     noteWorkspaceStreamAuthorizationDenied,

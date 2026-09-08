@@ -59,6 +59,7 @@ type UseWorkspaceDetailLoaderArgs = {
   setLogListingAuthDenied: Dispatch<SetStateAction<boolean>>;
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
+  workspaceBaseDetailAuthDeniedRef: MutableRefObject<boolean>;
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setEventFeedAuthDenied: Dispatch<SetStateAction<boolean>>;
   releaseWithdrawnOptionalFeedDenialRef: MutableRefObject<
@@ -140,6 +141,7 @@ export function useWorkspaceDetailLoader({
   setLogListingAuthDenied,
   workspaceDetailAuthDeniedRef,
   setWorkspaceDetailAuthDenied,
+  workspaceBaseDetailAuthDeniedRef,
   eventFeedAuthDeniedRef,
   setEventFeedAuthDenied,
   releaseWithdrawnOptionalFeedDenialRef,
@@ -252,6 +254,7 @@ export function useWorkspaceDetailLoader({
     // A new visit may retry /stream; the previous route denial must not
     // keep that retry closed, and must not survive onto the re-opened GET.
     workspaceStreamAuthDeniedRef.current = false;
+    workspaceBaseDetailAuthDeniedRef.current = false;
     revokedWorkspaceDetailGenerationRef.current = 0;
     appliedWorkspaceDetailGenerationRef.current = 0;
     revokedEventFeedGenerationRef.current = 0;
@@ -303,6 +306,9 @@ export function useWorkspaceDetailLoader({
       const publishWorkspaceDetailAuthDenied = (denied: boolean) => {
         workspaceDetailAuthDeniedRef.current = denied;
         setWorkspaceDetailAuthDenied(denied);
+        // This latch is owned by the base-detail GET, not by /stream. A later
+        // stream probe must not clear it or hide a still-denied GET.
+        workspaceBaseDetailAuthDeniedRef.current = denied;
       };
 
       const publishWorkspaceDetailRecovered = (): boolean => {
@@ -311,12 +317,17 @@ export function useWorkspaceDetailLoader({
         // request that started before that revocation. An older success must
         // not record recovery after a newer one already owns the snapshot.
         // A /stream 401/403 is not recovered by this GET: the stream route can
-        // stay denied while /workspaces/{id} remains authorized.
+        // stay denied while /workspaces/{id} remains authorized. This GET
+        // still proves the base-detail route is authorized, so drop only that
+        // latch — the stream route keeps owning the inspector display.
         if (
-          workspaceStreamAuthDeniedRef.current ||
           generation <= revokedWorkspaceDetailGenerationRef.current ||
           generation < appliedWorkspaceDetailGenerationRef.current
         ) {
+          return false;
+        }
+        workspaceBaseDetailAuthDeniedRef.current = false;
+        if (workspaceStreamAuthDeniedRef.current) {
           return false;
         }
         appliedWorkspaceDetailGenerationRef.current = Math.max(
@@ -721,12 +732,16 @@ export function useWorkspaceDetailLoader({
           selectedIdRef.current !== workspaceId ||
           visit !== workspaceDetailVisitRef.current ||
           generation <= workspaceDetailVisitGenerationFloorRef.current ||
-          generation <= revokedWorkspaceDetailGenerationRef.current ||
-          // Route-scoped /stream denial owns the inspector. This GET must not
-          // restore the revoked snapshot or clear the latch that closed
-          // EventSource.
-          workspaceStreamAuthDeniedRef.current
+          generation <= revokedWorkspaceDetailGenerationRef.current
         ) {
+          return;
+        }
+        // This GET is newer than the revoke watermark, so /workspaces/{id} is
+        // authorized even if the stream route still owns the inspector.
+        // publishWorkspaceDetailRecovered records that without restoring the
+        // revoked snapshot or clearing the stream-route latch.
+        if (workspaceStreamAuthDeniedRef.current) {
+          publishWorkspaceDetailRecovered();
           return;
         }
         // publish* records applied* only when this generation still owns the
@@ -931,6 +946,11 @@ export function useWorkspaceDetailLoader({
       // above does not stop it. That later GET must not recover the latch or
       // write cleared workspace/events back — the stream route can stay denied
       // while /workspaces/{id} and /events remain authorized.
+      if (workspace.ok && generation > revokedWorkspaceDetailGenerationRef.current) {
+        // Same rule as the settled 200 path: this GET proved the base-detail
+        // route, so a later stream probe must not keep treating it as denied.
+        workspaceBaseDetailAuthDeniedRef.current = false;
+      }
       if (workspaceStreamAuthDeniedRef.current) {
         return;
       }
@@ -1257,6 +1277,7 @@ export function useWorkspaceDetailLoader({
     logListingAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
+    workspaceBaseDetailAuthDeniedRef,
     eventFeedAuthDeniedRef,
     setEventFeedAuthDenied,
     logStreamActivityRef,

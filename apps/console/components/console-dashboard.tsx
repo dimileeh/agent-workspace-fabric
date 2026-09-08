@@ -150,6 +150,10 @@ export function ConsoleDashboard() {
   // write revoked workspace metadata back until a successful detail GET.
   const workspaceDetailAuthDeniedRef = useRef(false);
   const [workspaceDetailAuthDenied, setWorkspaceDetailAuthDenied] = useState(false);
+  // Owned only by a base-detail GET 401/403. Stream-route denial also sets
+  // workspaceDetailAuthDenied so snapshots stay withheld, but a later /stream
+  // probe must not clear this GET latch or the inspector error.
+  const workspaceBaseDetailAuthDeniedRef = useRef(false);
   // /events 401/403 while workspace_stream stays advertised. The detail loader
   // clears detail.events, but EventSource event frames must not refill the
   // panel until a successful /events read recovers the feed.
@@ -366,6 +370,7 @@ export function ConsoleDashboard() {
         setWorkspaceDetailError(null);
         workspaceDetailAuthDeniedRef.current = false;
         setWorkspaceDetailAuthDenied(false);
+        workspaceBaseDetailAuthDeniedRef.current = false;
         eventFeedAuthDeniedRef.current = false;
         setEventFeedAuthDenied(false);
         // Same tenant-learned filter wipe as clearAuthorizedConsoleFeeds:
@@ -580,6 +585,7 @@ export function ConsoleDashboard() {
     setWorkspaceDetailError(null);
     workspaceDetailAuthDeniedRef.current = false;
     setWorkspaceDetailAuthDenied(false);
+    workspaceBaseDetailAuthDeniedRef.current = false;
     eventFeedAuthDeniedRef.current = false;
     setEventFeedAuthDenied(false);
     setOverviewTruncationWarning(null);
@@ -895,6 +901,7 @@ export function ConsoleDashboard() {
     setLogListingAuthDenied,
     workspaceDetailAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
+    workspaceBaseDetailAuthDeniedRef,
     eventFeedAuthDeniedRef,
     setEventFeedAuthDenied,
     releaseWithdrawnOptionalFeedDenialRef,
@@ -1032,6 +1039,7 @@ export function ConsoleDashboard() {
     setLogTailAuthDenied(false);
     workspaceDetailAuthDeniedRef.current = false;
     setWorkspaceDetailAuthDenied(false);
+    workspaceBaseDetailAuthDeniedRef.current = false;
     eventFeedAuthDeniedRef.current = false;
     setEventFeedAuthDenied(false);
     selectedStreamsRef.current = [];
@@ -1057,6 +1065,7 @@ export function ConsoleDashboard() {
     workspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
+    workspaceBaseDetailAuthDeniedRef,
     workspaceStreamAuthDeniedRef,
     noteWorkspaceStreamAuthorizationDenied,
     noteWorkspaceStreamAuthorizationRecovered,
