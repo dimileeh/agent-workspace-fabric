@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { useSerializedPeriodicLoad } from "@/hooks/use-serialized-periodic-load";
+import { beginWorkspaceDetailVisit } from "@/hooks/workspace-detail-visit";
 import { releaseWithdrawnOptionalDetailFeeds } from "@/hooks/workspace-detail-optional-feed-release";
 import {
   createWorkspaceDetailFeedSettlement,
@@ -241,37 +242,33 @@ export function useWorkspaceDetailLoader({
   const workspaceDetailLoadInFlightRef = useRef(false);
 
   useLayoutEffect(() => {
-    if (workspaceDetailVisitSelectionRef.current === selectedId) {
-      return;
-    }
-    workspaceDetailVisitSelectionRef.current = selectedId;
-    workspaceDetailVisitRef.current += 1;
-    // The previous visit's in-flight GET is still the latest request generation
-    // until this visit starts its own load. Advance past it so that late
-    // 401/403 cannot stamp revoked onto the generation the re-opened GET will
-    // take, including the window before that GET begins.
-    workspaceDetailVisitGenerationFloorRef.current = ++workspaceDetailRequestGenerationRef.current;
-    // Previous visit's denial/success must not cover this inspector visit.
-    // A new visit may retry /stream; the previous route denial must not
-    // keep that retry closed, and must not survive onto the re-opened GET.
-    workspaceStreamAuthDeniedRef.current = false;
-    workspaceBaseDetailAuthDeniedRef.current = false;
-    revokedWorkspaceDetailGenerationRef.current = 0;
-    appliedWorkspaceDetailGenerationRef.current = 0;
-    revokedEventFeedGenerationRef.current = 0;
-    appliedEventFeedGenerationRef.current = 0;
-    revokedRuntimeGenerationRef.current = 0;
-    appliedRuntimeGenerationRef.current = 0;
-    runtimeDenialReleasedThroughRef.current = 0;
-    revokedOperationsGenerationRef.current = 0;
-    appliedOperationsGenerationRef.current = 0;
-    operationsDenialReleasedThroughRef.current = 0;
-    eventsOutageReleasedThroughRef.current = 0;
-    appliedDetailFailureGenerationRef.current = 0;
-    settledDetailOutagesRef.current = {};
-    revokedLogListingGenerationRef.current = 0;
-    appliedLogListingGenerationRef.current = 0;
-  }, [selectedId]);
+    beginWorkspaceDetailVisit(selectedId, {
+      workspaceDetailVisitSelectionRef,
+      workspaceDetailVisitRef,
+      workspaceDetailVisitGenerationFloorRef,
+      workspaceDetailRequestGenerationRef,
+      workspaceStreamAuthDeniedRef,
+      workspaceBaseDetailAuthDeniedRef,
+      revokedWorkspaceDetailGenerationRef,
+      appliedWorkspaceDetailGenerationRef,
+      revokedEventFeedGenerationRef,
+      appliedEventFeedGenerationRef,
+      revokedRuntimeGenerationRef,
+      appliedRuntimeGenerationRef,
+      runtimeDenialReleasedThroughRef,
+      revokedOperationsGenerationRef,
+      appliedOperationsGenerationRef,
+      operationsDenialReleasedThroughRef,
+      eventsOutageReleasedThroughRef,
+      appliedDetailFailureGenerationRef,
+      settledDetailOutagesRef,
+      revokedLogListingGenerationRef,
+      appliedLogListingGenerationRef,
+    });
+    // Local useRef values are stable. The prop ref is stable too; listing it
+    // keeps the visit reset tied to selection without a missing-deps warning
+    // for the extracted helper, which receives the ref object itself.
+  }, [selectedId, workspaceBaseDetailAuthDeniedRef]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const epoch = authorizedFeedEpochRef.current;
