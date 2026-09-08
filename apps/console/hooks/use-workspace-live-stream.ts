@@ -2,7 +2,10 @@
 
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { fallbackLlmUsage } from "@/lib/format";
-import { resolveWorkspaceLogStreamAccess } from "@/lib/console-capabilities";
+import {
+  resolveWorkspaceLogStreamAccess,
+  resolveWorkspaceStreamSubscription,
+} from "@/lib/console-capabilities";
 import { awfPath } from "@/lib/console-urls";
 import type { ConsoleCapabilities } from "@/lib/types";
 import {
@@ -74,12 +77,16 @@ export function useWorkspaceLiveStream({
       setStreamState("idle");
       return;
     }
+    // workspace_stream may stay up while events or logs are unsupported.
+    // Request only the negotiated feeds so Core does not read them, and do
+    // not retain event frames that would surface after a later enable.
+    const { allowEvents, channels, tailBytes } = resolveWorkspaceStreamSubscription(capabilities);
     const epoch = authorizedFeedEpochRef.current;
     setStreamState("connecting");
     const source = new EventSource(
       awfPath(`workspaces/${selectedId}/stream`, {
-        channels: "events,agent,validation,services",
-        tail_bytes: 65536,
+        channels,
+        tail_bytes: tailBytes,
       }),
     );
     let closedByServer = false;
@@ -129,8 +136,10 @@ export function useWorkspaceLiveStream({
       if (frame.type === "event") {
         // /events 401/403 clears detail.events but leaves workspace_stream
         // advertised. Ignore the event channel until that feed recovers;
-        // snapshots and logs stay on this EventSource.
-        if (eventFeedAuthDeniedRef.current) {
+        // snapshots and logs stay on this EventSource. An unsupported
+        // workspace_events gate (including policy_disabled) must not merge
+        // frames either — retained events would appear when the gate opens.
+        if (!allowEvents || eventFeedAuthDeniedRef.current) {
           return;
         }
         setStreamState("live");

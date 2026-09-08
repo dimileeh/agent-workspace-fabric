@@ -16,6 +16,7 @@ import {
   capabilitiesForMutatingControls,
   resolveRetryCapabilityGate,
   resolveWorkspaceLogStreamAccess,
+  resolveWorkspaceStreamSubscription,
   sameCapabilityNegotiation,
 } from "./console-capabilities.ts";
 import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "./console-dashboard-summary.ts";
@@ -590,6 +591,100 @@ test("resolveWorkspaceLogStreamAccess keeps stream without silently consuming lo
     allowStream: true,
     allowStreamLogs: false,
   });
+});
+
+test("resolveWorkspaceStreamSubscription derives channels and tail from event and log gates", () => {
+  const eventsRoute = "/v1/workspaces/{workspace_id}/events";
+  const logsRoute = "/v1/workspaces/{workspace_id}/logs";
+  const streamRoute = "/v1/workspaces/{workspace_id}/stream";
+
+  const parsed = (diagnostics) => {
+    const result = parseConsoleCapabilities({ ...localCapabilities, diagnostics });
+    assert.equal(result.ok, true);
+    if (!result.ok) {
+      throw new Error("expected capabilities to parse");
+    }
+    return result.capabilities;
+  };
+
+  assert.deepEqual(resolveWorkspaceStreamSubscription(null), {
+    allowEvents: false,
+    channels: "",
+    tailBytes: 0,
+  });
+  assert.deepEqual(resolveWorkspaceStreamSubscription(undefined), {
+    allowEvents: false,
+    channels: "",
+    tailBytes: 0,
+  });
+
+  assert.deepEqual(
+    resolveWorkspaceStreamSubscription(
+      parsed([
+        { id: "workspace_events", availability: "available", route: eventsRoute, semantics: "events" },
+        { id: "workspace_logs", availability: "available", route: logsRoute, semantics: "logs" },
+        { id: "workspace_stream", availability: "available", route: streamRoute, semantics: "stream" },
+      ]),
+    ),
+    { allowEvents: true, channels: "events,agent,validation,services", tailBytes: 65536 },
+  );
+
+  assert.deepEqual(
+    resolveWorkspaceStreamSubscription(
+      parsed([
+        {
+          id: "workspace_events",
+          availability: "unsupported",
+          reason_code: "policy_disabled",
+          message: "events disabled",
+          semantics: "events",
+        },
+        { id: "workspace_logs", availability: "available", route: logsRoute, semantics: "logs" },
+        { id: "workspace_stream", availability: "available", route: streamRoute, semantics: "stream" },
+      ]),
+    ),
+    { allowEvents: false, channels: "agent,validation,services", tailBytes: 65536 },
+  );
+
+  assert.deepEqual(
+    resolveWorkspaceStreamSubscription(
+      parsed([
+        { id: "workspace_events", availability: "available", route: eventsRoute, semantics: "events" },
+        {
+          id: "workspace_logs",
+          availability: "unsupported",
+          reason_code: "policy_disabled",
+          message: "logs disabled",
+          semantics: "logs",
+        },
+        { id: "workspace_stream", availability: "available", route: streamRoute, semantics: "stream" },
+      ]),
+    ),
+    { allowEvents: true, channels: "events", tailBytes: 0 },
+  );
+
+  assert.deepEqual(
+    resolveWorkspaceStreamSubscription(
+      parsed([
+        {
+          id: "workspace_events",
+          availability: "unsupported",
+          reason_code: "policy_disabled",
+          message: "events disabled",
+          semantics: "events",
+        },
+        {
+          id: "workspace_logs",
+          availability: "unsupported",
+          reason_code: "not_implemented",
+          message: "logs unavailable",
+          semantics: "logs",
+        },
+        { id: "workspace_stream", availability: "available", route: streamRoute, semantics: "stream" },
+      ]),
+    ),
+    { allowEvents: false, channels: "", tailBytes: 0 },
+  );
 });
 
 test("resolveCapabilityWorkspaceRoute substitutes workspace id", () => {

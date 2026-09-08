@@ -691,6 +691,37 @@ export function resolveWorkspaceLogStreamAccess(
   };
 }
 
+const WORKSPACE_STREAM_LOG_CHANNELS = ["agent", "validation", "services"] as const;
+const WORKSPACE_STREAM_LOG_TAIL_BYTES = 65_536;
+
+/**
+ * Channels and log tail for a workspace_stream subscription.
+ *
+ * workspace_events and workspace_logs are independent of workspace_stream.
+ * Core reads events when the events channel is selected and matching log
+ * files when tail_bytes is nonzero, so an available stream must not request
+ * those feeds — including when they are policy_disabled. An empty channel
+ * list is snapshot-only and must be preserved by the stream proxy.
+ */
+export function resolveWorkspaceStreamSubscription(
+  capabilities: ConsoleCapabilities | null | undefined,
+): { allowEvents: boolean; channels: string; tailBytes: number } {
+  if (!capabilities) {
+    return { allowEvents: false, channels: "", tailBytes: 0 };
+  }
+  const allowEvents = isDiagnosticAvailable(capabilities, "workspace_events");
+  const allowLogs = isDiagnosticAvailable(capabilities, "workspace_logs");
+  const channels = [
+    ...(allowEvents ? ["events"] : []),
+    ...(allowLogs ? WORKSPACE_STREAM_LOG_CHANNELS : []),
+  ];
+  return {
+    allowEvents,
+    channels: channels.join(","),
+    tailBytes: allowLogs ? WORKSPACE_STREAM_LOG_TAIL_BYTES : 0,
+  };
+}
+
 /**
  * Convert absolute /v1/... capability route through the configured console API
  * base (`awfPath`), including hosted `/api/core-console` and context query carry.

@@ -116,11 +116,23 @@ const AWF_STREAM_DEFAULT_CHANNELS = AWF_STREAM_CHANNELS.join(",");
 export const AWF_STREAM_MAX_TAIL_BYTES = 65_536;
 
 export function sanitizeStreamChannels(raw: string | null): string {
-  const filtered = (raw ?? "")
+  // Omitted or unknown channels keep the historical default. An explicit
+  // empty list is snapshot-only: expanding it would re-select events and log
+  // channels the client omitted because those diagnostics are unsupported.
+  if (raw === null) {
+    return AWF_STREAM_DEFAULT_CHANNELS;
+  }
+  const filtered = raw
     .split(",")
     .map((value) => value.trim())
     .filter((value) => AWF_STREAM_CHANNEL_SET.has(value));
-  return filtered.length > 0 ? filtered.join(",") : AWF_STREAM_DEFAULT_CHANNELS;
+  if (filtered.length > 0) {
+    return filtered.join(",");
+  }
+  if (raw.trim() === "") {
+    return "";
+  }
+  return AWF_STREAM_DEFAULT_CHANNELS;
 }
 
 export function sanitizeTailBytes(raw: string | null): string {

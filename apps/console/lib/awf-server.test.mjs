@@ -61,11 +61,17 @@ test("sanitizeStreamChannels keeps only supported channels", () => {
   assert.equal(sanitizeStreamChannels("agent,bogus,services"), "agent,services");
 });
 
-test("sanitizeStreamChannels falls back to the default set when empty or unknown", () => {
+test("sanitizeStreamChannels falls back to the default set when omitted or unknown", () => {
   const defaults = "events,agent,validation,services";
   assert.equal(sanitizeStreamChannels(null), defaults);
-  assert.equal(sanitizeStreamChannels(""), defaults);
   assert.equal(sanitizeStreamChannels("bogus,nope"), defaults);
+});
+
+test("sanitizeStreamChannels preserves an explicit empty channel list", () => {
+  // Snapshot-only subscriptions omit events and log channels. Expanding that
+  // to the default set would fetch feeds the client declared unsupported.
+  assert.equal(sanitizeStreamChannels(""), "");
+  assert.equal(sanitizeStreamChannels("   "), "");
 });
 
 test("sanitizeTailBytes clamps to the supported range", () => {
