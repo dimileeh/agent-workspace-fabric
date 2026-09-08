@@ -505,8 +505,18 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 # ``_execute`` returned without raising, so the execute-path forge
                 # calls recovered: clear any stale ``execute_action`` retry count so a
                 # recovered blip never accumulates toward the budget across polls. The
-                # unconditional persist below flushes the clear (no extra write).
+                # persist below flushes the clear (no extra write) — except on the
+                # superseded path, which must not write this row at all.
                 _clear_transient_forge_retry_state(state, context="execute_action")
+                if state.monitor_writes_suppressed:
+                    # A post-action terminal-PR cycle observed the merge/close only
+                    # after this runner had lost the monitor claim, so its terminate
+                    # sink dropped the write behind the owner fence. This state is
+                    # superseded: flushing it here would overwrite the live
+                    # claimant's addressed-thread map and last-push SHA, so unresolved
+                    # feedback could be treated as handled (PRRT_kwDOSJAM6s6fsqcA).
+                    # The new owner's next poll re-derives everything from the DB.
+                    return
                 await self._persist_state(workspace_id, state)
                 if terminal:
                     return

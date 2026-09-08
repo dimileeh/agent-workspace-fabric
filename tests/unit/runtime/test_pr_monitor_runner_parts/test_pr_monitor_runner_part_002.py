@@ -1298,6 +1298,8 @@ async def test_review_comment_fix_committed_is_recorded_against_pushed_head(
     adapter.queue(stdout="AWF-VERDICT: FIXED: committed repair")
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=pr_payload())
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="pushed")
     cmd.queue_result(returncode=0, stdout="new-head-after-repair-push\n")
     runner = make_runner(

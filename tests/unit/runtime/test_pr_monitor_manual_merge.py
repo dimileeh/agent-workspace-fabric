@@ -1087,6 +1087,8 @@ async def test_manual_merge_unresolved_comments_route_to_address_comments_before
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
     adapter.queue(stdout="AWF-VERDICT: FIXED: addressed manual-merge review thread")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0, stdout='{"data": {}}')  # resolveReviewThread
     cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -1149,12 +1151,16 @@ async def test_manual_merge_bot_issue_feedback_and_later_comments_still_addressa
     cmd.queue_result(returncode=0, stdout=pr_payload(comments=[policy_comment]))
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: trigger-review checklist status only")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
     adapter.queue(stdout="AWF-VERDICT: FIXED: addressed later human review thread")
     cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0, stdout='{"data": {}}')  # resolveReviewThread
     cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -1220,6 +1226,8 @@ async def test_manual_merge_checks_block_ready_until_green_and_merge_still_requi
         stdout="tests/unit/test_x.py::test_y FAILED\nE   assert 1 == 2",
     )  # gh run view --log-failed — actionable pytest evidence drives ReportCiFailure
     adapter.queue(stdout="fixed ci")
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(check_state="FAILURE"))
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # git push
     cmd.queue_result(returncode=0)  # git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # base-behind

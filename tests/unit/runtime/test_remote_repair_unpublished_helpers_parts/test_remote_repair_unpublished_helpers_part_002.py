@@ -1061,3 +1061,36 @@ async def test_abandon_behind_remote_ff_leaves_push_tracking_on_refused_reset(
     assert result.failed is True
     assert state.last_push_sha == _ORPHANED_HOSTED_TERMINAL
     assert state.hosted_terminal_head_advanced is True
+
+
+@pytest.mark.unit
+async def test_matching_heads_clear_stale_parked_unpublished_repair_marker(
+    tmp_path: Path,
+) -> None:
+    """A resolved park range must retire its marker on the equality path.
+
+    Regression for PRRT_kwDOSJAM6s6fu_-o: when an operator follows the documented
+    recovery and resets (or pushes) the parked commits, local HEAD is back at the
+    accepted remote tip so there is nothing left to park. Unresolved feedback keeps
+    ``decide()`` on ``AddressComments``, and that arm's attention clear is gated on
+    the park marker — so leaving the marker set here strands the operator-visible
+    ``awaiting_human_since`` and park reason until the action itself changes.
+    """
+    worktree = _repair_worktree(tmp_path)
+    remote = _PUBLISHED_PR_HEAD
+    state = _hosted_orphan_monitor_state()
+    state.mark_parked_unpublished_repair(f"no_comment_repair_provenance:{'aa' * 20}:{remote}")
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{remote}\n")
+    restored, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        _repair_runner(tmp_path, cmd),
+        workspace_id="ws_repair",
+        worktree_path=worktree,
+        remote_branch="fix/review",
+        expected_remote_head=remote,
+        local_head=remote,
+        state=state,
+    )
+    assert result is None
+    assert restored == remote
+    assert state.parked_unpublished_repair is None

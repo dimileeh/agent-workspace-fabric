@@ -863,6 +863,7 @@ def _copy_opened_regular_file_to_path(
     budget_seconds: float = _OBJECT_STORE_LEAF_COPY_BUDGET_SECONDS,
     validate_git_loose_object: bool = False,
     enum_budget: _ObjectStoreEnumBudget | None = None,
+    preserve_source_times: bool = False,
 ) -> bool:
     """Stream a size/deadline-bounded private copy from an opened regular file.
 
@@ -874,7 +875,10 @@ def _copy_opened_regular_file_to_path(
     exhausts its compressed-byte / wall-time budget before parsing a size
     (PRRT_kwDOSJAM6s6ewp-Z). When ``enum_budget`` is set, charge the opened
     descriptor's ``fstat`` size against the shared aggregate so a post-pathname
-    grow cannot bypass the walk cap (PRRT_kwDOSJAM6s6fDL6r). Returns ``False``
+    grow cannot bypass the walk cap (PRRT_kwDOSJAM6s6fDL6r). When
+    ``preserve_source_times`` is set, stamp the copy with the source inode's
+    atime/mtime — index files must keep them or Git's racily-clean re-check is
+    disabled (issue #942, see ``_symlink_git_dir_child_via_fd``). Returns ``False``
     on type/size/stability failures.
     """
     try:
@@ -945,6 +949,12 @@ def _copy_opened_regular_file_to_path(
             and copied == st.st_size
         ):
             return False
+        if preserve_source_times:
+            # Stamp through the destination descriptor, never the pathname.
+            try:
+                os.utime(out_fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+            except OSError:
+                return False
         succeeded = True
         return True
     finally:
@@ -963,6 +973,7 @@ def _symlink_git_dir_child_via_fd(
     expect_directory: bool | None = None,
     validate_git_loose_object: bool = False,
     enum_budget: _ObjectStoreEnumBudget | None = None,
+    preserve_source_times: bool = False,
 ) -> bool:
     """Materialize ``dest`` from the opened inode of ``name`` under ``dir_fd``.
 
@@ -975,6 +986,15 @@ def _symlink_git_dir_child_via_fd(
     (PRRT_kwDOSJAM6s6eteRs). Pass ``enum_budget`` so leaf copies charge the
     opened inode size against the shared object-store walk cap
     (PRRT_kwDOSJAM6s6fDL6r).
+
+    Pass ``preserve_source_times`` for index files. Git decides whether a cached
+    entry is *racily clean* — and therefore must be content-compared instead of
+    trusted from stat — by comparing the entry's cached mtime against the mtime of
+    the index file itself, in whole seconds (Git is built without ``USE_NSEC``). A
+    copy stamped with the staging time pushes the index timestamp past every cached
+    entry, so a same-size overwrite made in the same second as the index-recorded
+    mtime becomes invisible to snapshot-scoped ``diff-files`` and nested residue
+    silently loses its unstaged component (issue #942).
 
     Callers must keep every appended ``held_fds`` entry (directory pins only)
     open until staging is discarded, then close them.
@@ -1023,6 +1043,7 @@ def _symlink_git_dir_child_via_fd(
             dest,
             validate_git_loose_object=validate_git_loose_object,
             enum_budget=enum_budget,
+            preserve_source_times=preserve_source_times,
         ):
             return False
     finally:
@@ -1262,7 +1283,12 @@ def _symlink_split_index_backing_files_via_fd(
     ):  # pragma: no cover - oid.hex() always matches
         return True
     return _symlink_git_dir_child_via_fd(
-        dir_fd, name, staging / name, held_fds, expect_directory=False
+        dir_fd,
+        name,
+        staging / name,
+        held_fds,
+        expect_directory=False,
+        preserve_source_times=True,
     )
 
 

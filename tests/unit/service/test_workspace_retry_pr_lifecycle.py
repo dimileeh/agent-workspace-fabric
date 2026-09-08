@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import awf.service.workspaces_retry as workspaces_retry_service
+import awf.service.workspaces_retry_runtime as workspaces_retry_runtime
 from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.github_client import RepoRef
 from awf.service.workspaces import WorkspaceRetryNotFoundError
 from awf.service.workspaces_retry import _live_pr_lifecycle, _pr_number_from_url
 
@@ -49,7 +50,7 @@ async def test_live_pr_lifecycle_uses_current_forge_status(
             return PullRequestLifecycle.merged
 
     monkeypatch.setattr(
-        workspaces_retry_service,
+        workspaces_retry_runtime,
         "make_forge_client",
         lambda _forge, _runner: FakeForgeClient(),
     )
@@ -60,9 +61,7 @@ async def test_live_pr_lifecycle_uses_current_forge_status(
     assert await _live_pr_lifecycle(source, 10) is PullRequestLifecycle.merged
     assert calls == [
         {
-            "repo": workspaces_retry_service.RepoRef(
-                owner="example", name="retryable", forge="github"
-            ),
+            "repo": RepoRef(owner="example", name="retryable", forge="github"),
             "pr_number": 10,
         }
     ]

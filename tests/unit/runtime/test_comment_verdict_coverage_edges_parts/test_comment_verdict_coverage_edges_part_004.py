@@ -21,6 +21,23 @@ from tests.unit.runtime.test_comment_verdict_coverage_edges_parts._helpers impor
 
 _git_env = git_env_without_object_lookup_overrides
 
+# Fixed base far in the past; never "now", so stamps never depend on when a test runs.
+_STAMP_EPOCH_NS = 1_700_000_000_000_000_000
+
+
+def _write_stamped(path: Path, text: str, *, tick: int) -> None:
+    """Write ``text`` and pin a deterministic, per-step distinct mtime.
+
+    Nested probes list unstaged edits with stat-only ``git diff-files``. Git compares
+    index-cached stat data in whole seconds, so a same-size overwrite landing in the
+    second the index recorded is only caught by the racily-clean content re-check.
+    Giving every write an explicit tick makes the recorded and on-disk stat differ by
+    construction, so detection never depends on how fast the test ran (issue #942).
+    """
+    path.write_text(text, encoding="utf-8")
+    stamp = _STAMP_EPOCH_NS + tick * 1_000_000_000
+    os.utime(path, ns=(stamp, stamp))
+
 
 @pytest.mark.unit
 def test_nested_git_probe_pins_to_git_reported_worktree_root(
@@ -623,12 +640,17 @@ def test_open_worktree_directory_path_pins_multi_component_inside_outer(
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(2)
 def test_nested_git_probe_retains_opened_worktree_across_path_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eY3eE: redirected core.worktree must stay fd-pinned across probes."""
+    """PRRT_kwDOSJAM6s6eY3eE: redirected core.worktree must stay fd-pinned across probes.
+
+    Carries no per-test ``timeout`` marker: this test runs three nested probes, each
+    forking several ``git`` processes, so a two-second budget measured latency rather
+    than a hang under ``pytest -n 20`` (issue #942). The repo-wide 30 s timeout still
+    bounds a genuine hang, and matches the production nested-probe budget.
+    """
     worktree = tmp_path / "ws_redirected_worktree_fd"
     worktree.mkdir()
     init_git_worktree(worktree)
@@ -651,7 +673,7 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
         capture_output=True,
     )
     tracked = redirected_root / "f"
-    tracked.write_text("tracked\n", encoding="utf-8")
+    _write_stamped(tracked, "tracked\n", tick=0)
     git_dir = nested_root / ".git"
     subprocess.run(
         [
@@ -687,7 +709,9 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
         capture_output=True,
     )
 
-    tracked.write_text("mutated\n", encoding="utf-8")
+    # Distinct length as well as distinct bytes and mtime: the unstaged edit is then
+    # visible to ``diff-files`` on size alone, independent of any stat timing.
+    _write_stamped(tracked, "mutated-content\n", tick=1)
     before = comment_verdict_residue._git_nested_worktree_commit(
         worktree_path=worktree,
         path=nested_name,
@@ -697,7 +721,12 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
 
     decoy_root = worktree / "decoy_baseline"
     shutil.copytree(redirected_root, decoy_root)
-    (decoy_root / "f").write_text("tracked\n", encoding="utf-8")
+    # ``copytree`` uses ``copy2``, so the decoy would otherwise inherit the real
+    # tree's mtimes verbatim; give it its own tick.
+    _write_stamped(decoy_root / "f", "tracked\n", tick=2)
+    real_ino = redirected_root.stat().st_ino
+    decoy_ino = decoy_root.stat().st_ino
+    assert real_ino != decoy_ino
     # Measure what a pathname-following probe would hash if it saw the decoy.
     backup_for_decoy = worktree / "actual.decoy_measure"
     redirected_root.rename(backup_for_decoy)
@@ -713,15 +742,24 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
     assert decoy_fp != before
 
     real_pinned_probe = comment_verdict_residue._pinned_nested_git_probe
-    swap_done = False
+    # Record what the pinned probe actually saw instead of a bare "did it run" flag,
+    # so the swap is sequenced by an observation rather than by hoping the rename
+    # lands first, and a CI failure is self-diagnosing (issue #942).
+    pin_observations: list[tuple[str, str, int, str]] = []
 
     @contextlib.contextmanager
     def _swap_redirected_worktree_on_pin(git_dir_path: Path, worktree_path: Path) -> Iterator[None]:
-        nonlocal swap_done
         backup = worktree / "actual.real"
         redirected_root.rename(backup)
         decoy_root.rename(redirected_root)
-        swap_done = True
+        pin_observations.append(
+            (
+                str(git_dir_path),
+                str(worktree_path),
+                redirected_root.stat().st_ino,
+                (redirected_root / "f").read_text(encoding="utf-8"),
+            )
+        )
         try:
             with real_pinned_probe(git_dir_path, worktree_path):
                 yield
@@ -741,18 +779,26 @@ def test_nested_git_probe_retains_opened_worktree_across_path_swap(
         git_env=_git_env(),
     )
 
-    assert swap_done
-    assert after == before
-    assert after != decoy_fp
+    assert len(pin_observations) == 1, pin_observations
+    # The swap was already in place when the pinned probe ran: the redirected
+    # pathname resolved to the decoy inode holding the index-matching bytes.
+    assert pin_observations[0][2] == decoy_ino, pin_observations
+    assert pin_observations[0][3] == "tracked\n", pin_observations
+    assert after is not None, pin_observations
+    assert after == before, pin_observations
+    assert after != decoy_fp, pin_observations
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(2)
 def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6eajOa: pinned worktree fd must not be a pathname-only oracle."""
+    """PRRT_kwDOSJAM6s6eajOa: pinned worktree fd must not be a pathname-only oracle.
+
+    Carries no per-test ``timeout`` marker for the same reason as
+    ``test_nested_git_probe_retains_opened_worktree_across_path_swap`` (issue #942).
+    """
     worktree = tmp_path / "ws_worktree_fd_no_reenter"
     worktree.mkdir()
     init_git_worktree(worktree)
@@ -775,7 +821,7 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
         capture_output=True,
     )
     tracked = redirected_root / "f"
-    tracked.write_text("tracked\n", encoding="utf-8")
+    _write_stamped(tracked, "tracked\n", tick=0)
     git_dir = nested_root / ".git"
     subprocess.run(
         [
@@ -811,8 +857,10 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
         capture_output=True,
     )
 
-    tracked.write_text("mutated\n", encoding="utf-8")
-    (redirected_root / "u").write_text("untracked-real\n", encoding="utf-8")
+    # Distinct length as well as distinct bytes and mtime, so ``diff-files`` reports
+    # the unstaged edit on size alone rather than on stat timing.
+    _write_stamped(tracked, "mutated-content\n", tick=1)
+    _write_stamped(redirected_root / "u", "untracked-real\n", tick=2)
     before = comment_verdict_residue._git_nested_worktree_commit(
         worktree_path=worktree,
         path=nested_name,
@@ -822,8 +870,10 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
 
     decoy_root = worktree / "decoy_mid_hash"
     shutil.copytree(redirected_root, decoy_root)
-    (decoy_root / "f").write_text("tracked\n", encoding="utf-8")
-    (decoy_root / "u").write_text("untracked-decoy\n", encoding="utf-8")
+    # ``copytree`` uses ``copy2``; re-stamp every decoy leaf with its own tick so the
+    # decoy's stat data can never coincide with the real tree's.
+    _write_stamped(decoy_root / "f", "tracked\n", tick=3)
+    _write_stamped(decoy_root / "u", "untracked-decoy-bytes\n", tick=4)
 
     # Pathname-only oracle baseline: hashing after a full path replacement.
     backup_for_decoy = worktree / "actual.decoy_measure"
@@ -841,7 +891,11 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
 
     real_open = comment_verdict_residue._open_worktree_regular_file_under_root
     swap_done = False
-    seen_proc_worktree = False
+    # Record every leaf open (root, leaf, whether it came through the pinned fd)
+    # instead of a bare bool, so the swap is sequenced by an explicit marker and the
+    # assertions describe what the probe read (issue #942).
+    opens: list[tuple[str, str, bool]] = []
+    swap_at: list[int] = []
 
     @contextlib.contextmanager
     def _swap_redirected_worktree_on_byte_open(
@@ -850,12 +904,12 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
         *,
         root_dir_fd: int | None = None,
     ) -> Iterator[object]:
-        nonlocal swap_done, seen_proc_worktree
+        nonlocal swap_done
         root_s = str(root)
-        if "/proc/self/fd/" in root_s or root_dir_fd is not None:
-            seen_proc_worktree = True
         leaf = Path(path).name
+        opens.append((root_s, leaf, "/proc/self/fd/" in root_s or root_dir_fd is not None))
         if not swap_done and leaf in {"f", "u"}:
+            swap_at.append(len(opens) - 1)
             backup = worktree / "actual.real"
             redirected_root.rename(backup)
             decoy_root.rename(redirected_root)
@@ -882,10 +936,19 @@ def test_nested_worktree_fd_pin_does_not_reenter_by_pathname_mid_hash(
         git_env=_git_env(),
     )
 
-    assert swap_done
-    assert seen_proc_worktree
-    assert after == before
-    assert after != decoy_fp
+    leaves = [leaf for _, leaf, _ in opens]
+    # Both leaves were actually opened, so an empty untracked listing cannot silently
+    # skip the swap; the swap is then sequenced onto the first of them by index rather
+    # than by a bare "it happened" flag.
+    assert {"f", "u"} <= set(leaves), opens
+    assert swap_done, opens
+    first_leaf_open = next(i for i, leaf in enumerate(leaves) if leaf in {"f", "u"})
+    assert swap_at == [first_leaf_open], (swap_at, opens)
+    # Byte reads entered through the retained descriptor, not a mutable pathname.
+    assert any(pinned for _, _, pinned in opens), opens
+    assert after is not None, opens
+    assert after == before, opens
+    assert after != decoy_fp, opens
 
 
 @pytest.mark.unit
@@ -1265,7 +1328,8 @@ def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
         check=True,
         capture_output=True,
     )
-    (inner_root / "inner.txt").write_text("v1\n", encoding="utf-8")
+    inner_file = inner_root / "inner.txt"
+    _write_stamped(inner_file, "v1\n", tick=0)
     subprocess.run(["git", "add", "inner.txt"], cwd=inner_root, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "inner init"],
@@ -1274,18 +1338,25 @@ def test_nested_git_probe_discovers_inner_repo_while_outer_pin_active(
         capture_output=True,
     )
 
+    committed_bytes = inner_file.read_bytes()
     before = comment_verdict_residue._git_nested_worktree_commit(
         worktree_path=worktree,
         path=vendor_name,
         git_env=_git_env(),
     )
-    (inner_root / "inner.txt").write_text("v2\n", encoding="utf-8")
+    # Distinct length, bytes and mtime, so the inner edit is visible to the probe
+    # regardless of how long the probes took (issue #942).
+    _write_stamped(inner_file, "v2-mutated\n", tick=1)
+    mutated_bytes = inner_file.read_bytes()
     after = comment_verdict_residue._git_nested_worktree_commit(
         worktree_path=worktree,
         path=vendor_name,
         git_env=_git_env(),
     )
 
+    # Assert the observed input first: distinguishes "the test never mutated" from
+    # "the probe did not see the mutation".
+    assert committed_bytes != mutated_bytes
     assert before is not None
     assert after is not None
     assert before != after
@@ -1307,7 +1378,9 @@ def test_nested_gitfile_inside_outer_git_dir_detects_inner_mutations(
         path=outer_name,
         git_env=_git_env(),
     )
-    (inner_root / "inner.txt").write_text("v2\n", encoding="utf-8")
+    # Distinct length and mtime: same-size same-second overwrites are only visible to
+    # stat-only ``diff-files`` through the racily-clean re-check (issue #942).
+    _write_stamped(inner_root / "inner.txt", "v2-mutated\n", tick=1)
     after = comment_verdict_residue._git_nested_worktree_commit(
         worktree_path=worktree,
         path=outer_name,
@@ -1386,7 +1459,10 @@ def test_digest_nested_git_directory_uses_pinned_fd_not_readlink_pathname(
     decoy = tmp_path / "wt_nested_dir_decoy"
     decoy.mkdir()
     init_git_worktree_with_embedded_repo(decoy)
-    (decoy / nested_name / "inner.txt").write_text("decoy\n", encoding="utf-8")
+    # Distinct length and mtime from the committed ``inner\n``: the two repos can share
+    # a commit SHA when both ``git commit`` calls land in one second, so the decoy's
+    # unstaged edit is the only thing separating the digests (issue #942).
+    _write_stamped(decoy / nested_name / "inner.txt", "decoy-bytes\n", tick=1)
 
     decoy_digest = comment_verdict_residue._digest_worktree_entry_bytes(
         worktree_path=decoy,

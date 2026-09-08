@@ -815,6 +815,7 @@ async def test_retry_persists_live_head_into_adopted_sync_feature_pr_policy(
             lifecycle=PullRequestLifecycle.open,
             head_ref="contributors/renamed-live-head",
             base_sha="d" * 40,
+            head_sha="e" * 40,
         )
 
     monkeypatch.setattr(workspaces_retry_service, "_live_pr_snapshot", live_snapshot)
@@ -836,5 +837,6 @@ async def test_retry_persists_live_head_into_adopted_sync_feature_pr_policy(
     adoption = retried.task_policy["pr_adoption"]
     assert adoption["head_ref"] == "contributors/renamed-live-head"
     assert adoption["base_sha"] == "d" * 40
+    assert adoption["head_sha"] == "e" * 40
     assert _provision_remote_push_branch(retried) == "contributors/renamed-live-head"
     assert _provision_checkout_base_branch(retried) == "refs/pull/42/head"

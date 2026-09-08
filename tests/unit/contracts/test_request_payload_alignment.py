@@ -579,6 +579,7 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
         "task_prompt": None,
         "task_tag": "PROJ-123",
         "reason": None,
+        "hint": "do NOT edit .github/workflows/*",
     }
     rest_request = PullRequestMonitorAdoptionRequest.model_validate(rest_payload)
 
@@ -601,6 +602,7 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
             "task_prompt": None,
             "task_tag": "PROJ-123",
             "reason": None,
+            "hint": "do NOT edit .github/workflows/*",
         },
     )
     assert getattr(result, "isError", False) is False

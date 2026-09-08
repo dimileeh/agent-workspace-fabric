@@ -950,6 +950,15 @@ def workspace_adopt_pr(
         help="Optional task class for scheduling/policy parity with workspace create.",
     ),
     reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    hint: str | None = typer.Option(
+        None,
+        "--hint",
+        help=(
+            "Optional operator directive armed on the adopted workspace, addressed "
+            "by the monitor before any PR review comments. Ignored when the request "
+            "attaches to an already-live adoption (use 'awf workspace guide')."
+        ),
+    ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
@@ -1003,6 +1012,9 @@ def workspace_adopt_pr(
         body["task_class"] = _option_value(task_class)
     if owned_paths is not None:
         body["owned_paths"] = owned_paths
+    hint = _option_default(hint)
+    if hint is not None:
+        body["hint"] = hint
     response = _call(
         "POST",
         "/v1/workspaces/adopt-pr",

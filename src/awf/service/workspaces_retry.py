@@ -4,51 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT
-from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
-from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.forge_errors import ForgeClientError
-from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
-from awf.common.github_client import RepoRef
+from awf.common.forge_lifecycle import PullRequestLifecycle
+from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
-from awf.db.models import (
-    Task,
-    TaskAttempt,
-    Workspace,
-    WorkspaceEvent,
-)
+from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
-    TaskRepository,
     WorkspaceRepository,
 )
-from awf.db.repositories.base import (
-    HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES,
-    PRE_LAUNCH_FAILURE_EVENT_TYPE,
-    has_terminal_runtime_released_event,
-)
 from awf.db.session import make_session_factory
-from awf.runtime.planning import (
-    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
-    PLAN_CONFORMANCE_UNSATISFIED,
-    build_planning_scope_retry_prompt,
-)
-from awf.runtime.pr_monitor_actions import AbortReason
-from awf.runtime.pr_push_remote import retained_fork_pr_adoption
+from awf.runtime.planning import build_planning_scope_retry_prompt
+from awf.service import workspaces_retry_feature_pr as _retry_feature_pr
 from awf.service import workspaces_retry_payloads as _retry_payloads
+from awf.service import workspaces_retry_recovery as _retry_recovery
+from awf.service import workspaces_retry_runtime as _retry_runtime
 from awf.service.conformance_salvage import (
     CONFORMANCE_SALVAGE_POLICY_KEY,
     SALVAGE_NO_IMPLEMENTATION_DIFF,
@@ -57,10 +37,7 @@ from awf.service.conformance_salvage import (
     build_conformance_salvage_retry_prompt,
     capture_conformance_salvage,
 )
-from awf.service.coordination import (
-    owned_path_overlap_coordination_warnings,
-    task_policy_with_coordination_warnings,
-)
+from awf.service.coordination import owned_path_overlap_coordination_warnings
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_readiness import (
     HttpGet,
@@ -68,16 +45,8 @@ from awf.service.provider_readiness import (
 )
 from awf.service.scheduler import (
     SCHEDULER_POLICY_KEY,
-    scheduler_retry_policy_context,
     scheduler_score_from_workspace,
 )
-
-if TYPE_CHECKING:
-    from awf.service.workspaces import (
-        _AgentTimeoutRetryContext,
-        _ConformanceRetryContext,
-        _PlanningScopeRetryContext,
-    )
 
 # Re-export payload helpers so ``workspaces.py`` lazy proxies and existing
 # ``from awf.service.workspaces_retry import …`` sites keep working.
@@ -92,20 +61,84 @@ _optional_retry_evidence_str = _retry_payloads._optional_retry_evidence_str
 _payload_str = _retry_payloads._payload_str
 _retry_evidence_gaps = _retry_payloads._retry_evidence_gaps
 
+# Re-export recovery helpers for import compatibility only
+# (``from awf.service.workspaces_retry import …`` and lazy ``workspaces.py``
+# proxies). Inter-helper calls resolve names inside ``workspaces_retry_recovery``;
+# patching these aliases does not redirect those internal lookups.
+_agent_timeout_retry_context = _retry_recovery._agent_timeout_retry_context
+_agent_timeout_salvage_recovery_payload = _retry_recovery._agent_timeout_salvage_recovery_payload
+_conformance_retry_context = _retry_recovery._conformance_retry_context
+_conformance_salvage_recovery_payload = _retry_recovery._conformance_salvage_recovery_payload
+_is_plan_conformance_unsatisfied = _retry_recovery._is_plan_conformance_unsatisfied
+_planning_scope_recovery_payload = _retry_recovery._planning_scope_recovery_payload
+_planning_scope_retry_context = _retry_recovery._planning_scope_retry_context
+_prune_and_migrate_retired_agent = _retry_recovery._prune_and_migrate_retired_agent
+_prune_retired_fallbacks = _retry_recovery._prune_retired_fallbacks
+_retry_task_for_source = _retry_recovery._retry_task_for_source
+_retry_task_policy = _retry_recovery._retry_task_policy
 
-_PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
-PrLifecycleChecker = Callable[[Workspace, int], Awaitable[PullRequestLifecycle]]
+# Re-export runtime/forge helpers for import compatibility
+# (``from awf.service.workspaces_retry import …`` and attribute access).
+_live_pr_lifecycle = _retry_runtime._live_pr_lifecycle
+_live_pr_snapshot = _retry_runtime._live_pr_snapshot
+_source_cancelled_before_provisioning = _retry_runtime._source_cancelled_before_provisioning
+_source_has_pre_launch_failure_event = _retry_runtime._source_has_pre_launch_failure_event
+_source_runtime_not_yet_released = _retry_runtime._source_runtime_not_yet_released
 
-
-@dataclass(frozen=True, slots=True)
-class _PrefetchedFeaturePrState:
-    """Forge PR state captured before ``get_for_update`` holds the source row."""
-
-    pr_number: int
-    lifecycle: PullRequestLifecycle
-    head_ref: str | None = None
-    base_sha: str | None = None
-    from_snapshot: bool = False
+# Re-export feature-PR / hosted-adoption helpers for import compatibility
+# (``from awf.service.workspaces_retry import …`` and attribute access).
+# Inter-helper calls resolve names inside ``workspaces_retry_feature_pr``;
+# patching these aliases does not redirect those internal lookups.
+_PR_NUMBER_RE = _retry_feature_pr._PR_NUMBER_RE
+PrLifecycleChecker = _retry_feature_pr.PrLifecycleChecker
+HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON = (
+    _retry_feature_pr.HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED_REASON
+)
+_hosted_open_adoption_local_preflight_bypass = (
+    _retry_feature_pr._hosted_open_adoption_local_preflight_bypass
+)
+_PrefetchedFeaturePrState = _retry_feature_pr._PrefetchedFeaturePrState
+_source_pr_closed_externally = _retry_feature_pr._source_pr_closed_externally
+_pr_number_from_url = _retry_feature_pr._pr_number_from_url
+_sync_feature_pr_adoption = _retry_feature_pr._sync_feature_pr_adoption
+_existing_feature_pr_url = _retry_feature_pr._existing_feature_pr_url
+_existing_feature_pr_number = _retry_feature_pr._existing_feature_pr_number
+_adoption_policy_str = _retry_feature_pr._adoption_policy_str
+_existing_feature_pr_adoption_head_ref = _retry_feature_pr._existing_feature_pr_adoption_head_ref
+_existing_feature_pr_adoption_head_sha = _retry_feature_pr._existing_feature_pr_adoption_head_sha
+_existing_feature_pr_adoption_base_sha = _retry_feature_pr._existing_feature_pr_adoption_base_sha
+_sync_retried_adoption_live_refs = _retry_feature_pr._sync_retried_adoption_live_refs
+_PROFILE_TRUSTED_BASE_SHA_KEY = _retry_feature_pr._PROFILE_TRUSTED_BASE_SHA_KEY
+_is_exact_full_commit_sha = _retry_feature_pr._is_exact_full_commit_sha
+_auto_selection_profile_ref = _retry_feature_pr._auto_selection_profile_ref
+_drop_mismatched_trusted_profile_freeze_on_retry = (
+    _retry_feature_pr._drop_mismatched_trusted_profile_freeze_on_retry
+)
+_clear_closed_sync_feature_pr_adoption = _retry_feature_pr._clear_closed_sync_feature_pr_adoption
+_has_existing_feature_pr_identity = _retry_feature_pr._has_existing_feature_pr_identity
+_is_existing_feature_pr_preserve_candidate = (
+    _retry_feature_pr._is_existing_feature_pr_preserve_candidate
+)
+_is_hosted_adoption_forge_prefetch_candidate = (
+    _retry_feature_pr._is_hosted_adoption_forge_prefetch_candidate
+)
+_adoption_identity_pr_number = _retry_feature_pr._adoption_identity_pr_number
+_retained_hosted_adoption_identity_is_complete_and_consistent = (
+    _retry_feature_pr._retained_hosted_adoption_identity_is_complete_and_consistent
+)
+_prefetched_live_head_is_complete = _retry_feature_pr._prefetched_live_head_is_complete
+_raise_if_open_hosted_adoption_lacks_live_head = (
+    _retry_feature_pr._raise_if_open_hosted_adoption_lacks_live_head
+)
+_is_retained_open_hosted_pr_adoption_retry = (
+    _retry_feature_pr._is_retained_open_hosted_pr_adoption_retry
+)
+_raise_if_hosted_delegation_unconfigured_for_retry = (
+    _retry_feature_pr._raise_if_hosted_delegation_unconfigured_for_retry
+)
+_downgrade_unqualified_hosted_adoption_to_local = (
+    _retry_feature_pr._downgrade_unqualified_hosted_adoption_to_local
+)
 
 
 def _workspace_create() -> Any:
@@ -127,230 +160,6 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     from awf.service.workspaces_response import workspace_failure_details_payload as _payload
 
     return _payload(workspace)
-
-
-def _source_pr_closed_externally(source: Workspace) -> bool:
-    """Return whether the source's terminal transition recorded a closed PR."""
-    latest_failed_event = _latest_failed_state_event(source)
-    return (
-        latest_failed_event is not None
-        and latest_failed_event.reason_code == AbortReason.pr_closed_externally.value
-    )
-
-
-def _pr_number_from_url(pr_url: str) -> int | None:
-    """Recover a positive PR number from a GitHub or Bitbucket PR URL."""
-    match = _PR_NUMBER_RE.search(pr_url)
-    if match is None:
-        return None
-    pr_number = int(match.group(1))
-    return pr_number if pr_number > 0 else None
-
-
-def _sync_feature_pr_adoption(source: Workspace) -> Mapping[str, Any] | None:
-    """Return ``task_policy.pr_adoption`` for an adopted sync-feature-PR workspace."""
-    if source.task_kind != TaskKind.sync_feature_pr.value:
-        return None
-    policy = source.task_policy if isinstance(source.task_policy, Mapping) else {}
-    adoption = policy.get("pr_adoption")
-    return adoption if isinstance(adoption, Mapping) else None
-
-
-def _existing_feature_pr_url(source: Workspace) -> str | None:
-    """Return the source's feature/adopted PR URL from columns or adoption policy."""
-    if source.pr_url:
-        return source.pr_url
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return None
-    pr_url = adoption.get("pr_url")
-    if isinstance(pr_url, str) and pr_url.strip():
-        return pr_url.strip()
-    return None
-
-
-def _existing_feature_pr_number(source: Workspace) -> int | None:
-    """Return the source's feature/adopted PR number from columns, URL, or adoption."""
-    if source.pr_number is not None:
-        return source.pr_number
-    pr_url = _existing_feature_pr_url(source)
-    if pr_url:
-        from_url = _pr_number_from_url(pr_url)
-        if from_url is not None:
-            return from_url
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return None
-    raw = adoption.get("pr_number")
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw if raw > 0 else None
-    if isinstance(raw, str) and raw.strip().isdigit():
-        parsed = int(raw.strip())
-        return parsed if parsed > 0 else None
-    return None
-
-
-def _adoption_policy_str(source: Workspace, key: str) -> str | None:
-    """Return a non-empty string from ``task_policy.pr_adoption[key]``, if present."""
-    adoption = _sync_feature_pr_adoption(source)
-    if adoption is None:
-        return None
-    raw = adoption.get(key)
-    if not isinstance(raw, str):
-        return None
-    stripped = raw.strip()
-    return stripped or None
-
-
-def _existing_feature_pr_adoption_head_ref(source: Workspace) -> str | None:
-    """Return the adopted PR head ref from ``pr_adoption.head_ref``."""
-    return _adoption_policy_str(source, "head_ref")
-
-
-def _existing_feature_pr_adoption_base_sha(source: Workspace) -> str | None:
-    """Return the adopted PR base SHA from ``pr_adoption.base_sha``."""
-    return _adoption_policy_str(source, "base_sha")
-
-
-def _sync_retried_adoption_live_refs(
-    task_policy: dict[str, Any],
-    *,
-    head_ref: str | None,
-    base_sha: str | None,
-) -> None:
-    """Keep ``pr_adoption`` head/base aligned with live forge refs on retry.
-
-    Provisioning prefers ``pr_adoption.head_ref`` over ``remote_push_branch``
-    via ``_provision_remote_push_branch``. If retry only updates the column and
-    leaves a stale adoption head (e.g. after a forge rename), provision
-    overwrites the live push target and sends fixes to the wrong branch.
-    """
-    adoption = task_policy.get("pr_adoption")
-    if not isinstance(adoption, dict):
-        return
-    if isinstance(head_ref, str) and head_ref.strip():
-        adoption["head_ref"] = head_ref.strip()
-    if isinstance(base_sha, str) and base_sha.strip():
-        adoption["base_sha"] = base_sha.strip()
-
-
-_PROFILE_TRUSTED_BASE_SHA_KEY = "profile_trusted_base_sha"
-
-
-def _is_exact_full_commit_sha(value: object) -> bool:
-    """Return True only for an immutable full Git commit object name (40 hex)."""
-    return (
-        isinstance(value, str)
-        and len(value) == 40
-        and all(char in "0123456789abcdefABCDEF" for char in value)
-    )
-
-
-def _auto_selection_profile_ref(profile_ref: str | None) -> str | None:
-    """Keep unset/``auto`` selection; clear a post-provision concrete name.
-
-    Successful auto adoption persists the resolved profile name into
-    ``profile_ref``. That concrete name must not survive retry when a trusted
-    freeze may still need credential rehydration — otherwise
-    ``_should_resolve_adopted_auto_profile_from_trusted_base`` rejects the
-    trusted-base path, ``ProfileResolver`` prefers the PR-head repo marker,
-    and a matching trusted stamp would treat the attacker-controlled profile
-    as verified.
-    """
-    if profile_ref is None:
-        return None
-    stripped = profile_ref.strip()
-    if not stripped or stripped == "auto":
-        return profile_ref
-    return None
-
-
-def _drop_mismatched_trusted_profile_freeze_on_retry(
-    task_policy: dict[str, Any],
-    *,
-    resolved_profile: dict[str, Any] | None,
-    profile_ref: str | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Clear a frozen repo profile when its trusted-base stamp no longer matches.
-
-    Retry may refresh ``pr_adoption.base_sha`` to the live forge tip while
-    copying ``resolved_profile`` and ``profile_trusted_base_sha`` from the
-    failed attempt. A stamp that no longer equals ``base_sha`` makes
-    provenance verification fail and silently forces ``auto_merge=False`` for
-    an otherwise genuine trusted freeze. Drop the mismatched freeze and stamp
-    so provisioning re-resolves from the new base. Matching stamps keep the
-    freeze but restore auto ``profile_ref`` selection (see
-    ``_auto_selection_profile_ref``).
-
-    Successful auto adoption also persists the concrete resolved name into
-    ``profile_ref``. When dropping the freeze, clear that name too so
-    ``_should_resolve_adopted_auto_profile_from_trusted_base`` still sees auto
-    selection; otherwise retry would resolve from the untrusted PR-head tree.
-    """
-    if resolved_profile is None:
-        return None, profile_ref
-    adoption_raw = task_policy.get("pr_adoption")
-    if not isinstance(adoption_raw, dict):
-        return resolved_profile, profile_ref
-    stamped = adoption_raw.get(_PROFILE_TRUSTED_BASE_SHA_KEY)
-    base_sha = adoption_raw.get("base_sha")
-    if not isinstance(stamped, str) or not _is_exact_full_commit_sha(stamped):
-        return resolved_profile, profile_ref
-    if (
-        isinstance(base_sha, str)
-        and _is_exact_full_commit_sha(base_sha.strip())
-        and stamped.lower() == base_sha.strip().lower()
-    ):
-        return resolved_profile, _auto_selection_profile_ref(profile_ref)
-    adoption = dict(adoption_raw)
-    adoption.pop(_PROFILE_TRUSTED_BASE_SHA_KEY, None)
-    task_policy["pr_adoption"] = adoption
-    return None, None
-
-
-def _clear_closed_sync_feature_pr_adoption(
-    task_policy: dict[str, Any],
-    *,
-    source_task_kind: str,
-    repo_url: str | None = None,
-) -> str:
-    """Drop closed adoption identity so retry can open a replacement PR.
-
-    ``sync_feature_pr`` provisioning prefers ``pr_adoption`` / ``refs/pull/<n>/head``
-    over a cleared ``remote_push_branch``. Leaving the closed PR's adoption block
-    would re-checkout and re-push that head. Adoption is also monitor-only, so
-    the replacement must become a coding ``feature_branch_pr``.
-
-    Distinct fork ``head_repo_slug`` / ``head_repo_url`` are retained (same as
-    execution-time ``_apply_sync_feature_replacement_policy``) so replacement
-    pushes stay on the fork via ``remote_push_url_for_workspace``.
-    """
-    if source_task_kind != TaskKind.sync_feature_pr.value:
-        return source_task_kind
-    adoption = task_policy.get("pr_adoption")
-    retained = retained_fork_pr_adoption(
-        repo_url=repo_url,
-        adoption=adoption if isinstance(adoption, dict) else None,
-    )
-    task_policy.pop("pr_adoption", None)
-    if retained is not None:
-        task_policy["pr_adoption"] = retained
-    task_policy["task_kind"] = TaskKind.feature_branch_pr.value
-    return TaskKind.feature_branch_pr.value
-
-
-def _is_existing_feature_pr_preserve_candidate(source: Workspace) -> bool:
-    """Return whether retry should consult live forge state for this source PR."""
-    if _planning_scope_retry_context(source) is not None:
-        return False
-    pr_number = _existing_feature_pr_number(source)
-    return (
-        source.task_kind in {TaskKind.feature_branch_pr.value, TaskKind.sync_feature_pr.value}
-        and _existing_feature_pr_url(source) is not None
-        and pr_number is not None
-    )
 
 
 async def _load_retry_preview_outside_request_session(
@@ -381,16 +190,20 @@ async def _prefetch_existing_feature_pr_state(
 ) -> _PrefetchedFeaturePrState | None:
     """Fetch forge PR lifecycle/snapshot before acquiring the source row lock.
 
-    Returns ``None`` when the unlocked source is not a preserve-existing-feature-PR
-    candidate. Raises the same ``WorkspaceRetry*`` errors as the former in-lock path
-    for lookup failure or an already-merged PR.
+    Returns ``None`` when the unlocked source is neither a preserve-existing-
+    feature-PR candidate nor a hosted adoption that needs forge state for the
+    local-auth bypass. Raises the same ``WorkspaceRetry*`` errors as the former
+    in-lock path for lookup failure or an already-merged PR.
     """
     workspaces = _workspace_service()
     if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
         return None
     if WorkspaceStatus(source.status) not in workspaces.RETRYABLE_WORKSPACE_STATUSES:
         return None
-    if not _is_existing_feature_pr_preserve_candidate(source):
+    if not (
+        _is_existing_feature_pr_preserve_candidate(source)
+        or _is_hosted_adoption_forge_prefetch_candidate(source)
+    ):
         return None
 
     pr_number = _existing_feature_pr_number(source)
@@ -406,6 +219,7 @@ async def _prefetch_existing_feature_pr_state(
                 lifecycle=snapshot.lifecycle,
                 head_ref=snapshot.head_ref,
                 base_sha=snapshot.base_sha,
+                head_sha=snapshot.head_sha,
                 from_snapshot=True,
             )
     except (ForgeClientError, OSError, TimeoutError, ValueError) as exc:
@@ -432,123 +246,6 @@ async def _prefetch_existing_feature_pr_state(
             },
         )
     return prefetched
-
-
-async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
-    """Return the source PR's current lifecycle according to its forge."""
-    repo = RepoRef.from_url(source.repo_url)
-    forge = concrete_forge_for_repo(
-        (source.resolved_profile or {}).get("forge"),
-        source.repo_url,
-    )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.fetch_pull_request_lifecycle(
-            repo=repo,
-            pr_number=pr_number,
-        )
-
-
-async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
-    """Return the source PR's current lifecycle and head ref from its forge."""
-    repo = RepoRef.from_url(source.repo_url)
-    forge = concrete_forge_for_repo(
-        (source.resolved_profile or {}).get("forge"),
-        source.repo_url,
-    )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
-        return await client.fetch_pull_request_snapshot(
-            repo=repo,
-            pr_number=pr_number,
-        )
-
-
-async def _source_runtime_not_yet_released(
-    session: AsyncSession,
-    source: Workspace,
-) -> bool:
-    """Return True if the source workspace's compose runtime has not been released yet.
-
-    Only ``failed`` and ``cancelled`` workspaces reach this function — the
-    ``RETRYABLE_WORKSPACE_STATUSES`` guard in ``retry_workspace_row`` rejects
-    all other statuses (including ``destroying``) before this point.  The
-    ``HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES`` check below therefore only
-    matches ``failed`` / ``cancelled`` in practice; ``completed`` and
-    ``destroyed`` are listed in that constant for its shared semantics, not
-    because they flow through here.
-
-    Callers must verify that ``host_ports`` is non-empty before calling this
-    function. Zero-port workspaces cannot cause host-port conflicts, and the
-    outer ``retry_workspace_row`` call site gates this check on ``if host_ports:``.
-    """
-    source_status = WorkspaceStatus(source.status)
-    if source_status in HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES:
-        if await has_terminal_runtime_released_event(session, source.id):
-            return False
-        if source.compose_project_name is not None or source.compose_file_path is not None:
-            return True
-        reservations = await ResourceReservationRepository(session).list_for_workspace(
-            source.id,
-            limit=1,
-        )
-        if (
-            source_status == WorkspaceStatus.cancelled
-            and source.node_id is None
-            and not reservations
-            and await _source_cancelled_before_provisioning(session, source.id)
-        ):
-            # Cancelled before provisioning placement: no compose metadata, no
-            # node, and no reservation history means there is no runtime
-            # evidence for cleanup to release. Cancelled rows that reached
-            # provisioning fall through to the same explicit pre-launch
-            # provenance gate as failed null-runtime rows.
-            return False
-        # A reservation only proves placement, not that Compose never launched.
-        # Upgraded legacy launch failures can have a ResourceReservation while
-        # compose_project_name/compose_file_path are null after containers were
-        # created. An explicit pre-launch marker is required to admit the retry;
-        # otherwise keep the source ports blocked until cleanup records
-        # terminal_runtime_released.
-        return not await _source_has_pre_launch_failure_event(session, source.id)
-    return False
-
-
-async def _source_cancelled_before_provisioning(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    """Return True when the latest cancellation transition came from requested."""
-    stmt = (
-        select(WorkspaceEvent.old_state)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == "workspace.state_changed",
-            WorkspaceEvent.new_state == WorkspaceStatus.cancelled.value,
-        )
-        .order_by(
-            WorkspaceEvent.occurred_at.desc(),
-            WorkspaceEvent.event_order.desc().nullslast(),
-            WorkspaceEvent.id.desc(),
-        )
-        .limit(1)
-    )
-    old_state = (await session.execute(stmt)).scalar_one_or_none()
-    return old_state == WorkspaceStatus.requested.value
-
-
-async def _source_has_pre_launch_failure_event(
-    session: AsyncSession,
-    workspace_id: str,
-) -> bool:
-    """Return True when durable evidence says provisioning failed before launch."""
-    stmt = (
-        select(WorkspaceEvent.id)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == PRE_LAUNCH_FAILURE_EVENT_TYPE,
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def retry_workspace_row(
@@ -648,25 +345,55 @@ async def retry_workspace_row(
     # mirroring the create-time overlay in workspaces_create.create_workspace_row.
     # Also overlay any profile-declared provider API key the agent receives so the
     # non-Ollama credential gate does not block on a profile-only credential.
-    preflight_environ = workspaces_create.overlay_profile_provider_credentials(
-        workspaces_create.overlay_profile_ollama_base_url(
-            provider_environ if provider_environ is not None else os.environ,
+    #
+    # Retained open hosted PR adoptions intentionally skip local Codex/CLI
+    # preflight: Core has no local coding credential by design, and Cloud leases
+    # credentials to hosted execution jobs. Qualification requires explicit hosted
+    # mode + open prefetch so a closed-PR fallback cannot bypass local auth.
+    # Open forge snapshots must also carry a usable live head; otherwise fail
+    # with PR_STATE_LOOKUP_FAILED rather than admitting on stale stored refs.
+    # Record an explicit nonblocking bypass snapshot (not a missing key) so a
+    # retained ``cursor_auto_mode`` cannot re-enter deferred Router preflight
+    # during provisioning, and so a stale source ``blocks_launch=true`` copy
+    # cannot trip the provisioner defense-in-depth path.
+    # Unqualified hosted policies must downgrade to local before that fallthrough
+    # so a successful local preflight/override cannot retain mode=hosted.
+    # The same qualification omits local host-port admission below: hosted
+    # provisioning only renders the stack (no local compose launch / bind), and
+    # initial hosted adoption reserves no local ports.
+    preflight: dict[str, Any]
+    _raise_if_open_hosted_adoption_lacks_live_head(source, prefetched_feature_pr)
+    retained_open_hosted_pr_adoption = _is_retained_open_hosted_pr_adoption_retry(
+        source,
+        prefetched_feature_pr,
+    )
+    if retained_open_hosted_pr_adoption:
+        _raise_if_hosted_delegation_unconfigured_for_retry(resolved_settings)
+        preflight = _hosted_open_adoption_local_preflight_bypass(
+            source_workspace_id=source.id,
+            agent=target_agent,
+        )
+    else:
+        _downgrade_unqualified_hosted_adoption_to_local(retried_task_policy)
+        preflight_environ = workspaces_create.overlay_profile_provider_credentials(
+            workspaces_create.overlay_profile_ollama_base_url(
+                provider_environ if provider_environ is not None else os.environ,
+                source.resolved_profile,
+            ),
             source.resolved_profile,
-        ),
-        source.resolved_profile,
-    )
-    preflight = await workspaces_create._selected_provider_preflight_for_task_async(
-        resolved_settings,
-        agent=target_agent,
-        task_policy=retried_task_policy,
-        override=provider_readiness_override,
-        override_reason=provider_readiness_override_reason,
-        provider_environ=preflight_environ,
-        run_subprocess=run_subprocess,
-        http_get=http_get,
-    )
-    preflight = {**preflight, "source_workspace_id": source.id}
-    workspaces_create._raise_if_provider_preflight_blocks(preflight)
+        )
+        preflight = await workspaces_create._selected_provider_preflight_for_task_async(
+            resolved_settings,
+            agent=target_agent,
+            task_policy=retried_task_policy,
+            override=provider_readiness_override,
+            override_reason=provider_readiness_override_reason,
+            provider_environ=preflight_environ,
+            run_subprocess=run_subprocess,
+            http_get=http_get,
+        )
+        preflight = {**preflight, "source_workspace_id": source.id}
+        workspaces_create._raise_if_provider_preflight_blocks(preflight)
     conformance_salvage: dict[str, Any] | None = None
     salvage_recovery_payload: dict[str, Any] | None = None
     if conformance_retry_requested:
@@ -754,40 +481,43 @@ async def retry_workspace_row(
                 context=agent_timeout_context,
                 salvage=conformance_salvage,
             )
-    retried_task_policy = {
-        **retried_task_policy,
-        "provider_readiness_preflight": preflight,
-    }
+    # Fresh probe or hosted-bypass snapshot always wins over a source deepcopy
+    # (including a prior blocks_launch=true deferred Cursor Router failure).
+    retried_task_policy = dict(retried_task_policy)
+    retried_task_policy["provider_readiness_preflight"] = preflight
 
     host_ports: list[int] = []
-    host_ports.extend(
-        workspaces.host_ports_from_task_policy_companions(
-            retried_task_policy,
+    if not retained_open_hosted_pr_adoption:
+        host_ports.extend(
+            workspaces.host_ports_from_task_policy_companions(
+                retried_task_policy,
+            )
         )
-    )
-    # TOCTOU note: source.resolved_profile reflects the profile resolved
-    # when the source workspace was originally provisioned.  Legacy rows may
-    # still have an inline requested_profile but no resolved_profile snapshot,
-    # so fall back to that requested profile for admission-time source runtime
-    # and conflict checks.  If the repository's auto-resolved profile changed
-    # between the source run and this retry (e.g. .awf.yml was updated), the
-    # ports checked here may not match what the provisioner will actually use.
-    # The provisioner's _check_auto_resolved_profile_host_ports serves as the
-    # definitive gate, so a conflict missed here surfaces as an
-    # INFRASTRUCTURE_FAILURE inside the provisioner rather than a 409 at
-    # dispatch.  This is an inherent limitation of auto-resolved profiles at
-    # dispatch time.
-    source_profile_for_port_admission = (
-        source.resolved_profile if source.resolved_profile is not None else source.requested_profile
-    )
-    host_ports.extend(
-        workspaces.host_ports_from_resolved_profile(source_profile_for_port_admission),
-    )
-    _seen: set[int] = set()
-    for _hp in host_ports:
-        if _hp in _seen:
-            raise workspaces.WorkspaceCreateDuplicateHostPortError(host_port=_hp)
-        _seen.add(_hp)
+        # TOCTOU note: source.resolved_profile reflects the profile resolved
+        # when the source workspace was originally provisioned.  Legacy rows may
+        # still have an inline requested_profile but no resolved_profile snapshot,
+        # so fall back to that requested profile for admission-time source runtime
+        # and conflict checks.  If the repository's auto-resolved profile changed
+        # between the source run and this retry (e.g. .awf.yml was updated), the
+        # ports checked here may not match what the provisioner will actually use.
+        # The provisioner's _check_auto_resolved_profile_host_ports serves as the
+        # definitive gate, so a conflict missed here surfaces as an
+        # INFRASTRUCTURE_FAILURE inside the provisioner rather than a 409 at
+        # dispatch.  This is an inherent limitation of auto-resolved profiles at
+        # dispatch time.
+        source_profile_for_port_admission = (
+            source.resolved_profile
+            if source.resolved_profile is not None
+            else source.requested_profile
+        )
+        host_ports.extend(
+            workspaces.host_ports_from_resolved_profile(source_profile_for_port_admission),
+        )
+        _seen: set[int] = set()
+        for _hp in host_ports:
+            if _hp in _seen:
+                raise workspaces.WorkspaceCreateDuplicateHostPortError(host_port=_hp)
+            _seen.add(_hp)
     latest_source_reservation = await ResourceReservationRepository(session).list_for_workspace(
         source.id, limit=1
     )
@@ -823,6 +553,7 @@ async def retry_workspace_row(
     closed_existing_feature_pr = existing_feature_pr and _source_pr_closed_externally(source)
     live_pr_head_ref: str | None = None
     live_pr_base_commit: str | None = None
+    live_pr_head_sha: str | None = None
     retry_base_commit: str | None = None
     if preserve_existing_feature_pr:
         assert existing_feature_pr_number is not None
@@ -845,9 +576,44 @@ async def retry_workspace_row(
         if prefetched_feature_pr.from_snapshot:
             live_pr_head_ref = prefetched_feature_pr.head_ref
             live_pr_base_commit = prefetched_feature_pr.base_sha
+            live_pr_head_sha = prefetched_feature_pr.head_sha
         # Merged PRs are rejected during prefetch (before the row lock).
         preserve_existing_feature_pr = existing_pr_lifecycle is PullRequestLifecycle.open
         closed_existing_feature_pr = not preserve_existing_feature_pr
+    elif (
+        retained_open_hosted_pr_adoption
+        and prefetched_feature_pr is not None
+        and prefetched_feature_pr.from_snapshot
+        and prefetched_feature_pr.lifecycle is PullRequestLifecycle.open
+    ):
+        # Planning-scope (and other non-preserve) hosted retries still admit the
+        # local-auth bypass and send pr_adoption.head_sha as expected_head_sha.
+        # Refresh adoption identity from the prefetched forge tip. The push
+        # branch column is rebound later from live_pr_head_ref so hosted
+        # identity (which prefers remote_push_branch) stays aligned.
+        live_pr_head_ref = prefetched_feature_pr.head_ref
+        live_pr_base_commit = prefetched_feature_pr.base_sha
+        live_pr_head_sha = prefetched_feature_pr.head_sha
+        _sync_retried_adoption_live_refs(
+            retried_task_policy,
+            head_ref=live_pr_head_ref,
+            base_sha=live_pr_base_commit,
+            head_sha=live_pr_head_sha,
+            base_ref=source.branch_base,
+        )
+    elif (
+        existing_feature_pr
+        and prefetched_feature_pr is not None
+        and existing_feature_pr_number is not None
+        and prefetched_feature_pr.pr_number == existing_feature_pr_number
+        and prefetched_feature_pr.lifecycle is not PullRequestLifecycle.open
+    ):
+        # Non-preserve path (planning-scope hosted): the open-only branch above
+        # is skipped when forge reports closed/missing. closed_existing_feature_pr
+        # otherwise keys only off the source terminal reason, which may still be
+        # AGENT_PLAN_PHASE_SCOPE_VIOLATION from when the PR was open — apply the
+        # prefetched non-open lifecycle so replacement clears dead pr_adoption.
+        closed_existing_feature_pr = True
 
     if host_ports:
         # The runtime-release gate is only meaningful when the source
@@ -985,25 +751,58 @@ async def retry_workspace_row(
                     "reason_code": "PR_BASE_COMMIT_UNAVAILABLE",
                 },
             )
+        candidate_head_shas = (
+            live_pr_head_sha,
+            _existing_feature_pr_adoption_head_sha(source),
+            source.monitor_last_commit_sha,
+        )
+        retry_head_sha = next(
+            (head_sha.strip() for head_sha in candidate_head_shas if head_sha and head_sha.strip()),
+            None,
+        )
         # Provisioning prefers pr_adoption.head_ref over remote_push_branch.
         # Keep the adoption policy in lockstep with the live forge refs so a
         # renamed PR head is not overwritten back to the stale adoption value.
+        # Hosted expected_head_sha likewise reads pr_adoption.head_sha.
+        # Incomplete hosted→local fallthrough may still lack base_ref; restore
+        # it from branch_base (same fallback as hosted_pr_identity / adoption
+        # responses) so monitor handoff metadata stays complete.
         _sync_retried_adoption_live_refs(
             retried_task_policy,
             head_ref=retry_remote_push_branch,
             base_sha=retry_base_commit,
+            head_sha=retry_head_sha,
+            base_ref=source.branch_base,
         )
+    elif (
+        retained_open_hosted_pr_adoption
+        and isinstance(live_pr_head_ref, str)
+        and live_pr_head_ref.strip()
+    ):
+        # Non-preserve hosted path already refreshed pr_adoption above, but
+        # sync_feature_pr planning-scope retries still copy source.remote_push_branch.
+        # hosted_pr_identity_for_workspace prefers that column over adoption
+        # head_ref, so a renamed forge head must update the retried column too.
+        retry_remote_push_branch = live_pr_head_ref.strip()
 
     retry_resolved_profile = deepcopy(source.resolved_profile)
     retry_profile_ref = source.profile_ref
-    if preserve_existing_feature_pr:
-        retry_resolved_profile, retry_profile_ref = (
-            _drop_mismatched_trusted_profile_freeze_on_retry(
-                retried_task_policy,
-                resolved_profile=retry_resolved_profile,
-                profile_ref=retry_profile_ref,
-            )
-        )
+    # Preserve-existing and hosted planning-scope paths both may refresh
+    # ``pr_adoption.base_sha`` from the live forge tip. Drop a freeze whose
+    # ``profile_trusted_base_sha`` no longer matches so provisioning re-resolves
+    # instead of failing provenance / silently forcing auto_merge=False.
+    retry_resolved_profile, retry_profile_ref = _drop_mismatched_trusted_profile_freeze_on_retry(
+        retried_task_policy,
+        resolved_profile=retry_resolved_profile,
+        profile_ref=retry_profile_ref,
+    )
+    # Freeze drop clears the stored snapshot so provisioning re-resolves from the
+    # new trusted base. Until that completes, source reservation / old profile
+    # DinD demand is stale — capacity admission must not persist a zero-slot
+    # reservation that under-states a DinD-requiring re-resolve.
+    profile_pending_reresolve = (
+        source.resolved_profile is not None and retry_resolved_profile is None
+    )
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -1032,7 +831,16 @@ async def retry_workspace_row(
         assert retry_base_commit is not None
         # Admission snapshot only: push-time revalidation in pr_open_step abandons
         # reuse (and opens a replacement PR) if this PR merges/closes before push.
-        retried.pr_url = existing_feature_pr_url
+        # Prefer the validated adoption URL when present so a stale/spoofed
+        # Workspace.pr_url column cannot win over pr_adoption after hosted
+        # identity already keyed off the adoption block (PRRT_kwDOSJAM6s6flZ5E).
+        adoption_for_url = _sync_feature_pr_adoption(source)
+        adoption_pr_url: str | None = None
+        if adoption_for_url is not None:
+            raw_adoption_url = adoption_for_url.get("pr_url")
+            if isinstance(raw_adoption_url, str) and raw_adoption_url.strip():
+                adoption_pr_url = raw_adoption_url.strip()
+        retried.pr_url = adoption_pr_url or existing_feature_pr_url
         retried.pr_number = existing_feature_pr_number
         retried.base_commit = retry_base_commit
 
@@ -1063,7 +871,42 @@ async def retry_workspace_row(
     # no reservation cost, but DinD demand must still come from the stored
     # profile snapshots because worker capacity checks treat an existing
     # ResourceReservation as authoritative.
-    if source_reservation is not None:
+    #
+    # Retained open hosted adoptions reserve zero local CPU/memory/disk/DinD
+    # (matching initial hosted adoption): Core does not launch Compose, and
+    # the capacity broker reads this reservation before provisioning can
+    # reconcile demand. Non-zero defaults would strand hosted-only retries on
+    # a saturated local node.
+    #
+    # When hosted qualification fails (closed PR / incomplete identity), the
+    # retry falls through to local execution. The source reservation is still
+    # the hosted zero-capacity row, so DinD must be derived from the profile
+    # rather than copied — otherwise a DinD-requiring local retry can be
+    # admitted onto a node with no DinD slot (PRRT_kwDOSJAM6s6fkcBW).
+    #
+    # When a mismatched trusted freeze was cleared, skip copying the source
+    # reservation and reserve a safe DinD slot until provisioning re-resolves
+    # (same under-admission risk as the hosted→local path).
+    hosted_downgraded_to_local = (
+        pr_adoption_is_hosted(source.task_policy) and not retained_open_hosted_pr_adoption
+    )
+    if retained_open_hosted_pr_adoption:
+        retry_reservation = workspaces.ResourceReservationPlan(
+            node_id=target_node_id,
+            steady_cpu=0.0,
+            steady_memory_gb=0.0,
+            peak_cpu=0.0,
+            peak_memory_gb=0.0,
+            disk_mb=None,
+            dind_slots=0,
+            dind_mode="none",
+            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
+        )
+    elif (
+        source_reservation is not None
+        and not hosted_downgraded_to_local
+        and not profile_pending_reresolve
+    ):
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
@@ -1076,21 +919,30 @@ async def retry_workspace_row(
             phase=source_reservation.phase,
         )
     else:
-        dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
-        if dind_mode == "unknown":
-            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.requested_profile)
-        if dind_mode == "unknown":
-            dind_mode = "none"
+        if profile_pending_reresolve:
+            dind_mode = "dind"
+        else:
+            dind_mode = workspaces_create._dind_mode_from_profile_snapshot(source.resolved_profile)
+            if dind_mode == "unknown":
+                dind_mode = workspaces_create._dind_mode_from_profile_snapshot(
+                    source.requested_profile
+                )
+            if dind_mode == "unknown":
+                dind_mode = "none"
         retry_reservation = workspaces.ResourceReservationPlan(
             node_id=target_node_id,
             steady_cpu=resolved_settings.workspace_steady_cpu,
             steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
             peak_cpu=resolved_settings.workspace_peak_cpu,
             peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
-            disk_mb=None,
+            disk_mb=source_reservation.disk_mb if source_reservation is not None else None,
             dind_slots=1 if dind_mode == "dind" else 0,
             dind_mode=dind_mode,
-            phase=workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE,
+            phase=(
+                source_reservation.phase
+                if source_reservation is not None
+                else workspaces.RESOURCE_RESERVATION_PHASE_WORKSPACE
+            ),
         )
     retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     await ResourceReservationRepository(session).create(
@@ -1137,8 +989,9 @@ async def retry_workspace_row(
         "source_workspace_id": source.id,
         "new_workspace_id": retried.id,
         "attempt_number": attempt.attempt_number,
-        "provider_readiness_preflight": preflight,
     }
+    if preflight is not None:
+        event_payload["provider_readiness_preflight"] = preflight
     if planning_scope_context is not None:
         event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     if salvage_recovery_payload is not None:
@@ -1155,7 +1008,8 @@ async def retry_workspace_row(
         reason_code="RETRY_CREATED",
         payload=event_payload,
     )
-    await workspaces_create._record_provider_readiness_preflight(repo, retried, preflight)
+    if preflight is not None:
+        await workspaces_create._record_provider_readiness_preflight(repo, retried, preflight)
     await workspaces_create._record_owned_path_overlap_risk(repo, retried, overlaps)
     await operation_repo.finish(
         operation,
@@ -1178,292 +1032,4 @@ async def retry_workspace_row(
         new_workspace=retried,
         operation=operation,
         attempt_number=attempt.attempt_number,
-    )
-
-
-def _prune_and_migrate_retired_agent(
-    policy: dict[str, Any],
-    current_agent: str | None = None,
-) -> tuple[dict[str, Any], str | None]:
-    """Prune retired or unsupported fallback entries from a cloned retry policy,
-    and promote a launchable fallback if current_agent is retired.
-
-    Replacing retired slots with None placeholders preserves fallback attempt indexes.
-    If current_agent is retired/unlaunchable and a remaining approved launchable
-    fallback exists (respecting provider_recovery_state and max_fallback_attempts),
-    promotes that fallback as the new primary agent, updates agent_model, and sets
-    its slot in fallbacks to None.
-    """
-    recovery = policy.get("provider_recovery")
-    if not isinstance(recovery, Mapping):
-        return policy, current_agent
-    raw_fallbacks = recovery.get("fallbacks")
-    if not isinstance(raw_fallbacks, Sequence) or isinstance(raw_fallbacks, str):
-        return policy, current_agent
-
-    from awf.service.provider_readiness import is_launchable_agent
-
-    is_primary_launchable = True if current_agent is None else is_launchable_agent(current_agent)
-    promoted_index: int | None = None
-    target_agent = current_agent
-
-    if not is_primary_launchable:
-        from awf.service.provider_recovery import (
-            PROVIDER_RECOVERY_STATE_KEY,
-            _select_fallback_target_with_index,
-            parse_provider_recovery_policy,
-            parse_provider_recovery_state,
-        )
-
-        rec_policy = parse_provider_recovery_policy(policy)
-        rec_state = parse_provider_recovery_state(policy)
-        fallback_target, target_index = _select_fallback_target_with_index(rec_policy, rec_state)
-        if fallback_target is not None:
-            promoted_index = target_index
-            target_agent = fallback_target.agent
-            policy["agent_model"] = fallback_target.model
-
-            raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
-            state_dict = dict(raw_state) if isinstance(raw_state, Mapping) else {}
-            state_dict["fallback_attempt_number"] = target_index + 1
-            state_dict["launched_fallback_attempts"] = rec_state.launched_fallback_attempts + 1
-            state_dict["retry_attempt_number"] = 0
-            policy[PROVIDER_RECOVERY_STATE_KEY] = state_dict
-
-    pruned: list[Any] = []
-    for idx, item in enumerate(raw_fallbacks):
-        if idx == promoted_index:
-            pruned.append(None)
-        elif isinstance(item, Mapping):
-            fb_agent = item.get("agent")
-            if fb_agent is not None and is_launchable_agent(fb_agent):
-                pruned.append(item)
-            else:
-                pruned.append(None)
-        else:
-            pruned.append(None)
-
-    updated_recovery = dict(recovery)
-    updated_recovery["fallbacks"] = pruned
-    policy["provider_recovery"] = updated_recovery
-    return policy, target_agent
-
-
-def _prune_retired_fallbacks(policy: dict[str, Any]) -> dict[str, Any]:
-    """Prune retired or unsupported fallback entries from a cloned retry policy."""
-    pruned_policy, _ = _prune_and_migrate_retired_agent(policy, current_agent=None)
-    return pruned_policy
-
-
-def _retry_task_policy(
-    source: Workspace,
-    coordination_warnings: Sequence[Mapping[str, Any]],
-    *,
-    planning_scope_context: _PlanningScopeRetryContext | None,
-) -> tuple[dict[str, Any], str]:
-    """Build the task policy dict and target agent for a retried workspace."""
-    policy = task_policy_with_coordination_warnings(
-        scheduler_retry_policy_context(
-            deepcopy(source.task_policy),
-            source_workspace_id=source.id,
-            parent_failure_reason=source.failure_reason,
-        ),
-        coordination_warnings,
-    )
-    policy, target_agent = _prune_and_migrate_retired_agent(policy, current_agent=source.agent)
-    effective_agent = target_agent or source.agent
-    if (
-        planning_scope_context is not None
-        and planning_scope_context.fallback_model is not None
-        and effective_agent == source.agent
-    ):
-        # Same mutual exclusion as provider recovery: a fixed fallback must
-        # clear retained Cursor Auto mode or executor helpers keep preferring
-        # auto-smart[...] and silently ignore the approved pin.
-        from awf.service.provider_recovery import _install_fixed_recovery_model
-
-        policy = _install_fixed_recovery_model(
-            policy,
-            planning_scope_context.fallback_model["model"],
-        )
-    return policy, effective_agent
-
-
-def _planning_scope_recovery_payload(
-    context: _PlanningScopeRetryContext,
-) -> dict[str, Any]:
-    """Build the planning-scope recovery payload dict from a retry context."""
-    payload: dict[str, Any] = {
-        "source_reason_code": context.reason_code,
-        "planning_scope_evidence_ref": context.evidence_ref,
-        "recovery_strategy": context.recovery_strategy,
-        "salvage_policy": context.salvage_policy,
-    }
-    if context.salvage is not None:
-        payload["salvage"] = context.salvage
-    if context.fallback_model is not None:
-        payload["fallback_model"] = context.fallback_model
-    return payload
-
-
-def _conformance_salvage_recovery_payload(
-    *,
-    conformance_context: _ConformanceRetryContext | None,
-    salvage: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build the conformance-salvage recovery payload dict for a retry."""
-    payload: dict[str, Any] = {
-        "source_reason_code": PLAN_CONFORMANCE_UNSATISFIED,
-        "conformance_salvage": dict(salvage),
-    }
-    remaining_gaps = _compact_string_list(salvage.get("remaining_gaps"))
-    if remaining_gaps:
-        payload["remaining_gaps"] = remaining_gaps
-    if conformance_context is not None:
-        payload["conformance_evidence_ref"] = conformance_context.evidence_ref
-    elif salvage.get("conformance_evidence_ref") is not None:
-        payload["conformance_evidence_ref"] = salvage.get("conformance_evidence_ref")
-    return payload
-
-
-def _agent_timeout_salvage_recovery_payload(
-    *,
-    context: _AgentTimeoutRetryContext,
-    salvage: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build retry payload metadata for an agent-timeout salvage continuation."""
-    payload: dict[str, Any] = {
-        "source_reason_code": context.reason_code,
-        "recovery_strategy": "continue_from_timeout_salvage",
-        "conformance_salvage": dict(salvage),
-        "agent_timeout_evidence_ref": context.evidence_ref,
-    }
-    message = _optional_retry_evidence_str(context.evidence.get("message"))
-    if message is not None:
-        payload["source_failure_message"] = message
-    return payload
-
-
-async def _retry_task_for_source(
-    session: AsyncSession,
-    source: Workspace,
-    *,
-    source_attempt: TaskAttempt | None = None,
-) -> Task:
-    """Retrieve or create the task associated with a source workspace for retry."""
-    if source_attempt is None:
-        source_attempt = await TaskAttemptRepository(session).get_by_workspace_id(source.id)
-    if source_attempt is not None:
-        task = await TaskRepository(session).get(source_attempt.task_id)
-        if task is not None:
-            return task
-
-    fallback_idempotency_key = f"retry-source-workspace:{source.id}"
-    return await TaskRepository(session).create_or_get(
-        repo_url=source.repo_url,
-        base_branch=source.branch_base,
-        title=source.task_title,
-        prompt=source.task_prompt,
-        external_id=source.task_external_id,
-        idempotency_key=fallback_idempotency_key,
-        task_class=source.task_class,
-        owned_paths=list(source.owned_paths),
-    )
-
-
-def _is_plan_conformance_unsatisfied(workspace: Workspace) -> bool:
-    """Check whether the workspace's latest failure is a plan-conformance-unsatisfied reason."""
-    details = workspace_failure_details_payload(workspace)
-    if details is None:
-        return False
-    return details.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
-
-
-def _agent_timeout_retry_context(workspace: Workspace) -> Any:
-    """Build a timeout retry context from the workspace's failure details if applicable."""
-    workspaces = _workspace_service()
-    details = workspace_failure_details_payload(workspace)
-    if details is None:
-        return None
-    reason_code = details.get("reason_code")
-    if reason_code not in {AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT}:
-        return None
-    message = _optional_retry_evidence_str(details.get("message"))
-    evidence: dict[str, Any] = {
-        "reason_code": reason_code,
-        "gaps": [
-            "The previous agent run timed out before it could finish.",
-            "Continue from the recovered implementation diff and complete the original task.",
-        ],
-    }
-    if message is not None:
-        evidence["message"] = message
-    return workspaces._AgentTimeoutRetryContext(
-        reason_code=str(reason_code),
-        evidence=evidence,
-        evidence_ref={
-            "source_workspace_id": workspace.id,
-            "event_type": "workspace.state_changed",
-            "reason_code": str(reason_code),
-        },
-    )
-
-
-def _conformance_retry_context(workspace: Workspace) -> Any:
-    """Build a conformance retry context from the workspace's failure details if applicable."""
-    workspaces = _workspace_service()
-    details = workspace_failure_details_payload(workspace)
-    if details is None or details.get("reason_code") != PLAN_CONFORMANCE_UNSATISFIED:
-        return None
-    evidence = details.get("conformance")
-    if not isinstance(evidence, Mapping):
-        return None
-    return workspaces._ConformanceRetryContext(
-        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
-        evidence=evidence,
-        evidence_ref={
-            "source_workspace_id": workspace.id,
-            "event_type": "workspace.state_changed",
-            "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
-        },
-    )
-
-
-def _planning_scope_retry_context(workspace: Workspace) -> Any:
-    """Build a planning-scope retry context from the workspace's failure details if applicable."""
-    workspaces = _workspace_service()
-    details = workspace_failure_details_payload(workspace)
-    if details is None or details.get("reason_code") != AGENT_PLAN_PHASE_SCOPE_VIOLATION:
-        return None
-    evidence = details.get("planning_scope")
-    if not isinstance(evidence, Mapping):
-        return None
-    recovery_strategy_value = details.get("recovery_strategy")
-    recovery_strategy = (
-        recovery_strategy_value
-        if isinstance(recovery_strategy_value, str)
-        else "discard_and_replan"
-    )
-    salvage_policy_value = details.get("salvage_policy")
-    salvage_policy = (
-        salvage_policy_value
-        if isinstance(salvage_policy_value, str)
-        else "explicit_salvage_required"
-    )
-    fallback_model = workspaces._approved_planning_scope_fallback_model(workspace)
-    evidence_payload = dict(evidence)
-    if fallback_model is not None:
-        evidence_payload["fallback_model"] = fallback_model
-    return workspaces._PlanningScopeRetryContext(
-        reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
-        evidence=evidence_payload,
-        evidence_ref={
-            "source_workspace_id": workspace.id,
-            "event_type": "workspace.state_changed",
-            "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
-        },
-        recovery_strategy=recovery_strategy,
-        salvage_policy=salvage_policy,
-        salvage=_compact_salvage_payload(details.get("salvage")),
-        fallback_model=fallback_model,
     )

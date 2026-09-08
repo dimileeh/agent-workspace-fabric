@@ -23,6 +23,7 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
+from awf.common.github_client import RepoRef
 from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
     enter_blocked_for_protected_violation_in_session,
@@ -257,6 +258,7 @@ async def _pause_monitor_for_protected_scope_block(
     monitor_log: WorkspaceLogSink | None = None,
     source_head_sha: str | None = None,
     extra_state_markers: Mapping[str, str] | None = None,
+    repo: RepoRef | None = None,
 ) -> _GitPushResult:
     """Pause the workspace into ``blocked`` for an operator decision.
 
@@ -276,18 +278,36 @@ async def _pause_monitor_for_protected_scope_block(
     cannot clobber the new state with its stale preserved worktree commit. The
     inline-handoff arm is fenced via ``fence_unclaimed_monitor`` because its
     ``_monitor_owner_id`` is None (PRRT_kwDOSJAM6s6KKmGo).
+
+    Defence in depth for #910: a PR that merged/closed while the action ran makes
+    the whole pause moot, so the guard runs here too — even though every action
+    seam already checked — and returns the non-paused moot result instead of
+    entering ``blocked`` and posting an operator notification on a terminal PR.
+    ``repo`` is optional; when the caller does not thread one it is resolved from
+    the workspace row so the guard cannot be bypassed by omission.
     """
     del monitor_log
+    moot_result = await self._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="protected_scope_pause",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return cast(_GitPushResult, moot_result)
     violations = tuple(protected_scope_block.violations)
     preserved_head_sha = await self._rev_parse_head(worktree_path)
     block_epoch: int | None = None
     repo_url: str | None = None
     async with self._deps.session_factory() as session:
-        repo = WorkspaceRepository(session)
+        workspace_repo = WorkspaceRepository(session)
         extra_payload = {"preserved_head_sha": preserved_head_sha} if preserved_head_sha else None
         ws = await enter_blocked_for_protected_violation_in_session(
             session,
-            repo,
+            workspace_repo,
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.monitoring_pr,
             violations=violations,
@@ -428,7 +448,6 @@ async def _post_protected_block_notification(
     out-of-band pause with no live monitor context) skips the comment — the block
     event is the durable record either way.
     """
-    from awf.common.github_client import RepoRef
     from awf.runtime.monitor_prompts import ready_to_merge_comment
     from awf.runtime.pr_monitor_runner.helpers import (
         _protected_block_notification_key,

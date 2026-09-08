@@ -72,6 +72,8 @@ async def test_workflow_scope_push_failure_honors_latest_false_positive_thread_v
         ),
     )
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -144,6 +146,8 @@ async def test_workflow_scope_push_failure_preserves_false_positive_review_comme
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: FALSE POSITIVE: existing code already handles it")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[]))
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[]))
     cmd.queue_result(
         returncode=1,
@@ -230,6 +234,8 @@ async def test_workflow_scope_push_failure_requeues_captured_defer_thread_state(
     adapter = FakeAdapter()
     adapter.queue(stdout="AWF-VERDICT: DEFER: track follow-up separately")
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
+    # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload(threads=[]))
     cmd.queue_result(
         returncode=1,

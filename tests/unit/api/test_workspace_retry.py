@@ -461,3 +461,177 @@ async def test_retry_endpoint_override_records_preflight(
     assert preflight["source_workspace_id"] == original_id
     assert preflight["override_used"] is True
     assert preflight["override_reason"] == "operator verified local auth"
+
+
+async def _seed_hosted_adoption_workspace(
+    engine: AsyncEngine,
+    *,
+    status: WorkspaceStatus,
+    execution_mode: str = "hosted",
+    external_id: str = "TICKET-API-HOSTED-RETRY",
+) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/retry-api.git",
+            branch_base="development",
+            task_title="Hosted adoption retry",
+            task_prompt="Continue monitoring the adopted PR.",
+            task_external_id=external_id,
+            task_class="test_task",
+            owned_paths=["src/awf/api/hosted_retry.py"],
+            auto_merge=True,
+            initial_review_grace_period_seconds=30,
+            agent="codex",
+            profile_ref="python",
+            requested_profile={"source": "retry-api-hosted"},
+            resolved_profile={"source": "retry-api-hosted"},
+            test_commands=[],
+            task_kind="sync_feature_pr",
+            task_policy={
+                "task_kind": "sync_feature_pr",
+                "pr_adoption": {
+                    "repo_slug": "example/retry-api",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/example/retry-api/pull/42",
+                    "head_ref": "contributors/hosted-head",
+                    "base_ref": "development",
+                    "head_sha": "b" * 40,
+                    "base_sha": "a" * 40,
+                    "execution": {"mode": execution_mode},
+                },
+            },
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.branch_name = "feature-sync/hosted-api"
+        workspace.remote_push_branch = "contributors/hosted-head"
+        workspace.pr_number = 42
+        workspace.compose_project_name = None
+        workspace.compose_file_path = None
+        if status is WorkspaceStatus.failed:
+            workspace.failure_reason = "validation_failure"
+            workspace.failure_message = "hosted validation failed"
+            await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        else:
+            await repo.transition(workspace, to=status, reason_code="TEST_CANCEL")
+        await repo.add_event(
+            workspace,
+            event_type="workspace.terminal_runtime_released",
+            reason_code="TERMINAL_RUNTIME_RELEASED",
+        )
+        await session.commit()
+        return workspace.id
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", [WorkspaceStatus.failed, WorkspaceStatus.cancelled])
+async def test_retry_endpoint_admits_hosted_adoption_without_local_codex(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    api_auth_headers: dict[str, str],
+    tmp_path,
+    status: WorkspaceStatus,
+) -> None:  # type: ignore[no-untyped-def]
+    from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+
+    original_id = await _seed_hosted_adoption_workspace(
+        engine,
+        status=status,
+        external_id=f"TICKET-API-HOSTED-{status.value}",
+    )
+    monkeypatch.setattr(
+        workspace_service,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            docker_host="",
+            hosted_delegation_base_url="https://hosted.example.test",
+            hosted_delegation_bearer_token="hosted-token",
+        ),
+    )
+
+    async def _open_snapshot(_source: object, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/hosted-head",
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+        )
+
+    monkeypatch.setattr(workspace_service, "_live_pr_snapshot", _open_snapshot)
+
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        headers=api_auth_headers,
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["source_workspace_id"] == original_id
+    assert body["new_workspace_id"] != original_id
+    assert body["status"] == "requested"
+    preflight = body["provider_readiness_preflight"]
+    assert isinstance(preflight, dict)
+    assert preflight["blocks_launch"] is False
+    assert preflight["reason_code"] == "HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED"
+    assert preflight["agent"] == "codex"
+    assert preflight["provider"] == "codex"
+    assert preflight["auth_status"]
+    assert preflight["auth_source"]
+
+    detail = await client.get(
+        f"/v1/workspaces/{body['new_workspace_id']}",
+        headers=api_auth_headers,
+    )
+    assert detail.status_code == 200
+    workspace = detail.json()
+    assert workspace["task_kind"] == "sync_feature_pr"
+    assert workspace["pr_number"] == 42
+    assert workspace["task_policy"]["pr_adoption"]["execution"] == {"mode": "hosted"}
+    assert workspace["provider_readiness_preflight"]["reason_code"] == (
+        "HOSTED_PR_ADOPTION_LOCAL_PREFLIGHT_BYPASSED"
+    )
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_hosted_open_fails_closed_without_delegation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    api_auth_headers: dict[str, str],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+
+    original_id = await _seed_hosted_adoption_workspace(
+        engine,
+        status=WorkspaceStatus.failed,
+        external_id="TICKET-API-HOSTED-NO-DELEGATION",
+    )
+    monkeypatch.setattr(
+        workspace_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, host_home=str(tmp_path / "home"), docker_host=""),
+    )
+
+    async def _open_snapshot(_source: object, _pr_number: int) -> PullRequestSnapshot:
+        return PullRequestSnapshot(
+            lifecycle=PullRequestLifecycle.open,
+            head_ref="contributors/hosted-head",
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+        )
+
+    monkeypatch.setattr(workspace_service, "_live_pr_snapshot", _open_snapshot)
+
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        headers=api_auth_headers,
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "HOSTED_DELEGATION_NOT_CONFIGURED"

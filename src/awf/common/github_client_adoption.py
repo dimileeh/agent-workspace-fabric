@@ -259,6 +259,42 @@ def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
     return RepoRef(owner=parts[0], name=parts[1]), number
 
 
+def parse_forge_pull_request_url(pr_url: str, *, forge: str) -> tuple[RepoRef, int]:
+    """Parse a PR web URL for ``forge`` into ``(repo, number)``.
+
+    Dispatches on the trusted source forge so Bitbucket ``/pull-requests/<n>``
+    URLs are accepted the same way GitHub ``/pull/<n>`` URLs are. Hosted retry
+    identity must stay forge-neutral (AWF core is generic — AGENTS.md).
+    """
+    if forge == "github":
+        return parse_github_pull_request_url(pr_url)
+    if forge == "bitbucket":
+        return _parse_bitbucket_pull_request_url(pr_url)
+    raise ValueError(f"Unsupported forge for pull request URL parse: {forge!r}")
+
+
+def _parse_bitbucket_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
+    """Parse a canonical Bitbucket PR URL into ``(repo, number)``."""
+    from urllib.parse import urlsplit
+
+    from awf.common.github_client import RepoRef
+
+    parsed = urlsplit(pr_url.strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or host != "bitbucket.org":
+        raise ValueError(f"Cannot parse Bitbucket pull request URL: {pr_url!r}")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 4 or parts[2] != "pull-requests":
+        raise ValueError(f"Cannot parse Bitbucket pull request URL: {pr_url!r}")
+    try:
+        number = int(parts[3])
+    except ValueError as exc:
+        raise ValueError(f"Cannot parse Bitbucket pull request URL: {pr_url!r}") from exc
+    if number <= 0:
+        raise ValueError(f"Cannot parse Bitbucket pull request URL: {pr_url!r}")
+    return RepoRef(owner=parts[0], name=parts[1], forge="bitbucket"), number
+
+
 class BranchOpenPullRequestResolver:
     """Resolve open PRs for a branch using the GitHub CLI."""
 
