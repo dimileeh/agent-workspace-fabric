@@ -14,18 +14,16 @@ import { fallbackLlmUsage } from "@/lib/format";
 import {
   capabilitiesForMutatingControls,
   sameCapabilityNegotiation,
-  capabilityRouteToAwfPath,
   isDiagnosticAvailable,
   isWidgetAvailable,
   parseConsoleCapabilities,
   resolveCapabilityParseFailureClear,
-  widgetRoute,
 } from "@/lib/console-capabilities";
-import { parseCloudRuntimeSummary } from "@/lib/console-cloud-runtime";
-import { fleetKpisFromDashboardSummary, parseDashboardSummary } from "@/lib/console-dashboard-summary";
+import { fleetKpisFromDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import { collectOverviewPages, overviewListPath } from "@/lib/overview-list";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
+import { useConsoleFleetFeeds } from "@/hooks/use-console-fleet-feeds";
 import { useSerializedPeriodicLoad } from "@/hooks/use-serialized-periodic-load";
 import { useWorkspaceDetailLoader } from "@/hooks/use-workspace-detail-loader";
 import { useOperatorThemePreferences, useWorkspaceSelectionUrl } from "@/hooks/use-operator-theme-preferences";
@@ -72,8 +70,6 @@ ErrorBanner,
 apiGet,
 compareLogEntries,
 emptyDetail,
-fallbackResourceSaturation,
-mergeQueueLimit,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
@@ -544,6 +540,11 @@ export function ConsoleDashboard() {
     setLogListingAuthDenied(false);
     logTailAuthDeniedRef.current = false;
     setLogTailAuthDenied(false);
+    if (eventFeedAuthDeniedRef.current && !workspaceDetailAuthDeniedRef.current) {
+      setWorkspaceDetailError(null);
+    }
+    eventFeedAuthDeniedRef.current = false;
+    setEventFeedAuthDenied(false);
     selectedStreamsRef.current = [];
     setSelectedStreams([]);
     setLogEntries([]);
@@ -620,6 +621,16 @@ export function ConsoleDashboard() {
           // Close (not only omit) fullscreen when listing is withdrawn mid-view.
           setLogsFullscreen(false);
           setFullscreenWorkspaceIds([]);
+        }
+        if (plan.clearEvents) {
+          // workspace_events withdrawal leaves no later /events read that can
+          // clear this latch, so a basic-detail 200 must not keep the denial
+          // banner until the workspace or context changes.
+          if (eventFeedAuthDeniedRef.current && !workspaceDetailAuthDeniedRef.current) {
+            setWorkspaceDetailError(null);
+          }
+          eventFeedAuthDeniedRef.current = false;
+          setEventFeedAuthDenied(false);
         }
         // Unrelated fleet/capacity withdrawals bump only their own request
         // generations. Sharing this generation would make an in-flight detail
@@ -854,247 +865,40 @@ export function ConsoleDashboard() {
     loadOverview,
   ]);
 
-  const loadResourceSaturation = useCallback(async () => {
-    const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
-    const generation = ++resourceSaturationRequestGenerationRef.current;
-    const result = await apiGet<ResourceSaturationSummary>(awfPath("metrics/resources/saturation"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
-      generation !== resourceSaturationRequestGenerationRef.current
-    ) {
-      return;
-    }
-    if (!result.ok) {
-      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
-      // outage: drop last-good saturation even when capabilities still negotiate
-      // (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
-      // capabilities may still succeed and would thrash overview refill.
-      if (result.status === 401 || result.status === 403) {
-        setResourceSaturation(null);
-        setResourceError(result.message);
-        return;
-      }
-      setResourceError(result.message);
-      return;
-    }
-    setResourceError(null);
-    setResourceSaturation(fallbackResourceSaturation(result.data));
-  }, []);
-
-  const loadDashboardSummary = useCallback(async (caps?: ConsoleCapabilities | null) => {
-    const epoch = authorizedFeedEpochRef.current;
-    const generation = ++dashboardSummaryRequestGenerationRef.current;
-    const active = caps ?? capabilities;
-    const route = widgetRoute(active, "fleet_summary");
-    const path = route
-      ? capabilityRouteToAwfPath(route)
-      : awfPath("console/dashboard-summary");
-    const result = await apiGet<ConsoleDashboardSummary>(path);
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      generation !== dashboardSummaryRequestGenerationRef.current
-    ) {
-      return;
-    }
-    if (!result.ok) {
-      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
-      // outage: drop last-good counters even when capabilities still negotiate
-      // (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
-      // capabilities may still succeed and would thrash overview refill.
-      if (result.status === 401 || result.status === 403) {
-        setDashboardSummary(null);
-        setDashboardSummaryError(result.message);
-        return;
-      }
-      setDashboardSummaryError(result.message);
-      return;
-    }
-    const parsed = parseDashboardSummary(result.data, active?.backend_kind ?? null);
-    if (!parsed) {
-      setDashboardSummaryError("Dashboard summary payload malformed.");
-      return;
-    }
-    setDashboardSummaryError(null);
-    setDashboardSummary(parsed);
-  }, [capabilities]);
-
-  const loadCloudRuntime = useCallback(async (caps?: ConsoleCapabilities | null) => {
-    const epoch = authorizedFeedEpochRef.current;
-    const generation = ++cloudRuntimeRequestGenerationRef.current;
-    const active = caps ?? capabilities;
-    const route = widgetRoute(active, "cloud_runtime");
-    if (!route) {
-      return;
-    }
-    const result = await apiGet<CloudRuntimeSummary>(capabilityRouteToAwfPath(route));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      generation !== cloudRuntimeRequestGenerationRef.current
-    ) {
-      return;
-    }
-    if (!result.ok) {
-      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
-      // outage: drop last-good cloud runtime facts even when capabilities still
-      // negotiate (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
-      // capabilities may still succeed and would thrash overview refill.
-      if (result.status === 401 || result.status === 403) {
-        setCloudRuntime(null);
-        setCloudRuntimeError(result.message);
-        return;
-      }
-      setCloudRuntimeError(result.message);
-      return;
-    }
-    const parsed = parseCloudRuntimeSummary(result.data);
-    if (!parsed) {
-      setCloudRuntimeError("Cloud runtime payload malformed.");
-      return;
-    }
-    setCloudRuntimeError(null);
-    setCloudRuntime(parsed);
-  }, [capabilities]);
-
-  const loadWorkspaceSummary = useCallback(async () => {
-    const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
-    const generation = ++workspaceSummaryRequestGenerationRef.current;
-    const result = await apiGet<WorkspaceReliabilitySummary>(awfPath("metrics/workspaces/summary"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
-      generation !== workspaceSummaryRequestGenerationRef.current
-    ) {
-      return;
-    }
-    if (!result.ok) {
-      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
-      // outage: drop last-good reliability facts even when capabilities still
-      // negotiate (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
-      // capabilities may still succeed and would thrash overview refill.
-      if (result.status === 401 || result.status === 403) {
-        setWorkspaceSummary(null);
-        setWorkspaceSummaryError(result.message);
-        return;
-      }
-      setWorkspaceSummaryError(result.message);
-      return;
-    }
-    setWorkspaceSummaryError(null);
-    setWorkspaceSummary(result.data);
-  }, []);
-
-  const loadMergeQueue = useCallback(async () => {
-    const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
-    const generation = ++mergeQueueRequestGenerationRef.current;
-    const result = await apiGet<ListEnvelope<MergeQueueItem>>(
-      awfPath("merge-queue", { limit: mergeQueueLimit }),
-    );
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
-      generation !== mergeQueueRequestGenerationRef.current
-    ) {
-      return;
-    }
-    if (!result.ok) {
-      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
-      // outage: drop last-good queue rows even when capabilities still negotiate
-      // (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
-      // capabilities may still succeed and would thrash overview refill.
-      if (result.status === 401 || result.status === 403) {
-        setMergeQueue([]);
-        setMergeQueueHasMore(false);
-        setMergeQueueError(result.message);
-        setMergeQueueStatus("error");
-        return;
-      }
-      setMergeQueueError(result.message);
-      setMergeQueueStatus("error");
-      return;
-    }
-    setMergeQueueError(null);
-    setMergeQueue(result.data.items);
-    setMergeQueueHasMore(result.data.has_more);
-    setMergeQueueStatus("success");
-  }, []);
-
-  const loadFailureSummary = useCallback(async () => {
-    const epoch = authorizedFeedEpochRef.current;
-    const gatedGeneration = gatedDetailFeedGenerationRef.current;
-    const generation = ++failureSummaryRequestGenerationRef.current;
-    const result = await apiGet<FailureSummaryResponse>(awfPath("metrics/failures/summary"));
-    if (
-      epoch !== authorizedFeedEpochRef.current ||
-      gatedGeneration !== gatedDetailFeedGenerationRef.current ||
-      generation !== failureSummaryRequestGenerationRef.current
-    ) {
-      return;
-    }
-    if (!result.ok) {
-      // Feed-level 401/403 is auth revocation for this snapshot, not a transient
-      // outage: drop last-good failure examples even when capabilities still
-      // negotiate (CONSOLE_BACKEND_CONTRACT). Do not call clearAuthorizedConsoleFeeds —
-      // capabilities may still succeed and would thrash overview refill.
-      if (result.status === 401 || result.status === 403) {
-        setFailureSummary(null);
-        setFailureSummaryStatus("error");
-        setFailureSummaryError(result.message);
-        return;
-      }
-      // Advertised-feed 404/503 are refresh outages, not capability withdrawal.
-      // Withdrawal clears via clearNewlyUnsupportedCapabilityFeeds and bumps
-      // generation so this response cannot restore withdrawn data. Keep the last
-      // snapshot and record the error (CONSOLE_BACKEND_CONTRACT).
-      setFailureSummaryStatus("error");
-      setFailureSummaryError(result.message);
-      return;
-    }
-    setFailureSummary(result.data);
-    setFailureSummaryStatus("success");
-    setFailureSummaryError(null);
-  }, []);
-
-  const reloadAvailableFeeds = useCallback(
-    async (caps: ConsoleCapabilities | null) => {
-      if (!caps) {
-        return;
-      }
-      const loads: Promise<void>[] = [];
-      if (isWidgetAvailable(caps, "fleet_summary")) {
-        loads.push(loadDashboardSummary(caps));
-      }
-      if (isWidgetAvailable(caps, "resource_capacity")) {
-        loads.push(loadResourceSaturation());
-      }
-      if (isWidgetAvailable(caps, "cloud_runtime")) {
-        loads.push(loadCloudRuntime(caps));
-      }
-      if (isDiagnosticAvailable(caps, "reliability")) {
-        loads.push(loadWorkspaceSummary());
-      }
-      if (isDiagnosticAvailable(caps, "merge_queue")) {
-        loads.push(loadMergeQueue());
-      }
-      if (isDiagnosticAvailable(caps, "failures")) {
-        loads.push(loadFailureSummary());
-      }
-      if (loads.length > 0) {
-        await Promise.all(loads);
-      }
-    },
-    [
-      loadCloudRuntime,
-      loadDashboardSummary,
-      loadFailureSummary,
-      loadMergeQueue,
-      loadResourceSaturation,
-      loadWorkspaceSummary,
-    ],
-  );
+  const {
+    loadResourceSaturation,
+    loadDashboardSummary,
+    loadCloudRuntime,
+    loadWorkspaceSummary,
+    loadMergeQueue,
+    loadFailureSummary,
+    reloadAvailableFeeds,
+  } = useConsoleFleetFeeds({
+    capabilities,
+    authorizedFeedEpochRef,
+    gatedDetailFeedGenerationRef,
+    dashboardSummaryRequestGenerationRef,
+    cloudRuntimeRequestGenerationRef,
+    mergeQueueRequestGenerationRef,
+    resourceSaturationRequestGenerationRef,
+    workspaceSummaryRequestGenerationRef,
+    failureSummaryRequestGenerationRef,
+    setResourceSaturation,
+    setResourceError,
+    setDashboardSummary,
+    setDashboardSummaryError,
+    setCloudRuntime,
+    setCloudRuntimeError,
+    setWorkspaceSummary,
+    setWorkspaceSummaryError,
+    setMergeQueue,
+    setMergeQueueHasMore,
+    setMergeQueueStatus,
+    setMergeQueueError,
+    setFailureSummary,
+    setFailureSummaryStatus,
+    setFailureSummaryError,
+  });
 
   const { loadWorkspace } = useWorkspaceDetailLoader({
     selectedId,
