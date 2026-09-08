@@ -2440,6 +2440,39 @@ test("fullscreen listing refresh retries denied tails when metadata is unchanged
   );
 });
 
+test("fullscreen tail outage compares recovery against the failed stream", () => {
+  // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gNmx0: a newer
+  // success for stream A advances the global applied generation. An older
+  // network/5xx for stream B must still warn unless B itself has a newer
+  // applied success — deselecting B, completing an A-only wave, then
+  // reselecting B while its new read hangs otherwise leaves B's snapshot
+  // visible with no outage warning.
+  const logs = dashboardSource.logs;
+  const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
+  assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
+  const loadEnd = logs.indexOf("}, [allowLogs, selectedStreams, streams, workspace.workspace_id]);", loadIdx);
+  assert.ok(loadEnd > loadIdx, "Expected loadSelectedTails callback end");
+  const body = logs.slice(loadIdx, loadEnd);
+  const failureStart = body.indexOf("const applyTailRefreshFailure");
+  assert.ok(failureStart > 0, "Expected applyTailRefreshFailure");
+  const failureEnd = body.indexOf("const readSelectedTail", failureStart);
+  assert.ok(failureEnd > failureStart, "Expected applyTailRefreshFailure to end before readSelectedTail");
+  const failureBody = body.slice(failureStart, failureEnd);
+  const perStreamRecoveries = failureBody.match(
+    /generation < \(appliedTailSuccessGenerationRef\.current\[failure\.streamId\] \?\? 0\)/g,
+  );
+  assert.equal(
+    perStreamRecoveries?.length,
+    2,
+    "Expected the immediate outage guard and its queued updater to compare this stream's applied success",
+  );
+  assert.doesNotMatch(
+    failureBody,
+    /generation < appliedTailGenerationRef\.current/,
+    "Expected a sibling tail success not to discard another stream's network/5xx outage",
+  );
+});
+
 test("fullscreen listing refresh retries network/5xx tail errors when metadata is unchanged", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gIJVJ: a network/5xx
   // tail read does not enter the 401/403 denial set, and a static or closed

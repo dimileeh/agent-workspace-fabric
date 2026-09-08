@@ -445,8 +445,9 @@ export function WorkspaceLogColumn({
   const appliedTailGenerationRef = useRef(0);
   // Per-stream generation of that applied success. Overlapping waves can
   // apply a newer 200 for stream A while B fails transiently; only a newer
-  // success for the denied stream may suppress its 401/403. A sibling
-  // success must not leave B's cache visible or /stream open.
+  // success for that stream may suppress its 401/403 or network/5xx warning.
+  // A sibling success must not leave B's cache visible, drop B's outage, or
+  // keep /stream open.
   const appliedTailSuccessGenerationRef = useRef<Record<string, number>>({});
   // Highest tail generation covered by an applied 401/403. An older
   // overlapping 200 (started before that denial) must not restore cleared
@@ -583,9 +584,11 @@ export function WorkspaceLogColumn({
       // only after Promise.all never runs while a sibling tail hangs, and
       // apiGet has no timeout, so the column would keep the last snapshot
       // with no stale/error warning. A newer reload merely starting is not
-      // recovery — discard this warning only when a newer success already
-      // owns the snapshot, a newer failure already owns this stream, or
-      // authorization/listing denial has cleared the column.
+      // recovery — discard this warning only when this stream itself has a
+      // strictly newer successful snapshot, a newer failure already owns this
+      // stream, or authorization/listing denial has cleared the column. A
+      // sibling success advances the global applied generation and must not
+      // drop B's outage while B's own read is still hanging.
       if (isFullscreenTailAuthFailure(failure.status)) {
         return;
       }
@@ -595,7 +598,7 @@ export function WorkspaceLogColumn({
         tailAuthDeniedRef.current ||
         streamAuthDeniedRef.current ||
         sawAuthDenial ||
-        generation < appliedTailGenerationRef.current ||
+        generation < (appliedTailSuccessGenerationRef.current[failure.streamId] ?? 0) ||
         generation <= revokedTailGenerationRef.current
       ) {
         return;
@@ -613,7 +616,7 @@ export function WorkspaceLogColumn({
           listingDeniedRef.current ||
           tailAuthDeniedRef.current ||
           streamAuthDeniedRef.current ||
-          generation < appliedTailGenerationRef.current ||
+          generation < (appliedTailSuccessGenerationRef.current[failure.streamId] ?? 0) ||
           generation <= revokedTailGenerationRef.current ||
           appliedTailFailureGenerationRef.current[failure.streamId] !== generation
         ) {

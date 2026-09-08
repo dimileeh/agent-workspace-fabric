@@ -5644,6 +5644,171 @@ test("fullscreen logs preserve listing outage across a successful tail", async (
   await expect(output).toContainText(tailedAfterOutage);
 });
 
+// Regression for PR #933 review thread PRRT_kwDOSJAM6s6gNmx0: a newer success
+// for stream A advances the global applied tail generation. An older
+// network/5xx for stream B must still warn after the operator deselects B,
+// an A-only wave completes, and B is reselected while its new read hangs.
+for (const outageStatus of [0, 503] as const) {
+test(`fullscreen logs keep a stream outage after a sibling tail success (${outageStatus === 0 ? "network" : outageStatus})`, async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let quietPhase: "ok" | "hold-fail" | "hang" = "ok";
+  let activePhase: "ok" | "advance" = "ok";
+  const heldQuietFailures: Array<() => void> = [];
+  const hangingReselectedQuiet: Array<() => void> = [];
+  const workspaceId = "ws_fs_tail_outage_sibling_success";
+  const retainedQuiet = "retained-quiet-tail-during-sibling-success";
+  const retainedActive = "retained-active-tail-before-a-only-wave";
+  const advancedActive = "active-tail-after-quiet-deselected";
+  const outageMessage = "quiet tail outage after sibling success";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/health") {
+      await fulfillJson(route, { status: "ok" });
+      return;
+    }
+    if (path === "/api/awf/console/capabilities") {
+      await fulfillJson(route, localCapabilities());
+      return;
+    }
+    if (path === "/api/awf/console/dashboard-summary") {
+      await fulfillJson(route, localDashboardSummary());
+      return;
+    }
+    if (path === "/api/awf/workspaces/overview") {
+      await fulfillJson(route, listEnvelope([workspaceOverviewFor(workspaceId)]));
+      return;
+    }
+    if (path === "/api/awf/metrics/resources/saturation") {
+      await fulfillJson(route, resourceSaturation());
+      return;
+    }
+    if (path === "/api/awf/metrics/workspaces/summary") {
+      await fulfillJson(route, workspaceReliability());
+      return;
+    }
+    if (path === "/api/awf/merge-queue") {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === "/api/awf/metrics/failures/summary") {
+      await fulfillJson(route, { total_failures: 0, window_hours: 24, taxonomy: [], latest_examples: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/events`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/operations`) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      await fulfillJson(route, workspaceOverviewFor(workspaceId));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs`) {
+      await fulfillJson(route, listEnvelope([
+        logStream("quiet.stdout", 2_400, 120, quietOpenedAt),
+        logStream("active.stdout", 2_880, 120, activeOpenedAt),
+      ]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/quiet.stdout`) {
+      if (quietPhase === "hold-fail") {
+        await new Promise<void>((resolve) => {
+          heldQuietFailures.push(resolve);
+        });
+        if (outageStatus === 0) {
+          await route.abort("failed");
+          return;
+        }
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: outageMessage } },
+          outageStatus,
+        );
+        return;
+      }
+      if (quietPhase === "hang") {
+        await new Promise<void>((resolve) => {
+          hangingReselectedQuiet.push(resolve);
+        });
+        await fulfillJson(route, logRead("quiet.stdout", retainedQuiet));
+        return;
+      }
+      await fulfillJson(route, logRead("quiet.stdout", retainedQuiet));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/logs/active.stdout`) {
+      await fulfillJson(
+        route,
+        logRead("active.stdout", activePhase === "advance" ? advancedActive : retainedActive),
+      );
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+      });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(retainedQuiet);
+  await expect(output).toContainText(retainedActive);
+
+  quietPhase = "hold-fail";
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect.poll(() => heldQuietFailures.length, { timeout: 12_000 }).toBeGreaterThan(0);
+
+  activePhase = "advance";
+  await modal.getByRole("checkbox", { name: "quiet.stdout" }).uncheck();
+  await expect(output).toContainText(advancedActive, { timeout: 12_000 });
+  await expect(output).not.toContainText(retainedQuiet);
+
+  quietPhase = "hang";
+  await modal.getByRole("checkbox", { name: "quiet.stdout" }).check();
+  await expect(output).toContainText(retainedQuiet, { timeout: 12_000 });
+  await expect.poll(() => hangingReselectedQuiet.length, { timeout: 12_000 }).toBeGreaterThan(0);
+  await expect(modal.getByRole("alert")).toHaveCount(0);
+  await expect(output).toContainText(advancedActive);
+
+  heldQuietFailures.shift()?.();
+  const refreshWarning = modal.getByRole("alert");
+  await expect(refreshWarning).toContainText(outageStatus === 0 ? /unable to load log stream/i : outageMessage, {
+    timeout: 12_000,
+  });
+  await expect(output).toContainText(retainedQuiet);
+  await expect(output).toContainText(advancedActive);
+  await expect(output).not.toContainText("Unable to load log stream");
+  await expect(modal.locator("[data-awf-stale='true']")).toBeVisible();
+  await expect(modal.getByTitle("Showing the last snapshot — live data may be stale")).toBeVisible();
+
+  while (hangingReselectedQuiet.length > 0) {
+    hangingReselectedQuiet.shift()?.();
+  }
+});
+}
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();
