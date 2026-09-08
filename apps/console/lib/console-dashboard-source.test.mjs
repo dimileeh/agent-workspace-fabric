@@ -2471,6 +2471,21 @@ test("fullscreen tail outage compares recovery against the failed stream", () =>
     /generation < appliedTailGenerationRef\.current/,
     "Expected a sibling tail success not to discard another stream's network/5xx outage",
   );
+  const supersededStart = body.indexOf("generation !== tailRequestGenerationRef.current ||");
+  assert.ok(supersededStart > failureEnd, "Expected a superseded tail-wave gate after the per-read failure handler");
+  const supersededEnd = body.indexOf("const successes = results.filter", supersededStart);
+  assert.ok(supersededEnd > supersededStart, "Expected the superseded tail-wave gate to end before success application");
+  const supersededBody = body.slice(supersededStart, supersededEnd);
+  assert.match(
+    supersededBody,
+    /generation < appliedTailGenerationRef\.current/,
+    "Expected a sibling success to still withhold this wave's 200s",
+  );
+  assert.match(
+    supersededBody,
+    /if \(!result\.ok\) \{\s*applyTailRefreshFailure\(result\);\s*\}/,
+    "Expected a superseded tail completion to record unrecovered network/5xx before returning",
+  );
 });
 
 test("fullscreen listing refresh retries network/5xx tail errors when metadata is unchanged", () => {

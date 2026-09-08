@@ -665,12 +665,23 @@ export function WorkspaceLogColumn({
     }
     if (
       epoch !== columnEpochRef.current ||
-      generation !== tailRequestGenerationRef.current ||
       generation <= revokedTailGenerationRef.current ||
-      generation < appliedTailGenerationRef.current ||
       listingDeniedRef.current ||
       streamAuthDeniedRef.current
     ) {
+      return;
+    }
+    if (
+      generation !== tailRequestGenerationRef.current ||
+      generation < appliedTailGenerationRef.current
+    ) {
+      // Sibling success advanced the global watermark. Do not apply this
+      // wave's 200s; still record network/5xx for streams that have not recovered.
+      for (const result of results) {
+        if (!result.ok) {
+          applyTailRefreshFailure(result);
+        }
+      }
       return;
     }
     // Transient network/5xx (and other non-auth) failures: keep the last
