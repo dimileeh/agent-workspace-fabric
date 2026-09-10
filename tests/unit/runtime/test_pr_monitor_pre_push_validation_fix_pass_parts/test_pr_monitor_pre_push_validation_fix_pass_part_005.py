@@ -219,7 +219,7 @@ async def test_pre_push_validation_fix_pass_returns_post_agent_mirror_repair_fai
 
 @pytest.mark.unit
 @pytest.mark.parametrize("timeout_reason_code", ("AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"))
-async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_does_not_roll_back(
+async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_commits_preserved_work(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -230,8 +230,9 @@ async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_does_not_rol
     import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
 
     fix_start_head = "2" * 40
-    workspace_id, runner, cmd, _adapter = await _make_fix_pass_runner(factory, tmp_path)
-    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    workspace_id, runner, _cmd, _adapter = await _make_fix_pass_runner(factory, tmp_path)
+    committed_head = "3" * 40
+    rev_parse_heads = [fix_start_head, committed_head]
     cleanup_error = ComposeExecCleanupError(
         invocation_id="awf_timeout_cleanup",
         source="agent",
@@ -239,17 +240,29 @@ async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_does_not_rol
         message="tagged process still running",
     )
     cleanup_error.agent_reason_code = timeout_reason_code
-    repair_calls = 0
     rollback_calls: list[str] = []
+    commit_calls: list[dict[str, object]] = []
+    cleanup_calls: list[str] = []
 
     async def _run_agent_with_recovery(**kwargs: object) -> None:
         assert kwargs["timeout_rerun_requires_preservation"] is True
         raise cleanup_error
 
-    async def _repair_mirror_hooks(**_kwargs: object) -> str | None:
-        nonlocal repair_calls
-        repair_calls += 1
-        return _MIRROR_HOOKS_PATH_POISONED_REASON if repair_calls == 2 else None
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return rev_parse_heads.pop(0)
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    async def _commit_dirty_worktree(**kwargs: object) -> bool:
+        commit_calls.append(dict(kwargs))
+        return True
+
+    async def _head_descends_from(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def _cleanup_committed_fix_pass(*_args: object, **kwargs: object) -> None:
+        cleanup_calls.append(str(kwargs["committed_head"]))
 
     async def _rollback_failed_fix_pass(*_args: object, **kwargs: object) -> None:
         rollback_calls.append(str(kwargs["reason"]))
@@ -259,14 +272,20 @@ async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_does_not_rol
         "_run_monitor_agent_with_service_recovery",
         _run_agent_with_recovery,
     )
-    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _worktree_path: tmp_path)
-    monkeypatch.setattr(
-        fix_pass, "_repair_pre_push_validation_fix_mirror_hooks", _repair_mirror_hooks
-    )
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _worktree_path: None)
+    monkeypatch.setattr(fix_pass, "verify_head_object_exists", _verify_head_object_exists)
     monkeypatch.setattr(
         pre_push_validation,
         "_rollback_failed_pre_push_validation_fix_pass",
         _rollback_failed_fix_pass,
+    )
+    monkeypatch.setattr(pre_push_validation, "_head_descends_from", _head_descends_from)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_cleanup_committed_pre_push_validation_fix_pass",
+        _cleanup_committed_fix_pass,
     )
 
     committed, failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
@@ -287,8 +306,11 @@ async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_does_not_rol
         validation_commands=("pytest -q",),
     )
 
-    assert (committed, failure_reason) == (False, _MIRROR_HOOKS_PATH_POISONED_REASON)
+    assert (committed, failure_reason) == (True, None)
     assert rollback_calls == []
+    assert len(commit_calls) == 1
+    assert commit_calls[0]["operation_start_head"] == fix_start_head
+    assert cleanup_calls == [committed_head]
 
 
 @pytest.mark.unit
