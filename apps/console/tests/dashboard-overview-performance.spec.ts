@@ -991,6 +991,30 @@ test("a deep link resolves an older workspace without mounting the intervening f
   expect(batchRequests).toEqual([["ws_perf_1301"]]);
 });
 
+test("deep link preserves overview pagination after refresh", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  });
+
+  await page.goto("/?workspaceId=ws_perf_1301");
+  await expect(page.getByTestId("workspace-card-ws_perf_1301")).toBeVisible();
+
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
+
+  await expect(page.getByText("1–100 of 101 loaded", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load more workspaces" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_1301/);
+
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => overviewRequests).toContain("100");
+  await expect(page.getByText(/of 201 loaded$/)).toBeVisible();
+});
+
 test("repository filtering drops a selected off-page workspace excluded by the new query", async ({
   page,
 }) => {

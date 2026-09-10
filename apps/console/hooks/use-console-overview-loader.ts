@@ -197,6 +197,8 @@ export function useConsoleOverviewLoader({
     }
     const capturedQuery = overviewQueryRef.current;
     const capturedPagination = overviewPaginationRef.current;
+    const replaceEmptyOverviewWithSelection =
+      capturedPagination === null && overviewItemsRef.current.length === 0;
     if (
       selectedLookupId &&
       overviewItemsRef.current.some((item) => item.workspace_id === selectedLookupId)
@@ -732,7 +734,10 @@ export function useConsoleOverviewLoader({
       ) {
         return;
       }
-      await fetchSelectedOverview(currentSelectedId, capturedPagination === null);
+      // An initial deep link should still avoid mounting the intervening fleet.
+      // Once its selected row has been installed, however, a later first-page
+      // refresh must append that row without erasing the newly installed cursor.
+      await fetchSelectedOverview(currentSelectedId, replaceEmptyOverviewWithSelection);
     } finally {
       // A superseded load must not clear the latch while a newer filter or
       // refresh load is still paging; periodic polls skip while this stays true.
