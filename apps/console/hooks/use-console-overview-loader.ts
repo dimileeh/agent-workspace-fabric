@@ -73,6 +73,7 @@ type UseConsoleOverviewLoaderArgs = {
   overviewItemsRef: Ref<WorkspaceOverview[]>;
   overviewPaginationRef: Ref<OverviewPagination | null>;
   overviewSelectionLookupRef: Ref<{ query: unknown; workspaceId: string } | null>;
+  overviewIsolatedSelectionRef: Ref<{ query: unknown; workspaceId: string } | null>;
   gatedDetailFeedGenerationRef: Ref<number>;
   gatedDetailDroppedFeedsRef: Ref<GatedDetailDropStamp[]>;
   workspaceDetailAuthDeniedRef: Ref<boolean>;
@@ -136,6 +137,7 @@ export function useConsoleOverviewLoader({
   overviewItemsRef,
   overviewPaginationRef,
   overviewSelectionLookupRef,
+  overviewIsolatedSelectionRef,
   gatedDetailFeedGenerationRef,
   gatedDetailDroppedFeedsRef,
   workspaceDetailAuthDeniedRef,
@@ -189,6 +191,7 @@ export function useConsoleOverviewLoader({
       overviewItemsRef.current = [];
       overviewPaginationRef.current = null;
       overviewSelectionLookupRef.current = null;
+      overviewIsolatedSelectionRef.current = null;
       setOverview([]);
       setOverviewHasMore(false);
       setOverviewHistoryComplete(false);
@@ -197,8 +200,13 @@ export function useConsoleOverviewLoader({
     }
     const capturedQuery = overviewQueryRef.current;
     const capturedPagination = overviewPaginationRef.current;
+    const capturedIsolatedSelection = overviewIsolatedSelectionRef.current;
     const replaceEmptyOverviewWithSelection =
       capturedPagination === null && overviewItemsRef.current.length === 0;
+    const shouldIsolateSelection = (workspaceId: string) =>
+      replaceEmptyOverviewWithSelection ||
+      (capturedIsolatedSelection?.query === capturedQuery &&
+        capturedIsolatedSelection.workspaceId === workspaceId);
     if (
       selectedLookupId &&
       overviewItemsRef.current.some((item) => item.workspace_id === selectedLookupId)
@@ -287,6 +295,7 @@ export function useConsoleOverviewLoader({
         overviewItemsRef.current = [];
         overviewPaginationRef.current = null;
         overviewSelectionLookupRef.current = null;
+        overviewIsolatedSelectionRef.current = null;
         setOverviewError(message);
         setOverview([]);
         setOverviewHasMore(false);
@@ -437,6 +446,9 @@ export function useConsoleOverviewLoader({
         workspaceId: string,
         replaceCurrentOverview = false,
       ) => {
+        if (replaceCurrentOverview) {
+          overviewIsolatedSelectionRef.current = { query: capturedQuery, workspaceId };
+        }
         const result = await apiPostWithDeadline<OverviewBatchResponse>(
           awfPath("workspaces/overview/batch"), { workspace_ids: [workspaceId] },
         );
@@ -462,6 +474,13 @@ export function useConsoleOverviewLoader({
             overviewSelectionLookupRef.current = null;
           }
           return;
+        }
+        const isolatedSelection = overviewIsolatedSelectionRef.current;
+        if (
+          isolatedSelection?.query === capturedQuery &&
+          isolatedSelection.workspaceId === workspaceId
+        ) {
+          overviewIsolatedSelectionRef.current = null;
         }
         overviewRetainedRefreshAbortControllerRef.current?.abort();
         overviewRetainedRefreshAbortControllerRef.current = null;
@@ -699,7 +718,10 @@ export function useConsoleOverviewLoader({
               currentSelectedId &&
               !overviewItemsRef.current.some((item) => item.workspace_id === currentSelectedId)
             ) {
-              await fetchSelectedOverview(currentSelectedId);
+              await fetchSelectedOverview(
+                currentSelectedId,
+                shouldIsolateSelection(currentSelectedId),
+              );
             }
           } catch (error) {
             if (!retainedRefreshController.signal.aborted) {
@@ -737,7 +759,7 @@ export function useConsoleOverviewLoader({
       // An initial deep link should still avoid mounting the intervening fleet.
       // Once its selected row has been installed, however, a later first-page
       // refresh must append that row without erasing the newly installed cursor.
-      await fetchSelectedOverview(currentSelectedId, replaceEmptyOverviewWithSelection);
+      await fetchSelectedOverview(currentSelectedId, shouldIsolateSelection(currentSelectedId));
     } finally {
       // A superseded load must not clear the latch while a newer filter or
       // refresh load is still paging; periodic polls skip while this stays true.
@@ -763,6 +785,7 @@ export function useConsoleOverviewLoader({
     overviewItemsRef,
     overviewPaginationRef,
     overviewSelectionLookupRef,
+    overviewIsolatedSelectionRef,
     gatedDetailFeedGenerationRef,
     gatedDetailDroppedFeedsRef,
     workspaceDetailAuthDeniedRef,

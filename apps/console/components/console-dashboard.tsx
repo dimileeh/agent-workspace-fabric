@@ -228,6 +228,9 @@ export function ConsoleDashboard() {
   const overviewItemsRef = useRef<WorkspaceOverview[]>([]);
   const overviewPaginationRef = useRef<OverviewPagination | null>(null);
   const overviewSelectionLookupRef = useRef<{ query: unknown; workspaceId: string } | null>(null);
+  // Keep initial deep-link isolation independent from pagination while its
+  // selected-row lookup retries after a transient failure.
+  const overviewIsolatedSelectionRef = useRef<{ query: unknown; workspaceId: string } | null>(null);
   // Summary poll generation: older success must not replace newer state.
   // A completed 401/403 or network/5xx stays authoritative unless a newer
   // success has already been applied — a newer request merely starting is not
@@ -307,6 +310,7 @@ export function ConsoleDashboard() {
     overviewItemsRef,
     overviewPaginationRef,
     overviewSelectionLookupRef,
+    overviewIsolatedSelectionRef,
     gatedDetailFeedGenerationRef,
     gatedDetailDroppedFeedsRef,
     workspaceDetailAuthDeniedRef,
@@ -383,6 +387,7 @@ export function ConsoleDashboard() {
     overviewItemsRef.current = [];
     overviewPaginationRef.current = null;
     overviewSelectionLookupRef.current = null;
+    overviewIsolatedSelectionRef.current = null;
     overviewRetainedRefreshAbortControllerRef.current?.abort();
     overviewRetainedRefreshAbortControllerRef.current = null;
     setOverview([]);

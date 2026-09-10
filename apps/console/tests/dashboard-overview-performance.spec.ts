@@ -991,6 +991,33 @@ test("a deep link resolves an older workspace without mounting the intervening f
   expect(batchRequests).toEqual([["ws_perf_1301"]]);
 });
 
+test("deep link remains isolated after a transient selected-row lookup failure", async ({
+  page,
+}) => {
+  const batchRequests: string[][] = [];
+  let failNextBatch = true;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+    shouldFailBatch: () => {
+      if (!failNextBatch) {
+        return false;
+      }
+      failNextBatch = false;
+      return true;
+    },
+  });
+
+  await page.goto("/?workspaceId=ws_perf_1301");
+  await expect
+    .poll(() => batchRequests.length, { timeout: 18_000 })
+    .toBeGreaterThan(1);
+  await expect(page.getByTestId("workspace-card-ws_perf_1301")).toBeVisible();
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_1301/);
+});
+
 test("deep link preserves overview pagination after refresh", async ({ page }) => {
   const overviewRequests: Array<string | null> = [];
   await mockAwfConsoleApi(page);
