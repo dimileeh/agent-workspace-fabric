@@ -295,7 +295,7 @@ async def _resolve_unpublished_comment_repair_disposition(
        → park (never reset someone else's work);
     2. the commit-time item chain covers the range exactly → preserve and resume;
     3. an operation record owns the range → reset (unchanged);
-    4. legacy state whose commit subjects name review items → preserve and resume;
+    4. legacy state whose newest commit subject names a review item → preserve and resume;
     5. otherwise → park.
 
     Preserving is only offered when the fetched head still equals the batch base. On
@@ -418,6 +418,8 @@ async def _resolve_unpublished_comment_repair_disposition(
     if not preserve_allowed:
         return await _park("stale_snapshot_advance")
     entries = await _commit_log_entries()
-    if entries and any(_is_review_item_commit_subject(subject) for _sha, subject in entries):
+    # ``git log`` is newest-first. An older repair marker cannot attribute commits
+    # added above it; preserving here would push that unknown tip with the batch.
+    if entries and _is_review_item_commit_subject(entries[0][1]):
         return await _preserve("legacy_review_item_commit_subjects")
     return await _park("no_comment_repair_provenance")

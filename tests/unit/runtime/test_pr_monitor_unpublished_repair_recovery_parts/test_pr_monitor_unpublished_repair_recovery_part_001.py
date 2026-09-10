@@ -242,6 +242,44 @@ async def test_legacy_review_item_subjects_resume_the_batch(
 
 
 @pytest.mark.unit
+async def test_legacy_review_item_subject_below_unknown_tip_parks_the_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "ws_legacy_unknown_tip"
+    _worktree(tmp_path, workspace_id)
+    commands = _RecoveryCommandRunner(
+        remote_head=_REMOTE_HEAD,
+        local_head=_LOCAL_HEAD,
+        # ``git log`` is newest-first: the unrelated commit was added after the
+        # valid legacy repair marker and must not ride into a resumed push.
+        log_stdout=(
+            "aa194c9 chore: unrelated local work\n"
+            "3195fc8 fix: address PR review thread PRRT_kwDOSJAM6s6fjOze\n"
+        ),
+    )
+    runner = _runner(tmp_path, commands)
+    _patch_operation_provenance(monkeypatch, comment_repair=False, conflicting=False)
+
+    restored_head, result = await remote_repair_unpublished._abandon_unpublished_comment_repairs(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=tmp_path / workspace_id,
+        remote_branch="fix/review",
+        expected_remote_head=_REMOTE_HEAD,
+        local_head=_LOCAL_HEAD,
+        state=MonitorState(),
+        current_operation_id="op_comment_repair",
+    )
+
+    assert restored_head == _LOCAL_HEAD
+    assert result is not None
+    assert result.parked_needs_human is True
+    assert result.details["disposition"] == "no_comment_repair_provenance"
+    assert all("reset" not in call for call in commands.calls)
+
+
+@pytest.mark.unit
 async def test_unknown_local_commits_park_for_a_human_without_failing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
