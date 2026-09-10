@@ -26,7 +26,9 @@ Design notes:
   the branch has no loose ref file to land in either, so the worktree's *own*
   ``reftable/tables.list`` — where the refs and reflogs belonging to this
   worktree alone, HEAD's among them, are rewritten by every ref transaction it
-  makes — is watched too. So is ``FETCH_HEAD``,
+  makes — is watched too. The git dir and its ``commondir`` are resolved and
+  pinned by the bounded pre-agent prime scan; later scans never accept a
+  replacement pointer or symlink target selected by the agent. So is ``FETCH_HEAD``,
   the one path in the worktree's own Git state a quiet ``git fetch`` is
   guaranteed to move. A linked worktree's git dir holds nothing *but* this
   worktree's state, so it is **walked whole** like a second tree root rather
@@ -91,14 +93,18 @@ Design notes:
   error would abort a run that had not started instead of starting it without a
   baseline. Priming therefore has its own cap and fails open on any error. A
   truncated — or capped, or failed — priming walk leaves nothing to compare
-  against, and only then is the first probe clock-based: it asks whether
+  against. Whenever a safe follow-up scan is possible, the first probe is then
+  clock-based: it asks whether
   anything is newer than a seed taken when the probe was built, with a small
   tolerance for that coarse-clock lag. A clock is blind to a change that moves
   no mtime, so that probe can answer "activity" or "could not tell" — never
   "idle". Answering idleness there would resurrect the very ``chmod`` kill
   priming exists to prevent, in the one window where priming failed. It costs at
   most one idle window per run: the complete scan it just took is the baseline
-  every later probe compares fingerprints against.
+  every later probe compares fingerprints against. If priming failed before it
+  could pin external Git roots, later scans resolve nothing agent-controlled:
+  an absent or real-directory ``.git`` remains covered by the worktree walk,
+  while a pointer or symlink fails open for the rest of the run.
 * The walk is bounded by an entry budget, and running out fails **open**: the
   probe reports ``None`` ("could not tell"), which the watchdog counts as
   activity. A truncated walk has no opinion about liveness, and any worktree
@@ -437,6 +443,13 @@ class _GitPaths(NamedTuple):
     walk_roots: tuple[Path, ...]
 
 
+class _GitLayout(NamedTuple):
+    """External Git roots trusted because priming resolved them pre-agent."""
+
+    git_dir: Path
+    common_dir: Path
+
+
 class WorktreeActivityProbe:
     """Report whether anything under a worktree changed since the last probe."""
 
@@ -454,6 +467,14 @@ class WorktreeActivityProbe:
         # One live scan thread per worktree: an abandoned scan cannot be
         # reclaimed, so probing again while it runs would leak another.
         self._scan_gate = _ScanGate()
+        # External Git roots are agent-writable inputs once execution starts.
+        # Priming pins their pre-agent values; the lock prevents a priming
+        # thread abandoned during resolution from publishing an agent-modified
+        # target after the timeout has already let execution begin.
+        self._git_layout_lock = threading.Lock()
+        self._git_layout: _GitLayout | None = None
+        self._git_layout_pinned = False
+        self._git_layout_sealed = False
         # Wall clock, because ``st_mtime`` is wall clock, and only ever read by
         # a first probe that priming left without a baseline. Never compared
         # against the event loop's monotonic clock — the probe only returns a
@@ -481,13 +502,15 @@ class WorktreeActivityProbe:
         somewhere that blocks) would wedge the worker with no deadline to escape
         through. Abandoning the wait leaves the thread to finish on its own, and
         gates the probes that follow until it does — one unreclaimable scan
-        thread per worktree is the whole budget. Any
-        error is likewise only a missing baseline: letting it escape would abort
-        a run that has not started over a best-effort optimisation. Both land in
-        the documented degraded mode — no baseline, seed in charge for one probe
-        — which is strictly better than not running the agent at all, so an
-        existence check that stalls or raises keeps the probe rather than
-        dropping the watchdog back to the stdout-only cap #932 is about.
+        thread per worktree is the whole budget. Any error is likewise only a
+        missing baseline: letting it escape would abort a run that has not
+        started over a best-effort optimisation. When the external Git layout
+        was already pinned, this lands in the documented seed-based degraded
+        mode. When it was not, later scans only trust a fixed lstat proving
+        ``.git`` is absent or a real directory; a pointer or symlink stays
+        "could not tell." An existence check that stalls or raises still keeps
+        the probe rather than dropping the watchdog back to the stdout-only cap
+        #932 is about.
         ``CancelledError`` is a ``BaseException`` and is deliberately not
         absorbed.
         """
@@ -510,6 +533,10 @@ class WorktreeActivityProbe:
             )
             self._previous = None
             return True
+        finally:
+            # No external root first resolved after this point can be trusted:
+            # the caller starts the agent as soon as ``prime`` returns.
+            self._seal_git_layout()
         self._previous = baseline
         return present
 
@@ -524,7 +551,33 @@ class WorktreeActivityProbe:
         """
         if not self._worktree_path.exists():
             return False, None
+        if not self._pin_current_git_layout():
+            return True, None
         return True, self._scan()
+
+    def _pin_current_git_layout(self) -> bool:
+        """Pin the current external Git roots unless pre-agent capture is closed."""
+        with self._git_layout_lock:
+            if self._git_layout_pinned:
+                return True
+            if self._git_layout_sealed:
+                return False
+        layout = _resolve_git_layout(self._worktree_path)
+        return self._commit_git_layout(layout)
+
+    def _commit_git_layout(self, layout: _GitLayout | None) -> bool:
+        """Publish a resolved layout only if priming is still pre-agent."""
+        with self._git_layout_lock:
+            if self._git_layout_sealed:
+                return False
+            self._git_layout = layout
+            self._git_layout_pinned = True
+            return True
+
+    def _seal_git_layout(self) -> None:
+        """Forbid a late priming thread from trusting post-prime metadata."""
+        with self._git_layout_lock:
+            self._git_layout_sealed = True
 
     async def __call__(self) -> bool | None:
         """Scan off the event loop and compare against what the last probe saw.
@@ -633,6 +686,11 @@ class WorktreeActivityProbe:
                 error=str(exc),
             )
             return None
+        if git_paths is None:
+            # Priming ended before its worker could establish the external Git
+            # roots. Resolving them now would trust agent-controlled metadata;
+            # omitting them would make a later Git-only write look idle.
+            return None
         stack: list[str] = [str(self._worktree_path)]
         for path in (self._worktree_path, *git_paths.watched):
             try:
@@ -705,11 +763,25 @@ class WorktreeActivityProbe:
                 return None
         return _Scan(newest_mtime=newest, fingerprint=fingerprint)
 
-    def _git_dir_paths(self) -> _GitPaths:
-        git_dir = _resolve_linked_git_dir(self._worktree_path)
-        if git_dir is None:
+    def _git_dir_paths(self) -> _GitPaths | None:
+        if not self._git_layout_pinned and not self._pin_current_git_layout():
+            # Priming could not establish an external layout before execution.
+            # A fixed lstat of the worktree's own `.git` is still safe: when it
+            # is absent or a real directory, every Git path is already covered
+            # by the worktree walk. A pointer or symlink remains unknown rather
+            # than being followed after the agent could have replaced it.
+            try:
+                git_path_mode = (self._worktree_path / ".git").lstat().st_mode
+            except FileNotFoundError:
+                return _GitPaths((), ())
+            if stat_module.S_ISDIR(git_path_mode):
+                return _GitPaths((), ())
+            return None
+        layout = self._git_layout
+        if layout is None:
             return _GitPaths((), ())
-        common_dir = _git_common_dir(git_dir)
+        git_dir = layout.git_dir
+        common_dir = layout.common_dir
         # The git dir itself, so that per-worktree metadata with no watch of its
         # own — ``ORIG_HEAD``, ``MERGE_HEAD``, ``COMMIT_EDITMSG``, a
         # ``rebase-merge`` directory — registers when it appears or is replaced:
@@ -870,6 +942,18 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
         candidate = Path(raw)
         return candidate if candidate.is_absolute() else worktree_path / candidate
     return None
+
+
+def _resolve_git_layout(worktree_path: Path) -> _GitLayout | None:
+    """Resolve and canonicalize the external Git roots captured before execution."""
+    git_dir = _resolve_linked_git_dir(worktree_path)
+    if git_dir is None:
+        return None
+    canonical_git_dir = git_dir.resolve()
+    return _GitLayout(
+        git_dir=canonical_git_dir,
+        common_dir=_git_common_dir(canonical_git_dir).resolve(),
+    )
 
 
 def _resolve_head_branch_ref(git_dir: Path, common_dir: Path) -> Path | None:

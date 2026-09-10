@@ -11,7 +11,9 @@ each test module under the first-party 1500-line maintainability guardrail.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ from awf.adapters.worktree_activity import (
 from tests.unit.adapters.test_worktree_activity_probe_parts.helpers import (
     _age,
     _age_tree,
+    _await_scan_gate,
     _prime_scan_truncates,
 )
 
@@ -161,6 +164,192 @@ async def test_symlinked_gitfile_pointer_still_resolves(
 
     (git_dir / "index").write_bytes(b"DIRC-updated")
     assert await probe() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("replacement", ["pointer", "symlink"])
+async def test_primed_probe_never_walks_replaced_git_target(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    """Agent-controlled ``.git`` replacement cannot redirect a control-plane walk."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "index").write_bytes(b"DIRC")
+    gitfile = worktree / ".git"
+    gitfile.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    untrusted = tmp_path / "agent-selected"
+    untrusted.mkdir()
+    if replacement == "pointer":
+        gitfile.write_text(f"gitdir: {untrusted}\n", encoding="utf-8")
+    else:
+        gitfile.unlink()
+        gitfile.symlink_to(untrusted, target_is_directory=True)
+
+    real_scandir = os.scandir
+
+    def _reject_untrusted_walk(path: str) -> os.ScandirIterator[str]:
+        candidate = Path(path)
+        if candidate == untrusted or untrusted in candidate.parents:
+            raise AssertionError(f"walk escaped to agent-selected path: {candidate}")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _reject_untrusted_walk)
+
+    assert await probe() is True
+    (git_dir / "index").write_bytes(b"DIRC-updated")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_primed_probe_never_watches_replaced_commondir_target(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rewritten ``commondir`` cannot redirect branch-ref metadata stats."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    branch_ref = common_dir / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("0" * 40 + "\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    untrusted = tmp_path / "agent-selected-common"
+    untrusted.mkdir()
+    (git_dir / "commondir").write_text(f"{untrusted}\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _reject_untrusted_stat(self: Path) -> os.stat_result:
+        if self == untrusted or untrusted in self.parents:
+            raise AssertionError(f"stat escaped to agent-selected path: {self}")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _reject_untrusted_stat)
+
+    assert await probe() is True
+    branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_probe_without_pre_agent_layout_never_resolves_later_git_pointer(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed prime must not trust an external target first seen post-agent."""
+    original_slots = worktree_activity._live_scan_threads
+    monkeypatch.setattr(
+        worktree_activity, "_live_scan_threads", worktree_activity._LiveScanThreads(0)
+    )
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", original_slots)
+
+    untrusted = tmp_path / "agent-selected-after-prime"
+    untrusted.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {untrusted}\n", encoding="utf-8")
+
+    def _reject_post_prime_resolution(_path: Path) -> None:
+        raise AssertionError("post-prime Git metadata was resolved")
+
+    monkeypatch.setattr(
+        worktree_activity,
+        "_resolve_git_layout",
+        _reject_post_prime_resolution,
+    )
+    real_scandir = os.scandir
+
+    def _reject_untrusted_walk(path: str) -> os.ScandirIterator[str]:
+        candidate = Path(path)
+        if candidate == untrusted or untrusted in candidate.parents:
+            raise AssertionError(f"walk escaped to agent-selected path: {candidate}")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _reject_untrusted_walk)
+
+    assert await probe() is None
+
+
+@pytest.mark.unit
+async def test_late_priming_resolution_cannot_publish_post_prime_git_target(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out resolver cannot publish metadata first observed after prime."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    gitfile = worktree / ".git"
+    gitfile.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    real_resolve = worktree_activity._resolve_git_layout
+    started = threading.Event()
+    release = threading.Event()
+
+    def _stalled_resolve(path: Path) -> object:
+        started.set()
+        release.wait(timeout=10.0)
+        return real_resolve(path)
+
+    monkeypatch.setattr(worktree_activity, "_resolve_git_layout", _stalled_resolve)
+    probe = WorktreeActivityProbe(worktree, prime_timeout_seconds=0.01)
+    try:
+        priming = asyncio.create_task(probe.prime())
+        assert await asyncio.to_thread(started.wait, 10.0) is True
+        assert await priming is True
+        untrusted = tmp_path / "agent-selected-after-timeout"
+        untrusted.mkdir()
+        gitfile.write_text(f"gitdir: {untrusted}\n", encoding="utf-8")
+    finally:
+        release.set()
+
+    await _await_scan_gate(probe)
+    assert probe._git_layout_pinned is False
+    assert await probe() is None
+
+
+@pytest.mark.unit
+async def test_failed_prime_still_scans_internal_git_directory(
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real ``.git`` directory needs no post-prime external target resolution."""
+    git_dir = worktree / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    _age_tree(worktree)
+
+    original_slots = worktree_activity._live_scan_threads
+    monkeypatch.setattr(
+        worktree_activity, "_live_scan_threads", worktree_activity._LiveScanThreads(0)
+    )
+    probe = await make_worktree_activity_probe(worktree)
+    assert probe is not None
+    monkeypatch.setattr(worktree_activity, "_live_scan_threads", original_slots)
+
+    (git_dir / "HEAD").write_text("ref: refs/heads/other\n", encoding="utf-8")
+    assert await probe() is True
+    assert await probe() is False
 
 
 @pytest.mark.unit
