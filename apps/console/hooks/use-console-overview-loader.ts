@@ -431,7 +431,10 @@ export function useConsoleOverviewLoader({
         }
         return result.data;
       };
-      const fetchSelectedOverview = async (workspaceId: string) => {
+      const fetchSelectedOverview = async (
+        workspaceId: string,
+        replaceCurrentOverview = false,
+      ) => {
         const result = await apiPostWithDeadline<OverviewBatchResponse>(
           awfPath("workspaces/overview/batch"), { workspace_ids: [workspaceId] },
         );
@@ -467,7 +470,19 @@ export function useConsoleOverviewLoader({
         const selectedItems = normalizeOverview(result.data.items).filter((item) =>
           overviewItemMatchesQuery(item, capturedQuery),
         );
-        const withSelected = appendUniqueOverviewItems(overviewItemsRef.current, selectedItems);
+        const replaceCurrent =
+          replaceCurrentOverview &&
+          selectedItems.some((item) => item.workspace_id === workspaceId);
+        const withSelected = replaceCurrent
+          ? selectedItems
+          : appendUniqueOverviewItems(overviewItemsRef.current, selectedItems);
+        if (replaceCurrent) {
+          overviewPaginationRef.current = null;
+          setOverviewHasMore(false);
+          setOverviewHistoryComplete(false);
+          setOverviewHistoryError(false);
+          setOverviewTruncationWarning(null);
+        }
         overviewItemsRef.current = withSelected;
         setOverview(withSelected);
         if (
@@ -478,7 +493,7 @@ export function useConsoleOverviewLoader({
         }
       };
       if (selectedLookupId) {
-        await fetchSelectedOverview(selectedLookupId);
+        await fetchSelectedOverview(selectedLookupId, true);
         return;
       }
       const page = await fetchOverviewPage(requestedCursor);
@@ -717,7 +732,7 @@ export function useConsoleOverviewLoader({
       ) {
         return;
       }
-      await fetchSelectedOverview(currentSelectedId);
+      await fetchSelectedOverview(currentSelectedId, capturedPagination === null);
     } finally {
       // A superseded load must not clear the latch while a newer filter or
       // refresh load is still paging; periodic polls skip while this stays true.
