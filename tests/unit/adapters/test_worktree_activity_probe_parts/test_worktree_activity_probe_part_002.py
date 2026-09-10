@@ -198,10 +198,11 @@ async def test_primed_probe_never_walks_replaced_git_target(
 
     real_scandir = os.scandir
 
-    def _reject_untrusted_walk(path: str) -> os.ScandirIterator[str]:
-        candidate = Path(path)
-        if candidate == untrusted or untrusted in candidate.parents:
-            raise AssertionError(f"walk escaped to agent-selected path: {candidate}")
+    def _reject_untrusted_walk(path: str | int) -> os.ScandirIterator[str]:
+        if not isinstance(path, int):
+            candidate = Path(path)
+            if candidate == untrusted or untrusted in candidate.parents:
+                raise AssertionError(f"walk escaped to agent-selected path: {candidate}")
         return real_scandir(path)
 
     monkeypatch.setattr(os, "scandir", _reject_untrusted_walk)
@@ -209,6 +210,97 @@ async def test_primed_probe_never_walks_replaced_git_target(
     assert await probe() is True
     (git_dir / "index").write_bytes(b"DIRC-updated")
     assert await probe() is True
+
+
+@pytest.mark.unit
+async def test_primed_probe_never_walks_replaced_git_admin_directory(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing the pinned Git admin directory cannot redirect its walk."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(tmp_path / "mirror.git")
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    original_git_dir = git_dir.with_name("ws_probe-original")
+    git_dir.rename(original_git_dir)
+    untrusted = tmp_path / "agent-selected"
+    untrusted.mkdir()
+    (untrusted / "sentinel").write_text("outside\n", encoding="utf-8")
+    git_dir.symlink_to(untrusted, target_is_directory=True)
+    real_scandir = os.scandir
+
+    def _reject_replacement_walk(path: str | int) -> os.ScandirIterator[str]:
+        if not isinstance(path, int):
+            candidate = Path(path)
+            if candidate in (git_dir, untrusted) or untrusted in candidate.parents:
+                raise AssertionError(f"walk escaped through replaced Git dir: {candidate}")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _reject_replacement_walk)
+
+    assert await probe() is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_pinned_directory_open_rejects_stat_open_replacement(
+    tmp_path: Path,
+    replacement: str,
+) -> None:
+    """A root swapped after verification cannot win the no-follow open race."""
+    root = tmp_path / "pinned.git"
+    root.mkdir()
+    pinned = worktree_activity._pin_directory(root)
+    root.rename(tmp_path / "original.git")
+    replacement_root = tmp_path / "replacement"
+    replacement_root.mkdir()
+    if replacement == "directory":
+        replacement_root.rename(root)
+    else:
+        root.symlink_to(replacement_root, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        worktree_activity._open_pinned_directory(pinned)
+
+
+@pytest.mark.unit
+def test_pinned_directory_capture_rejects_non_directory(tmp_path: Path) -> None:
+    """Only a real directory may become a trusted external walk root."""
+    root = tmp_path / "not-a-directory"
+    root.write_text("gitdir data\n", encoding="utf-8")
+
+    with pytest.raises(NotADirectoryError):
+        worktree_activity._pin_directory(root)
+
+
+@pytest.mark.unit
+def test_observed_subdirectory_open_rejects_symlink_replacement(tmp_path: Path) -> None:
+    """Descriptor-relative descent cannot follow a raced child symlink."""
+    root = tmp_path / "root"
+    child = root / "child"
+    child.mkdir(parents=True)
+    observed = child.lstat()
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        child.rename(root / "original-child")
+        child.symlink_to(tmp_path, target_is_directory=True)
+        with pytest.raises(OSError):
+            worktree_activity._open_observed_directory(
+                child.name,
+                descriptor,
+                observed,
+            )
+    finally:
+        os.close(descriptor)
 
 
 @pytest.mark.unit

@@ -28,7 +28,9 @@ Design notes:
   worktree alone, HEAD's among them, are rewritten by every ref transaction it
   makes — is watched too. The git dir and its ``commondir`` are resolved and
   pinned by the bounded pre-agent prime scan; later scans never accept a
-  replacement pointer or symlink target selected by the agent. So is ``FETCH_HEAD``,
+  replacement pointer or symlink target selected by the agent. Its device/inode
+  identity is pinned too, and later walks open it and descendants without
+  following symlinks. So is ``FETCH_HEAD``,
   the one path in the worktree's own Git state a quiet ``git fetch`` is
   guaranteed to move. A linked worktree's git dir holds nothing *but* this
   worktree's state, so it is **walked whole** like a second tree root rather
@@ -131,6 +133,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import errno
 import itertools
 import os
 import stat as stat_module
@@ -430,6 +433,20 @@ class _Scan(NamedTuple):
     fingerprint: int
 
 
+class _DirectoryIdentity(NamedTuple):
+    """A directory object captured before the agent can replace its path."""
+
+    device: int
+    inode: int
+
+
+class _PinnedDirectory(NamedTuple):
+    """An external directory path and its pre-agent identity, if it existed."""
+
+    path: Path
+    identity: _DirectoryIdentity | None
+
+
 class _GitPaths(NamedTuple):
     """Git state a scan must fold in from outside the worktree.
 
@@ -440,13 +457,13 @@ class _GitPaths(NamedTuple):
     """
 
     watched: tuple[Path, ...]
-    walk_roots: tuple[Path, ...]
+    walk_roots: tuple[_PinnedDirectory, ...]
 
 
 class _GitLayout(NamedTuple):
     """External Git roots trusted because priming resolved them pre-agent."""
 
-    git_dir: Path
+    git_dir: _PinnedDirectory
     common_dir: Path
 
 
@@ -691,7 +708,7 @@ class WorktreeActivityProbe:
             # roots. Resolving them now would trust agent-controlled metadata;
             # omitting them would make a later Git-only write look idle.
             return None
-        stack: list[str] = [str(self._worktree_path)]
+        stack: list[tuple[str, int | None]] = [(str(self._worktree_path), None)]
         for path in (self._worktree_path, *git_paths.watched):
             try:
                 stat_result = _metadata_stat(path)
@@ -709,58 +726,89 @@ class WorktreeActivityProbe:
                 )
                 return None
             newest, fingerprint = _absorb(newest, fingerprint, str(path), stat_result)
-            if stat_result is not None and path in git_paths.walk_roots:
-                # Walked only once its own stat says it is there. An absent git
-                # dir stays the complete "(path, None)" observation the stat
-                # above folded in, rather than a ``scandir`` raising
-                # ``FileNotFoundError`` and wedging every later scan at "could
-                # not tell" — which would retire the watchdog for the run.
-                stack.append(str(path))
-        budget = self._max_entries
-        while stack:
-            current = stack.pop()
+        for root in git_paths.walk_roots:
             try:
-                with os.scandir(current) as entries:
-                    for entry in entries:
-                        if budget <= 0:
-                            _log.warning(
-                                "agent.worktree_activity.entry_budget_exhausted",
-                                worktree_path=str(self._worktree_path),
-                                max_entries=self._max_entries,
-                            )
-                            return None
-                        budget -= 1
-                        # Directories count too: a create / delete / rename only
-                        # bumps the containing directory. One lstat answers both
-                        # questions, and its failure propagates to the handler
-                        # below rather than being folded in as a stable term.
-                        stat_result = _entry_stat(entry)
-                        newest, fingerprint = _absorb(
-                            newest,
-                            fingerprint,
-                            entry.path,
-                            stat_result,
-                        )
-                        if stat_module.S_ISDIR(stat_result.st_mode):
-                            stack.append(entry.path)
+                root_descriptor = _open_pinned_directory(root)
             except OSError as exc:
-                # An unreadable directory — or an entry that can be listed but
-                # not stat-ed — means the walk did not observe the whole tree,
-                # so the fingerprint it would return is not the complete one it
-                # claims to be. Writes to existing files inside that subtree
-                # leave no trace anywhere the walk *can* see — a directory's
-                # mtime does not move when a file inside it is rewritten — so
-                # consecutive scans would match and the watchdog would idle-kill
-                # an agent that is still editing. Same fail-open rule as the
-                # entry budget: no opinion, and the remembered scan is left
-                # alone.
+                # The lstat in ``_git_dir_paths`` and this no-follow open are
+                # deliberately separate: replacing the path between them must
+                # fail open, never redirect the recursive scan.
                 _log.warning(
                     "agent.worktree_activity.subtree_unreadable",
                     worktree_path=str(self._worktree_path),
-                    path=current,
+                    path=str(root.path),
                     error=str(exc),
                 )
                 return None
+            stack.append((str(root.path), root_descriptor))
+        budget = self._max_entries
+        try:
+            while stack:
+                current, descriptor = stack.pop()
+                try:
+                    scan_target = descriptor if descriptor is not None else current
+                    with os.scandir(scan_target) as entries:
+                        for entry in entries:
+                            if budget <= 0:
+                                _log.warning(
+                                    "agent.worktree_activity.entry_budget_exhausted",
+                                    worktree_path=str(self._worktree_path),
+                                    max_entries=self._max_entries,
+                                )
+                                return None
+                            budget -= 1
+                            # Directories count too: a create / delete / rename only
+                            # bumps the containing directory. One lstat answers both
+                            # questions, and its failure propagates to the handler
+                            # below rather than being folded in as a stable term.
+                            stat_result = _entry_stat(entry)
+                            entry_path = (
+                                str(Path(current) / entry.name)
+                                if descriptor is not None
+                                else entry.path
+                            )
+                            newest, fingerprint = _absorb(
+                                newest,
+                                fingerprint,
+                                entry_path,
+                                stat_result,
+                            )
+                            if stat_module.S_ISDIR(stat_result.st_mode):
+                                child_descriptor = (
+                                    _open_observed_directory(
+                                        entry.name,
+                                        descriptor,
+                                        stat_result,
+                                    )
+                                    if descriptor is not None
+                                    else None
+                                )
+                                stack.append((entry_path, child_descriptor))
+                except OSError as exc:
+                    # An unreadable directory — or an entry that can be listed but
+                    # not stat-ed — means the walk did not observe the whole tree,
+                    # so the fingerprint it would return is not the complete one it
+                    # claims to be. Writes to existing files inside that subtree
+                    # leave no trace anywhere the walk *can* see — a directory's
+                    # mtime does not move when a file inside it is rewritten — so
+                    # consecutive scans would match and the watchdog would idle-kill
+                    # an agent that is still editing. Same fail-open rule as the
+                    # entry budget: no opinion, and the remembered scan is left
+                    # alone.
+                    _log.warning(
+                        "agent.worktree_activity.subtree_unreadable",
+                        worktree_path=str(self._worktree_path),
+                        path=current,
+                        error=str(exc),
+                    )
+                    return None
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+        finally:
+            for _path, pending_descriptor in stack:
+                if pending_descriptor is not None:
+                    os.close(pending_descriptor)
         return _Scan(newest_mtime=newest, fingerprint=fingerprint)
 
     def _git_dir_paths(self) -> _GitPaths | None:
@@ -780,8 +828,22 @@ class WorktreeActivityProbe:
         layout = self._git_layout
         if layout is None:
             return _GitPaths((), ())
-        git_dir = layout.git_dir
+        git_root = layout.git_dir
+        git_dir = git_root.path
         common_dir = layout.common_dir
+        git_dir_stat = _metadata_stat(git_dir)
+        if git_dir_stat is None:
+            # An absent root is a complete observation and is not walked. If it
+            # reappears, it cannot be trusted because no pre-agent identity was
+            # captured for that new directory object.
+            return _GitPaths((git_dir,), ())
+        if not _matches_directory_identity(git_dir_stat, git_root.identity):
+            _log.warning(
+                "agent.worktree_activity.git_root_replaced",
+                worktree_path=str(self._worktree_path),
+                path=str(git_dir),
+            )
+            return None
         # The git dir itself, so that per-worktree metadata with no watch of its
         # own — ``ORIG_HEAD``, ``MERGE_HEAD``, ``COMMIT_EDITMSG``, a
         # ``rebase-merge`` directory — registers when it appears or is replaced:
@@ -802,7 +864,7 @@ class WorktreeActivityProbe:
         # *directory* is already walked whole by the worktree walk itself, and
         # going through a symlink — which the walk never descends — must not
         # quietly narrow that to the handful of names watched here.
-        walk_roots: tuple[Path, ...] = (git_dir,)
+        walk_roots = (git_root,)
         # The *common* dir stays out of the walk, and nothing shared under it is
         # watched by name either: one bare mirror backs every worktree of a
         # repo, so its churn is other workspaces' agents and would report this
@@ -903,6 +965,76 @@ def _metadata_stat(path: Path) -> os.stat_result | None:
         return None
 
 
+def _matches_directory_identity(
+    stat_result: os.stat_result,
+    identity: _DirectoryIdentity | None,
+) -> bool:
+    """Return whether ``stat_result`` is the pre-agent directory object."""
+    return (
+        identity is not None
+        and stat_module.S_ISDIR(stat_result.st_mode)
+        and stat_result.st_dev == identity.device
+        and stat_result.st_ino == identity.inode
+    )
+
+
+def _pin_directory(path: Path) -> _PinnedDirectory:
+    """Capture a directory identity, preserving a positively absent root."""
+    stat_result = _metadata_stat(path)
+    if stat_result is None:
+        return _PinnedDirectory(path, None)
+    if not stat_module.S_ISDIR(stat_result.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, "Git admin root is not a directory", path)
+    return _PinnedDirectory(
+        path,
+        _DirectoryIdentity(stat_result.st_dev, stat_result.st_ino),
+    )
+
+
+def _open_checked_directory(
+    path: str | Path,
+    expected: _DirectoryIdentity,
+    *,
+    parent_descriptor: int | None = None,
+) -> int:
+    """Open one exact directory object without following its final component."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = (
+        os.open(path, flags)
+        if parent_descriptor is None
+        else os.open(path, flags, dir_fd=parent_descriptor)
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not _matches_directory_identity(opened, expected):
+            raise OSError(errno.ESTALE, "directory identity changed", os.fspath(path))
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_pinned_directory(directory: _PinnedDirectory) -> int:
+    """Open a pre-agent directory, rejecting absence or replacement."""
+    if directory.identity is None:
+        raise OSError(errno.ESTALE, "directory was absent when pinned", directory.path)
+    return _open_checked_directory(directory.path, directory.identity)
+
+
+def _open_observed_directory(
+    name: str,
+    parent_descriptor: int,
+    observed: os.stat_result,
+) -> int:
+    """Open a walked child without accepting a stat/open substitution."""
+    expected = _DirectoryIdentity(observed.st_dev, observed.st_ino)
+    return _open_checked_directory(
+        name,
+        expected,
+        parent_descriptor=parent_descriptor,
+    )
+
+
 def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
     """Resolve a ``gitdir:`` pointer file to the real git dir, if present.
 
@@ -951,7 +1083,7 @@ def _resolve_git_layout(worktree_path: Path) -> _GitLayout | None:
         return None
     canonical_git_dir = git_dir.resolve()
     return _GitLayout(
-        git_dir=canonical_git_dir,
+        git_dir=_pin_directory(canonical_git_dir),
         common_dir=_git_common_dir(canonical_git_dir).resolve(),
     )
 
