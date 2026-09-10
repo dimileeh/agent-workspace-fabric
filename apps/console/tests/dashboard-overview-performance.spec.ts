@@ -288,6 +288,38 @@ test("routine refresh updates and removes retained workspaces outside page one",
   await expect(retainedCard.getByText("completed", { exact: true })).toBeVisible();
 });
 
+test("routine refresh drops a selected retained workspace excluded by its repository query", async ({
+  page,
+}) => {
+  let excludeSelectedRetained = false;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolveBatchItem: (item) =>
+      excludeSelectedRetained && item.workspace_id === "ws_perf_0202"
+        ? { ...item, repo_url: "https://example.com/odd.git" }
+        : item,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Filters" }).click();
+  await page.getByPlaceholder("exact repo filter").fill("https://example.com/even.git");
+  await expect(page.getByTestId("workspace-card-ws_perf_0002")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByTestId("workspace-card-ws_perf_0202").click();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0202/);
+
+  excludeSelectedRetained = true;
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0202")).toHaveCount(0, {
+    timeout: 10_000,
+  });
+  await expect(page).not.toHaveURL(/workspaceId=ws_perf_0202/);
+});
+
 test("a deep link resolves an older workspace without mounting the intervening fleet", async ({
   page,
 }) => {

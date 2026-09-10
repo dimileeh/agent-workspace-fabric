@@ -645,7 +645,13 @@ export function ConsoleDashboard() {
           ) {
             return;
           }
-          refreshedRetainedItems.push(...normalizeOverview(result.data.items));
+          for (const item of normalizeOverview(result.data.items)) {
+            if (overviewItemMatchesQuery(item, capturedQuery)) {
+              refreshedRetainedItems.push(item);
+            } else {
+              missingRetainedIds.push(item.workspace_id);
+            }
+          }
           missingRetainedIds.push(...result.data.missing_workspace_ids);
         }
         if (pageAuthDenied) {
