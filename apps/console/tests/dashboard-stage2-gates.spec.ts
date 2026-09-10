@@ -234,11 +234,15 @@ test("retry authorization denial disables mutating controls while renegotiation 
     ...presentationOverview(),
     status: "failed",
     current_phase: "failed",
-    pr_url: null,
-    pr_number: null,
+    pr_url: "https://github.com/example/repo/pull/123",
+    pr_number: 123,
     native_runtime_finished_at: null,
     failure_reason: "VALIDATION_FAILED",
     failure_message: "tests failed",
+    task_kind: "feature_branch_pr",
+    branch_name: "codex/ws_presentation_sample",
+    remote_push_branch: "codex/ws_presentation_sample",
+    remonitor_compose_runtime_available: true,
   } as Record<string, unknown>;
   let stallCapabilities = false;
   let releaseRenegotiation: () => void = () => {};
@@ -283,13 +287,16 @@ test("retry authorization denial disables mutating controls while renegotiation 
     await waitForConsoleReady(page);
     await page.getByTestId("workspace-card-ws_presentation_sample").click();
     const retry = page.getByRole("button", { name: "Retry" });
+    const remonitor = page.getByRole("button", { name: "Remonitor" });
     await expect(retry).toBeEnabled();
+    await expect(remonitor).toBeEnabled();
 
     stallCapabilities = true;
     await retry.click();
 
     await expect(page.getByText(/mutation permission revoked/)).toBeVisible();
     await expect(retry).toBeDisabled();
+    await expect(remonitor).toBeDisabled();
   } finally {
     releaseRenegotiation();
   }
