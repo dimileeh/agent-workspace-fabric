@@ -227,6 +227,74 @@ test("malformed capabilities disable retry without posting", async ({ page }) =>
   expect(retryPosted).toBe(false);
 });
 
+test("retry authorization denial disables mutating controls while renegotiation stalls", async ({
+  page,
+}) => {
+  const overview = {
+    ...presentationOverview(),
+    status: "failed",
+    current_phase: "failed",
+    pr_url: null,
+    pr_number: null,
+    native_runtime_finished_at: null,
+    failure_reason: "VALIDATION_FAILED",
+    failure_message: "tests failed",
+  } as Record<string, unknown>;
+  let stallCapabilities = false;
+  let releaseRenegotiation: () => void = () => {};
+  const renegotiationBlocked = new Promise<void>((resolve) => {
+    releaseRenegotiation = resolve;
+  });
+
+  await mockAwfConsoleApi(page, { overviewItems: [overview] });
+  await page.route("/api/awf/console/capabilities", async (route) => {
+    if (stallCapabilities) {
+      await renegotiationBlocked;
+    }
+    await fulfillJson(route, localCapabilities());
+  });
+  await page.route("**/api/awf/workspaces/ws_presentation_sample**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/workspaces/ws_presentation_sample/retry") {
+      await fulfillJson(
+        route,
+        { detail: { error_code: "FORBIDDEN", message: "mutation permission revoked" } },
+        403,
+      );
+      return;
+    }
+    if (path === "/api/awf/workspaces/ws_presentation_sample") {
+      await fulfillJson(route, { ...overview, id: overview.workspace_id, version: 1 });
+      return;
+    }
+    if (path.endsWith("/runtime")) {
+      await fulfillJson(route, { status: "failed" });
+      return;
+    }
+    if (path.includes("/events") || path.includes("/operations") || path.includes("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  try {
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await page.getByTestId("workspace-card-ws_presentation_sample").click();
+    const retry = page.getByRole("button", { name: "Retry" });
+    await expect(retry).toBeEnabled();
+
+    stallCapabilities = true;
+    await retry.click();
+
+    await expect(page.getByText(/mutation permission revoked/)).toBeVisible();
+    await expect(retry).toBeDisabled();
+  } finally {
+    releaseRenegotiation();
+  }
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6f9g8g: inspector
 // diagnostic feed outages must retain last-successful snapshots while showing
 // the error (gated-off feeds still clear; do not blank on every 5xx blip).

@@ -152,6 +152,43 @@ test.describe("Operator cancel control", () => {
     expect(cancelPosts).toBe(1);
   });
 
+  test("authorization denial disables operator controls while renegotiation stalls", async ({
+    page,
+  }) => {
+    let stallCapabilities = false;
+    let releaseRenegotiation: () => void = () => {};
+    const renegotiationBlocked = new Promise<void>((resolve) => {
+      releaseRenegotiation = resolve;
+    });
+    await page.route("/api/awf/console/capabilities", async (route) => {
+      if (stallCapabilities) {
+        await renegotiationBlocked;
+      }
+      await fulfillJson(route, localCapabilities());
+    });
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      await fulfillJson(
+        route,
+        { detail: { error_code: "UNAUTHORIZED", message: "operator permission revoked" } },
+        401,
+      );
+    });
+
+    try {
+      await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+      const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+      await expect(cancelButton).toBeEnabled();
+      await cancelButton.click();
+      stallCapabilities = true;
+      await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
+
+      await expect(page.getByText(/operator permission revoked/)).toBeVisible();
+      await expect(cancelButton).toBeDisabled();
+    } finally {
+      releaseRenegotiation();
+    }
+  });
+
   test("keeps cancel enabled while a workspace operation is active", async ({ page }) => {
     let cancelPosts = 0;
     await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {

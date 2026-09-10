@@ -855,6 +855,21 @@ export function ConsoleDashboard() {
     setCapabilitiesReady,
   });
 
+  const renegotiateAfterMutationAuthorizationDenied = useCallback((message: string) => {
+    // A mutation route can observe revoked operator permissions before the
+    // capabilities poll. Latch the denial into the mutating-capability gate
+    // immediately, while retaining read-only snapshots until capability
+    // negotiation determines whether the wider console authorization changed.
+    // Cover requests that already started so only a negotiation begun after
+    // this denial can restore the controls.
+    revokedCapabilityGenerationRef.current = Math.max(
+      revokedCapabilityGenerationRef.current,
+      capabilityRequestGenerationRef.current,
+    );
+    setCapabilityError(message);
+    void loadCapabilities();
+  }, [loadCapabilities]);
+
   const {
     loadResourceSaturation,
     loadDashboardSummary,
@@ -934,6 +949,7 @@ export function ConsoleDashboard() {
     operatorActionState,
     setRetryState,
     setOperatorActionState,
+    renegotiateAfterMutationAuthorizationDenied,
     loadCapabilities,
     loadOverview,
     loadWorkspace,

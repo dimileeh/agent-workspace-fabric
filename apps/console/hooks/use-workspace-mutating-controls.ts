@@ -40,6 +40,7 @@ type UseWorkspaceMutatingControlsArgs = {
   operatorActionState: OperatorActionState;
   setRetryState: Dispatch<SetStateAction<RetryActionState>>;
   setOperatorActionState: Dispatch<SetStateAction<OperatorActionState>>;
+  renegotiateAfterMutationAuthorizationDenied: (message: string) => void;
   loadCapabilities: () => Promise<ConsoleCapabilities | null>;
   loadOverview: () => Promise<void>;
   loadWorkspace: (workspaceId: string) => Promise<void>;
@@ -60,6 +61,7 @@ export function useWorkspaceMutatingControls({
   operatorActionState,
   setRetryState,
   setOperatorActionState,
+  renegotiateAfterMutationAuthorizationDenied,
   loadCapabilities,
   loadOverview,
   loadWorkspace,
@@ -84,6 +86,13 @@ export function useWorkspaceMutatingControls({
     const result = await apiPost<WorkspaceRetryResponse>(
       awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
     );
+    if (
+      epoch === authorizedFeedEpochRef.current &&
+      !result.ok &&
+      (result.status === 401 || result.status === 403)
+    ) {
+      renegotiateAfterMutationAuthorizationDenied(result.message);
+    }
     if (
       epoch !== authorizedFeedEpochRef.current ||
       selectedIdRef.current !== workspaceId
@@ -138,6 +147,7 @@ export function useWorkspaceMutatingControls({
     loadCapabilities,
     loadOverview,
     mutatingCapabilities,
+    renegotiateAfterMutationAuthorizationDenied,
     reloadAvailableFeeds,
     selectedId,
     selectedIdRef,
@@ -165,6 +175,13 @@ export function useWorkspaceMutatingControls({
         operatorActionPath(action, workspaceId),
         payload,
       );
+      if (
+        epoch === authorizedFeedEpochRef.current &&
+        !result.ok &&
+        (result.status === 401 || result.status === 403)
+      ) {
+        renegotiateAfterMutationAuthorizationDenied(result.message);
+      }
       if (
         epoch !== authorizedFeedEpochRef.current ||
         selectedIdRef.current !== workspaceId
@@ -219,6 +236,7 @@ export function useWorkspaceMutatingControls({
       loadOverview,
       loadWorkspace,
       operatorActionState.status,
+      renegotiateAfterMutationAuthorizationDenied,
       reloadAvailableFeeds,
       selectedId,
       selectedIdRef,

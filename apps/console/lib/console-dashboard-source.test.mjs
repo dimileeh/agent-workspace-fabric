@@ -3081,6 +3081,34 @@ test("workspace retry is guarded by authorized feed epoch", () => {
   );
 });
 
+test("mutation authorization denials revoke stale controls before renegotiation", () => {
+  const dashboard = dashboardSource.dashboard;
+  const mutating = dashboardSource.mutatingControls;
+  const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");
+  const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
+  assert.ok(retryStart >= 0, "Expected retrySelectedWorkspace callback");
+  assert.ok(operatorStart > retryStart, "Expected runWorkspaceOperatorAction callback");
+  const retrySource = mutating.slice(retryStart, operatorStart);
+  const operatorSource = mutating.slice(operatorStart);
+
+  for (const [name, source] of [
+    ["retry", retrySource],
+    ["operator action", operatorSource],
+  ]) {
+    assert.match(
+      source,
+      /!result\.ok\s*&&\s*\(result\.status === 401 \|\| result\.status === 403\)[\s\S]*?renegotiateAfterMutationAuthorizationDenied\(result\.message\)/,
+      `Expected ${name} 401/403 to revoke mutating capabilities`,
+    );
+  }
+
+  assert.match(
+    dashboard,
+    /const renegotiateAfterMutationAuthorizationDenied = useCallback\([\s\S]*?revokedCapabilityGenerationRef\.current = Math\.max\([\s\S]*?capabilityRequestGenerationRef\.current,[\s\S]*?setCapabilityError\(message\);[\s\S]*?void loadCapabilities\(\);/,
+    "Expected mutation denial to cover older capability generations, fail closed, and renegotiate",
+  );
+});
+
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
   const mutating = dashboardSource.mutatingControls;
