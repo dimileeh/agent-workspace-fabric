@@ -778,7 +778,7 @@ export function useWorkspaceLogTails({
 
   const openWorkspaceLogs = useCallback(
     (workspaceId: string) => {
-      if (workspaceId !== selectedId) {
+      if (workspaceId !== selectedIdRef.current) {
         setDetail(emptyDetail);
         setSelectedStreams([]);
         setLogEntries([]);
@@ -789,7 +789,7 @@ export function useWorkspaceLogTails({
       setLogsFullscreen(true);
     },
     [
-      selectedId,
+      selectedIdRef,
       setDetail,
       setFullscreenWorkspaceIds,
       setLogEntries,

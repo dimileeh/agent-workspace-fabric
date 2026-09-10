@@ -45,6 +45,29 @@ test("collectOverviewPages follows next_cursor across pages", async () => {
   );
 });
 
+test("collectOverviewPages continues from an already-painted first page", async () => {
+  const calls = [];
+  const collected = await collectOverviewPages(
+    async (cursor) => {
+      calls.push(cursor);
+      assert.equal(cursor, "page-2");
+      return page([{ workspace_id: "ws_2" }]);
+    },
+    {
+      initialPage: page(
+        [{ workspace_id: "ws_1" }],
+        { has_more: true, next_cursor: "page-2" },
+      ),
+    },
+  );
+
+  assert.deepEqual(calls, ["page-2"]);
+  assert.deepEqual(
+    collected?.items.map((item) => item.workspace_id),
+    ["ws_1", "ws_2"],
+  );
+});
+
 test("collectOverviewPages stops when has_more is false even if next_cursor is set", async () => {
   let calls = 0;
   const collected = await collectOverviewPages(async () => {

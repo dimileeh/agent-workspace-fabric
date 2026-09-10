@@ -28,6 +28,8 @@ Type
 } from "lucide-react";
 import {
 type SyntheticEvent,
+memo,
+useCallback,
 useEffect,
 useId,
 useRef,
@@ -677,116 +679,55 @@ export function WorkspaceSelectionToolbar({
   );
 }
 
-export function WorkspaceList({
-  items,
-  selectedId,
-  showWorkspaceLogs = true,
-  selectedWorkspaceIds,
-  onSelect,
-  onToggleWorkspaceSelection,
-  onOpenDetails,
-  onOpenLogs,
-}: {
-  items: WorkspaceOverview[];
-  selectedId: string | null;
-  /** When false, omit per-row log checkboxes and Logs buttons. */
-  showWorkspaceLogs?: boolean;
-  selectedWorkspaceIds: string[];
+export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
+
+type WorkspaceCardProps = {
+  item: WorkspaceOverview;
+  selected: boolean;
+  selectedForLogs: boolean;
+  showWorkspaceLogs: boolean;
+  copied: boolean;
+  copyToastVisible: boolean;
   onSelect: (workspaceId: string) => void;
   onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
   onOpenDetails: (workspaceId: string) => void;
   onOpenLogs: (workspaceId: string) => void;
-}) {
-  const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
-  const [copyToastVisible, setCopyToastVisible] = useState(false);
-  const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  onCopy: (event: SyntheticEvent<HTMLElement>, workspaceId: string) => void;
+};
 
-  useEffect(() => {
-    return () => {
-      if (copyFadeTimeoutRef.current !== null) {
-        clearTimeout(copyFadeTimeoutRef.current);
-      }
-      if (copyClearTimeoutRef.current !== null) {
-        clearTimeout(copyClearTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const copyWorkspaceId = async (event: SyntheticEvent<HTMLElement>, workspaceId: string) => {
-    event.preventDefault();
-    event.stopPropagation();
-    // Clear any pending timers upfront so every copy attempt starts from a clean
-    // state — otherwise stale timers from a prior successful copy could fire during
-    // the await or after a failed attempt and unexpectedly mutate the toast state.
-    if (copyFadeTimeoutRef.current !== null) {
-      clearTimeout(copyFadeTimeoutRef.current);
-      copyFadeTimeoutRef.current = null;
-    }
-    if (copyClearTimeoutRef.current !== null) {
-      clearTimeout(copyClearTimeoutRef.current);
-      copyClearTimeoutRef.current = null;
-    }
-    // Use the fallback-aware helper: navigator.clipboard is unavailable over plain
-    // HTTP (e.g. a Tailscale address), so it falls back to execCommand there.
-    const copied = await copyTextToClipboard(workspaceId);
-    if (!copied) {
-      setCopiedWorkspaceId(null);
-      setCopyToastVisible(false);
-      return;
-    }
-    setCopiedWorkspaceId(workspaceId);
-    setCopyToastVisible(true);
-    copyFadeTimeoutRef.current = setTimeout(() => {
-      setCopyToastVisible(false);
-    }, 1000);
-    copyClearTimeoutRef.current = setTimeout(() => {
-      setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
-    }, 1400);
-  };
-
-  if (items.length === 0) {
-    return (
-      <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
-        <div>
-          <ListFilter className="mx-auto mb-3 text-slate-400" size={24} aria-hidden />
-          No workspaces match the current filters.
-        </div>
-      </div>
-    );
-  }
-
-  const selectedSet = new Set(selectedWorkspaceIds);
+const WorkspaceCard = memo(function WorkspaceCard({
+  item,
+  selected,
+  selectedForLogs,
+  showWorkspaceLogs,
+  copied,
+  copyToastVisible,
+  onSelect,
+  onToggleWorkspaceSelection,
+  onOpenDetails,
+  onOpenLogs,
+  onCopy,
+}: WorkspaceCardProps) {
+  const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
+  const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
+  const blockedFor = item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
+  const awaitingHumanFor = isAwaitingHuman(item)
+    ? attentionAgeSeconds(attentionSince(item))
+    : null;
+  const taskKey = displayedTaskKey(item);
   return (
-    <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
-      {items.map((item) => {
-        const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
-        const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
-        // "Blocked for N" from the authoritative `blocked_at` the overview now
-        // carries while blocked; `blockedSince` falls back to the blocked
-        // transition event / `updated_at` only when it is absent.
-        const blockedFor =
-          item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
-        // "Awaiting human for N" from the authoritative `awaiting_human_since` the
-        // overview carries while a monitoring_pr workspace is flagged (HUMAN_WAIT).
-        const awaitingHumanFor = isAwaitingHuman(item)
-          ? attentionAgeSeconds(attentionSince(item))
-          : null;
-        const taskKey = displayedTaskKey(item);
-        return (
-          <div
-            key={item.workspace_id}
-            data-testid={`workspace-card-${item.workspace_id}`}
-            className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
-              selectedId === item.workspace_id ? "bg-blue-50" : "bg-white"
-            }`}
-          >
+    <div
+      data-testid={`workspace-card-${item.workspace_id}`}
+      className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
+        selected ? "bg-blue-50" : "bg-white"
+      }`}
+    >
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
               <div className="flex min-w-0 items-start gap-2">
                 {showWorkspaceLogs ? (
                   <input
                     type="checkbox"
-                    checked={selectedSet.has(item.workspace_id)}
+                    checked={selectedForLogs}
                     onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
                     aria-label={`Select ${item.title} for fullscreen logs`}
                     className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
@@ -817,14 +758,14 @@ export function WorkspaceList({
                     <span className="relative inline-flex min-w-0 items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={(event) => void copyWorkspaceId(event, item.workspace_id)}
+                        onClick={(event) => onCopy(event, item.workspace_id)}
                         className="workspace-id-copy pointer-events-auto focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                         aria-label={`Copy workspace id ${item.workspace_id}`}
                         title="Copy workspace id"
                       >
                         {item.workspace_id}
                       </button>
-                      {copiedWorkspaceId === item.workspace_id ? (
+                      {copied ? (
                         <span
                           aria-live="polite"
                           className={`pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/2 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 shadow-sm transition duration-300 ${
@@ -939,8 +880,129 @@ export function WorkspaceList({
               ) : null}
             </div>
           </div>
-        );
-      })}
+  );
+});
+
+export function WorkspaceList({
+  items,
+  selectedId,
+  showWorkspaceLogs = true,
+  selectedWorkspaceIds,
+  onSelect,
+  onToggleWorkspaceSelection,
+  onOpenDetails,
+  onOpenLogs,
+}: {
+  items: WorkspaceOverview[];
+  selectedId: string | null;
+  showWorkspaceLogs?: boolean;
+  selectedWorkspaceIds: string[];
+  onSelect: (workspaceId: string) => void;
+  onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
+  onOpenDetails: (workspaceId: string) => void;
+  onOpenLogs: (workspaceId: string) => void;
+}) {
+  const [windowStart, setWindowStart] = useState(0);
+  const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
+  const [copyToastVisible, setCopyToastVisible] = useState(false);
+  const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const selectedIndex = selectedId
+      ? items.findIndex((item) => item.workspace_id === selectedId)
+      : -1;
+    const selectedStart =
+      selectedIndex < 0
+        ? null
+        : Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE;
+    const maxStart = Math.max(0, Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE);
+    setWindowStart((current) => selectedStart ?? Math.min(current, maxStart));
+  }, [items, selectedId]);
+
+  useEffect(() => () => {
+    if (copyFadeTimeoutRef.current !== null) clearTimeout(copyFadeTimeoutRef.current);
+    if (copyClearTimeoutRef.current !== null) clearTimeout(copyClearTimeoutRef.current);
+  }, []);
+
+  const copyWorkspaceId = useCallback(async (
+    event: SyntheticEvent<HTMLElement>,
+    workspaceId: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (copyFadeTimeoutRef.current !== null) clearTimeout(copyFadeTimeoutRef.current);
+    if (copyClearTimeoutRef.current !== null) clearTimeout(copyClearTimeoutRef.current);
+    const copied = await copyTextToClipboard(workspaceId);
+    if (!copied) {
+      setCopiedWorkspaceId(null);
+      setCopyToastVisible(false);
+      return;
+    }
+    setCopiedWorkspaceId(workspaceId);
+    setCopyToastVisible(true);
+    copyFadeTimeoutRef.current = setTimeout(() => setCopyToastVisible(false), 1000);
+    copyClearTimeoutRef.current = setTimeout(() => {
+      setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
+    }, 1400);
+  }, []);
+
+  if (items.length === 0) {
+    return (
+      <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
+        <div>
+          <ListFilter className="mx-auto mb-3 text-slate-400" size={24} aria-hidden />
+          No workspaces match the current filters.
+        </div>
+      </div>
+    );
+  }
+
+  const windowEnd = Math.min(items.length, windowStart + WORKSPACE_RENDER_WINDOW_SIZE);
+  const selectedSet = new Set(selectedWorkspaceIds);
+  return (
+    <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
+      {items.length > WORKSPACE_RENDER_WINDOW_SIZE ? (
+        <div className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-600">
+          <span>{windowStart + 1}–{windowEnd} of {items.length} loaded</span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              aria-label="Previous workspace results"
+              disabled={windowStart === 0}
+              onClick={() => setWindowStart((current) => Math.max(0, current - WORKSPACE_RENDER_WINDOW_SIZE))}
+              className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              aria-label="Next workspace results"
+              disabled={windowEnd >= items.length}
+              onClick={() => setWindowStart((current) => current + WORKSPACE_RENDER_WINDOW_SIZE)}
+              className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {items.slice(windowStart, windowEnd).map((item) => (
+        <WorkspaceCard
+          key={item.workspace_id}
+          item={item}
+          selected={selectedId === item.workspace_id}
+          selectedForLogs={selectedSet.has(item.workspace_id)}
+          showWorkspaceLogs={showWorkspaceLogs}
+          copied={copiedWorkspaceId === item.workspace_id}
+          copyToastVisible={copyToastVisible}
+          onSelect={onSelect}
+          onToggleWorkspaceSelection={onToggleWorkspaceSelection}
+          onOpenDetails={onOpenDetails}
+          onOpenLogs={onOpenLogs}
+          onCopy={copyWorkspaceId}
+        />
+      ))}
     </div>
   );
 }

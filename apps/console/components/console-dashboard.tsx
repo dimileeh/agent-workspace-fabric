@@ -132,6 +132,8 @@ export function ConsoleDashboard() {
   const [overviewError, setOverviewError] = useState<string | null>(null);
   const [workspaceDetailError, setWorkspaceDetailError] = useState<string | null>(null);
   const [overviewTruncationWarning, setOverviewTruncationWarning] = useState<string | null>(null);
+  const [overviewHasMore, setOverviewHasMore] = useState(false);
+  const [overviewHistoryLoading, setOverviewHistoryLoading] = useState(false);
   const [isPending, startTransition] = useTransition();
   const logStreamActivityRef = useRef<LogStreamActivityMap>({});
   const selectedStreamsRef = useRef<string[]>([]);
@@ -199,31 +201,17 @@ export function ConsoleDashboard() {
   // Last configured context fingerprint; null = uninitialized ("" is valid locally).
   const configuredContextFingerprintRef = useRef<string | null>(null);
   const overviewQueryRef = useOverviewQueryRef(statusFilters, agentFilters, repoFilter);
-  // Overview poll generation: overlapping filter/explicit loads stay monotonic.
-  // repoFilter is server-side only (filterAndSortOverview does not reapply it), so a
-  // superseded paginated response must not overwrite a newer filtered rail.
-  // A completed 401/403 or network/5xx stays authoritative unless a newer
-  // successful overview has already been applied — a newer request merely
-  // starting is not recovery.
+  // Overview generations keep filters, explicit history, failures, and revocation ordered.
   const overviewRequestGenerationRef = useRef(0);
-  // Highest overview generation that applied a successful list. An older
-  // 401/403 must not clear a rail this newer success already owns. An older
-  // network/5xx outage must not replace the error that success cleared.
+  // Older failures cannot replace a newer applied success.
   const appliedOverviewGenerationRef = useRef(0);
-  // Highest overview generation that applied a network/5xx (or other non-auth)
-  // page failure. A newer request merely starting is not recovery. An older
-  // success must not clear a failure this newer response already applied, or
-  // the retained rail stays visible with no stale/error warning.
+  // Older successes cannot clear a newer applied outage.
   const appliedOverviewFailureGenerationRef = useRef(0);
-  // Highest overview generation covered by an applied 401/403. An in-flight
-  // refresh that started before the denial must not restore cleared rail,
-  // inspector, or logs. A request that starts after this watermark may recover.
+  // Requests covered by a 401/403 cannot restore cleared authorized surfaces.
   const revokedOverviewGenerationRef = useRef(0);
-  // Periodic polls chain after the previous invocation settles and skip while a
-  // collection is still paging. A wall-clock interval that calls loadOverview
-  // would advance generation and cancel that collector; if every page walk
-  // exceeds pollMs, the rail stays empty or permanently stale.
+  // Serialized polling skips while an explicit history walk is in flight.
   const overviewLoadInFlightRef = useRef(false);
+  const completeOverviewQueryRef = useRef<unknown>(null);
   // Summary poll generation: older success must not replace newer state.
   // A completed 401/403 or network/5xx stays authoritative unless a newer
   // success has already been applied — a newer request merely starting is not
@@ -287,18 +275,16 @@ export function ConsoleDashboard() {
     selectedStreamsRef.current = selectedStreams;
   }, [selectedStreams]);
 
-  const loadOverview = useCallback(async () => {
+  const loadOverview = useCallback(async (loadHistory = false) => {
     const epoch = authorizedFeedEpochRef.current;
     // Auth revocation must not refill previously authorized workspace rows.
     // Non-auth capability failures keep legacy-safe overview navigation.
     if (consoleAuthDeniedRef.current) {
       setOverview([]);
+      setOverviewHasMore(false);
       return;
     }
-    // Stamp after the auth-denial early return so a denied no-op cannot invalidate
-    // an in-flight recovery load that already cleared the latch and advanced.
-    // Capture the query snapshot with the generation so pagination stays pinned to
-    // the filters that started this load; repoFilter is server-side only.
+    // Stamp the captured query after the denial no-op so filter races stay pinned.
     const generation = ++overviewRequestGenerationRef.current;
     overviewLoadInFlightRef.current = true;
     try {
@@ -314,10 +300,6 @@ export function ConsoleDashboard() {
       }
       setApiState(health.ok ? "ok" : "error");
 
-      // Build per request so hosted context query keys (org_id/project_id) are
-      // read from the current page search after client-side tenant switches —
-      // do not memoize on filter state alone. Filter values come from the captured
-      // snapshot so this callback identity stays stable across filter edits.
       const { statusFilters: statuses, agentFilters: agents, repoFilter: repo } =
         capturedQuery;
       const filters = {
@@ -325,8 +307,6 @@ export function ConsoleDashboard() {
         agent: agents.length === 1 ? agents[0] : undefined,
         repo_url: repo.trim() || undefined,
       };
-      // Overview is cursor-paginated; accumulate pages so the rail, client search,
-      // multi-value filters, and log selection see every matching workspace.
       let pageError: string | null = null;
       let pageAuthDenied = false;
       let pageOutage = false;
@@ -362,8 +342,10 @@ export function ConsoleDashboard() {
         // overview refill. Bump gated-detail generation so in-flight
         // loadWorkspace / log-tail cannot restore revoked caches.
         noteGatedDetailDrop(gatedDetailDroppedFeedsRef, gatedDetailFeedGenerationRef, DROP_ALL_GATED_DETAIL_FEEDS);
+        completeOverviewQueryRef.current = null;
         setOverviewError(message);
         setOverview([]);
+        setOverviewHasMore(false);
         setOverviewTruncationWarning(null);
         // Inspector surfaces are wiped with the rail; drop the detail warning
         // so a retained diagnostic error does not outlive the cleared snapshot.
@@ -440,7 +422,7 @@ export function ConsoleDashboard() {
         );
         return true;
       };
-      const collected = await collectOverviewPages(async (cursor) => {
+      const fetchOverviewPage = async (cursor: string | null) => {
         if (
           epoch !== authorizedFeedEpochRef.current ||
           consoleAuthDeniedRef.current ||
@@ -478,7 +460,8 @@ export function ConsoleDashboard() {
           return null;
         }
         return result.data;
-      });
+      };
+      const firstPage = await fetchOverviewPage(null);
       if (pageAuthDenied) {
         applyOverviewAuthDenial(generation, pageError ?? "");
         return;
@@ -495,7 +478,7 @@ export function ConsoleDashboard() {
       ) {
         return;
       }
-      if (collected === null) {
+      if (firstPage === null) {
         return;
       }
       // A newer 401/403 already covers this generation, a newer success
@@ -513,20 +496,35 @@ export function ConsoleDashboard() {
         appliedOverviewGenerationRef.current,
         generation,
       );
-      // Never treat a capped prefix as a complete fleet: surface truncation so
-      // rail/search/log selection cannot silently omit later workspaces.
-      // Keep this off both feed error slots so neither poll can clear it.
+      const normalizeOverview = (items: WorkspaceOverview[]) =>
+        items.map((item) => ({
+          ...item,
+          task_prompt: item.task_prompt ?? "",
+          lifecycle: item.lifecycle ?? [],
+          llm_usage: fallbackLlmUsage(item.llm_usage),
+          recovery: item.recovery ?? null,
+        }));
+      const firstItems = normalizeOverview(firstPage.items);
+      const queryHistoryComplete = completeOverviewQueryRef.current === capturedQuery;
+      setOverview((current) => {
+        if (!queryHistoryComplete || !firstPage.has_more) {
+          return firstItems;
+        }
+        const freshIds = new Set(firstItems.map((item) => item.workspace_id));
+        return [...firstItems, ...current.filter((item) => !freshIds.has(item.workspace_id))];
+      });
+      if (!firstPage.has_more) {
+        completeOverviewQueryRef.current = capturedQuery;
+      }
+      const firstCursorUsable =
+        firstPage.has_more && typeof firstPage.next_cursor === "string" && firstPage.next_cursor.trim() !== "";
+      setOverviewHasMore(firstCursorUsable && !queryHistoryComplete);
       setOverviewTruncationWarning(
-        collected.truncated
-          ? collected.truncationReason === "missing_cursor"
-            ? "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor, so later workspaces cannot be loaded."
-            : "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
+        firstPage.has_more && !firstCursorUsable
+          ? "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor, so later workspaces cannot be loaded."
           : null,
       );
-      // Clear only the overview warning. A still-failing workspace-detail feed
-      // retains last-good inspector data and must keep its own banner. Re-check
-      // in the updater so a newer outage that settled after this success was
-      // claimed cannot be wiped.
+      // Clear only this feed's warning, and not over a newer failure or denial.
       setOverviewError((current) =>
         generation < appliedOverviewFailureGenerationRef.current ||
         generation <= revokedOverviewGenerationRef.current ||
@@ -534,17 +532,48 @@ export function ConsoleDashboard() {
           ? current
           : null,
       );
-      setOverview(
-        collected.items.map((item) => ({
-          ...item,
-          task_prompt: item.task_prompt ?? "",
-          lifecycle: item.lifecycle ?? [],
-          llm_usage: fallbackLlmUsage(item.llm_usage),
-          recovery: item.recovery ?? null,
-        })),
-      );
       setLastRefresh(new Date());
       const currentSelectedId = selectedIdRef.current;
+      if (currentSelectedId && !firstPage.has_more && !firstPage.items.some((item) => item.workspace_id === currentSelectedId)) {
+        setSelectedId(null);
+      }
+      loadHistory ||= Boolean(
+        currentSelectedId &&
+          firstPage.has_more &&
+          !firstPage.items.some((item) => item.workspace_id === currentSelectedId),
+      );
+      if (!loadHistory || !firstCursorUsable || queryHistoryComplete) {
+        return;
+      }
+      setOverviewHistoryLoading(true);
+      const collected = await collectOverviewPages(fetchOverviewPage, { initialPage: firstPage });
+      if (pageAuthDenied) {
+        applyOverviewAuthDenial(generation, pageError ?? "");
+        return;
+      }
+      if (pageOutage) {
+        applyOverviewOutage(generation, pageError ?? "");
+        return;
+      }
+      if (
+        collected === null ||
+        epoch !== authorizedFeedEpochRef.current ||
+        consoleAuthDeniedRef.current ||
+        generation !== overviewRequestGenerationRef.current ||
+        overviewQueryRef.current !== capturedQuery
+      ) {
+        return;
+      }
+      completeOverviewQueryRef.current = collected.truncated ? null : capturedQuery;
+      setOverviewHasMore(false);
+      setOverviewTruncationWarning(
+        collected.truncated
+          ? collected.truncationReason === "missing_cursor"
+            ? "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor, so later workspaces cannot be loaded."
+            : "Workspace list truncated: more matching workspaces exist beyond the loaded pages. Narrow filters or raise the overview page budget."
+          : null,
+      );
+      setOverview(normalizeOverview(collected.items));
       if (currentSelectedId && !collected.items.some((item) => item.workspace_id === currentSelectedId)) {
         setSelectedId(null);
       }
@@ -553,6 +582,7 @@ export function ConsoleDashboard() {
       // refresh load is still paging; periodic polls skip while this stays true.
       if (generation === overviewRequestGenerationRef.current) {
         overviewLoadInFlightRef.current = false;
+        setOverviewHistoryLoading(false);
       }
     }
   }, [setSelectedId]);
@@ -588,6 +618,9 @@ export function ConsoleDashboard() {
     // wipe them on auth denial or tenant/backend identity change so revocation
     // and cross-context reuse cannot fail open with prior rows still on screen.
     setOverview([]);
+    completeOverviewQueryRef.current = null;
+    setOverviewHasMore(false);
+    setOverviewHistoryLoading(false);
     setOverviewError(null);
     setWorkspaceDetailError(null);
     workspaceDetailAuthDeniedRef.current = false;
@@ -1112,6 +1145,14 @@ export function ConsoleDashboard() {
       }),
     [overview, searchText, agentFilters, modelFilters, sortDirection, sortKey, statusFilters],
   );
+  const toggleWorkspaceLogSelection = useCallback(
+    (workspaceId: string, checked: boolean) =>
+      setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked)),
+    [],
+  );
+  const loadOverviewHistory = useCallback(() => {
+    void loadOverview(true);
+  }, [loadOverview]);
 
   const {
     logTailRefreshError,
@@ -1148,10 +1189,15 @@ export function ConsoleDashboard() {
   });
 
   useEffect(() => {
-    if (overview.length > 0 && selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
+    if (
+      overview.length > 0 &&
+      selectedId &&
+      !overviewHistoryLoading &&
+      !filteredOverview.some((item) => item.workspace_id === selectedId)
+    ) {
       setSelectedId(filteredOverview[0]?.workspace_id ?? null);
     }
-  }, [overview.length, filteredOverview, selectedId, setSelectedId]);
+  }, [overview.length, overviewHistoryLoading, filteredOverview, selectedId, setSelectedId]);
 
   const selectedOverview = overview.find((item) => item.workspace_id === selectedId) ?? null;
   const selectedMergeQueueItem = useMemo(
@@ -1338,6 +1384,9 @@ export function ConsoleDashboard() {
           onSortKey={setSortKey}
           onSortDirection={setSortDirection}
           onToggleExpanded={() => setFiltersExpanded((current) => !current)}
+          overviewHasMore={overviewHasMore}
+          overviewHistoryLoading={overviewHistoryLoading}
+          onLoadOverviewHistory={loadOverviewHistory}
           showWorkspaceLogs={showWorkspaceLogs}
           workspaceLogSelection={workspaceLogSelection}
           onOpenSelectedLogs={openSelectedWorkspaceLogs}
@@ -1345,9 +1394,7 @@ export function ConsoleDashboard() {
           filteredOverview={filteredOverview}
           selectedId={selectedId}
           onSelect={setSelectedId}
-          onToggleWorkspaceSelection={(workspaceId, checked) =>
-            setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked))
-          }
+          onToggleWorkspaceSelection={toggleWorkspaceLogSelection}
           onOpenDetails={setTaskDetailsWorkspaceId}
           onOpenLogs={openWorkspaceLogs}
         />

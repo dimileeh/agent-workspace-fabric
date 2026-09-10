@@ -27,6 +27,9 @@ type ConsoleDashboardWorkspaceRailProps = {
   onSortKey: (value: WorkspaceSortKey) => void;
   onSortDirection: (value: SortDirection) => void;
   onToggleExpanded: () => void;
+  overviewHasMore: boolean;
+  overviewHistoryLoading: boolean;
+  onLoadOverviewHistory: () => void;
   /** When false, omit log-selection toolbar, checkboxes, and Logs buttons. */
   showWorkspaceLogs: boolean;
   workspaceLogSelection: string[];
@@ -67,6 +70,18 @@ export function ConsoleDashboardWorkspaceRail(props: ConsoleDashboardWorkspaceRa
         expanded={props.filtersExpanded}
         onToggleExpanded={props.onToggleExpanded}
       />
+      {props.overviewHasMore || props.overviewHistoryLoading ? (
+        <div className="border-b border-[var(--border)] px-3 py-2">
+          <button
+            type="button"
+            disabled={props.overviewHistoryLoading}
+            onClick={props.onLoadOverviewHistory}
+            className="inline-flex h-8 w-full items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:opacity-50"
+          >
+            {props.overviewHistoryLoading ? "Loading older workspaces…" : "Load older workspaces"}
+          </button>
+        </div>
+      ) : null}
       {props.showWorkspaceLogs ? (
         <WorkspaceSelectionToolbar
           selectedCount={props.workspaceLogSelection.length}

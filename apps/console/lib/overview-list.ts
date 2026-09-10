@@ -33,6 +33,11 @@ export type OverviewPageCollection = {
   truncationReason: OverviewTruncationReason | null;
 };
 
+export type OverviewPageCollectionOptions = {
+  /** First page already fetched and published by a latency-sensitive caller. */
+  initialPage?: OverviewListPage;
+};
+
 function complete(items: WorkspaceOverview[]): OverviewPageCollection {
   return { items, truncated: false, truncationReason: null };
 }
@@ -70,11 +75,13 @@ export function overviewListPath(
 // callers must surface continuation rather than treat the prefix as complete.
 export async function collectOverviewPages(
   fetchPage: (cursor: string | null) => Promise<OverviewListPage | null>,
+  options: OverviewPageCollectionOptions = {},
 ): Promise<OverviewPageCollection | null> {
   const collected: WorkspaceOverview[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < OVERVIEW_LIST_MAX_PAGES; page += 1) {
-    const data = await fetchPage(cursor);
+    const data: OverviewListPage | null =
+      page === 0 && options.initialPage ? options.initialPage : await fetchPage(cursor);
     if (data === null) {
       return null;
     }
