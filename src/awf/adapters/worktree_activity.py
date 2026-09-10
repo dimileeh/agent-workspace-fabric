@@ -32,8 +32,9 @@ Design notes:
   makes — is watched too. The git dir and its ``commondir`` are resolved and
   pinned by the bounded pre-agent prime scan; later scans never accept a
   replacement pointer or symlink target selected by the agent. Its device/inode
-  identity is pinned too, and later walks open it and descendants without
-  following symlinks. So is ``FETCH_HEAD``,
+  identity is pinned too; the common dir is pinned the same way, and later
+  scans resolve every watched descendant descriptor-relative without following
+  symlinks. So is ``FETCH_HEAD``,
   the one path in the worktree's own Git state a quiet ``git fetch`` is
   guaranteed to move. A linked worktree's git dir holds nothing *but* this
   worktree's state, so it is **walked whole** like a second tree root rather
@@ -450,16 +451,28 @@ class _PinnedDirectory(NamedTuple):
     identity: _DirectoryIdentity | None
 
 
+class _WatchedPath(NamedTuple):
+    """One metadata path resolved beneath a pre-agent pinned directory."""
+
+    root: _PinnedDirectory
+    relative: Path
+
+    @property
+    def path(self) -> Path:
+        """Absolute display/fingerprint path without using it for access."""
+        return self.root.path / self.relative
+
+
 class _GitPaths(NamedTuple):
     """Git state a scan must fold in from outside the worktree.
 
-    ``watched`` paths are stat-ed one by one — shared ones among them, so only
-    the names that belong to this worktree are ever listed. ``walk_roots`` are
-    walked whole, like the worktree itself, and so may only ever hold state
-    this worktree alone writes.
+    ``watched`` paths are stat-ed descriptor-relative to their pinned roots —
+    shared ones among them, so only the names that belong to this worktree are
+    ever listed. ``walk_roots`` are walked whole, like the worktree itself, and
+    so may only ever hold state this worktree alone writes.
     """
 
-    watched: tuple[Path, ...]
+    watched: tuple[_WatchedPath, ...]
     walk_roots: tuple[_PinnedDirectory, ...]
 
 
@@ -467,7 +480,7 @@ class _GitLayout(NamedTuple):
     """External Git roots trusted because priming resolved them pre-agent."""
 
     git_dir: _PinnedDirectory
-    common_dir: Path
+    common_dir: _PinnedDirectory
 
 
 class WorktreeActivityProbe:
@@ -711,10 +724,25 @@ class WorktreeActivityProbe:
             # roots. Resolving them now would trust agent-controlled metadata;
             # omitting them would make a later Git-only write look idle.
             return None
-        worktree_stat: os.stat_result | None = None
-        for path in (self._worktree_path, *git_paths.watched):
+        try:
+            worktree_stat = _metadata_stat(self._worktree_path)
+        except OSError as exc:
+            _log.warning(
+                "agent.worktree_activity.metadata_unreadable",
+                worktree_path=str(self._worktree_path),
+                path=str(self._worktree_path),
+                error=str(exc),
+            )
+            return None
+        newest, fingerprint = _absorb(
+            newest,
+            fingerprint,
+            str(self._worktree_path),
+            worktree_stat,
+        )
+        for watched in git_paths.watched:
             try:
-                stat_result = _metadata_stat(path)
+                stat_result = _metadata_stat_at(watched)
             except OSError as exc:
                 # Same fail-open rule as an unstattable walked entry: the linked
                 # worktree's HEAD / index / logs/HEAD are the only place
@@ -724,13 +752,16 @@ class WorktreeActivityProbe:
                 _log.warning(
                     "agent.worktree_activity.metadata_unreadable",
                     worktree_path=str(self._worktree_path),
-                    path=str(path),
+                    path=str(watched.path),
                     error=str(exc),
                 )
                 return None
-            if path == self._worktree_path:
-                worktree_stat = stat_result
-            newest, fingerprint = _absorb(newest, fingerprint, str(path), stat_result)
+            newest, fingerprint = _absorb(
+                newest,
+                fingerprint,
+                str(watched.path),
+                stat_result,
+            )
         worktree_root = _PinnedDirectory(
             self._worktree_path,
             (
@@ -847,13 +878,15 @@ class WorktreeActivityProbe:
             return _GitPaths((), ())
         git_root = layout.git_dir
         git_dir = git_root.path
-        common_dir = layout.common_dir
-        git_dir_stat = _metadata_stat(git_dir)
+        common_root = layout.common_dir
+        common_dir = common_root.path
+        git_dir_watch = _WatchedPath(git_root, Path())
+        git_dir_stat = _metadata_stat_at(git_dir_watch)
         if git_dir_stat is None:
             # An absent root is a complete observation and is not walked. If it
             # reappears, it cannot be trusted because no pre-agent identity was
             # captured for that new directory object.
-            return _GitPaths((git_dir,), ())
+            return _GitPaths((git_dir_watch,), ())
         if not _matches_directory_identity(git_dir_stat, git_root.identity):
             _log.warning(
                 "agent.worktree_activity.git_root_replaced",
@@ -866,9 +899,9 @@ class WorktreeActivityProbe:
         # ``rebase-merge`` directory — registers when it appears or is replaced:
         # every one of those is created, renamed or removed inside this
         # directory, which moves its mtime.
-        watched = [git_dir]
-        watched.extend(git_dir / name for name in _GIT_DIR_ACTIVITY_FILES)
-        watched.append(git_dir / _REFTABLE_STACK_FILE)
+        watched = [git_dir_watch]
+        watched.extend(_WatchedPath(git_root, name) for name in _GIT_DIR_ACTIVITY_FILES)
+        watched.append(_WatchedPath(git_root, _REFTABLE_STACK_FILE))
         # The git dir resolved above is this worktree's alone — a linked
         # worktree's private directory, or the one a ``.git`` symlink / pointer
         # file names for a checkout of its own — so it is walked whole, not just
@@ -894,9 +927,9 @@ class WorktreeActivityProbe:
         # the one path under the common dir that belongs to this worktree — the
         # branch ref HEAD names — is watched, by name; the reftable state that
         # is this worktree's alone lives in its own git dir, watched above.
-        branch_ref = _resolve_head_branch_ref(git_dir, common_dir)
+        branch_ref = _resolve_head_branch_ref(git_root, common_dir)
         if branch_ref is not None:
-            watched.append(branch_ref)
+            watched.append(_WatchedPath(common_root, branch_ref.relative_to(common_dir)))
         return _GitPaths(tuple(watched), walk_roots)
 
 
@@ -980,6 +1013,62 @@ def _metadata_stat(path: Path) -> os.stat_result | None:
         return path.lstat()
     except FileNotFoundError:
         return None
+
+
+def _metadata_stat_at(watched: _WatchedPath) -> os.stat_result | None:
+    """Stat a watched path beneath its pinned root without following symlinks.
+
+    ``lstat(root / relative)`` protects only the final component; every earlier
+    component is still followed. Open each intermediate directory relative to
+    its already-open parent with ``O_NOFOLLOW`` so an agent cannot replace
+    ``logs``, ``reftable``, or ``refs/heads`` with an outside-pointing symlink.
+    A missing root or component is the same complete absence observation as
+    :func:`_metadata_stat`; every other access failure propagates so the scan
+    fails open.
+    """
+    root = watched.root
+    if root.identity is None:
+        root_stat = _metadata_stat(root.path)
+        if root_stat is None:
+            return None
+        raise OSError(errno.ESTALE, "pinned directory appeared after priming", root.path)
+    descriptors: list[int] = []
+    try:
+        descriptor = _open_pinned_directory(root)
+        descriptors.append(descriptor)
+        parts = watched.relative.parts
+        if not parts:
+            return os.fstat(descriptor)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        for component in parts[:-1]:
+            descriptor = os.open(component, flags, dir_fd=descriptor)
+            descriptors.append(descriptor)
+        return os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _read_head_at(git_root: _PinnedDirectory) -> str | None:
+    """Read HEAD directly beneath its pinned Git root without following it."""
+    descriptor = _open_pinned_directory(git_root)
+    try:
+        try:
+            head_descriptor = os.open(
+                "HEAD",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                dir_fd=descriptor,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            return os.read(head_descriptor, 4096).decode("utf-8", errors="replace")
+        finally:
+            os.close(head_descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _matches_directory_identity(
@@ -1099,13 +1188,17 @@ def _resolve_git_layout(worktree_path: Path) -> _GitLayout | None:
     if git_dir is None:
         return None
     canonical_git_dir = git_dir.resolve()
+    canonical_common_dir = _git_common_dir(canonical_git_dir).resolve()
     return _GitLayout(
         git_dir=_pin_directory(canonical_git_dir),
-        common_dir=_git_common_dir(canonical_git_dir).resolve(),
+        common_dir=_pin_directory(canonical_common_dir),
     )
 
 
-def _resolve_head_branch_ref(git_dir: Path, common_dir: Path) -> Path | None:
+def _resolve_head_branch_ref(
+    git_root: _PinnedDirectory,
+    common_dir: Path,
+) -> Path | None:
     """Resolve HEAD's symbolic target to the ref file a commit lands in.
 
     That file lives under the *common* git dir (``common_dir``), not the linked
@@ -1128,9 +1221,8 @@ def _resolve_head_branch_ref(git_dir: Path, common_dir: Path) -> Path | None:
     ``refs/heads/.invalid`` — which is why the caller watches this worktree's
     own ``reftable/tables.list`` alongside whatever this resolves to.
     """
-    try:
-        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
+    head = _read_head_at(git_root)
+    if head is None:
         return None
     target = head.partition("\n")[0].strip()
     if not target.startswith(_HEAD_REF_PREFIX):

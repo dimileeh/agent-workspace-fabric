@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import structlog
 
+from awf.adapters import worktree_activity
 from awf.adapters.worktree_activity import WorktreeActivityProbe
 from tests.unit.adapters.test_worktree_activity_probe_parts.helpers import _age, _age_tree
 
@@ -542,15 +543,25 @@ async def test_unreadable_ref_resolution_input_reports_unknown(
     _age_tree(worktree)
     _age_tree(tmp_path / "mirror.git")
 
-    real_read_text = Path.read_text
     denied = git_dir / denied_name
+    if denied_name == "HEAD":
+        real_read_head_at = worktree_activity._read_head_at
 
-    def _deny_one(self: Path, *args: object, **kwargs: object) -> str:
-        if self == denied:
-            raise PermissionError(13, "read denied", str(denied))
-        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+        def _deny_head(root: worktree_activity._PinnedDirectory) -> str | None:
+            if root.path / "HEAD" == denied:
+                raise PermissionError(13, "read denied", str(denied))
+            return real_read_head_at(root)
 
-    monkeypatch.setattr(Path, "read_text", _deny_one)
+        monkeypatch.setattr(worktree_activity, "_read_head_at", _deny_head)
+    else:
+        real_read_text = Path.read_text
+
+        def _deny_commondir(self: Path, *args: object, **kwargs: object) -> str:
+            if self == denied:
+                raise PermissionError(13, "read denied", str(denied))
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", _deny_commondir)
 
     probe = WorktreeActivityProbe(worktree)
     with structlog.testing.capture_logs() as captured:
@@ -607,15 +618,15 @@ async def test_unreadable_git_dir_metadata_reports_unknown(
     _age_tree(worktree)
     _age_tree(git_dir)
 
-    real_lstat = Path.lstat
+    real_metadata_stat_at = worktree_activity._metadata_stat_at
     denied = git_dir / "index"
 
-    def _deny_one(self: Path) -> os.stat_result:
-        if self == denied:
+    def _deny_one(watched: worktree_activity._WatchedPath) -> os.stat_result | None:
+        if watched.path == denied:
             raise PermissionError("lstat denied")
-        return real_lstat(self)
+        return real_metadata_stat_at(watched)
 
-    monkeypatch.setattr(Path, "lstat", _deny_one)
+    monkeypatch.setattr(worktree_activity, "_metadata_stat_at", _deny_one)
 
     probe = WorktreeActivityProbe(worktree)
     with structlog.testing.capture_logs() as captured:

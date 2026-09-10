@@ -304,6 +304,88 @@ def test_observed_subdirectory_open_rejects_symlink_replacement(tmp_path: Path) 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("root_kind", "link_path", "watched_tail"),
+    [
+        ("git", Path("logs"), Path("HEAD")),
+        ("git", Path("reftable"), Path("tables.list")),
+        ("common", Path("refs") / "heads", Path("awf") / "ws"),
+    ],
+)
+async def test_watched_git_path_rejects_symlinked_intermediate_directory(
+    tmp_path: Path,
+    worktree: Path,
+    root_kind: str,
+    link_path: Path,
+    watched_tail: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6hRszr: watched metadata stays under pinned roots.
+
+    ``Path.lstat`` protects only its final component. An agent can replace an
+    intermediate ``logs``, ``reftable``, or ``refs/heads`` directory with a
+    symlink and make an absolute-path lstat resolve outside the pinned Git root.
+    The incomplete scan must fail open without following that replacement.
+    """
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    (git_dir / "logs").mkdir(parents=True)
+    (git_dir / "reftable").mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "logs" / "HEAD").write_text("reflog\n", encoding="utf-8")
+    (git_dir / "reftable" / "tables.list").write_text("table.ref\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    branch_ref = common_dir / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("0" * 40 + "\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    watched_root = git_dir if root_kind == "git" else common_dir
+    replaced = watched_root / link_path
+    replaced.rename(replaced.with_name(f"{replaced.name}-original"))
+    outside = tmp_path / f"outside-{root_kind}-{replaced.name}"
+    outside_target = outside / watched_tail
+    outside_target.parent.mkdir(parents=True)
+    outside_target.write_text("agent-selected\n", encoding="utf-8")
+    replaced.symlink_to(outside, target_is_directory=True)
+
+    assert await probe() is None
+
+
+@pytest.mark.unit
+async def test_branch_resolution_rejects_symlinked_head(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """The branch watch must not follow a replaced HEAD while resolving it."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    head = git_dir / "HEAD"
+    head.write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    head.rename(git_dir / "HEAD-original")
+    outside = tmp_path / "agent-selected-head"
+    outside.write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    head.symlink_to(outside)
+
+    assert await probe() is None
+
+
+@pytest.mark.unit
 async def test_worktree_walk_never_follows_root_replacement(
     tmp_path: Path,
     worktree: Path,
