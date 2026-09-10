@@ -215,6 +215,29 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_checks_grok_acp_stdio_contract() -> None:
+    """Pin Grok upgrades to the ACP exchange used by the runtime adapter."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "timeout 15s env" in dockerfile
+    assert "grok --always-approve --no-auto-update -m grok-build agent stdio" in dockerfile
+    assert '"method":"initialize"' in dockerfile
+    assert '"method":"authenticate"' in dockerfile
+    assert '"method":"session/new"' in dockerfile
+    assert '"method":"session/prompt"' in dockerfile
+    assert '--arg expected_version "$GROK_VERSION"' in dockerfile
+    assert ".result._meta.agentVersion == $expected_version" in dockerfile
+    assert ".result.protocolVersion == 1" in dockerfile
+    assert '.result.authMethods[]?.id] | index("grok.com") != null' in dockerfile
+    assert '.error.data == "unsupported auth method: awf-contract-probe"' in dockerfile
+    assert '.error.message == "Authentication required"' in dockerfile
+    assert '.error.data == "unknown session id"' in dockerfile
+    assert dockerfile.index("@xai-official/grok@${GROK_VERSION}") < dockerfile.index(
+        '"method":"initialize"'
+    )
+
+
+@pytest.mark.unit
 def test_agent_runtime_prepares_writable_cursor_config_home() -> None:
     """Verify agent runtime prepares writable cursor config home."""
     dockerfile = _agent_runtime_dockerfile()
