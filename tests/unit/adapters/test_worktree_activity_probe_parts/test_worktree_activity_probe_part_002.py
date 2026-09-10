@@ -415,6 +415,46 @@ async def test_primed_probe_never_watches_replaced_commondir_target(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("head_ref_kind", ["absolute", "traversal"])
+async def test_rewritten_head_ref_cannot_escape_pinned_common_dir(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_ref_kind: str,
+) -> None:
+    """Agent-controlled HEAD text cannot redirect branch-ref metadata stats."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    outside_ref = tmp_path / "outside-ref"
+    head_ref = (
+        str(outside_ref) if head_ref_kind == "absolute" else "refs/heads/../../../outside-ref"
+    )
+    (git_dir / "HEAD").write_text(f"ref: {head_ref}\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _reject_external_stat(self: Path) -> os.stat_result:
+        if Path(os.path.normpath(self)) == outside_ref:
+            raise AssertionError(f"branch-ref stat escaped common dir: {self}")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _reject_external_stat)
+
+    assert await probe() is True
+    assert await probe() is False
+
+
+@pytest.mark.unit
 async def test_probe_without_pre_agent_layout_never_resolves_later_git_pointer(
     tmp_path: Path,
     worktree: Path,

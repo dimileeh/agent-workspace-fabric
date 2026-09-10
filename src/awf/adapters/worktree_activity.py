@@ -1138,7 +1138,13 @@ def _resolve_head_branch_ref(git_dir: Path, common_dir: Path) -> Path | None:
     ref = target[len(_HEAD_REF_PREFIX) :].strip()
     if not ref:
         return None
-    return common_dir / ref
+    ref_path = Path(ref)
+    if ref_path.is_absolute():
+        return None
+    branch_ref = Path(os.path.normpath(common_dir / ref_path))
+    if not branch_ref.is_relative_to(common_dir):
+        return None
+    return branch_ref
 
 
 def _git_common_dir(git_dir: Path) -> Path:
