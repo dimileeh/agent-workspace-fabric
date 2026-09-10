@@ -15,7 +15,7 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_lifecycle import PullRequestLifecycle
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, TaskKind, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
@@ -183,6 +183,24 @@ async def _load_retry_preview_outside_request_session(
         return preview
 
 
+async def _load_retry_operation_outside_request_session(
+    session: AsyncSession,
+    idempotency_key: str,
+) -> Operation | None:
+    """Load a detached retry-operation replay before any external prefetch."""
+    bind = session.bind
+    if not isinstance(bind, AsyncEngine):  # pragma: no cover - session always engine-bound
+        raise RuntimeError("retry operation replay requires an AsyncEngine-bound session")
+    preview_factory = make_session_factory(bind)
+    async with preview_factory() as preview_session:
+        operation = await OperationRepository(preview_session).get_by_idempotency_key(
+            idempotency_key
+        )
+        if operation is not None:
+            preview_session.expunge(operation)
+        return operation
+
+
 async def _prefetch_existing_feature_pr_state(
     source: Workspace,
     *,
@@ -248,12 +266,63 @@ async def _prefetch_existing_feature_pr_state(
     return prefetched
 
 
+def _retry_operation_identity(
+    workspace_id: str,
+    *,
+    provider_readiness_override: bool,
+    provider_readiness_override_reason: str | None,
+) -> dict[str, Any]:
+    """Return the effective request fields protected by retry idempotency."""
+    normalized_reason = (
+        provider_readiness_override_reason.strip()
+        if provider_readiness_override_reason is not None
+        else None
+    )
+    return {
+        "source_workspace_id": workspace_id,
+        "provider_readiness_override": provider_readiness_override,
+        "provider_readiness_override_reason": normalized_reason or None,
+    }
+
+
+async def _retry_result_from_idempotent_operation(
+    repo: WorkspaceRepository,
+    operation: Operation,
+    *,
+    retry_identity: Mapping[str, Any],
+) -> Any:
+    """Reconstruct the accepted retry result for a durable operation replay."""
+    workspaces = _workspace_service()
+    payload = operation.payload
+    if (
+        operation.type != OperationType.retry.value
+        or not isinstance(payload, Mapping)
+        or any(payload.get(key) != value for key, value in retry_identity.items())
+    ):
+        raise workspaces.WorkspaceRetryIdempotencyConflictError()
+
+    retried = await repo.get(operation.workspace_id)
+    result = operation.result
+    attempt_number = result.get("attempt_number") if isinstance(result, Mapping) else None
+    if retried is None or not isinstance(attempt_number, int) or isinstance(attempt_number, bool):
+        raise workspaces.WorkspaceRetryIdempotencyReplayUnavailableError(
+            detail={"operation_id": operation.id},
+        )
+    return workspaces.WorkspaceRetryResult(
+        source_workspace_id=str(retry_identity["source_workspace_id"]),
+        new_workspace=retried,
+        operation=operation,
+        attempt_number=attempt_number,
+    )
+
+
 async def retry_workspace_row(
     session: AsyncSession,
     workspace_id: str,
     *,
     provider_readiness_override: bool = False,
     provider_readiness_override_reason: str | None = None,
+    idempotency_key: str | None = None,
     settings: Settings | None = None,
     provider_environ: Mapping[str, str] | None = None,
     run_subprocess: SubprocessRun | None = None,
@@ -273,6 +342,24 @@ async def retry_workspace_row(
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
+    operations = OperationRepository(session)
+    retry_idempotency_key = idempotency_key.strip() if idempotency_key else None
+    retry_identity = _retry_operation_identity(
+        workspace_id,
+        provider_readiness_override=provider_readiness_override,
+        provider_readiness_override_reason=provider_readiness_override_reason,
+    )
+    if retry_idempotency_key is not None:
+        existing_operation = await _load_retry_operation_outside_request_session(
+            session,
+            retry_idempotency_key,
+        )
+        if existing_operation is not None:
+            return await _retry_result_from_idempotent_operation(
+                repo,
+                existing_operation,
+                retry_identity=retry_identity,
+            )
     # Prefetch forge PR state from an unlocked read in a short-lived session.
     # ``get_for_update`` holds SELECT ... FOR UPDATE for the rest of the
     # transaction, and forge reads use RetryPolicy.READ (sleep+retry). Looking up
@@ -290,6 +377,16 @@ async def retry_workspace_row(
         preview,
         pr_lifecycle_checker=pr_lifecycle_checker,
     )
+
+    if retry_idempotency_key is not None:
+        await operations.acquire_idempotency_key_lock(retry_idempotency_key)
+        existing_operation = await operations.get_by_idempotency_key(retry_idempotency_key)
+        if existing_operation is not None:
+            return await _retry_result_from_idempotent_operation(
+                repo,
+                existing_operation,
+                retry_identity=retry_identity,
+            )
 
     source = await repo.get_for_update(workspace_id)
     if source is None:
@@ -973,17 +1070,19 @@ async def retry_workspace_row(
         score_summary=retry_score.score_summary,
     )
 
-    operation_repo = OperationRepository(session)
     operation_payload: dict[str, Any] = {"source_workspace_id": source.id}
+    if retry_idempotency_key is not None:
+        operation_payload.update(retry_identity)
     if planning_scope_context is not None:
         operation_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     if salvage_recovery_payload is not None:
         operation_payload.update(salvage_recovery_payload)
-    operation = await operation_repo.create(
+    operation = await operations.create(
         workspace_id=retried.id,
         operation_type=OperationType.retry,
         status=OperationStatus.running,
         payload=operation_payload,
+        idempotency_key=retry_idempotency_key,
     )
     event_payload = {
         "source_workspace_id": source.id,
@@ -1011,7 +1110,7 @@ async def retry_workspace_row(
     if preflight is not None:
         await workspaces_create._record_provider_readiness_preflight(repo, retried, preflight)
     await workspaces_create._record_owned_path_overlap_risk(repo, retried, overlaps)
-    await operation_repo.finish(
+    await operations.finish(
         operation,
         status=OperationStatus.succeeded,
         result={

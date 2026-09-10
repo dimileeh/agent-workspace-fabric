@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { handleWorkspaceControlRoute } from "./workspace-control-routes.ts";
+import {
+  handleWorkspaceControlRoute,
+  handleWorkspaceRetryRoute,
+} from "./workspace-control-routes.ts";
 
 const originalFetch = globalThis.fetch;
 const originalBaseUrl = process.env.AWF_API_BASE_URL;
@@ -97,6 +100,32 @@ test("cancel BFF maps to cancel endpoint and sends stop_stack", async () => {
     reason: "operator console cancel",
     stop_stack: true,
   });
+});
+
+test("retry BFF forwards the browser retry identity to Core", async () => {
+  const calls = recordAwfProxy(
+    {
+      source_workspace_id: "ws_failed",
+      new_workspace_id: "ws_retried",
+      operation_id: "op_retry",
+      status: "requested",
+      attempt_number: 2,
+    },
+    { status: 202 },
+  );
+
+  const response = await handleWorkspaceRetryRoute(
+    "ws_failed",
+    jsonRequest({ idempotency_key: "console:retry:ws_failed:stable" }),
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://awf.example.test/v1/workspaces/ws_failed/retry");
+  assert.equal(calls[0].init.method, "POST");
+  const headers = normalizeHeaders(calls[0].init.headers);
+  assert.equal(headers["idempotency-key"], "console:retry:ws_failed:stable");
+  assert.equal(calls[0].init.body, undefined);
 });
 
 test("cancel BFF sends stop_stack even without a reason", async () => {

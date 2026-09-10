@@ -23,6 +23,23 @@ class WorkspaceRetryError(Exception):
         super().__init__(self.message)
 
 
+class WorkspaceRetryIdempotencyConflictError(WorkspaceRetryError):
+    """Raised when a retry idempotency key is reused for another request."""
+
+    error_code = "IDEMPOTENCY_CONFLICT"
+    message = (
+        "Idempotency-Key previously used with a different retry request; "
+        "supply a fresh key or replay the original request."
+    )
+
+
+class WorkspaceRetryIdempotencyReplayUnavailableError(WorkspaceRetryError):
+    """Raised when a persisted retry operation cannot reconstruct its response."""
+
+    error_code = "IDEMPOTENCY_REPLAY_UNAVAILABLE"
+    message = "The original workspace retry result is no longer available for replay."
+
+
 class WorkspaceRetryPrStateUnavailableError(WorkspaceRetryError):
     """Raised when retry cannot safely establish an existing PR's live identity."""
 

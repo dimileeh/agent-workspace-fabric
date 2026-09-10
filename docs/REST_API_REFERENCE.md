@@ -342,11 +342,14 @@ Returns a workspace control response.
 
 Retry a terminal (failed/cancelled) workspace by creating a new workspace
 that inherits repo, branch, and task configuration. Auth required when
-`AWF_API_TOKEN` is configured.
+`AWF_API_TOKEN` is configured. Supply an optional `Idempotency-Key` header and
+reuse it after a timeout or dropped response to receive the originally accepted
+retry result without creating another attempt.
 
 ```bash
 curl -X POST "http://localhost:8000/v1/workspaces/ws_123/retry" \
-  -H "Authorization: Bearer $AWF_API_TOKEN"
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: retry-ws-123-001"
 ```
 
 Optional query params: `provider_readiness_override`, `provider_readiness_override_reason`.

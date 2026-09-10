@@ -3244,6 +3244,36 @@ test("workspace mutation requests have deadlines", () => {
   );
 });
 
+test("workspace retry reuses its identity after an ambiguous request failure", () => {
+  const mutating = dashboardSource.mutatingControls;
+  const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");
+  const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
+  assert.ok(retryStart >= 0, "Expected retrySelectedWorkspace callback");
+  assert.ok(operatorStart > retryStart, "Expected runWorkspaceOperatorAction callback");
+  const retrySource = mutating.slice(retryStart, operatorStart);
+
+  assert.match(
+    mutating,
+    /const retryIdempotencyKeysRef = useRef\(new Map<string, string>\(\)\);/,
+    "Expected retry identities to survive state updates and workspace selection changes",
+  );
+  assert.match(
+    retrySource,
+    /const retryIdentityScope = `\$\{epoch\}:\$\{workspaceId\}`;[\s\S]*?retryIdempotencyKeysRef\.current\.get\(retryIdentityScope\)[\s\S]*?operatorIdempotencyKey\("retry", workspaceId\)[\s\S]*?retryIdempotencyKeysRef\.current\.set\(retryIdentityScope, idempotencyKey\)/,
+    "Expected a retry click to reuse an outstanding identity for the same auth epoch and workspace",
+  );
+  assert.match(
+    retrySource,
+    /apiPostWithDeadline<WorkspaceRetryResponse>\([\s\S]*?\{ idempotency_key: idempotencyKey \},[\s\S]*?\)/,
+    "Expected the retry identity in the BFF request",
+  );
+  assert.match(
+    retrySource,
+    /if \(result\.ok \|\| result\.status !== 0\) \{[\s\S]*?retryIdempotencyKeysRef\.current\.delete\(retryIdentityScope\);[\s\S]*?\}/,
+    "Expected only a definitive response to release the retry identity",
+  );
+});
+
 test("workspace retry is guarded by authorized feed epoch", () => {
   const mutating = dashboardSource.mutatingControls;
   const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");

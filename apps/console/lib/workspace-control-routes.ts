@@ -62,6 +62,27 @@ export async function handleWorkspaceControlRoute(
   });
 }
 
+export async function handleWorkspaceRetryRoute(
+  workspaceId: string,
+  request: Request,
+): Promise<Response> {
+  const parsed = await parsePayload(request);
+  if (!parsed.ok) {
+    return invalidRequest(parsed.message);
+  }
+  const idempotencyKeyResult = idempotencyKey(
+    parsed.value.idempotency_key,
+    request.headers,
+  );
+  if (!idempotencyKeyResult.ok) {
+    return invalidRequest(idempotencyKeyResult.message);
+  }
+  return proxyAwf(`/v1/workspaces/${encodeURIComponent(workspaceId)}/retry`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKeyResult.value },
+  });
+}
+
 async function parsePayload(
   request: Request,
 ): Promise<{ ok: true; value: WorkspaceControlRoutePayload } | { ok: false; message: string }> {

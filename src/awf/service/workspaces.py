@@ -82,6 +82,8 @@ from awf.service.workspace_runtime_health import (
 from awf.service.workspaces_retry_errors import (
     WorkspaceHostedDelegationNotConfiguredError,
     WorkspaceRetryError,
+    WorkspaceRetryIdempotencyConflictError,
+    WorkspaceRetryIdempotencyReplayUnavailableError,
     WorkspaceRetryPrAlreadyMergedError,
     WorkspaceRetryPrStateUnavailableError,
 )
@@ -654,6 +656,7 @@ class WorkspaceService:
         *,
         provider_readiness_override: bool = False,
         provider_readiness_override_reason: str | None = None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceRetryResponse:
         """Retry a failed or cancelled workspace as a fresh attempt."""
         async with self._factory() as s:
@@ -662,6 +665,7 @@ class WorkspaceService:
                 workspace_id,
                 provider_readiness_override=provider_readiness_override,
                 provider_readiness_override_reason=provider_readiness_override_reason,
+                idempotency_key=idempotency_key,
                 settings=self._settings,
             )
             await s.commit()
@@ -1356,6 +1360,8 @@ def _approved_planning_scope_fallback_model(*args: Any, **kwargs: Any) -> Any:
 __all__ = [
     "WorkspaceService",
     "WorkspaceRetryError",
+    "WorkspaceRetryIdempotencyConflictError",
+    "WorkspaceRetryIdempotencyReplayUnavailableError",
     "WorkspaceRetryNotFoundError",
     "WorkspaceRetryNotAllowedError",
     "WorkspaceRetryRecoveringInFlightError",

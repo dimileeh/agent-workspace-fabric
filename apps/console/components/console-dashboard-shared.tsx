@@ -653,7 +653,10 @@ export function operatorActionReason(action: WorkspaceOperatorAction): string {
   }
 }
 
-export function operatorIdempotencyKey(action: WorkspaceOperatorAction, workspaceId: string): string {
+export function operatorIdempotencyKey(
+  action: WorkspaceOperatorAction | "retry",
+  workspaceId: string,
+): string {
   const suffix =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()

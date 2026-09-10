@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useRef,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
@@ -67,6 +68,8 @@ export function useWorkspaceMutatingControls({
   loadWorkspace,
   reloadAvailableFeeds,
 }: UseWorkspaceMutatingControlsArgs) {
+  const retryIdempotencyKeysRef = useRef(new Map<string, string>());
+
   const retrySelectedWorkspace = useCallback(async () => {
     const workspaceId = selectedId;
     if (!workspaceId) {
@@ -83,9 +86,20 @@ export function useWorkspaceMutatingControls({
     // during follow-up refreshes) cannot apply the prior tenant's retry result.
     const epoch = authorizedFeedEpochRef.current;
     setRetryState({ status: "submitting" });
+    const retryIdentityScope = `${epoch}:${workspaceId}`;
+    const idempotencyKey =
+      retryIdempotencyKeysRef.current.get(retryIdentityScope) ??
+      operatorIdempotencyKey("retry", workspaceId);
+    retryIdempotencyKeysRef.current.set(retryIdentityScope, idempotencyKey);
     const result = await apiPostWithDeadline<WorkspaceRetryResponse>(
       awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
+      { idempotency_key: idempotencyKey },
     );
+    if (result.ok || result.status !== 0) {
+      if (retryIdempotencyKeysRef.current.get(retryIdentityScope) === idempotencyKey) {
+        retryIdempotencyKeysRef.current.delete(retryIdentityScope);
+      }
+    }
     if (
       epoch === authorizedFeedEpochRef.current &&
       !result.ok &&
