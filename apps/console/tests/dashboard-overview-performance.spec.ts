@@ -496,6 +496,58 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
   );
 });
 
+test("keeps the visible row anchored when a refresh changes row heights", async ({ page }) => {
+  const expandedTitle =
+    "Expanded after refresh with enough detail to wrap across several lines in the workspace rail ".repeat(4);
+  let firstPageRequests = 0;
+  await page.setViewportSize({ width: 1_000, height: 720 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => {
+      if (cursor === null) firstPageRequests += 1;
+    },
+    resolvePageItem: (item) => {
+      const index = Number.parseInt(item.workspace_id.slice(-4), 10);
+      return firstPageRequests > 1 && index <= 50
+        ? { ...item, title: `${expandedTitle}${item.workspace_id}` }
+        : item;
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  const anchorScrollTop = await list.locator('[data-testid^="workspace-card-"]').evaluateAll(
+    (cards) => cards.slice(0, 60).reduce(
+      (height, card) => height + card.getBoundingClientRect().height,
+      cards[60].getBoundingClientRect().height * 0.25,
+    ),
+  );
+  await list.evaluate((element, top) => element.scrollTo({ top }), anchorScrollTop);
+
+  const visibleAnchor = async () => list.evaluate((element) => {
+    const viewportTop = element.querySelector<HTMLElement>(":scope > .sticky")
+      ?.getBoundingClientRect().bottom ?? element.getBoundingClientRect().top;
+    const row = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    ).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    const bounds = row?.getBoundingClientRect();
+    return {
+      id: row?.dataset.testid ?? null,
+      offsetRatio: bounds ? (bounds.top - viewportTop) / bounds.height : null,
+    };
+  });
+  const beforeRefresh = await visibleAnchor();
+
+  await expect.poll(() => firstPageRequests, { timeout: 10_000 }).toBeGreaterThan(1);
+  await expect(page.getByTestId("workspace-title-ws_perf_0001")).toContainText(
+    "Expanded after refresh",
+  );
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(beforeRefresh.id);
+  const afterRefresh = await visibleAnchor();
+  expect(afterRefresh.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hDQDq: selections
 // retained across overview render windows must not mount one live column per ID.
 test("fullscreen logs cap retained selections across overview windows", async ({ page }) => {

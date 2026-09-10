@@ -973,6 +973,7 @@ export function WorkspaceList({
   const pendingScrollAnchorRef = useRef<{
     workspaceId: string;
     offsetRatio: number;
+    sourceRowOffsets: readonly number[];
   } | null>(null);
   const preserveScrollTopRef = useRef<number | null>(null);
   const suppressScrollLoadRef = useRef(false);
@@ -1090,6 +1091,7 @@ export function WorkspaceList({
           offsetRatio: anchorHeight > 0
             ? (scrollContainer.scrollTop - rowOffsets[anchorIndex]) / anchorHeight
             : 0,
+          sourceRowOffsets: rowOffsets,
         };
       }
       measuredWindowWidthRef.current = measuredWindowWidth;
@@ -1108,6 +1110,7 @@ export function WorkspaceList({
 
   useLayoutEffect(() => {
     const pendingAnchor = pendingScrollAnchorRef.current;
+    if (pendingAnchor?.sourceRowOffsets === rowOffsets) return;
     pendingScrollAnchorRef.current = null;
     const anchorIndex = pendingAnchor
       ? items.findIndex((item) => item.workspace_id === pendingAnchor.workspaceId)
