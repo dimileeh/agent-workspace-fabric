@@ -554,9 +554,11 @@ def test_clear_closed_sync_feature_pr_adoption_strips_identity_for_sync_only(
     assert task_policy == expected_policy
 
 
+@pytest.mark.parametrize("idempotency_key", [None, "retry-prefetch-unavailable"])
 async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
+    idempotency_key: str | None,
 ) -> None:  # type: ignore[no-untyped-def]
     settings = _settings_with_host_home(tmp_path)
     async with factory() as session:
@@ -583,6 +585,7 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
                 first.id,
                 provider_readiness_override=True,
                 provider_readiness_override_reason="retry existing PR",
+                idempotency_key=idempotency_key,
                 settings=settings,
                 provider_environ={},
                 pr_lifecycle_checker=unavailable,
@@ -598,12 +601,12 @@ async def test_retry_blocks_when_existing_feature_pr_state_is_unavailable(
     assert [workspace.id for workspace in workspaces] == [first.id]
 
 
-async def test_idempotent_retry_replay_waits_before_feature_pr_prefetch(
+async def test_idempotent_retry_replay_prefetches_before_lock_without_losing_winner(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    """An uncommitted same-key retry must serialize before forge prefetch."""
+    """A same-key retry must prefetch unlocked, then replay the committed winner."""
     settings = _settings_with_host_home(tmp_path)
     async with factory() as session:
         first = await create_workspace_row(
@@ -648,10 +651,14 @@ async def test_idempotent_retry_replay_waits_before_feature_pr_prefetch(
             pr_lifecycle_checker=original_forge_state,
         )
 
+        replay_sequence: list[str] = []
+        forge_entered = asyncio.Event()
         lock_entered = asyncio.Event()
+        request_session_in_transaction_during_forge: bool | None = None
         acquire_lock = OperationRepository.acquire_idempotency_key_lock
 
         async def observe_replay_lock(repo: OperationRepository, key: str) -> None:
+            replay_sequence.append("lock")
             lock_entered.set()
             await acquire_lock(repo, key)
 
@@ -659,7 +666,11 @@ async def test_idempotent_retry_replay_waits_before_feature_pr_prefetch(
             _source: Workspace,
             _pr_number: int,
         ) -> PullRequestLifecycle:
+            nonlocal request_session_in_transaction_during_forge
+            replay_sequence.append("forge")
             forge_calls.append("replay")
+            request_session_in_transaction_during_forge = replay_session.in_transaction()
+            forge_entered.set()
             return PullRequestLifecycle.merged
 
         monkeypatch.setattr(
@@ -679,24 +690,21 @@ async def test_idempotent_retry_replay_waits_before_feature_pr_prefetch(
                 pr_lifecycle_checker=stale_replay_forge_state,
             )
         )
-        lock_wait = asyncio.create_task(lock_entered.wait())
-        done, _pending = await asyncio.wait(
-            {replay_task, lock_wait},
-            timeout=2,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        replay_error = replay_task.exception() if replay_task in done else None
-        assert lock_wait in done, (
-            f"same-key replay reached forge prefetch before the idempotency lock: {replay_error!r}"
-        )
-        assert forge_calls == ["original"]
+        replay = None
+        try:
+            await asyncio.wait_for(forge_entered.wait(), timeout=2)
+            await asyncio.wait_for(lock_entered.wait(), timeout=2)
+            assert replay_sequence == ["forge", "lock"]
+            assert request_session_in_transaction_during_forge is False
+            assert not replay_task.done()
+        finally:
+            await original_session.commit()
+            replay = await asyncio.wait_for(replay_task, timeout=2)
 
-        await original_session.commit()
-        replay = await asyncio.wait_for(replay_task, timeout=2)
-
+    assert replay is not None
     assert replay.operation.id == original.operation.id
     assert replay.new_workspace.id == original.new_workspace.id
-    assert forge_calls == ["original"]
+    assert forge_calls == ["original", "replay"]
 
 
 async def test_retry_closes_preview_transaction_before_forge_prefetch(
