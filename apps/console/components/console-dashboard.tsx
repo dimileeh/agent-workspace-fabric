@@ -77,6 +77,7 @@ apiGet,
 apiPost,
 compareLogEntries,
 emptyDetail,
+pollMs,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
@@ -234,6 +235,9 @@ export function ConsoleDashboard() {
   const revokedOverviewGenerationRef = useRef(0);
   // Serialized polling skips while one explicit continuation page is in flight.
   const overviewLoadInFlightRef = useRef(false);
+  // Retained history is best-effort maintenance behind the live first page.
+  // Superseding overview work aborts it so stalled batches cannot accumulate.
+  const overviewRetainedRefreshAbortControllerRef = useRef<AbortController | null>(null);
   const overviewItemsRef = useRef<WorkspaceOverview[]>([]);
   const overviewPaginationRef = useRef<OverviewPagination | null>(null);
   const overviewSelectionLookupRef = useRef<{ query: unknown; workspaceId: string } | null>(null);
@@ -561,6 +565,8 @@ export function ConsoleDashboard() {
           }
           return;
         }
+        overviewRetainedRefreshAbortControllerRef.current?.abort();
+        overviewRetainedRefreshAbortControllerRef.current = null;
         appliedOverviewGenerationRef.current = Math.max(
           appliedOverviewGenerationRef.current,
           generation,
@@ -615,54 +621,14 @@ export function ConsoleDashboard() {
       }
       const pageItems = normalizeOverview(page.items);
       const sameQuery = capturedPagination?.query === capturedQuery;
-      const refreshedRetainedItems: WorkspaceOverview[] = [];
-      const missingRetainedIds: string[] = [];
-      if (!continuation && sameQuery && page.has_more) {
-        const retainedIdBatches = retainedOverviewIdBatches(
-          overviewItemsRef.current,
-          pageItems,
-        );
-        for (const workspaceIds of retainedIdBatches) {
-          const result = await apiPost<OverviewBatchResponse>(
-            awfPath("workspaces/overview/batch"),
-            { workspace_ids: workspaceIds },
-          );
-          if (!result.ok && (result.status === 401 || result.status === 403)) {
-            pageError = result.message;
-            pageAuthDenied = true;
-            break;
-          }
-          if (!result.ok) {
-            pageError = result.message;
-            pageOutage = true;
-            break;
-          }
-          if (
-            epoch !== authorizedFeedEpochRef.current ||
-            consoleAuthDeniedRef.current ||
-            generation !== overviewRequestGenerationRef.current ||
-            overviewQueryRef.current !== capturedQuery
-          ) {
-            return;
-          }
-          for (const item of normalizeOverview(result.data.items)) {
-            if (overviewItemMatchesQuery(item, capturedQuery)) {
-              refreshedRetainedItems.push(item);
-            } else {
-              missingRetainedIds.push(item.workspace_id);
-            }
-          }
-          missingRetainedIds.push(...result.data.missing_workspace_ids);
-        }
-        if (pageAuthDenied) {
-          applyOverviewAuthDenial(generation, pageError ?? "");
-          return;
-        }
-        if (pageOutage) {
-          applyOverviewOutage(generation, pageError ?? "");
-          return;
-        }
-      }
+      const retainedIdBatches = !continuation && sameQuery && page.has_more
+        ? retainedOverviewIdBatches(overviewItemsRef.current, pageItems)
+        : [];
+      // A successful newer live page supersedes older best-effort history.
+      // Wait until success is known before aborting so a prior completed
+      // authorization denial still wins over a merely-started request.
+      overviewRetainedRefreshAbortControllerRef.current?.abort();
+      overviewRetainedRefreshAbortControllerRef.current = null;
       appliedOverviewGenerationRef.current = Math.max(
         appliedOverviewGenerationRef.current,
         generation,
@@ -720,8 +686,8 @@ export function ConsoleDashboard() {
           ? reconcileOverviewRetainedItems(
               overviewItemsRef.current,
               pageItems,
-              refreshedRetainedItems,
-              missingRetainedIds,
+              [],
+              [],
             )
           : appendUniqueOverviewItems([], pageItems);
         overviewItemsRef.current = refreshed;
@@ -745,6 +711,93 @@ export function ConsoleDashboard() {
       );
       if (!continuation) {
         setLastRefresh(new Date());
+      }
+      if (retainedIdBatches.length > 0) {
+        const retainedRefreshController = new AbortController();
+        const retainedRefreshTimeout = window.setTimeout(
+          () => retainedRefreshController.abort(),
+          pollMs,
+        );
+        const refreshRetainedOverview = async () => {
+          const refreshedRetainedItems: WorkspaceOverview[] = [];
+          const missingRetainedIds: string[] = [];
+          try {
+            for (const workspaceIds of retainedIdBatches) {
+              const result = await apiPost<OverviewBatchResponse>(
+                awfPath("workspaces/overview/batch"),
+                { workspace_ids: workspaceIds },
+                { signal: retainedRefreshController.signal },
+              );
+              if (retainedRefreshController.signal.aborted) {
+                return;
+              }
+              if (!result.ok && (result.status === 401 || result.status === 403)) {
+                applyOverviewAuthDenial(generation, result.message);
+                return;
+              }
+              if (!result.ok) {
+                applyOverviewOutage(generation, result.message);
+                return;
+              }
+              if (
+                epoch !== authorizedFeedEpochRef.current ||
+                consoleAuthDeniedRef.current ||
+                generation !== overviewRequestGenerationRef.current ||
+                overviewQueryRef.current !== capturedQuery
+              ) {
+                return;
+              }
+              for (const item of normalizeOverview(result.data.items)) {
+                if (overviewItemMatchesQuery(item, capturedQuery)) {
+                  refreshedRetainedItems.push(item);
+                } else {
+                  missingRetainedIds.push(item.workspace_id);
+                }
+              }
+              missingRetainedIds.push(...result.data.missing_workspace_ids);
+            }
+            if (
+              retainedRefreshController.signal.aborted ||
+              epoch !== authorizedFeedEpochRef.current ||
+              consoleAuthDeniedRef.current ||
+              generation !== overviewRequestGenerationRef.current ||
+              generation <= revokedOverviewGenerationRef.current ||
+              generation < appliedOverviewFailureGenerationRef.current ||
+              overviewQueryRef.current !== capturedQuery
+            ) {
+              return;
+            }
+            const refreshed = reconcileOverviewRetainedItems(
+              overviewItemsRef.current,
+              pageItems,
+              refreshedRetainedItems,
+              missingRetainedIds,
+            );
+            overviewItemsRef.current = refreshed;
+            setOverview(refreshed);
+            const currentSelectedId = selectedIdRef.current;
+            if (
+              currentSelectedId &&
+              !overviewItemsRef.current.some((item) => item.workspace_id === currentSelectedId)
+            ) {
+              await fetchSelectedOverview(currentSelectedId);
+            }
+          } catch (error) {
+            if (!retainedRefreshController.signal.aborted) {
+              applyOverviewOutage(
+                generation,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          } finally {
+            window.clearTimeout(retainedRefreshTimeout);
+            if (overviewRetainedRefreshAbortControllerRef.current === retainedRefreshController) {
+              overviewRetainedRefreshAbortControllerRef.current = null;
+            }
+          }
+        };
+        overviewRetainedRefreshAbortControllerRef.current = retainedRefreshController;
+        void refreshRetainedOverview();
       }
       const currentSelectedId = selectedIdRef.current;
       if (
@@ -807,6 +860,8 @@ export function ConsoleDashboard() {
     overviewItemsRef.current = [];
     overviewPaginationRef.current = null;
     overviewSelectionLookupRef.current = null;
+    overviewRetainedRefreshAbortControllerRef.current?.abort();
+    overviewRetainedRefreshAbortControllerRef.current = null;
     setOverview([]);
     setOverviewHasMore(false);
     setOverviewHistoryLoading(false);

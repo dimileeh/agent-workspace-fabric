@@ -561,8 +561,13 @@ test("loadOverview refreshes retained IDs in bounded batches and fetches one con
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?const requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?if \(!continuation && sameQuery && page\.has_more\) \{[\s\S]*?retainedOverviewIdBatches\([\s\S]*?for \(const workspaceIds of retainedIdBatches\) \{[\s\S]*?overview\/batch[\s\S]*?workspace_ids: workspaceIds[\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?reconcileOverviewRetainedItems\(/,
-    "Expected loadOverview to batch-refresh retained rows and append only one requested continuation page",
+    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?const requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?retainedOverviewIdBatches\([\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?setOverview\(refreshed\)[\s\S]*?void refreshRetainedOverview\(/,
+    "Expected loadOverview to publish one requested page before refreshing retained rows",
+  );
+  assert.match(
+    dashboard,
+    /const overviewRetainedRefreshAbortControllerRef = useRef<AbortController \| null>\(null\);[\s\S]*?overviewRetainedRefreshAbortControllerRef\.current\?\.abort\(\);[\s\S]*?const retainedRefreshTimeout = window\.setTimeout\([\s\S]*?retainedRefreshController\.abort\(\)[\s\S]*?pollMs[\s\S]*?const refreshRetainedOverview = async \(\) => \{[\s\S]*?for \(const workspaceIds of retainedIdBatches\) \{[\s\S]*?overview\/batch[\s\S]*?workspace_ids: workspaceIds[\s\S]*?signal: retainedRefreshController\.signal[\s\S]*?reconcileOverviewRetainedItems\(/,
+    "Expected retained overview refreshes to run independently with bounded, abortable requests",
   );
   assert.doesNotMatch(
     dashboard,

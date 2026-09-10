@@ -586,9 +586,17 @@ export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
   }
 }
 
-export async function apiPost<T>(path: string, body?: unknown): Promise<ApiEnvelope<T>> {
+export async function apiPost<T>(
+  path: string,
+  body?: unknown,
+  options?: { signal?: AbortSignal },
+): Promise<ApiEnvelope<T>> {
   try {
-    const init: RequestInit = { method: "POST", cache: "no-store" };
+    const init: RequestInit = {
+      method: "POST",
+      cache: "no-store",
+      signal: options?.signal,
+    };
     if (body !== undefined) {
       init.headers = { "content-type": "application/json" };
       init.body = JSON.stringify(omitUndefined(body));

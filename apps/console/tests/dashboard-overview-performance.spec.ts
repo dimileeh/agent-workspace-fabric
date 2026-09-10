@@ -14,6 +14,11 @@ type OverviewRouteOptions = {
   failFirstContinuation?: boolean;
   onRequest?: (cursor: string | null) => void;
   onBatchRequest?: (workspaceIds: string[]) => void;
+  shouldDelayBatch?: () => boolean;
+  shouldFailBatch?: () => boolean;
+  resolvePageItem?: (
+    item: ReturnType<typeof workspaceOverview>,
+  ) => ReturnType<typeof workspaceOverview>;
   resolveBatchItem?: (
     item: ReturnType<typeof workspaceOverview>,
   ) => ReturnType<typeof workspaceOverview> | null;
@@ -53,10 +58,13 @@ async function installLargeFleetOverview(
   options: OverviewRouteOptions = {},
 ): Promise<() => Promise<void>> {
   const delayedRoutes: Route[] = [];
+  const delayedBatchRoutes: Route[] = [];
   let continuationFailed = false;
-  const fulfillOverviewBatch = async (route: Route) => {
+  const fulfillOverviewBatch = async (route: Route, recordRequest = true) => {
     const body = route.request().postDataJSON() as { workspace_ids: string[] };
-    options.onBatchRequest?.(body.workspace_ids);
+    if (recordRequest) {
+      options.onBatchRequest?.(body.workspace_ids);
+    }
     const requested = new Set(body.workspace_ids);
     const items = fleet
       .filter((item) => requested.has(item.workspace_id))
@@ -69,9 +77,22 @@ async function installLargeFleetOverview(
       ),
     });
   };
+  const routeOverviewBatch = async (route: Route) => {
+    const body = route.request().postDataJSON() as { workspace_ids: string[] };
+    options.onBatchRequest?.(body.workspace_ids);
+    if (options.shouldDelayBatch?.()) {
+      delayedBatchRoutes.push(route);
+      return;
+    }
+    if (options.shouldFailBatch?.()) {
+      await fulfillJson(route, { detail: { message: "retained history unavailable" } }, 503);
+      return;
+    }
+    await fulfillOverviewBatch(route, false);
+  };
   await page.route("**/api/awf/workspaces/overview*", async (route) => {
     if (route.request().method() === "POST") {
-      await fulfillOverviewBatch(route);
+      await routeOverviewBatch(route);
       return;
     }
     const cursor = new URL(route.request().url()).searchParams.get("cursor");
@@ -85,22 +106,30 @@ async function installLargeFleetOverview(
       delayedRoutes.push(route);
       return;
     }
-    await fulfillOverviewPage(route, cursor);
+    await fulfillOverviewPage(route, cursor, options.resolvePageItem);
   });
-  await page.route("**/api/awf/workspaces/overview/batch", fulfillOverviewBatch);
+  await page.route("**/api/awf/workspaces/overview/batch", routeOverviewBatch);
   return async () => {
-    await Promise.all(
-      delayedRoutes.splice(0).map((route) =>
+    await Promise.allSettled([
+      ...delayedRoutes.splice(0).map((route) =>
         fulfillOverviewPage(
           route,
           new URL(route.request().url()).searchParams.get("cursor"),
+          options.resolvePageItem,
         ),
       ),
-    );
+      ...delayedBatchRoutes.splice(0).map((route) => fulfillOverviewBatch(route, false)),
+    ]);
   };
 }
 
-async function fulfillOverviewPage(route: Route, cursor: string | null): Promise<void> {
+async function fulfillOverviewPage(
+  route: Route,
+  cursor: string | null,
+  resolvePageItem?: (
+    item: ReturnType<typeof workspaceOverview>,
+  ) => ReturnType<typeof workspaceOverview>,
+): Promise<void> {
   const url = new URL(route.request().url());
   const status = url.searchParams.get("status");
   const agent = url.searchParams.get("agent");
@@ -112,7 +141,9 @@ async function fulfillOverviewPage(route: Route, cursor: string | null): Promise
       (!repoUrl || item.repo_url === repoUrl),
   );
   const start = cursor === null ? 0 : Number.parseInt(cursor, 10);
-  const items = matchingFleet.slice(start, start + PAGE_SIZE);
+  const items = matchingFleet
+    .slice(start, start + PAGE_SIZE)
+    .map((item) => resolvePageItem?.(item) ?? item);
   const next = start + items.length;
   await fulfillJson(route, {
     items,
@@ -286,6 +317,82 @@ test("routine refresh updates and removes retained workspaces outside page one",
   await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3 - 1} loaded`, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Previous workspace results" }).click();
   await expect(retainedCard.getByText("completed", { exact: true })).toBeVisible();
+});
+
+test("stalled retained history does not block first-page publication or the next poll", async ({
+  page,
+}) => {
+  let delayRetainedBatch = false;
+  let refreshedFirstPage = false;
+  const firstPageRequests: number[] = [];
+  const batchRequests: string[][] = [];
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, {
+    onRequest: (cursor) => {
+      if (cursor === null) {
+        firstPageRequests.push(Date.now());
+      }
+    },
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+    shouldDelayBatch: () => delayRetainedBatch,
+    resolvePageItem: (item) =>
+      refreshedFirstPage && item.workspace_id === "ws_perf_0001"
+        ? { ...item, title: "Fresh first-page workspace" }
+        : item,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(
+    page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
+  ).toBeVisible();
+
+  delayRetainedBatch = true;
+  refreshedFirstPage = true;
+  const firstPagesBeforeRefresh = firstPageRequests.length;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect.poll(() => batchRequests.length).toBeGreaterThan(0);
+  await expect(page.getByText("Fresh first-page workspace", { exact: true })).toBeVisible({
+    timeout: 2_000,
+  });
+  await expect
+    .poll(() => firstPageRequests.length, { timeout: 7_000 })
+    .toBeGreaterThan(firstPagesBeforeRefresh + 1);
+
+  await releaseHistory();
+});
+
+test("failed retained history does not discard a successful first-page refresh", async ({
+  page,
+}) => {
+  let failRetainedBatch = false;
+  let refreshedFirstPage = false;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    shouldFailBatch: () => failRetainedBatch,
+    resolvePageItem: (item) =>
+      refreshedFirstPage && item.workspace_id === "ws_perf_0001"
+        ? { ...item, title: "First page survived history failure" }
+        : item,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(
+    page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
+  ).toBeVisible();
+
+  failRetainedBatch = true;
+  refreshedFirstPage = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect(
+    page.getByText("First page survived history failure", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("retained history unavailable", { exact: true })).toBeVisible();
 });
 
 test("routine refresh drops a selected retained workspace excluded by its repository query", async ({
