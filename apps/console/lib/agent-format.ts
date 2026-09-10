@@ -41,6 +41,7 @@ const NON_CONFIRMING_MODEL_SOURCES = new Set([
   "auto",
   "inferred",
   "configured",
+  "unavailable",
 ]);
 
 export function formatAgentLabel(workspace: AgentLabelWorkspace): string {
@@ -135,7 +136,7 @@ export function formatRequestedEffort(workspace: RequestedModelWorkspace): strin
 
 /**
  * Confirmed execution model when provenance is a nonempty confirming source.
- * Never labels task_policy / default / auto / inferred / configured as confirmed.
+ * Never labels task_policy / default / auto / inferred / configured / unavailable as confirmed.
  */
 export function formatConfirmedExecutionModel(workspace: ConfirmedModelWorkspace): string {
   const source = workspace.confirmed_execution_model_source;
