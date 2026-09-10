@@ -212,7 +212,13 @@ export function useWorkspaceMutatingControls({
           return;
         }
         const caps = await loadCapabilities();
+        if (epoch !== authorizedFeedEpochRef.current) {
+          return;
+        }
         await loadOverview();
+        if (epoch !== authorizedFeedEpochRef.current) {
+          return;
+        }
         if (caps) {
           await reloadAvailableFeeds(caps);
         }

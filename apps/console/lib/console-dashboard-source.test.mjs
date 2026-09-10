@@ -3373,6 +3373,24 @@ test("operator action post-mutation reloads are guarded by authorized feed epoch
   );
 });
 
+test("operator action selection-change reloads recheck the authorized feed epoch", () => {
+  const mutating = dashboardSource.mutatingControls;
+  const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
+  const successStart = mutating.indexOf(
+    "const success = summarizeWorkspaceOperatorSuccess",
+    operatorStart,
+  );
+  assert.ok(operatorStart >= 0, "Expected the operator-action callback");
+  assert.ok(successStart > operatorStart, "Expected the operator-action success continuation");
+  const selectionChangedSource = mutating.slice(operatorStart, successStart);
+
+  assert.match(
+    selectionChangedSource,
+    /const caps = await loadCapabilities\(\);\s*if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}\s*await loadOverview\(\);\s*if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}\s*if \(caps\) \{\s*await reloadAvailableFeeds\(caps\);/,
+    "Expected selection-change reloads to stop after every await when the auth epoch advances",
+  );
+});
+
 test("inspector omits unsupported diagnostic panels instead of empty shells", () => {
   const inspector = dashboardSource.inspector;
   assert.match(inspector, /\{showWorkspaceRuntime \? <RuntimePanel runtime=\{detail\.runtime\} \/> : null\}/);
