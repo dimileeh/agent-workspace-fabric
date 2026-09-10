@@ -3203,6 +3203,25 @@ test("workspace retry button gates on negotiated control capabilities", () => {
   assert.match(dashboard, /useWorkspaceMutatingControls\(/);
 });
 
+test("workspace mutation requests have deadlines", () => {
+  const mutating = dashboardSource.mutatingControls;
+  const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");
+  const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
+  assert.ok(retryStart >= 0, "Expected retrySelectedWorkspace callback");
+  assert.ok(operatorStart > retryStart, "Expected runWorkspaceOperatorAction callback");
+
+  assert.match(
+    mutating.slice(retryStart, operatorStart),
+    /await apiPostWithDeadline<WorkspaceRetryResponse>\(/,
+    "Expected workspace retry requests to settle after the console API deadline",
+  );
+  assert.match(
+    mutating.slice(operatorStart),
+    /await apiPostWithDeadline<WorkspaceControlResponse \| Operation>\(/,
+    "Expected operator-action requests to settle after the console API deadline",
+  );
+});
+
 test("workspace retry is guarded by authorized feed epoch", () => {
   const mutating = dashboardSource.mutatingControls;
   const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");

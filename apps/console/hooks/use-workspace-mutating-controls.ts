@@ -23,7 +23,7 @@ import type {
 import {
   type OperatorActionState,
   type RetryActionState,
-  apiPost,
+  apiPostWithDeadline,
   operatorActionPath,
   operatorActionReason,
   operatorIdempotencyKey,
@@ -83,7 +83,7 @@ export function useWorkspaceMutatingControls({
     // during follow-up refreshes) cannot apply the prior tenant's retry result.
     const epoch = authorizedFeedEpochRef.current;
     setRetryState({ status: "submitting" });
-    const result = await apiPost<WorkspaceRetryResponse>(
+    const result = await apiPostWithDeadline<WorkspaceRetryResponse>(
       awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
     );
     if (
@@ -171,7 +171,7 @@ export function useWorkspaceMutatingControls({
         payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
       }
 
-      const result = await apiPost<WorkspaceControlResponse | Operation>(
+      const result = await apiPostWithDeadline<WorkspaceControlResponse | Operation>(
         operatorActionPath(action, workspaceId),
         payload,
       );
