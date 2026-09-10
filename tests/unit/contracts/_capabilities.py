@@ -346,7 +346,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
         cli_tokens=("workspace", "retry"),
         parity_status="MCP implemented",
         parity_backlog_slice="—",
-        supports_idempotency_key=False,
+        supports_idempotency_key=True,
         supports_if_match=False,
         error_codes=frozenset(
             {
@@ -359,10 +359,13 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE",
                 "PROVIDER_READINESS_PRECHECK_FAILED",
                 "HOSTED_DELEGATION_NOT_CONFIGURED",
+                "IDEMPOTENCY_CONFLICT",
+                "IDEMPOTENCY_REPLAY_UNAVAILABLE",
             }
         ),
         rest_response_model="WorkspaceRetryResponse",
         rest_path_fields=frozenset({"workspace_id"}),
+        rest_header_fields=frozenset({"Idempotency-Key"}),
         rest_query_fields=frozenset(
             {"provider_readiness_override", "provider_readiness_override_reason"}
         ),
@@ -371,11 +374,17 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "workspace_id",
                 "provider_readiness_override",
                 "provider_readiness_override_reason",
+                "idempotency_key",
             }
         ),
         mcp_required_fields=frozenset({"workspace_id"}),
         cli_options=frozenset(
-            {"--provider-readiness-override", "--provider-readiness-override-reason", "--api-token"}
+            {
+                "--provider-readiness-override",
+                "--provider-readiness-override-reason",
+                "--idempotency-key",
+                "--api-token",
+            }
         ),
         cli_arguments=frozenset({"workspace_id"}),
         response_fields=frozenset(

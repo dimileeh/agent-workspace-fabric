@@ -955,6 +955,7 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         *,
         provider_readiness_override: bool = False,
         provider_readiness_override_reason: str | None = None,
+        idempotency_key: str | None = None,
         settings: Any | None = None,
         provider_environ: Any | None = None,
         run_subprocess: Any | None = None,
@@ -965,6 +966,7 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
                 "workspace_id": workspace_id,
                 "provider_readiness_override": provider_readiness_override,
                 "provider_readiness_override_reason": provider_readiness_override_reason,
+                "idempotency_key": idempotency_key,
             }
         )
         response = _stub_retry_response(workspace_id)
@@ -985,12 +987,14 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         *,
         provider_readiness_override: bool = False,
         provider_readiness_override_reason: str | None = None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceRetryResponse:
         calls.append(
             {
                 "workspace_id": workspace_id,
                 "provider_readiness_override": provider_readiness_override,
                 "provider_readiness_override_reason": provider_readiness_override_reason,
+                "idempotency_key": idempotency_key,
             }
         )
         return _stub_retry_response(workspace_id)

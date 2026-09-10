@@ -69,6 +69,10 @@ The create tool `awf_create_workspace` accepts a schema-optional
 payload returns the existing workspace; reusing the key with a changed payload
 returns structured `IDEMPOTENCY_CONFLICT`.
 
+`awf_retry_workspace` likewise accepts an optional `idempotency_key`. A stable
+key replays the originally accepted retry across REST, CLI, and MCP; changing
+the effective retry request for that key returns `IDEMPOTENCY_CONFLICT`.
+
 **MCP control migration note:** The control tools `awf_cancel_workspace`,
 `awf_stop_workspace`, `awf_destroy_workspace`, `awf_remonitor_workspace`,
 `awf_guide_workspace`, `awf_request_workspace_validation`,
