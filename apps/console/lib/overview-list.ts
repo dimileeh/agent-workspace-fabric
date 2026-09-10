@@ -1,10 +1,8 @@
 import type { ListEnvelope, WorkspaceOverview } from "@/lib/types";
 import { awfPath } from "./console-urls.ts";
 
-// Overview list is cursor-paginated (API max 500). The dashboard rail, client
-// search, multi-value filters, and log selection all consume the accumulated
-// overview array, so a single page would hide later workspaces while fleet
-// summary KPIs still report totals. Request 100 per page and follow next_cursor.
+// Overview list is cursor-paginated (API max 500). Request a small page so the
+// dashboard can paint promptly and fetch later pages only as the operator asks.
 export const OVERVIEW_LIST_PAGE_SIZE = 100;
 // Defensive ceiling so a misbehaving cursor cannot loop forever;
 // 100 * 50 covers 5k workspaces, beyond typical local/Core fleets.
@@ -31,11 +29,6 @@ export type OverviewPageCollection = {
   truncated: boolean;
   /** Set only when ``truncated`` is true. */
   truncationReason: OverviewTruncationReason | null;
-};
-
-export type OverviewPageCollectionOptions = {
-  /** First page already fetched and published by a latency-sensitive caller. */
-  initialPage?: OverviewListPage;
 };
 
 function complete(items: WorkspaceOverview[]): OverviewPageCollection {
@@ -67,6 +60,52 @@ export function overviewListPath(
   });
 }
 
+/** Append one cursor page without replacing existing rows or duplicating IDs. */
+export function appendUniqueOverviewItems(
+  current: WorkspaceOverview[],
+  pageItems: WorkspaceOverview[],
+): WorkspaceOverview[] {
+  const seen = new Set<string>();
+  const merged: WorkspaceOverview[] = [];
+  for (const item of [...current, ...pageItems]) {
+    if (seen.has(item.workspace_id)) {
+      continue;
+    }
+    seen.add(item.workspace_id);
+    merged.push(item);
+  }
+  return merged;
+}
+
+/**
+ * Refresh the newest page while retaining an already-loaded history tail.
+ * Byte-equivalent rows reuse their previous object so memoized cards stay
+ * stable during routine polling.
+ */
+export function reconcileOverviewFirstPage(
+  current: WorkspaceOverview[],
+  pageItems: WorkspaceOverview[],
+): WorkspaceOverview[] {
+  const currentById = new Map(current.map((item) => [item.workspace_id, item]));
+  const seen = new Set<string>();
+  const reconciled: WorkspaceOverview[] = [];
+  for (const item of pageItems) {
+    if (seen.has(item.workspace_id)) {
+      continue;
+    }
+    seen.add(item.workspace_id);
+    const prior = currentById.get(item.workspace_id);
+    reconciled.push(prior && JSON.stringify(prior) === JSON.stringify(item) ? prior : item);
+  }
+  for (const item of current) {
+    if (!seen.has(item.workspace_id)) {
+      seen.add(item.workspace_id);
+      reconciled.push(item);
+    }
+  }
+  return reconciled;
+}
+
 // Accumulate overview rows across pages until exhaustion or the page ceiling.
 // ``fetchPage`` returns ``null`` to signal failure or caller abort; that
 // short-circuits to ``null`` so the dashboard can distinguish apply vs discard.
@@ -75,13 +114,11 @@ export function overviewListPath(
 // callers must surface continuation rather than treat the prefix as complete.
 export async function collectOverviewPages(
   fetchPage: (cursor: string | null) => Promise<OverviewListPage | null>,
-  options: OverviewPageCollectionOptions = {},
 ): Promise<OverviewPageCollection | null> {
   const collected: WorkspaceOverview[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < OVERVIEW_LIST_MAX_PAGES; page += 1) {
-    const data: OverviewListPage | null =
-      page === 0 && options.initialPage ? options.initialPage : await fetchPage(cursor);
+    const data = await fetchPage(cursor);
     if (data === null) {
       return null;
     }

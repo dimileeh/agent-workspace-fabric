@@ -11,7 +11,9 @@ const PAGE_SIZE = 100;
 
 type OverviewRouteOptions = {
   delayContinuation?: boolean;
+  failFirstContinuation?: boolean;
   onRequest?: (cursor: string | null) => void;
+  onBatchRequest?: (workspaceIds: string[]) => void;
 };
 
 function workspaceOverview(index: number) {
@@ -48,15 +50,38 @@ async function installLargeFleetOverview(
   options: OverviewRouteOptions = {},
 ): Promise<() => Promise<void>> {
   const delayedRoutes: Route[] = [];
+  let continuationFailed = false;
+  const fulfillOverviewBatch = async (route: Route) => {
+    const body = route.request().postDataJSON() as { workspace_ids: string[] };
+    options.onBatchRequest?.(body.workspace_ids);
+    const requested = new Set(body.workspace_ids);
+    const items = fleet.filter((item) => requested.has(item.workspace_id));
+    await fulfillJson(route, {
+      items,
+      missing_workspace_ids: body.workspace_ids.filter(
+        (workspaceId) => !items.some((item) => item.workspace_id === workspaceId),
+      ),
+    });
+  };
   await page.route("**/api/awf/workspaces/overview*", async (route) => {
+    if (route.request().method() === "POST") {
+      await fulfillOverviewBatch(route);
+      return;
+    }
     const cursor = new URL(route.request().url()).searchParams.get("cursor");
     options.onRequest?.(cursor);
+    if (options.failFirstContinuation && cursor !== null && !continuationFailed) {
+      continuationFailed = true;
+      await fulfillJson(route, { detail: { message: "history temporarily unavailable" } }, 503);
+      return;
+    }
     if (options.delayContinuation && cursor !== null) {
       delayedRoutes.push(route);
       return;
     }
     await fulfillOverviewPage(route, cursor);
   });
+  await page.route("**/api/awf/workspaces/overview/batch", fulfillOverviewBatch);
   return async () => {
     await Promise.all(
       delayedRoutes.splice(0).map((route) =>
@@ -146,7 +171,7 @@ test("1,301-row fleet paints its first page before history and keeps routine wor
   await releaseHistory();
 });
 
-test("explicit history access keeps older search, filters, selection, and DOM windows usable", async ({
+test("scroll loads one history page and refresh preserves the bounded loaded window", async ({
   page,
 }) => {
   const overviewRequests: Array<string | null> = [];
@@ -159,29 +184,41 @@ test("explicit history access keeps older search, filters, selection, and DOM wi
   await waitForConsoleReady(page);
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
   expect(overviewRequests).toEqual([null]);
+  await expect(page.getByRole("button", { name: "Load more workspaces" })).toBeVisible();
+  await expect(page.getByText(/Search and client-side filters cover loaded workspaces only/)).toBeVisible();
 
-  await page.getByRole("button", { name: "Load older workspaces" }).click();
-  await expect(page.getByText(`1–${PAGE_SIZE} of ${FLEET_SIZE} loaded`, { exact: true })).toBeVisible();
-  // One bootstrap request, then an explicit fresh first page plus its history.
-  expect(overviewRequests).toHaveLength(1 + Math.ceil(FLEET_SIZE / PAGE_SIZE));
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+  const scrollTopAfterAppend = await list.evaluate((element) => element.scrollTop);
+  expect(scrollTopAfterAppend).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Next workspace results" }).click();
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => overviewRequests).toEqual([null, "100", "200"]);
+  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3} loaded`, { exact: true })).toBeVisible();
+
   const requestsAfterHistory = overviewRequests.length;
   await page.waitForTimeout(5_500);
   expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
   expect(overviewRequests.at(-1)).toBeNull();
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(scrollTopAfterAppend);
 
   const filters = page.getByRole("button", { name: "Filters" });
   await filters.click();
   await page.getByPlaceholder("Search workspaces").fill("Performance workspace 1301");
-  await expect(page.getByTestId("workspace-card-ws_perf_1301")).toBeVisible();
-  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(1);
+  await expect(page.getByText("No loaded workspaces match the current filters.")).toBeVisible();
+  await expect(page.getByText(/Search and client-side filters cover loaded workspaces only/)).toBeVisible();
+  expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
+
+  await page.getByPlaceholder("Search workspaces").fill("");
 
   const statusGroup = page.getByRole("group", { name: "Status" });
   await statusGroup.getByRole("button", { name: /Status all/ }).click();
@@ -195,12 +232,41 @@ test("explicit history access keeps older search, filters, selection, and DOM wi
 test("a deep link resolves an older workspace without mounting the intervening fleet", async ({
   page,
 }) => {
+  const overviewRequests: Array<string | null> = [];
+  const batchRequests: string[][] = [];
   await mockAwfConsoleApi(page);
-  await installLargeFleetOverview(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+  });
 
   await page.goto("/?workspaceId=ws_perf_1301");
+  await expect.poll(() => batchRequests).toEqual([["ws_perf_1301"]]);
   await expect(page.getByTestId("workspace-card-ws_perf_1301")).toBeVisible();
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
   await expect(page).toHaveURL(/workspaceId=ws_perf_1301/);
+  expect(overviewRequests).toEqual([null]);
+  expect(batchRequests).toEqual([["ws_perf_1301"]]);
+});
+
+test("failed scroll loading keeps an accessible one-page retry", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    failFirstContinuation: true,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect(page.getByRole("button", { name: "Retry loading older workspaces" })).toBeVisible();
+  expect(overviewRequests).toEqual([null, "100"]);
+
+  await page.getByRole("button", { name: "Retry loading older workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  expect(overviewRequests).toEqual([null, "100", "100"]);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 });

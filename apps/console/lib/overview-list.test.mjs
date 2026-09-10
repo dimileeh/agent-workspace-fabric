@@ -4,8 +4,10 @@ import test from "node:test";
 import {
   OVERVIEW_LIST_MAX_PAGES,
   OVERVIEW_LIST_PAGE_SIZE,
+  appendUniqueOverviewItems,
   collectOverviewPages,
   overviewListPath,
+  reconcileOverviewFirstPage,
   usableContinuationCursor,
 } from "./overview-list.ts";
 
@@ -24,6 +26,37 @@ test("overviewListPath includes limit and omits empty cursor", () => {
   );
 });
 
+test("appendUniqueOverviewItems appends only unseen workspace IDs", () => {
+  const current = [{ workspace_id: "ws_1", title: "one" }];
+  const appended = appendUniqueOverviewItems(current, [
+    { workspace_id: "ws_1", title: "duplicate" },
+    { workspace_id: "ws_2", title: "two" },
+    { workspace_id: "ws_2", title: "duplicate in page" },
+  ]);
+
+  assert.deepEqual(appended.map((item) => item.workspace_id), ["ws_1", "ws_2"]);
+  assert.equal(appended[0], current[0]);
+});
+
+test("reconcileOverviewFirstPage keeps unchanged rows stable and retains loaded history", () => {
+  const current = [
+    { workspace_id: "ws_1", title: "one" },
+    { workspace_id: "ws_2", title: "old two" },
+    { workspace_id: "ws_3", title: "history" },
+  ];
+  const reconciled = reconcileOverviewFirstPage(current, [
+    { workspace_id: "ws_1", title: "one" },
+    { workspace_id: "ws_2", title: "new two" },
+    { workspace_id: "ws_2", title: "duplicate" },
+  ]);
+
+  assert.deepEqual(reconciled.map((item) => item.workspace_id), ["ws_1", "ws_2", "ws_3"]);
+  assert.equal(reconciled[0], current[0]);
+  assert.notEqual(reconciled[1], current[1]);
+  assert.equal(reconciled[1].title, "new two");
+  assert.equal(reconciled[2], current[2]);
+});
+
 test("collectOverviewPages follows next_cursor across pages", async () => {
   const calls = [];
   const collected = await collectOverviewPages(async (cursor) => {
@@ -39,29 +72,6 @@ test("collectOverviewPages follows next_cursor across pages", async () => {
   assert.deepEqual(calls, [null, "page-2"]);
   assert.equal(collected?.truncated, false);
   assert.equal(collected?.truncationReason, null);
-  assert.deepEqual(
-    collected?.items.map((item) => item.workspace_id),
-    ["ws_1", "ws_2"],
-  );
-});
-
-test("collectOverviewPages continues from an already-painted first page", async () => {
-  const calls = [];
-  const collected = await collectOverviewPages(
-    async (cursor) => {
-      calls.push(cursor);
-      assert.equal(cursor, "page-2");
-      return page([{ workspace_id: "ws_2" }]);
-    },
-    {
-      initialPage: page(
-        [{ workspace_id: "ws_1" }],
-        { has_more: true, next_cursor: "page-2" },
-      ),
-    },
-  );
-
-  assert.deepEqual(calls, ["page-2"]);
   assert.deepEqual(
     collected?.items.map((item) => item.workspace_id),
     ["ws_1", "ws_2"],

@@ -28,6 +28,7 @@ Type
 } from "lucide-react";
 import {
 type SyntheticEvent,
+type UIEvent,
 memo,
 useCallback,
 useEffect,
@@ -680,6 +681,7 @@ export function WorkspaceSelectionToolbar({
 }
 
 export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
+export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
 
 type WorkspaceCardProps = {
   item: WorkspaceOverview;
@@ -892,6 +894,12 @@ export function WorkspaceList({
   onToggleWorkspaceSelection,
   onOpenDetails,
   onOpenLogs,
+  hasMore,
+  loadingMore,
+  historyComplete,
+  historyError,
+  loadedCount,
+  onLoadMore,
 }: {
   items: WorkspaceOverview[];
   selectedId: string | null;
@@ -901,12 +909,19 @@ export function WorkspaceList({
   onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
   onOpenDetails: (workspaceId: string) => void;
   onOpenLogs: (workspaceId: string) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  historyComplete: boolean;
+  historyError: boolean;
+  loadedCount: number;
+  onLoadMore: () => void;
 }) {
   const [windowStart, setWindowStart] = useState(0);
   const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
   const [copyToastVisible, setCopyToastVisible] = useState(false);
   const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nearBottomTriggeredRef = useRef(false);
 
   useEffect(() => {
     const selectedIndex = selectedId
@@ -947,13 +962,65 @@ export function WorkspaceList({
     }, 1400);
   }, []);
 
+  const loadMoreNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
+      nearBottomTriggeredRef.current = false;
+      return;
+    }
+    if (
+      hasMore &&
+      !loadingMore &&
+      !nearBottomTriggeredRef.current &&
+      remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX
+    ) {
+      nearBottomTriggeredRef.current = true;
+      onLoadMore();
+    }
+  }, [hasMore, loadingMore, onLoadMore]);
+
+  const historyFooter = (
+    <div
+      className="grid gap-2 border-t border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600"
+      data-testid="workspace-history-scope"
+    >
+      <span aria-live="polite">
+        {hasMore || loadingMore || historyError
+          ? `${loadedCount} loaded. More matching workspaces are available. Search and client-side filters cover loaded workspaces only.`
+          : historyComplete
+            ? `All ${loadedCount} matching workspaces loaded.`
+            : `${loadedCount} workspaces loaded; history scope is incomplete.`}
+      </span>
+      {hasMore || loadingMore || historyError ? (
+        <button
+          type="button"
+          disabled={loadingMore}
+          onClick={onLoadMore}
+          className="inline-flex h-8 w-full items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:opacity-50"
+        >
+          {loadingMore
+            ? "Loading more workspaces…"
+            : historyError
+              ? "Retry loading older workspaces"
+              : "Load more workspaces"}
+        </button>
+      ) : null}
+    </div>
+  );
+
   if (items.length === 0) {
     return (
-      <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
-        <div>
+      <div
+        className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden"
+        data-testid="workspace-list-scroll"
+        onScroll={loadMoreNearBottom}
+      >
+        <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
           <ListFilter className="mx-auto mb-3 text-slate-400" size={24} aria-hidden />
-          No workspaces match the current filters.
+          No loaded workspaces match the current filters.
         </div>
+        {historyFooter}
       </div>
     );
   }
@@ -961,7 +1028,11 @@ export function WorkspaceList({
   const windowEnd = Math.min(items.length, windowStart + WORKSPACE_RENDER_WINDOW_SIZE);
   const selectedSet = new Set(selectedWorkspaceIds);
   return (
-    <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
+    <div
+      className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden"
+      data-testid="workspace-list-scroll"
+      onScroll={loadMoreNearBottom}
+    >
       {items.length > WORKSPACE_RENDER_WINDOW_SIZE ? (
         <div className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-600">
           <span>{windowStart + 1}–{windowEnd} of {items.length} loaded</span>
@@ -1003,6 +1074,7 @@ export function WorkspaceList({
           onCopy={copyWorkspaceId}
         />
       ))}
+      {historyFooter}
     </div>
   );
 }

@@ -29,6 +29,9 @@ type ConsoleDashboardWorkspaceRailProps = {
   onToggleExpanded: () => void;
   overviewHasMore: boolean;
   overviewHistoryLoading: boolean;
+  overviewHistoryComplete: boolean;
+  overviewHistoryError: boolean;
+  overviewLoadedCount: number;
   onLoadOverviewHistory: () => void;
   /** When false, omit log-selection toolbar, checkboxes, and Logs buttons. */
   showWorkspaceLogs: boolean;
@@ -70,18 +73,6 @@ export function ConsoleDashboardWorkspaceRail(props: ConsoleDashboardWorkspaceRa
         expanded={props.filtersExpanded}
         onToggleExpanded={props.onToggleExpanded}
       />
-      {props.overviewHasMore || props.overviewHistoryLoading ? (
-        <div className="border-b border-[var(--border)] px-3 py-2">
-          <button
-            type="button"
-            disabled={props.overviewHistoryLoading}
-            onClick={props.onLoadOverviewHistory}
-            className="inline-flex h-8 w-full items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:opacity-50"
-          >
-            {props.overviewHistoryLoading ? "Loading older workspaces…" : "Load older workspaces"}
-          </button>
-        </div>
-      ) : null}
       {props.showWorkspaceLogs ? (
         <WorkspaceSelectionToolbar
           selectedCount={props.workspaceLogSelection.length}
@@ -98,6 +89,12 @@ export function ConsoleDashboardWorkspaceRail(props: ConsoleDashboardWorkspaceRa
         onToggleWorkspaceSelection={props.onToggleWorkspaceSelection}
         onOpenDetails={props.onOpenDetails}
         onOpenLogs={props.onOpenLogs}
+        hasMore={props.overviewHasMore}
+        loadingMore={props.overviewHistoryLoading}
+        historyComplete={props.overviewHistoryComplete}
+        historyError={props.overviewHistoryError}
+        loadedCount={props.overviewLoadedCount}
+        onLoadMore={props.onLoadOverviewHistory}
       />
     </aside>
   );

@@ -272,7 +272,7 @@ test("authorized feed loaders discard responses after clear epoch advances", () 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?if \(consoleAuthDeniedRef\.current\) \{\s*setOverview\(\[\]\);\s*setOverviewHasMore\(false\);\s*return;/,
+    /const loadOverview = useCallback\([\s\S]*?if \(consoleAuthDeniedRef\.current\) \{[\s\S]*?overviewItemsRef\.current = \[\];\s*overviewPaginationRef\.current = null;[\s\S]*?setOverview\(\[\]\);\s*setOverviewHasMore\(false\);[\s\S]*?return;/,
     "Expected loadOverview to refuse refill while auth denial is latched",
   );
   assert.match(
@@ -513,13 +513,13 @@ test("loadOverview discards responses superseded by a newer filter query", () =>
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?const generation = \+\+overviewRequestGenerationRef\.current;[\s\S]*?const capturedQuery = overviewQueryRef\.current;[\s\S]*?generation !== overviewRequestGenerationRef\.current \|\|\s*overviewQueryRef\.current !== capturedQuery[\s\S]*?setOverview\(/,
+    /const loadOverview = useCallback\([\s\S]*?const capturedQuery = overviewQueryRef\.current;[\s\S]*?const generation = \+\+overviewRequestGenerationRef\.current;[\s\S]*?generation !== overviewRequestGenerationRef\.current \|\|\s*overviewQueryRef\.current !== capturedQuery[\s\S]*?setOverview\(/,
     "Expected loadOverview to stamp generation, capture the query, and discard superseded responses before apply",
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?const fetchOverviewPage = async \(cursor: string \| null\) => \{[\s\S]*?generation !== overviewRequestGenerationRef\.current \|\|\s*overviewQueryRef\.current !== capturedQuery[\s\S]*?collectOverviewPages\(fetchOverviewPage/,
-    "Expected first-page and history fetches to abort when a newer request or query supersedes them",
+    /const loadOverview = useCallback\([\s\S]*?const fetchOverviewPage = async \(cursor: string \| null\) => \{[\s\S]*?generation !== overviewRequestGenerationRef\.current \|\|\s*overviewQueryRef\.current !== capturedQuery[\s\S]*?await fetchOverviewPage\(requestedCursor\)/,
+    "Expected first-page and one-page continuation fetches to abort when a newer request or query supersedes them",
   );
   assert.match(
     dashboard,
@@ -542,7 +542,7 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?overviewQueryRef\.current;[\s\S]*?\}, \[setSelectedId\]\);/,
+    /const loadOverview = useCallback\([\s\S]*?overviewQueryRef\.current;[\s\S]*?\}, \[overviewQueryRef, selectedIdRef, setSelectedId\]\);/,
     "Expected loadOverview deps to exclude status/agent/repo filters",
   );
   assert.doesNotMatch(
@@ -552,22 +552,22 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   );
 });
 
-test("loadOverview publishes one page for routine polls and collects history only on demand", () => {
+test("loadOverview publishes one page for routine polls and fetches one continuation page on demand", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /import \{ collectOverviewPages, overviewListPath \} from "@\/lib\/overview-list";/,
-    "Expected loadOverview to import overview cursor helpers",
+    /import \{[\s\S]*?appendUniqueOverviewItems,[\s\S]*?overviewListPath,[\s\S]*?reconcileOverviewFirstPage,[\s\S]*?usableContinuationCursor,[\s\S]*?\} from "@\/lib\/overview-list";/,
+    "Expected loadOverview to import incremental overview reconciliation helpers",
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?overviewListPath\(filters, cursor\)[\s\S]*?const firstPage = await fetchOverviewPage\(null\)[\s\S]*?setOverview\([\s\S]*?if \(!loadHistory/,
-    "Expected loadOverview to publish the first page before deciding whether to collect history",
+    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?const requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?reconcileOverviewFirstPage\(overviewItemsRef\.current, pageItems\)/,
+    "Expected loadOverview to reconcile page one and append only one requested continuation page",
   );
-  assert.match(
+  assert.doesNotMatch(
     dashboard,
-    /if \(!loadHistory[\s\S]*?return;[\s\S]*?collectOverviewPages\(/,
-    "Expected cursor collection to be opt-in rather than part of routine polls",
+    /collectOverviewPages\(/,
+    "Expected dashboard history access not to walk every cursor page",
   );
   assert.doesNotMatch(
     dashboard,
@@ -576,12 +576,12 @@ test("loadOverview publishes one page for routine polls and collects history onl
   );
   assert.match(
     dashboard,
-    /collected\.truncated[\s\S]*?truncationReason === "missing_cursor"[\s\S]*?omitted a continuation cursor[\s\S]*?Workspace list truncated/,
-    "Expected loadOverview to surface a missing-cursor envelope separately from the page-ceiling warning",
+    /page\.has_more && !usableContinuationCursor\(page\.next_cursor\)[\s\S]*?omitted a continuation cursor/,
+    "Expected loadOverview to surface a missing-cursor envelope",
   );
   assert.match(
     dashboard,
-    /setOverviewTruncationWarning\(\s*collected\.truncated\s*\?[\s\S]*?Workspace list truncated/,
+    /setOverviewTruncationWarning\([\s\S]*?Workspace list truncated/,
     "Expected truncation to use a dedicated overview warning state, not the shared error slot",
   );
   assert.doesNotMatch(
@@ -589,11 +589,8 @@ test("loadOverview publishes one page for routine polls and collects history onl
     /const loadOverview = useCallback\([\s\S]*?setError\(\s*collected\.truncated/,
     "Expected loadOverview not to write truncation into the shared error state wiped by loadWorkspace",
   );
-  assert.match(
-    dashboard,
-    /collected\.items/,
-    "Expected loadOverview to consume OverviewPageCollection.items rather than a bare array",
-  );
+  assert.match(dashboard, /apiPost<[\s\S]*?overview\/batch[\s\S]*?workspace_ids: \[workspaceId\]/,
+    "Expected an unloaded URL selection to use bounded batch overview lookup rather than history collection");
 });
 
 test("workspace cards are windowed and memoized away from inspector-only renders", () => {
@@ -614,6 +611,16 @@ test("workspace cards are windowed and memoized away from inspector-only renders
     overview,
     /items\.slice\(windowStart, windowEnd\)\.map/,
     "Expected WorkspaceList to mount only its current result window",
+  );
+  assert.match(
+    overview,
+    /const remaining = element\.scrollHeight - element\.scrollTop - element\.clientHeight;[\s\S]*?remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX[\s\S]*?onLoadMore\(\)/,
+    "Expected a near-bottom workspace-list scroll to request one more page",
+  );
+  assert.match(
+    overview,
+    /Search and client-side filters cover loaded workspaces only/,
+    "Expected partial-list search and filter scope to be explicit",
   );
   assert.match(
     dashboard,
@@ -691,8 +698,8 @@ test("overview and workspace-detail errors clear only when their own feed succee
     "const applyOverviewOutage = (failedGeneration: number, message: string): boolean => {",
   );
   assert.ok(outageStart > 0, "Expected applyOverviewOutage helper for overview page failure");
-  const outageEnd = dashboard.indexOf("const collected = await collectOverviewPages", outageStart);
-  assert.ok(outageEnd > outageStart, "Expected collectOverviewPages after applyOverviewOutage");
+  const outageEnd = dashboard.indexOf("const fetchOverviewPage = async", outageStart);
+  assert.ok(outageEnd > outageStart, "Expected the page fetch after applyOverviewOutage");
   const outageBody = dashboard.slice(outageStart, outageEnd);
   assert.match(
     dashboard,
@@ -1284,7 +1291,7 @@ test("authorized feed clear and overview auth denial wipe truncation with the ov
   );
   assert.match(
     dashboard,
-    /const applyOverviewAuthDenial = \(deniedGeneration: number, message: string\): boolean => \{[\s\S]*?setOverview\(\[\]\);\s*setOverviewHasMore\(false\);\s*setOverviewTruncationWarning\(null\);/,
+    /const applyOverviewAuthDenial = \(deniedGeneration: number, message: string\): boolean => \{[\s\S]*?setOverview\(\[\]\);\s*setOverviewHasMore\(false\);[\s\S]*?setOverviewTruncationWarning\(null\);/,
     "Expected overview auth denial to wipe truncation with the overview",
   );
 });
@@ -1346,21 +1353,24 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?const firstPage = await fetchOverviewPage\(null\);\s*if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(pageOutage\) \{\s*applyOverviewOutage\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(firstPage === null\) \{\s*return;/,
-    "Expected first-page auth denial to apply before the transient last-good path",
+    /const page = await fetchOverviewPage\(requestedCursor\);\s*if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(pageOutage\) \{\s*applyOverviewOutage\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(page === null\) \{\s*return;/,
+    "Expected page auth denial to apply before the transient last-good path",
   );
   assert.match(
     dashboard,
-    /const applyOverviewAuthDenial = \(deniedGeneration: number, message: string\): boolean => \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);\s*setOverviewHasMore\(false\);\s*setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
+    /const applyOverviewAuthDenial = \(deniedGeneration: number, message: string\): boolean => \{[\s\S]*?noteGatedDetailDrop\(\s*gatedDetailDroppedFeedsRef,\s*gatedDetailFeedGenerationRef,\s*DROP_ALL_GATED_DETAIL_FEEDS,?\s*\);[\s\S]*?setOverview\(\[\]\);\s*setOverviewHasMore\(false\);[\s\S]*?setOverviewTruncationWarning\(null\);[\s\S]*?setWorkspaceDetailError\(null\);/,
     "Expected overview auth denial to clear overview and dependent surfaces",
   );
   const loadOverviewStart = dashboard.indexOf("const loadOverview = useCallback");
-  const loadOverviewEnd = dashboard.indexOf("}, [setSelectedId]);", loadOverviewStart);
+  const loadOverviewEnd = dashboard.indexOf(
+    "}, [overviewQueryRef, selectedIdRef, setSelectedId]);",
+    loadOverviewStart,
+  );
   assert.ok(loadOverviewEnd > loadOverviewStart, "Expected loadOverview callback end");
   assert.doesNotMatch(
     dashboard.slice(loadOverviewStart, loadOverviewEnd),
-    /if \(collected === null\) \{[\s\S]*?setOverviewError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
-    "Expected loadOverview not to blank the authorized overview on every collectOverviewPages null",
+    /if \(page === null\) \{[\s\S]*?setOverviewError\(pageError\);[\s\S]*?setOverview\(\[\]\);\s*return;/,
+    "Expected loadOverview not to blank the authorized overview on a transient page failure",
   );
 });
 
@@ -1369,8 +1379,8 @@ function overviewAuthDenialHelperBody(dashboard) {
     "const applyOverviewAuthDenial = (deniedGeneration: number, message: string): boolean => {",
   );
   assert.ok(helperStart > 0, "Expected applyOverviewAuthDenial helper for overview auth denial");
-  const helperEnd = dashboard.indexOf("const collected = await collectOverviewPages", helperStart);
-  assert.ok(helperEnd > helperStart, "Expected collectOverviewPages after applyOverviewAuthDenial");
+  const helperEnd = dashboard.indexOf("const fetchOverviewPage = async", helperStart);
+  assert.ok(helperEnd > helperStart, "Expected the page fetch after applyOverviewAuthDenial");
   return dashboard.slice(helperStart, helperEnd);
 }
 
