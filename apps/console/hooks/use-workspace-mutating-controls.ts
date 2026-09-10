@@ -95,7 +95,10 @@ export function useWorkspaceMutatingControls({
       awfPath(`workspaces/${encodeURIComponent(workspaceId)}/retry`),
       { idempotency_key: idempotencyKey },
     );
-    if (result.ok || result.status !== 0) {
+    if (
+      result.ok ||
+      (result.status !== 0 && result.status !== 502 && result.status !== 504)
+    ) {
       if (retryIdempotencyKeysRef.current.get(retryIdentityScope) === idempotencyKey) {
         retryIdempotencyKeysRef.current.delete(retryIdentityScope);
       }

@@ -3244,7 +3244,7 @@ test("workspace mutation requests have deadlines", () => {
   );
 });
 
-test("workspace retry reuses its identity after an ambiguous request failure", () => {
+test("workspace retry reuses its identity after ambiguous client and gateway failures", () => {
   const mutating = dashboardSource.mutatingControls;
   const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");
   const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
@@ -3269,8 +3269,8 @@ test("workspace retry reuses its identity after an ambiguous request failure", (
   );
   assert.match(
     retrySource,
-    /if \(result\.ok \|\| result\.status !== 0\) \{[\s\S]*?retryIdempotencyKeysRef\.current\.delete\(retryIdentityScope\);[\s\S]*?\}/,
-    "Expected only a definitive response to release the retry identity",
+    /result\.ok \|\|[\s\S]*?result\.status !== 0 &&[\s\S]*?result\.status !== 502 &&[\s\S]*?result\.status !== 504[\s\S]*?retryIdempotencyKeysRef\.current\.delete\(retryIdentityScope\)/,
+    "Expected client deadlines and gateway failures to retain the retry identity",
   );
 });
 
