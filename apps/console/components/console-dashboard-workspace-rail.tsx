@@ -32,7 +32,7 @@ type ConsoleDashboardWorkspaceRailProps = {
   overviewHistoryComplete: boolean;
   overviewHistoryError: boolean;
   overviewLoadedCount: number;
-  onLoadOverviewHistory: () => void;
+  onLoadOverviewHistory: () => Promise<void>;
   /** When false, omit log-selection toolbar, checkboxes, and Logs buttons. */
   showWorkspaceLogs: boolean;
   workspaceLogSelection: string[];

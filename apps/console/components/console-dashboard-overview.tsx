@@ -954,7 +954,7 @@ export function WorkspaceList({
   historyComplete: boolean;
   historyError: boolean;
   loadedCount: number;
-  onLoadMore: () => void;
+  onLoadMore: () => Promise<void>;
 }) {
   const [windowStart, setWindowStart] = useState(0);
   const [pageStart, setPageStart] = useState(0);
@@ -978,7 +978,9 @@ export function WorkspaceList({
   const preserveScrollTopRef = useRef<number | null>(null);
   const suppressScrollLoadRef = useRef(false);
   const suppressScrollFrameRef = useRef<number | null>(null);
-  const previousLoadingMoreRef = useRef(loadingMore);
+  const historyLoadPendingRef = useRef(false);
+  const nearBottomTriggerScrollTopRef = useRef<number | null>(null);
+  const suppressNextButtonLoadRef = useRef(false);
   const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nearBottomTriggeredRef = useRef(false);
@@ -1170,13 +1172,6 @@ export function WorkspaceList({
     }
   }, [items, rowOffsets, scrollWithoutLoading]);
 
-  useEffect(() => {
-    if (previousLoadingMoreRef.current && !loadingMore) {
-      nearBottomTriggeredRef.current = false;
-    }
-    previousLoadingMoreRef.current = loadingMore;
-  }, [loadingMore]);
-
   useEffect(() => () => {
     if (suppressScrollFrameRef.current !== null) {
       cancelAnimationFrame(suppressScrollFrameRef.current);
@@ -1206,6 +1201,15 @@ export function WorkspaceList({
       setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
     }, 1400);
   }, []);
+
+  const requestHistoryPage = useCallback(() => {
+    if (historyLoadPendingRef.current) return false;
+    historyLoadPendingRef.current = true;
+    void onLoadMore().finally(() => {
+      historyLoadPendingRef.current = false;
+    });
+    return true;
+  }, [onLoadMore]);
 
   const updateWindowAndLoadNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
@@ -1252,19 +1256,30 @@ export function WorkspaceList({
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;
+      nearBottomTriggerScrollTopRef.current = null;
+      suppressNextButtonLoadRef.current = false;
       return;
     }
+    const advancedSinceTrigger =
+      nearBottomTriggerScrollTopRef.current !== null &&
+      element.scrollTop > nearBottomTriggerScrollTopRef.current + 1;
     if (
       hasMore &&
       !loadingMore &&
-      !nearBottomTriggeredRef.current &&
+      !historyLoadPendingRef.current &&
+      (!nearBottomTriggeredRef.current || advancedSinceTrigger) &&
       remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX
     ) {
-      nearBottomTriggeredRef.current = true;
       preserveScrollTopRef.current = element.scrollTop;
-      onLoadMore();
+      if (requestHistoryPage()) {
+        nearBottomTriggeredRef.current = true;
+        nearBottomTriggerScrollTopRef.current = element.scrollTop;
+        // A locator or browser may scroll this button into view immediately
+        // before dispatching its click. That click belongs to this same load.
+        suppressNextButtonLoadRef.current = true;
+      }
     }
-  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, onLoadMore, rowOffsets]);
+  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
 
   const showWindow = useCallback((nextStart: number) => {
     const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
@@ -1274,14 +1289,19 @@ export function WorkspaceList({
   }, [maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading]);
 
   const loadMoreFromButton = useCallback(() => {
-    // Playwright and real browsers may scroll the footer into view before the
-    // click dispatches. Mark that near-bottom transition as handled so one
-    // explicit click cannot race the scroll handler into loading two pages.
-    if (nearBottomTriggeredRef.current && !historyError) return;
-    nearBottomTriggeredRef.current = true;
+    // Consume a click paired with the browser's immediately preceding
+    // scroll-to-button load, even when that fast request has already settled.
+    if (suppressNextButtonLoadRef.current && !historyError) {
+      suppressNextButtonLoadRef.current = false;
+      return;
+    }
+    suppressNextButtonLoadRef.current = false;
     preserveScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? null;
-    onLoadMore();
-  }, [historyError, onLoadMore]);
+    if (requestHistoryPage()) {
+      nearBottomTriggeredRef.current = true;
+      nearBottomTriggerScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? null;
+    }
+  }, [historyError, requestHistoryPage]);
 
   const historyFooter = (
     <div

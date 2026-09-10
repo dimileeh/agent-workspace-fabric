@@ -938,7 +938,7 @@ export function ConsoleDashboard() {
     [],
   );
   const loadMoreOverviewHistory = useCallback(() => {
-    void loadOverview(true);
+    return loadOverview(true);
   }, [loadOverview]);
 
   useEffect(() => {
