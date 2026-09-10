@@ -129,6 +129,29 @@ test("planCapabilityFeedWithdrawal drops only withdrawn inspector diagnostics", 
   assert.equal(allGatedDetailFeedsDropped(dropped), false);
 });
 
+test("planCapabilityFeedWithdrawal detects workspace_stream withdrawal", () => {
+  const next = {
+    ...localCaps,
+    diagnostics: localCaps.diagnostics.map((item) =>
+      item.id === "workspace_stream"
+        ? {
+            ...item,
+            availability: "unsupported",
+            reason_code: "policy_disabled",
+            message: "stream withdrawn",
+            route: undefined,
+          }
+        : item,
+    ),
+  };
+  const plan = planCapabilityFeedWithdrawal(localCaps, next);
+
+  assert.equal(plan.clearStream, true);
+  assert.equal(plan.clearLogs, false);
+  assert.equal(capabilityFeedWithdrawalCleared(plan), true);
+  assert.equal(inspectorDetailFeedWithdrawn(plan), false);
+});
+
 test("gated-detail drop log unions bumps since the captured generation", () => {
   const stamps = { current: [] };
   const generation = { current: 0 };

@@ -163,6 +163,10 @@ export function ConsoleDashboard() {
   // workspaceDetailAuthDenied so snapshots stay withheld, but a later /stream
   // probe must not clear this GET latch or the inspector error.
   const workspaceBaseDetailAuthDeniedRef = useRef(false);
+  // /stream 401/403 is route-scoped and cannot be recovered by the basic
+  // workspace GET. Capability withdrawal must release it when no base-detail
+  // denial remains, because no stream probe can run without the route.
+  const workspaceStreamAuthDeniedRef = useRef(false);
   // /events 401/403 while workspace_stream stays advertised. The detail loader
   // clears detail.events, but EventSource event frames must not refill the
   // panel until a successful /events read recovers the feed.
@@ -475,6 +479,7 @@ export function ConsoleDashboard() {
       clearEvents: false,
       clearOperations: false,
       clearLogs: false,
+      clearStream: false,
     });
     // Already-cleared negotiation: another 404/malformed poll has no optional
     // snapshot left to invalidate. Repeating this bump is what starves the
@@ -569,6 +574,14 @@ export function ConsoleDashboard() {
         setFailureSummary(null);
         setFailureSummaryStatus("loading");
         setFailureSummaryError(null);
+      }
+      if (plan.clearStream && workspaceStreamAuthDeniedRef.current) {
+        workspaceStreamAuthDeniedRef.current = false;
+        if (!workspaceBaseDetailAuthDeniedRef.current) {
+          workspaceDetailAuthDeniedRef.current = false;
+          setWorkspaceDetailAuthDenied(false);
+          setWorkspaceDetailError(null);
+        }
       }
       // Inspector detail feeds: same-identity withdrawal must clear caches and
       // bump gated-detail generation so in-flight optional feeds cannot restore
@@ -716,7 +729,6 @@ export function ConsoleDashboard() {
     loadWorkspace,
     noteWorkspaceStreamAuthorizationDenied,
     noteWorkspaceStreamAuthorizationRecovered,
-    workspaceStreamAuthDeniedRef,
   } = useWorkspaceDetailLoader({
     selectedId,
     selectedIdRef,
@@ -731,6 +743,7 @@ export function ConsoleDashboard() {
     workspaceDetailAuthDeniedRef,
     setWorkspaceDetailAuthDenied,
     workspaceBaseDetailAuthDeniedRef,
+    workspaceStreamAuthDeniedRef,
     eventFeedAuthDeniedRef,
     setEventFeedAuthDenied,
     releaseWithdrawnOptionalFeedDenialRef,

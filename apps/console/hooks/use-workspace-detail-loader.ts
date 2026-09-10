@@ -62,6 +62,7 @@ type UseWorkspaceDetailLoaderArgs = {
   workspaceDetailAuthDeniedRef: MutableRefObject<boolean>;
   setWorkspaceDetailAuthDenied: Dispatch<SetStateAction<boolean>>;
   workspaceBaseDetailAuthDeniedRef: MutableRefObject<boolean>;
+  workspaceStreamAuthDeniedRef: MutableRefObject<boolean>;
   eventFeedAuthDeniedRef: MutableRefObject<boolean>;
   setEventFeedAuthDenied: Dispatch<SetStateAction<boolean>>;
   releaseWithdrawnOptionalFeedDenialRef: MutableRefObject<
@@ -143,6 +144,7 @@ export function useWorkspaceDetailLoader({
   workspaceDetailAuthDeniedRef,
   setWorkspaceDetailAuthDenied,
   workspaceBaseDetailAuthDeniedRef,
+  workspaceStreamAuthDeniedRef,
   eventFeedAuthDeniedRef,
   setEventFeedAuthDenied,
   releaseWithdrawnOptionalFeedDenialRef,
@@ -167,13 +169,6 @@ export function useWorkspaceDetailLoader({
   // after this watermark may recover. Re-applying a denial already inside
   // this window must not raise the watermark.
   const revokedWorkspaceDetailGenerationRef = useRef(0);
-  // /stream 401/403 is route-scoped. A later authorized /workspaces/{id} GET
-  // must not clear that latch or restore the revoked snapshot — the GET can
-  // still succeed while the stream route stays denied, and treating it as
-  // recovery reopens EventSource on every poll. A later /stream probe may
-  // clear this ref after a successful connection, without lowering the
-  // revoke watermark that still blocks in-flight GETs.
-  const workspaceStreamAuthDeniedRef = useRef(false);
   // Highest detail generation that applied a successful /events GET. An older
   // event-feed 401/403 must not clear events this newer success already owns.
   const appliedEventFeedGenerationRef = useRef(0);
@@ -267,7 +262,7 @@ export function useWorkspaceDetailLoader({
     // Local useRef values are stable. The prop ref is stable too; listing it
     // keeps the visit reset tied to selection without a missing-deps warning
     // for the extracted helper, which receives the ref object itself.
-  }, [selectedId, workspaceBaseDetailAuthDeniedRef]);
+  }, [selectedId, workspaceBaseDetailAuthDeniedRef, workspaceStreamAuthDeniedRef]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const epoch = authorizedFeedEpochRef.current;
@@ -1300,6 +1295,7 @@ export function useWorkspaceDetailLoader({
     setWorkspaceDetailAuthDenied,
     workspaceDetailAuthDeniedRef,
     workspaceBaseDetailAuthDeniedRef,
+    workspaceStreamAuthDeniedRef,
     eventFeedAuthDeniedRef,
     setEventFeedAuthDenied,
     logStreamActivityRef,
@@ -1374,7 +1370,7 @@ export function useWorkspaceDetailLoader({
       revokedWorkspaceDetailGenerationRef.current,
       workspaceDetailRequestGenerationRef.current,
     );
-  }, []);
+  }, [workspaceStreamAuthDeniedRef]);
 
   const noteWorkspaceStreamAuthorizationRecovered = useCallback(() => {
     // Successful /stream probe only. Do not lower the revoke watermark: an
@@ -1382,12 +1378,11 @@ export function useWorkspaceDetailLoader({
     // revoked caches. The next detail request starts after this and may
     // refresh once the route latch is clear.
     workspaceStreamAuthDeniedRef.current = false;
-  }, []);
+  }, [workspaceStreamAuthDeniedRef]);
 
   return {
     loadWorkspace,
     noteWorkspaceStreamAuthorizationDenied,
     noteWorkspaceStreamAuthorizationRecovered,
-    workspaceStreamAuthDeniedRef,
   };
 }

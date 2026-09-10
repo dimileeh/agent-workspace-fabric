@@ -403,6 +403,146 @@ test("same-identity capability refresh clears inspector when workspace_runtime b
   await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toHaveCount(0);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hOD-o: a route-level
+// stream denial cannot recover through a basic workspace GET. If the same
+// capability identity then withdraws workspace_stream, release that obsolete
+// latch so polling can render the still-authorized basic workspace detail.
+test("same-identity workspace_stream withdrawal releases inspector stream denial", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let withdrawStream = false;
+  let streamOpens = 0;
+  let detailRequests = 0;
+  let releaseDeniedStream: () => void = () => undefined;
+  const deniedStream = new Promise<void>((resolve) => {
+    releaseDeniedStream = resolve;
+  });
+  let releaseWithdrawnCapabilities: () => void = () => undefined;
+  const withdrawnCapabilities = new Promise<void>((resolve) => {
+    releaseWithdrawnCapabilities = resolve;
+  });
+  const workspaceId = "ws_stream_withdraw";
+  const detailBranch = "authorized-basic-detail-after-stream-withdrawal";
+  const denialMessage = "Workspace stream authorization denied.";
+  const baseCaps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withdrawnCaps = {
+    ...baseCaps,
+    diagnostics: baseCaps.diagnostics.map((item) =>
+      item.id === "workspace_stream"
+        ? {
+            id: "workspace_stream",
+            availability: "unsupported",
+            reason_code: "policy_disabled",
+            message: "Workspace stream withdrawn",
+            semantics: "Optional workspace live event/log stream.",
+          }
+        : item,
+    ),
+  };
+  const overviewItem = {
+    workspace_id: workspaceId,
+    title: "Stream withdrawal workspace",
+    repo_url: "https://github.com/example/stream-withdrawal",
+    base_branch: "main",
+    branch_name: "overview-branch",
+    agent: "codex",
+    agent_model: "gpt-5.5",
+    status: "running",
+    created_at: "2026-09-06T17:00:00Z",
+    updated_at: "2026-09-06T17:00:00Z",
+    task_prompt: "Release stream denial after capability withdrawal",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await mockAwfConsoleApi(page, { overviewItems: [overviewItem] });
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/console/capabilities") {
+      if (withdrawStream) {
+        await withdrawnCapabilities;
+        await fulfillJson(route, withdrawnCaps);
+        return;
+      }
+      await fulfillJson(route, baseCaps);
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}`) {
+      detailRequests += 1;
+      await fulfillJson(route, {
+        ...overviewItem,
+        id: workspaceId,
+        version: 1,
+        branch_name: detailBranch,
+      });
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/runtime`) {
+      await fulfillJson(route, { stack_state: "running", services: [], app_endpoints: [] });
+      return;
+    }
+    if (
+      path === `/api/awf/workspaces/${workspaceId}/events` ||
+      path === `/api/awf/workspaces/${workspaceId}/operations` ||
+      path === `/api/awf/workspaces/${workspaceId}/logs`
+    ) {
+      await fulfillJson(route, listEnvelope([]));
+      return;
+    }
+    if (path === `/api/awf/workspaces/${workspaceId}/stream`) {
+      streamOpens += 1;
+      await deniedStream;
+      const frames = [
+        { type: "connected", workspace_id: workspaceId },
+        {
+          type: "error",
+          error_code: "FORBIDDEN",
+          message: denialMessage,
+          status: 403,
+        },
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        },
+        body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`/?workspaceId=${workspaceId}`);
+  await waitForConsoleReady(page);
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByText(detailBranch, { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect.poll(() => streamOpens, { timeout: 10_000 }).toBeGreaterThan(0);
+
+  releaseDeniedStream();
+  await expect(inspector.getByText(denialMessage)).toBeVisible({ timeout: 10_000 });
+  await expect(inspector.getByText(detailBranch, { exact: true })).toHaveCount(0);
+  const streamOpensAtDenial = streamOpens;
+
+  withdrawStream = true;
+  const detailRequestsAtDenial = detailRequests;
+  await page.getByRole("button", { name: /refresh/i }).click({ force: true });
+  await expect.poll(() => detailRequests, { timeout: 10_000 }).toBeGreaterThan(detailRequestsAtDenial);
+  await expect(inspector.getByText(detailBranch, { exact: true })).toHaveCount(0);
+  releaseWithdrawnCapabilities();
+
+  await expect(inspector.getByText(denialMessage)).toHaveCount(0, { timeout: 10_000 });
+  await expect(inspector.getByText(detailBranch, { exact: true })).toBeVisible({ timeout: 12_000 });
+  await expect(page.getByText("Stream: idle")).toBeVisible();
+  await expect.poll(() => streamOpens, { timeout: 4_000 }).toBe(streamOpensAtDenial);
+});
+
 test("capability 401 clears retained agent and model filter options", async ({ page }) => {
   let authDenied = false;
   const priorWorkspace = {

@@ -76,6 +76,7 @@ export type CapabilityFeedWithdrawal = {
   clearEvents: boolean;
   clearOperations: boolean;
   clearLogs: boolean;
+  clearStream: boolean;
 };
 
 export function planCapabilityFeedWithdrawal(
@@ -110,6 +111,9 @@ export function planCapabilityFeedWithdrawal(
     clearLogs:
       isDiagnosticAvailable(previous, "workspace_logs") &&
       !isDiagnosticAvailable(next, "workspace_logs"),
+    clearStream:
+      isDiagnosticAvailable(previous, "workspace_stream") &&
+      !isDiagnosticAvailable(next, "workspace_stream"),
   };
 }
 
@@ -124,7 +128,8 @@ export function capabilityFeedWithdrawalCleared(plan: CapabilityFeedWithdrawal):
     plan.clearRuntime ||
     plan.clearEvents ||
     plan.clearOperations ||
-    plan.clearLogs
+    plan.clearLogs ||
+    plan.clearStream
   );
 }
 
