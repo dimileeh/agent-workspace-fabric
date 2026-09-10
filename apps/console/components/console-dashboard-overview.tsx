@@ -33,6 +33,7 @@ memo,
 useCallback,
 useEffect,
 useId,
+useLayoutEffect,
 useRef,
 useState
 } from "react";
@@ -690,6 +691,7 @@ export function WorkspaceSelectionToolbar({
 
 export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
 export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
+const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
 
 type WorkspaceCardProps = {
   item: WorkspaceOverview;
@@ -925,13 +927,43 @@ export function WorkspaceList({
   onLoadMore: () => void;
 }) {
   const [windowStart, setWindowStart] = useState(0);
+  const [virtualRowHeight, setVirtualRowHeight] = useState(
+    WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX,
+  );
   const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
   const [copyToastVisible, setCopyToastVisible] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const renderedWindowRef = useRef<HTMLDivElement | null>(null);
+  const measuredRowHeightRef = useRef(false);
+  const preserveScrollTopRef = useRef<number | null>(null);
+  const suppressScrollLoadRef = useRef(false);
+  const suppressScrollFrameRef = useRef<number | null>(null);
+  const previousLoadingMoreRef = useRef(loadingMore);
   const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nearBottomTriggeredRef = useRef(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const selectedWasLoadedRef = useRef(false);
+  const maxWindowStart = Math.max(
+    0,
+    Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) *
+      WORKSPACE_RENDER_WINDOW_SIZE,
+  );
+  const windowEnd = Math.min(items.length, windowStart + WORKSPACE_RENDER_WINDOW_SIZE);
+
+  const scrollWithoutLoading = useCallback((top: number) => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    suppressScrollLoadRef.current = true;
+    if (suppressScrollFrameRef.current !== null) {
+      cancelAnimationFrame(suppressScrollFrameRef.current);
+    }
+    scrollContainer.scrollTo({ top });
+    suppressScrollFrameRef.current = requestAnimationFrame(() => {
+      suppressScrollLoadRef.current = false;
+      suppressScrollFrameRef.current = null;
+    });
+  }, []);
 
   useEffect(() => {
     const selectedIndex = selectedId
@@ -946,15 +978,48 @@ export function WorkspaceList({
       (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
     previousSelectedIdRef.current = selectedId;
     selectedWasLoadedRef.current = selectedIndex >= 0;
-    const maxStart = Math.max(0, Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE);
+    const selectedWindowStart = shouldFollowSelection
+      ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
+        WORKSPACE_RENDER_WINDOW_SIZE
+      : null;
     setWindowStart((current) =>
-      shouldFollowSelection
-        ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE
-        : Math.min(current, maxStart),
+      selectedWindowStart ?? Math.min(current, maxWindowStart),
     );
-  }, [items, selectedId]);
+    if (selectedWindowStart !== null) {
+      scrollWithoutLoading(selectedWindowStart * virtualRowHeight);
+    }
+  }, [items, maxWindowStart, scrollWithoutLoading, selectedId, virtualRowHeight]);
+
+  useLayoutEffect(() => {
+    const renderedWindow = renderedWindowRef.current;
+    const renderedCount = windowEnd - windowStart;
+    if (measuredRowHeightRef.current || !renderedWindow || renderedCount <= 0) return;
+    const measuredRowHeight = renderedWindow.scrollHeight / renderedCount;
+    if (measuredRowHeight > 0) {
+      measuredRowHeightRef.current = true;
+      setVirtualRowHeight(measuredRowHeight);
+    }
+  }, [windowEnd, windowStart]);
+
+  useLayoutEffect(() => {
+    const scrollTop = preserveScrollTopRef.current ?? scrollContainerRef.current?.scrollTop;
+    preserveScrollTopRef.current = null;
+    if (scrollTop !== undefined) {
+      scrollWithoutLoading(scrollTop);
+    }
+  }, [items.length, scrollWithoutLoading]);
+
+  useEffect(() => {
+    if (previousLoadingMoreRef.current && !loadingMore) {
+      nearBottomTriggeredRef.current = false;
+    }
+    previousLoadingMoreRef.current = loadingMore;
+  }, [loadingMore]);
 
   useEffect(() => () => {
+    if (suppressScrollFrameRef.current !== null) {
+      cancelAnimationFrame(suppressScrollFrameRef.current);
+    }
     if (copyFadeTimeoutRef.current !== null) clearTimeout(copyFadeTimeoutRef.current);
     if (copyClearTimeoutRef.current !== null) clearTimeout(copyClearTimeoutRef.current);
   }, []);
@@ -981,8 +1046,20 @@ export function WorkspaceList({
     }, 1400);
   }, []);
 
-  const loadMoreNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
+  const updateWindowAndLoadNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
+    const visibleRow = Math.floor(
+      (element.scrollTop + element.clientHeight / 2) / virtualRowHeight,
+    );
+    const visibleWindowStart = Math.min(
+      maxWindowStart,
+      Math.floor(visibleRow / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE,
+    );
+    setWindowStart((current) =>
+      current === visibleWindowStart ? current : visibleWindowStart,
+    );
+
+    if (suppressScrollLoadRef.current) return;
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;
@@ -995,17 +1072,26 @@ export function WorkspaceList({
       remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX
     ) {
       nearBottomTriggeredRef.current = true;
+      preserveScrollTopRef.current = element.scrollTop;
       onLoadMore();
     }
-  }, [hasMore, loadingMore, onLoadMore]);
+  }, [hasMore, loadingMore, maxWindowStart, onLoadMore, virtualRowHeight]);
+
+  const showWindow = useCallback((nextStart: number) => {
+    const boundedStart = Math.max(0, Math.min(nextStart, maxWindowStart));
+    setWindowStart(boundedStart);
+    scrollWithoutLoading(boundedStart * virtualRowHeight);
+  }, [maxWindowStart, scrollWithoutLoading, virtualRowHeight]);
 
   const loadMoreFromButton = useCallback(() => {
     // Playwright and real browsers may scroll the footer into view before the
     // click dispatches. Mark that near-bottom transition as handled so one
     // explicit click cannot race the scroll handler into loading two pages.
+    if (nearBottomTriggeredRef.current && !historyError) return;
     nearBottomTriggeredRef.current = true;
+    preserveScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? null;
     onLoadMore();
-  }, [onLoadMore]);
+  }, [historyError, onLoadMore]);
 
   const historyFooter = (
     <div
@@ -1039,9 +1125,10 @@ export function WorkspaceList({
   if (items.length === 0) {
     return (
       <div
-        className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden"
+        className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
         data-testid="workspace-list-scroll"
-        onScroll={loadMoreNearBottom}
+        onScroll={updateWindowAndLoadNearBottom}
+        ref={scrollContainerRef}
       >
         <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
           <ListFilter className="mx-auto mb-3 text-slate-400" size={24} aria-hidden />
@@ -1052,13 +1139,15 @@ export function WorkspaceList({
     );
   }
 
-  const windowEnd = Math.min(items.length, windowStart + WORKSPACE_RENDER_WINDOW_SIZE);
   const selectedSet = new Set(selectedWorkspaceIds);
+  const topSpacerHeight = windowStart * virtualRowHeight;
+  const bottomSpacerHeight = (items.length - windowEnd) * virtualRowHeight;
   return (
     <div
-      className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden"
+      className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
       data-testid="workspace-list-scroll"
-      onScroll={loadMoreNearBottom}
+      onScroll={updateWindowAndLoadNearBottom}
+      ref={scrollContainerRef}
     >
       {items.length > WORKSPACE_RENDER_WINDOW_SIZE ? (
         <div className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-600">
@@ -1068,7 +1157,7 @@ export function WorkspaceList({
               type="button"
               aria-label="Previous workspace results"
               disabled={windowStart === 0}
-              onClick={() => setWindowStart((current) => Math.max(0, current - WORKSPACE_RENDER_WINDOW_SIZE))}
+              onClick={() => showWindow(windowStart - WORKSPACE_RENDER_WINDOW_SIZE)}
               className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
             >
               Previous
@@ -1077,7 +1166,7 @@ export function WorkspaceList({
               type="button"
               aria-label="Next workspace results"
               disabled={windowEnd >= items.length}
-              onClick={() => setWindowStart((current) => current + WORKSPACE_RENDER_WINDOW_SIZE)}
+              onClick={() => showWindow(windowStart + WORKSPACE_RENDER_WINDOW_SIZE)}
               className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
             >
               Next
@@ -1085,22 +1174,26 @@ export function WorkspaceList({
           </div>
         </div>
       ) : null}
-      {items.slice(windowStart, windowEnd).map((item) => (
-        <WorkspaceCard
-          key={item.workspace_id}
-          item={item}
-          selected={selectedId === item.workspace_id}
-          selectedForLogs={selectedSet.has(item.workspace_id)}
-          showWorkspaceLogs={showWorkspaceLogs}
-          copied={copiedWorkspaceId === item.workspace_id}
-          copyToastVisible={copyToastVisible}
-          onSelect={onSelect}
-          onToggleWorkspaceSelection={onToggleWorkspaceSelection}
-          onOpenDetails={onOpenDetails}
-          onOpenLogs={onOpenLogs}
-          onCopy={copyWorkspaceId}
-        />
-      ))}
+      {topSpacerHeight > 0 ? <div aria-hidden style={{ height: topSpacerHeight }} /> : null}
+      <div ref={renderedWindowRef}>
+        {items.slice(windowStart, windowEnd).map((item) => (
+          <WorkspaceCard
+            key={item.workspace_id}
+            item={item}
+            selected={selectedId === item.workspace_id}
+            selectedForLogs={selectedSet.has(item.workspace_id)}
+            showWorkspaceLogs={showWorkspaceLogs}
+            copied={copiedWorkspaceId === item.workspace_id}
+            copyToastVisible={copyToastVisible}
+            onSelect={onSelect}
+            onToggleWorkspaceSelection={onToggleWorkspaceSelection}
+            onOpenDetails={onOpenDetails}
+            onOpenLogs={onOpenLogs}
+            onCopy={copyWorkspaceId}
+          />
+        ))}
+      </div>
+      {bottomSpacerHeight > 0 ? <div aria-hidden style={{ height: bottomSpacerHeight }} /> : null}
       {historyFooter}
     </div>
   );

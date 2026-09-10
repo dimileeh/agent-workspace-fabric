@@ -273,6 +273,57 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByText("1 selected for logs", { exact: true })).toBeVisible();
 });
 
+// Regression for PR #958 operator acceptance: appended history must extend the
+// virtual scroll range instead of requiring the explicit paging controls.
+test("scroll traverses bounded history windows in both directions", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  const scrollTo = async (position: "top" | "middle" | "later" | "bottom") => {
+    await list.evaluate((element, target) => {
+      const top = target === "top"
+        ? 0
+        : target === "middle"
+          ? element.scrollHeight / 2
+          : target === "later"
+            ? element.scrollHeight * 0.8
+            : element.scrollHeight;
+      element.scrollTo({ top });
+    }, position);
+  };
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+
+  await scrollTo("bottom");
+  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  await scrollTo("bottom");
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+  await expect.poll(() => overviewRequests).toEqual([null, "100", "200"]);
+
+  await scrollTo("later");
+  await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+
+  await scrollTo("middle");
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0201")).toHaveCount(0);
+  await scrollTo("top");
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+  expect(overviewRequests).toEqual([null, "100", "200"]);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hDQDq: selections
 // retained across overview render windows must not mount one live column per ID.
 test("fullscreen logs cap retained selections across overview windows", async ({ page }) => {
