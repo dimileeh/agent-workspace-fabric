@@ -199,6 +199,8 @@ def main():
         auth_ids = _auth_method_ids(init.get("authMethods"))
         if os.environ.get("XAI_API_KEY") and "xai.api_key" in auth_ids:
             method_id = "xai.api_key"
+        elif "grok.com" in auth_ids:
+            method_id = "grok.com"
         elif "cached_token" in auth_ids:
             method_id = "cached_token"
         else:

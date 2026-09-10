@@ -244,8 +244,8 @@ RUN set -eux; \
     test -x /usr/local/bin/agy; \
     agy --version
 
-# Grok's ACP probe uses an isolated unauthenticated home. Its expected auth and
-# session errors prove those RPC handlers are compatible without build secrets.
+# Grok's ACP probe uses an isolated unauthenticated home. Its expected session
+# errors and advertised auth exchange prove compatibility without build secrets.
 RUN set -eux; \
     max_attempts=3; \
     attempt=1; \
@@ -278,9 +278,9 @@ RUN set -eux; \
     grok_acp_output="$(mktemp)"; \
     printf '%s\n%s\n%s\n%s\n' \
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true}}}' \
-      '{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"awf-contract-probe"}}' \
-      '{"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
-      '{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"awf-contract-probe","prompt":[{"type":"text","text":""}]}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+      '{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"awf-contract-probe","prompt":[{"type":"text","text":""}]}}' \
+      '{"jsonrpc":"2.0","id":4,"method":"authenticate","params":{"methodId":"grok.com","_meta":{"headless":true}}}' \
       | timeout 15s env -u XAI_API_KEY -u GROK_CODE_XAI_API_KEY \
           HOME="$grok_acp_home" GROK_HOME="$grok_acp_home/.grok" \
           grok --always-approve --no-auto-update -m grok-build agent stdio \
@@ -291,12 +291,10 @@ RUN set -eux; \
       (by_id(1).result.protocolVersion == 1) and \
       (by_id(1).result._meta.agentVersion == $expected_version) and \
       ([by_id(1).result.authMethods[]?.id] | index("grok.com") != null) and \
-      (by_id(2).error.code == -32602) and \
-      (by_id(2).error.data == "unsupported auth method: awf-contract-probe") and \
-      (by_id(3).error.code == -32000) and \
-      (by_id(3).error.message == "Authentication required") and \
-      (by_id(4).error.code == -32602) and \
-      (by_id(4).error.data == "unknown session id") \
+      (by_id(2).error.code == -32000) and \
+      (by_id(2).error.message == "Authentication required") and \
+      (by_id(3).error.code == -32602) and \
+      (by_id(3).error.data == "unknown session id") \
     ' "$grok_acp_output" >/dev/null; \
     rm -rf -- "$grok_acp_home"; \
     rm -f -- "$grok_acp_output"; \

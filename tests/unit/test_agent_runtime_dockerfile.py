@@ -230,7 +230,8 @@ def test_agent_runtime_checks_grok_acp_stdio_contract() -> None:
     assert ".result._meta.agentVersion == $expected_version" in dockerfile
     assert ".result.protocolVersion == 1" in dockerfile
     assert '.result.authMethods[]?.id] | index("grok.com") != null' in dockerfile
-    assert '.error.data == "unsupported auth method: awf-contract-probe"' in dockerfile
+    assert '"method":"authenticate","params":{"methodId":"grok.com"' in dockerfile
+    assert "unsupported auth method" not in dockerfile
     assert '.error.message == "Authentication required"' in dockerfile
     assert '.error.data == "unknown session id"' in dockerfile
     assert dockerfile.index("@xai-official/grok@${GROK_VERSION}") < dockerfile.index(
