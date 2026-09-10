@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +122,132 @@ async def test_terminate_completed_is_fenced_against_a_superseded_monitor_owner(
     assert workspace.pr_merge_sha is None
     assert len(ignored) == 1
     assert ignored[0].payload["callback_action"] == "terminal_completed"
+
+
+@pytest.mark.unit
+async def test_terminate_completed_publishes_before_cancellable_session_exit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Cancellation in session exit cannot strand the terminal publication.
+
+    Regression for PRRT_kwDOSJAM6s6g8fr. Once the ``completed`` transition
+    commits, no later monitor retries the defer signal. The commit-adjacent
+    callback must therefore finish before the session context enters its
+    cancellable ``__aexit__``.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+
+    session_exit_started = asyncio.Event()
+
+    @asynccontextmanager
+    async def _cancellable_exit_factory() -> AsyncIterator[AsyncSession]:
+        async with factory() as session:
+            try:
+                yield session
+            finally:
+                session_exit_started.set()
+                await asyncio.Event().wait()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_ScriptedGh(),
+    )
+    runner._deps = replace(runner._deps, session_factory=_cancellable_exit_factory)
+    runner._monitor_owner_id = "worker-current"
+    callback_finished = asyncio.Event()
+
+    async def _publish() -> None:
+        callback_finished.set()
+
+    completion_task = asyncio.create_task(
+        runner._terminate_completed(
+            workspace_id,
+            pr_merge_sha=None,
+            on_transition_committed=_publish,
+        )
+    )
+    await session_exit_started.wait()
+    completion_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await completion_task
+
+    assert callback_finished.is_set()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
+
+
+@pytest.mark.unit
+async def test_terminate_completed_shields_post_commit_publication_from_cancellation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Outer cancellation waits for terminal publication before propagating.
+
+    Regression for PRRT_kwDOSJAM6s6g8fr. The callback can grow await points even
+    though today's defer-signal writer is synchronous; cancellation at any such
+    point must not cancel the publication owned by the committed transition.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = "worker-current"
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    callback_finished = asyncio.Event()
+
+    async def _publish() -> None:
+        callback_started.set()
+        await release_callback.wait()
+        callback_finished.set()
+
+    completion_task = asyncio.create_task(
+        runner._terminate_completed(
+            workspace_id,
+            pr_merge_sha=None,
+            on_transition_committed=_publish,
+        )
+    )
+    await callback_started.wait()
+    completion_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not completion_task.done()
+    completion_task.cancel()
+    await asyncio.sleep(0)
+    assert not completion_task.done()
+    release_callback.set()
+    with pytest.raises(asyncio.CancelledError):
+        await completion_task
+
+    assert callback_finished.is_set()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "completed"
 
 
 def _merged_terminal_push_result(*, merge_commit_sha: str = "mergesha0000") -> _GitPushResult:

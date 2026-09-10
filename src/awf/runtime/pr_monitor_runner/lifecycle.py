@@ -621,6 +621,25 @@ def _superseded_monitor_owner(self: Any, ws: Workspace) -> bool:
     return superseded_claimed_runner or superseded_inline_handoff
 
 
+async def _run_transition_committed_callback(
+    callback: Callable[[], Awaitable[None]],
+) -> None:
+    """Finish terminal publication before propagating outer cancellation."""
+    callback_task: asyncio.Future[None] = asyncio.ensure_future(callback())
+    cancellation_requested = False
+    while not callback_task.done():
+        try:
+            await asyncio.shield(callback_task)
+        except asyncio.CancelledError:
+            # Cancellation targets the outer monitor task, not the terminal write.
+            # Re-await across repeated shutdown cancels so the committed transition
+            # cannot outlive its authoritative completion artifact.
+            cancellation_requested = True
+    callback_task.result()
+    if cancellation_requested:
+        raise asyncio.CancelledError
+
+
 async def _terminate_completed(
     self: Any,
     workspace_id: str,
@@ -639,15 +658,17 @@ async def _terminate_completed(
     (``_persist_state``, the defer signal) on the same atomic owner fence instead
     of publishing them ahead of it (PRRT_kwDOSJAM6s6flswY).
 
-    ``on_transition_committed`` is that gated publication, run the moment the
-    transition commits and BEFORE the cancellable post-commit work below
-    (target-branch reconciliation, filesystem/Compose GC). The row is terminal from
-    the commit onward, so no monitor is ever started for it again: a caller that
-    waited for this coroutine to RETURN would silently drop its terminal artifact
-    whenever cancellation or process loss landed in that cleanup, breaking
+    ``on_transition_committed`` is that gated publication, run cancellation-safe
+    the moment the transition commits and BEFORE both the async session's
+    cancellable ``__aexit__`` and the post-commit work below (target-branch
+    reconciliation, filesystem/Compose GC). The row is terminal from the commit
+    onward, so no monitor is ever started for it again: a caller that waited for
+    this coroutine to RETURN would silently drop its terminal artifact whenever
+    cancellation or process loss landed in that cleanup, breaking
     ``_write_defer_signal``'s contract that the file always exists once the monitor
-    is done (PRRT_kwDOSJAM6s6fvDbP). Callbacks keep the best-effort contract of the
-    writes they wrap — raising here skips the cleanup below.
+    is done (PRRT_kwDOSJAM6s6fvDbP / PRRT_kwDOSJAM6s6g8fr-). Callbacks keep the
+    best-effort contract of the writes they wrap — raising here skips the cleanup
+    below.
 
     Callers MUST honor the returned ownership boolean before publishing any
     merge-success monitor write: a False return means a newer claimant owns the row,
@@ -717,8 +738,8 @@ async def _terminate_completed(
         # NotifyHuman episode (issuecomment-5225662425 / PR #805).
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
-    if on_transition_committed is not None:
-        await on_transition_committed()
+        if on_transition_committed is not None:
+            await _run_transition_committed_callback(on_transition_committed)
     if repo_url and base_branch:
         await self._reconcile_target_branch_after_merge(
             workspace_id=workspace_id,
