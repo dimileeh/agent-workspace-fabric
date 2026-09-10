@@ -2452,8 +2452,13 @@ test("fullscreen log stream requires listing capability via allowStreamLogs", ()
   );
   assert.match(
     logs,
-    /if \(!allowStreamLogs\) \{[\s\S]*?streamAuthDeniedRef\.current = false;[\s\S]*?setStreamAuthDenied\(false\);[\s\S]*?setStreamProbeNonce\(0\);[\s\S]*?if \(!listingDeniedRef\.current && !tailAuthDeniedRef\.current\) \{[\s\S]*?void loadSelectedTails\(\);[\s\S]*?return;\s*\}[\s\S]*?if \(listingDenied \|\| tailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
+    /if \(!allowStreamLogs\) \{[\s\S]*?streamAuthDeniedRef\.current = false;[\s\S]*?setStreamAuthDenied\(false\);[\s\S]*?setStreamProbeNonce\(0\);[\s\S]*?if \(!listingDeniedRef\.current && !tailAuthDeniedRef\.current\) \{[\s\S]*?void loadSelectedTailsRef\.current\(\);[\s\S]*?return;\s*\}[\s\S]*?if \(listingDenied \|\| tailAuthDenied\) \{\s*setStreamState\("idle"\);\s*return;\s*\}/,
     "Expected WorkspaceLogColumn to open /stream only when listing+stream (allowStreamLogs) is allowed and listing or tail has not been auth-denied",
+  );
+  assert.match(
+    logs,
+    /useLayoutEffect\(\(\) => \{\s*loadSelectedTailsRef\.current = loadSelectedTails;\s*\}, \[loadSelectedTails\]\);[\s\S]*?\}, \[allowStreamLogs, capabilities, listingDenied, streamAuthDenied, streamProbeNonce, tailAuthDenied, workspace\.workspace_id\]\);/,
+    "Expected listing-driven loadSelectedTails changes not to restart the fullscreen EventSource",
   );
   assert.match(
     logs,

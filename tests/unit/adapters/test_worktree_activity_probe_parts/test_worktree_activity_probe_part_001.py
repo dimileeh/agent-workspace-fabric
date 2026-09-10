@@ -65,7 +65,13 @@ async def test_future_dated_entry_does_not_blind_later_activity(worktree: Path) 
     assert await probe() is True
 
     for index in range(3):
-        (worktree / "README.md").write_text(f"hello {index}\n", encoding="utf-8")
+        # Vary size as well as content so the test isolates the future-mtime
+        # regression from a filesystem's ctime clock granularity.
+        suffix = "!" * index
+        (worktree / "README.md").write_text(
+            f"hello {index}{suffix}\n",
+            encoding="utf-8",
+        )
         assert await probe() is True
         assert await probe() is False
 
@@ -117,10 +123,17 @@ async def test_timestamp_preserving_rewrite_reports_activity(worktree: Path) -> 
     assert await probe() is False
 
     before = target.stat()
-    with target.open("r+b") as handle:
-        handle.write(b"HELLO\n")
-    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
-    after = target.stat()
+    deadline = time.monotonic() + 1.0
+    while True:
+        with target.open("r+b") as handle:
+            handle.write(b"HELLO\n")
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = target.stat()
+        if after.st_ctime_ns != before.st_ctime_ns:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("filesystem ctime did not advance after rewrite")
+        time.sleep(0.001)
     assert (after.st_mtime_ns, after.st_size, after.st_ino, after.st_mode) == (
         before.st_mtime_ns,
         before.st_size,

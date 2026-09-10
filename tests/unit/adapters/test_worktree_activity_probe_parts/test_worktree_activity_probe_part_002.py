@@ -304,6 +304,77 @@ def test_observed_subdirectory_open_rejects_symlink_replacement(tmp_path: Path) 
 
 
 @pytest.mark.unit
+async def test_worktree_walk_never_follows_root_replacement(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worktree root itself is opened without following a replacement."""
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    original = tmp_path / "ws_probe-original"
+    outside = tmp_path / "outside-root"
+    outside.mkdir()
+    (outside / "outside-root-sentinel").write_text("outside\n", encoding="utf-8")
+    worktree.rename(original)
+    worktree.symlink_to(outside, target_is_directory=True)
+    real_entry_stat = worktree_activity._entry_stat
+
+    def _reject_outside_entry(entry: os.DirEntry[str]) -> os.stat_result:
+        if entry.name == "outside-root-sentinel":
+            raise AssertionError("worktree scan escaped through replacement root")
+        return real_entry_stat(entry)
+
+    monkeypatch.setattr(worktree_activity, "_entry_stat", _reject_outside_entry)
+
+    assert await probe() is None
+
+
+@pytest.mark.unit
+async def test_worktree_walk_never_follows_queued_directory_replacement(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory replaced after its lstat cannot redirect a later scan.
+
+    Worktree descendants used to be queued without descriptors. If the agent
+    renamed an observed directory and put an outside-pointing symlink at its
+    path before that queue entry was popped, ``scandir(path)`` followed the
+    replacement outside the isolated checkout.
+    """
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    source = worktree / "src"
+    original = worktree / "src-original"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside-sentinel").write_text("outside\n", encoding="utf-8")
+    real_entry_stat = worktree_activity._entry_stat
+    armed = True
+
+    def _replace_observed_directory(entry: os.DirEntry[str]) -> os.stat_result:
+        nonlocal armed
+        if entry.name == "outside-sentinel":
+            raise AssertionError("worktree scan escaped through replacement symlink")
+        stat_result = real_entry_stat(entry)
+        if armed and entry.name == source.name:
+            armed = False
+            source.rename(original)
+            source.symlink_to(outside, target_is_directory=True)
+        return stat_result
+
+    monkeypatch.setattr(worktree_activity, "_entry_stat", _replace_observed_directory)
+
+    assert await probe() is None
+    assert armed is False
+
+
+@pytest.mark.unit
 async def test_primed_probe_never_watches_replaced_commondir_target(
     tmp_path: Path,
     worktree: Path,
@@ -341,6 +412,46 @@ async def test_primed_probe_never_watches_replaced_commondir_target(
     assert await probe() is True
     branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
     assert await probe() is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head_ref_kind", ["absolute", "traversal"])
+async def test_rewritten_head_ref_cannot_escape_pinned_common_dir(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_ref_kind: str,
+) -> None:
+    """Agent-controlled HEAD text cannot redirect branch-ref metadata stats."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    _age_tree(worktree)
+    _age_tree(common_dir)
+
+    probe = WorktreeActivityProbe(worktree)
+    await probe.prime()
+    assert await probe() is False
+
+    outside_ref = tmp_path / "outside-ref"
+    head_ref = (
+        str(outside_ref) if head_ref_kind == "absolute" else "refs/heads/../../../outside-ref"
+    )
+    (git_dir / "HEAD").write_text(f"ref: {head_ref}\n", encoding="utf-8")
+    real_lstat = Path.lstat
+
+    def _reject_external_stat(self: Path) -> os.stat_result:
+        if Path(os.path.normpath(self)) == outside_ref:
+            raise AssertionError(f"branch-ref stat escaped common dir: {self}")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", _reject_external_stat)
+
+    assert await probe() is True
+    assert await probe() is False
 
 
 @pytest.mark.unit
@@ -487,7 +598,7 @@ async def test_unstattable_entry_is_never_reported_as_idle(
     nothing beneath it is ever walked.
     """
     real_scandir = os.scandir
-    blocked = str(worktree / "src")
+    blocked = "src"
 
     class _UnstattableEntry:
         def __init__(self, entry: os.DirEntry[str]) -> None:
@@ -499,12 +610,12 @@ async def test_unstattable_entry_is_never_reported_as_idle(
             raise PermissionError("stat denied")
 
     class _PartiallyBrokenScandir:
-        def __init__(self, path: str) -> None:
+        def __init__(self, path: str | int) -> None:
             self._inner = real_scandir(path)
 
         def __enter__(self) -> list[object]:
             return [
-                _UnstattableEntry(entry) if entry.path == blocked else entry
+                _UnstattableEntry(entry) if entry.name == blocked else entry
                 for entry in self._inner
             ]
 
@@ -565,15 +676,18 @@ async def test_unreadable_subtree_is_never_reported_as_idle(
     can see: consecutive fingerprints would match and the watchdog would
     idle-kill an actively editing agent — the #932 defect again.
     """
-    real_scandir = os.scandir
-    blocked = str(worktree / "src" / "nested")
+    real_open = worktree_activity._open_observed_directory
 
-    def _deny_one(path: str) -> object:
-        if path == blocked:
+    def _deny_one(
+        name: str,
+        parent_descriptor: int,
+        observed: os.stat_result,
+    ) -> int:
+        if name == "nested":
             raise PermissionError("scandir denied")
-        return real_scandir(path)
+        return real_open(name, parent_descriptor, observed)
 
-    monkeypatch.setattr(os, "scandir", _deny_one)
+    monkeypatch.setattr(worktree_activity, "_open_observed_directory", _deny_one)
 
     probe = WorktreeActivityProbe(worktree)
     assert await probe() is None
@@ -601,7 +715,7 @@ async def test_write_racing_the_walk_is_not_reported_as_idle(
     def _stat_then_race(entry: os.DirEntry[str]) -> os.stat_result:
         nonlocal armed
         stat_result = real_entry_stat(entry)
-        if armed and entry.path == str(target):
+        if armed and entry.name == target.name:
             # Land the write *after* this entry was stat-ed, exactly once, so
             # the confirming rescan runs against a quiet tree.
             armed = False

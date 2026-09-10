@@ -3618,6 +3618,40 @@ test("fullscreen logs recover through tails when streaming is withdrawn after st
   expect(streamOpens).toBe(streamOpensAtDenial);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hRN-P: successful
+// fullscreen /logs polls replace the streams array, but must not close and
+// recreate an otherwise healthy EventSource.
+streamTest("fullscreen logs keep a healthy stream open across listing polls", async ({
+  page,
+  openEventStream,
+}) => {
+  let streamOpens = 0;
+  const streamUrl = await openEventStream([
+    { type: "connected", workspace_id: "ws_logs" },
+    { type: "heartbeat", workspace_id: "ws_logs" },
+  ]);
+  const api = await mockAwfApi(page);
+  await page.route("**/api/awf/workspaces/ws_logs/stream**", async (route) => {
+    streamOpens += 1;
+    await route.continue({ url: streamUrl });
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  await expect(modal.getByText(/stream live/)).toBeVisible({ timeout: 12_000 });
+  await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThan(0);
+  const opensBeforeListingPoll = streamOpens;
+  const listingPollsBefore = api.streamPolls;
+
+  await expect.poll(() => api.streamPolls, { timeout: 12_000 }).toBeGreaterThan(listingPollsBefore);
+  await page.waitForTimeout(1_000);
+  expect(streamOpens).toBe(opensBeforeListingPoll);
+  await expect(modal.getByText(/stream live/)).toBeVisible();
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBlfk: fullscreen
 // loadSelectedTails must not treat a sibling tail 200 as recovery while a
 // previously denied stream retries with 5xx. /stream stays closed until that
