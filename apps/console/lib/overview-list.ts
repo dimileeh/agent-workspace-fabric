@@ -16,6 +16,12 @@ export type OverviewListFilters = {
   repo_url?: string;
 };
 
+export type OverviewQuery = {
+  statusFilters: string[];
+  agentFilters: string[];
+  repoFilter: string;
+};
+
 export type OverviewListPage = ListEnvelope<WorkspaceOverview>;
 
 /** Why a collected prefix is incomplete. Callers must surface this, not treat it as done. */
@@ -60,6 +66,19 @@ export function overviewListPath(
     repo_url: filters.repo_url,
     cursor: cursor ?? undefined,
   });
+}
+
+/** Match a batch-fetched row against the query that produced the current list. */
+export function overviewItemMatchesQuery(
+  item: WorkspaceOverview,
+  query: OverviewQuery,
+): boolean {
+  const repoUrl = query.repoFilter.trim();
+  return (
+    (query.statusFilters.length === 0 || query.statusFilters.includes(item.status)) &&
+    (query.agentFilters.length === 0 || query.agentFilters.includes(item.agent)) &&
+    (repoUrl === "" || item.repo_url === repoUrl)
+  );
 }
 
 /** Append one cursor page without replacing existing rows or duplicating IDs. */

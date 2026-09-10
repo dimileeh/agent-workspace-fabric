@@ -266,7 +266,9 @@ test("routine refresh updates and removes retained workspaces outside page one",
   await page.goto("/");
   await waitForConsoleReady(page);
   await page.getByRole("button", { name: "Load more workspaces" }).click();
-  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Next workspace results" }).click();
   const retainedCard = page.getByTestId("workspace-card-ws_perf_0101");
   await expect(retainedCard.getByText("running", { exact: true })).toBeVisible();
@@ -305,6 +307,36 @@ test("a deep link resolves an older workspace without mounting the intervening f
   await expect(page).toHaveURL(/workspaceId=ws_perf_1301/);
   expect(overviewRequests).toEqual([null]);
   expect(batchRequests).toEqual([["ws_perf_1301"]]);
+});
+
+test("repository filtering drops a selected off-page workspace excluded by the new query", async ({
+  page,
+}) => {
+  const batchRequests: string[][] = [];
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByTestId("workspace-card-ws_perf_0101").click();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0101/);
+
+  await page.getByRole("button", { name: "Filters" }).click();
+  await page.getByPlaceholder("exact repo filter").fill("https://example.com/even.git");
+
+  await expect.poll(() =>
+    batchRequests.some(
+      (workspaceIds) =>
+        workspaceIds.length === 1 && workspaceIds[0] === "ws_perf_0101",
+    ),
+  ).toBe(true);
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/workspaceId=ws_perf_0101/);
 });
 
 test("failed scroll loading keeps an accessible one-page retry", async ({ page }) => {

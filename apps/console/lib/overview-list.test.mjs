@@ -7,6 +7,7 @@ import {
   OVERVIEW_REFRESH_BATCH_SIZE,
   appendUniqueOverviewItems,
   collectOverviewPages,
+  overviewItemMatchesQuery,
   overviewListPath,
   reconcileOverviewFirstPage,
   reconcileOverviewRetainedItems,
@@ -27,6 +28,30 @@ test("overviewListPath includes limit and omits empty cursor", () => {
     overviewListPath({ status: "running", agent: "codex", repo_url: "https://example.com/r.git" }, "c1"),
     `/api/awf/workspaces/overview?limit=${OVERVIEW_LIST_PAGE_SIZE}&status=running&agent=codex&repo_url=https%3A%2F%2Fexample.com%2Fr.git&cursor=c1`,
   );
+});
+
+test("overviewItemMatchesQuery applies every overview query filter", () => {
+  const item = {
+    workspace_id: "ws_1",
+    status: "running",
+    agent: "codex",
+    repo_url: "https://example.com/awf.git",
+  };
+  const cases = [
+    [{ statusFilters: [], agentFilters: [], repoFilter: "" }, true],
+    [{
+      statusFilters: ["running", "completed"],
+      agentFilters: ["codex", "claude_code"],
+      repoFilter: " https://example.com/awf.git ",
+    }, true],
+    [{ statusFilters: ["completed"], agentFilters: [], repoFilter: "" }, false],
+    [{ statusFilters: [], agentFilters: ["claude_code"], repoFilter: "" }, false],
+    [{ statusFilters: [], agentFilters: [], repoFilter: "https://example.com/other.git" }, false],
+  ];
+
+  for (const [query, expected] of cases) {
+    assert.equal(overviewItemMatchesQuery(item, query), expected);
+  }
 });
 
 test("appendUniqueOverviewItems appends only unseen workspace IDs", () => {

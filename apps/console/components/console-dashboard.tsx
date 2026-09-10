@@ -20,6 +20,7 @@ import { fleetKpisFromDashboardSummary } from "@/lib/console-dashboard-summary";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import {
   appendUniqueOverviewItems,
+  overviewItemMatchesQuery,
   overviewListPath,
   reconcileOverviewRetainedItems,
   retainedOverviewIdBatches,
@@ -564,11 +565,16 @@ export function ConsoleDashboard() {
           appliedOverviewGenerationRef.current,
           generation,
         );
-        const selectedItems = normalizeOverview(result.data.items);
+        const selectedItems = normalizeOverview(result.data.items).filter((item) =>
+          overviewItemMatchesQuery(item, capturedQuery),
+        );
         const withSelected = appendUniqueOverviewItems(overviewItemsRef.current, selectedItems);
         overviewItemsRef.current = withSelected;
         setOverview(withSelected);
-        if (result.data.missing_workspace_ids.includes(workspaceId)) {
+        if (
+          result.data.missing_workspace_ids.includes(workspaceId) ||
+          !selectedItems.some((item) => item.workspace_id === workspaceId)
+        ) {
           setSelectedId(null);
         }
       };
