@@ -695,7 +695,7 @@ export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;
 export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
 const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
 
-function workspaceRowAtOffset(rowOffsets: number[], offset: number): number {
+function workspaceRowAtOffset(rowOffsets: readonly number[], offset: number): number {
   let low = 0;
   let high = Math.max(0, rowOffsets.length - 2);
   while (low < high) {
@@ -984,6 +984,11 @@ export function WorkspaceList({
   const nearBottomTriggeredRef = useRef(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const selectedWasLoadedRef = useRef(false);
+  const committedListGeometryRef = useRef<{
+    workspaceIds: readonly string[];
+    rowOffsets: readonly number[];
+    selectedId: string | null;
+  } | null>(null);
   const maxPageStart = Math.max(
     0,
     Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) *
@@ -1016,6 +1021,42 @@ export function WorkspaceList({
       suppressScrollFrameRef.current = null;
     });
   }, []);
+
+  useLayoutEffect(() => {
+    const previous = committedListGeometryRef.current;
+    const workspaceIds = items.map((item) => item.workspace_id);
+    committedListGeometryRef.current = { workspaceIds, rowOffsets, selectedId };
+    if (!previous || previous.selectedId !== selectedId) return;
+    const membershipChanged =
+      previous.workspaceIds.length !== workspaceIds.length ||
+      previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
+    const scrollContainer = scrollContainerRef.current;
+    if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
+
+    const previousAnchorIndex = workspaceRowAtOffset(
+      previous.rowOffsets,
+      scrollContainer.scrollTop,
+    );
+    const workspaceId = previous.workspaceIds[previousAnchorIndex];
+    const anchorIndex = workspaceIds.indexOf(workspaceId);
+    if (anchorIndex < 0) return;
+    const previousAnchorHeight =
+      previous.rowOffsets[previousAnchorIndex + 1] -
+      previous.rowOffsets[previousAnchorIndex];
+    const offsetRatio = previousAnchorHeight > 0
+      ? (scrollContainer.scrollTop - previous.rowOffsets[previousAnchorIndex]) /
+        previousAnchorHeight
+      : 0;
+    const anchorHeight = rowOffsets[anchorIndex + 1] - rowOffsets[anchorIndex];
+    const anchorWindowStart = Math.min(
+      Math.floor(anchorIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
+        WORKSPACE_RENDER_WINDOW_SIZE,
+      maxWindowStart,
+    );
+    setPageStart(anchorWindowStart);
+    setWindowStart(anchorWindowStart);
+    scrollWithoutLoading(rowOffsets[anchorIndex] + offsetRatio * anchorHeight);
+  }, [items, maxWindowStart, rowOffsets, scrollWithoutLoading, selectedId]);
 
   useEffect(() => {
     const selectedIndex = selectedId

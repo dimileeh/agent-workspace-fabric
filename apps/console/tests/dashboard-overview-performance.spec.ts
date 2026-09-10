@@ -19,6 +19,10 @@ type OverviewRouteOptions = {
   resolvePageItem?: (
     item: ReturnType<typeof workspaceOverview>,
   ) => ReturnType<typeof workspaceOverview>;
+  resolvePageItems?: (
+    items: ReturnType<typeof workspaceOverview>[],
+    cursor: string | null,
+  ) => ReturnType<typeof workspaceOverview>[];
   resolveBatchItem?: (
     item: ReturnType<typeof workspaceOverview>,
   ) => ReturnType<typeof workspaceOverview> | null;
@@ -106,7 +110,12 @@ async function installLargeFleetOverview(
       delayedRoutes.push(route);
       return;
     }
-    await fulfillOverviewPage(route, cursor, options.resolvePageItem);
+    await fulfillOverviewPage(
+      route,
+      cursor,
+      options.resolvePageItem,
+      options.resolvePageItems,
+    );
   });
   await page.route("**/api/awf/workspaces/overview/batch", routeOverviewBatch);
   return async () => {
@@ -116,6 +125,7 @@ async function installLargeFleetOverview(
           route,
           new URL(route.request().url()).searchParams.get("cursor"),
           options.resolvePageItem,
+          options.resolvePageItems,
         ),
       ),
       ...delayedBatchRoutes.splice(0).map((route) => fulfillOverviewBatch(route, false)),
@@ -129,6 +139,10 @@ async function fulfillOverviewPage(
   resolvePageItem?: (
     item: ReturnType<typeof workspaceOverview>,
   ) => ReturnType<typeof workspaceOverview>,
+  resolvePageItems?: (
+    items: ReturnType<typeof workspaceOverview>[],
+    cursor: string | null,
+  ) => ReturnType<typeof workspaceOverview>[],
 ): Promise<void> {
   const url = new URL(route.request().url());
   const status = url.searchParams.get("status");
@@ -141,9 +155,10 @@ async function fulfillOverviewPage(
       (!repoUrl || item.repo_url === repoUrl),
   );
   const start = cursor === null ? 0 : Number.parseInt(cursor, 10);
-  const items = matchingFleet
+  const pageItems = matchingFleet
     .slice(start, start + PAGE_SIZE)
     .map((item) => resolvePageItem?.(item) ?? item);
+  const items = resolvePageItems?.(pageItems, cursor) ?? pageItems;
   const next = start + items.length;
   await fulfillJson(route, {
     items,
@@ -546,6 +561,80 @@ test("keeps the visible row anchored when a refresh changes row heights", async 
   await expect.poll(async () => (await visibleAnchor()).id).toBe(beforeRefresh.id);
   const afterRefresh = await visibleAnchor();
   expect(afterRefresh.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
+});
+
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hJmGY: refreshing
+// membership ahead of the viewport must preserve the visible workspace, not
+// merely the same numeric scrollTop.
+test("refresh preserves the visible workspace when membership shifts", async ({ page }) => {
+  let firstPageRequests = 0;
+  let prependWorkspace = false;
+  await page.setViewportSize({ width: 1_000, height: 720 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => {
+      if (cursor === null) firstPageRequests += 1;
+    },
+    resolvePageItems: (items, cursor) =>
+      cursor === null && prependWorkspace
+        ? [workspaceOverview(0), ...items.slice(0, -1)]
+        : items,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+
+  const list = page.getByTestId("workspace-list-scroll");
+  const anchor = page.getByTestId("workspace-card-ws_perf_0150");
+  await expect(anchor).toBeAttached();
+  const anchorScrollTop = await anchor.evaluate((element) => {
+    const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
+    if (!listElement) throw new Error("workspace list is missing");
+    const controlsHeight = listElement.querySelector<HTMLElement>(":scope > .sticky")
+      ?.offsetHeight ?? 0;
+    const listTop = listElement.getBoundingClientRect().top + controlsHeight;
+    return listElement.scrollTop + element.getBoundingClientRect().top - listTop +
+      element.getBoundingClientRect().height * 0.35;
+  });
+  await list.evaluate((element, top) => element.scrollTo({ top }), anchorScrollTop);
+  await expect(anchor).toBeVisible();
+
+  const visibleAnchor = () => list.evaluate((element) => {
+    const viewportTop = element.querySelector<HTMLElement>(":scope > .sticky")
+      ?.getBoundingClientRect().bottom ?? element.getBoundingClientRect().top;
+    const row = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    ).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    const bounds = row?.getBoundingClientRect();
+    return {
+      id: row?.dataset.testid ?? null,
+      offsetRatio: bounds ? (bounds.top - viewportTop) / bounds.height : null,
+    };
+  });
+  const beforeRefresh = await visibleAnchor();
+  expect(beforeRefresh.id).toBe("workspace-card-ws_perf_0150");
+
+  prependWorkspace = true;
+  const requestsBeforePrepend = firstPageRequests;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => firstPageRequests).toBeGreaterThan(requestsBeforePrepend);
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(beforeRefresh.id);
+  const afterPrepend = await visibleAnchor();
+  expect(afterPrepend.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+
+  prependWorkspace = false;
+  const requestsBeforeRemoval = firstPageRequests;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => firstPageRequests).toBeGreaterThan(requestsBeforeRemoval);
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(beforeRefresh.id);
+  const afterRemoval = await visibleAnchor();
+  expect(afterRemoval.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 });
 
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hIfD1: a
