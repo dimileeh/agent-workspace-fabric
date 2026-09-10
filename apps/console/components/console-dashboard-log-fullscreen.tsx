@@ -977,8 +977,28 @@ export function WorkspaceLogColumn({
     // Listing or tail 401/403 while workspace_logs stays advertised must close
     // /stream. Those denials are separate from a route-level /stream 401/403:
     // a later listing or tail 200 must not reopen or restore revoked log text.
-    // The stream-route latch can clear only after a later /stream probe connects.
-    if (!allowStreamLogs || listingDenied || tailAuthDenied) {
+    // While streaming stays advertised, the route latch can clear only after a
+    // later /stream probe connects. Stream withdrawal releases it below.
+    if (!allowStreamLogs) {
+      setStreamState("idle");
+      // A route-specific /stream denial no longer governs this column once
+      // streaming is withdrawn but workspace_logs remains available. Cancel
+      // the obsolete probe, release only that latch, and refill the caches it
+      // cleared through the still-supported polling-tail path. Listing/tail
+      // denials remain authoritative and recover through their own requests.
+      if (streamAuthDeniedRef.current) {
+        clearStreamAuthProbe();
+        streamAuthDeniedRef.current = false;
+        setStreamAuthDenied(false);
+        setStreamProbeNonce(0);
+        if (!listingDeniedRef.current && !tailAuthDeniedRef.current) {
+          setError(() => listingOutageMessageRef.current);
+          void loadSelectedTails();
+        }
+      }
+      return;
+    }
+    if (listingDenied || tailAuthDenied) {
       setStreamState("idle");
       return;
     }
@@ -1213,7 +1233,7 @@ export function WorkspaceLogColumn({
         eventSourceRef.current = null;
       }
     };
-  }, [allowStreamLogs, capabilities, listingDenied, streamAuthDenied, streamProbeNonce, tailAuthDenied, workspace.workspace_id]);
+  }, [allowStreamLogs, capabilities, listingDenied, loadSelectedTails, streamAuthDenied, streamProbeNonce, tailAuthDenied, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">

@@ -3537,6 +3537,87 @@ test(`fullscreen logs clear caches and hold the stream closed after stream autho
 });
 }
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hRApz: once
+// workspace_stream is withdrawn, a prior route-specific denial no longer
+// applies to the still-supported polling-tail path. Release that latch and
+// repopulate the cleared fullscreen column without reopening /stream.
+test("fullscreen logs recover through tails when streaming is withdrawn after stream authorization denial", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  let capabilitiesRequests = 0;
+  let streamAvailable = true;
+  let streamOpens = 0;
+  const heldStream = createDeferred();
+  const capabilities = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const withoutStreaming = {
+    ...capabilities,
+    diagnostics: capabilities.diagnostics.map((item) =>
+      item.id === "workspace_stream"
+        ? {
+            id: item.id,
+            availability: "unsupported",
+            reason_code: "policy_disabled",
+            message: "workspace_stream withdrawn",
+            semantics: "Optional workspace live event/log stream.",
+          }
+        : item,
+    ),
+  };
+
+  const api = await mockAwfApi(page);
+  await page.route("**/api/awf/console/capabilities", async (route) => {
+    capabilitiesRequests += 1;
+    await fulfillJson(route, streamAvailable ? capabilities : withoutStreaming);
+  });
+  await page.route("**/api/awf/workspaces/ws_logs/stream**", async (route) => {
+    streamOpens += 1;
+    await heldStream.promise;
+    const frame: AwfStreamFrame = {
+      type: "error",
+      error_code: "FORBIDDEN",
+      message: "Workspace stream authorization denied.",
+      status: 403,
+    };
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+      body: `data: ${JSON.stringify(frame)}\n\n`,
+    });
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText("active line");
+  await expect.poll(() => streamOpens, { timeout: 12_000 }).toBeGreaterThan(0);
+
+  heldStream.resolve();
+  await expect(modal.getByText(/Workspace stream authorization denied/i)).toBeVisible({ timeout: 12_000 });
+  await expect(output).toContainText("No log data loaded.");
+  const tailReadsAtDenial = api.activeTailReads;
+  const streamOpensAtDenial = streamOpens;
+  const capabilitiesAtDenial = capabilitiesRequests;
+
+  streamAvailable = false;
+  await expect.poll(() => capabilitiesRequests, { timeout: 12_000 }).toBeGreaterThan(capabilitiesAtDenial);
+  await expect.poll(() => api.activeTailReads, { timeout: 12_000 }).toBeGreaterThan(tailReadsAtDenial);
+  await expect(output).toContainText("active line", { timeout: 12_000 });
+  await expect(modal.getByText(/Workspace stream authorization denied/i)).toHaveCount(0);
+  await expect(modal.getByText(/stream idle/i)).toBeVisible();
+  await page.waitForTimeout(1_000);
+  expect(streamOpens).toBe(streamOpensAtDenial);
+});
+
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gBlfk: fullscreen
 // loadSelectedTails must not treat a sibling tail 200 as recovery while a
 // previously denied stream retries with 5xx. /stream stays closed until that
