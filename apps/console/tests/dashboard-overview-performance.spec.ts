@@ -23,6 +23,11 @@ type OverviewRouteOptions = {
     items: ReturnType<typeof workspaceOverview>[],
     cursor: string | null,
   ) => ReturnType<typeof workspaceOverview>[];
+  resolvePage?: (cursor: string | null) => {
+    items: ReturnType<typeof workspaceOverview>[];
+    has_more: boolean;
+    next_cursor: string | null;
+  } | null;
   resolveBatchItem?: (
     item: ReturnType<typeof workspaceOverview>,
   ) => ReturnType<typeof workspaceOverview> | null;
@@ -94,6 +99,19 @@ async function installLargeFleetOverview(
     }
     await fulfillOverviewBatch(route, false);
   };
+  const fulfillPage = async (route: Route, cursor: string | null) => {
+    const resolvedPage = options.resolvePage?.(cursor);
+    if (resolvedPage) {
+      await fulfillJson(route, resolvedPage);
+      return;
+    }
+    await fulfillOverviewPage(
+      route,
+      cursor,
+      options.resolvePageItem,
+      options.resolvePageItems,
+    );
+  };
   await page.route("**/api/awf/workspaces/overview*", async (route) => {
     if (route.request().method() === "POST") {
       await routeOverviewBatch(route);
@@ -110,23 +128,13 @@ async function installLargeFleetOverview(
       delayedRoutes.push(route);
       return;
     }
-    await fulfillOverviewPage(
-      route,
-      cursor,
-      options.resolvePageItem,
-      options.resolvePageItems,
-    );
+    await fulfillPage(route, cursor);
   });
   await page.route("**/api/awf/workspaces/overview/batch", routeOverviewBatch);
   return async () => {
     await Promise.allSettled([
       ...delayedRoutes.splice(0).map((route) =>
-        fulfillOverviewPage(
-          route,
-          new URL(route.request().url()).searchParams.get("cursor"),
-          options.resolvePageItem,
-          options.resolvePageItems,
-        ),
+        fulfillPage(route, new URL(route.request().url()).searchParams.get("cursor")),
       ),
       ...delayedBatchRoutes.splice(0).map((route) => fulfillOverviewBatch(route, false)),
     ]);
@@ -286,6 +294,69 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
 
   await page.getByLabel("Select Performance workspace 1301 for fullscreen logs").check();
   await expect(page.getByText("1 selected for logs", { exact: true })).toBeVisible();
+});
+
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hMh1_: when a full
+// page of newer workspaces makes page one disjoint, the old keyset cursor skips
+// the pages inserted ahead of its boundary.
+test("disjoint first-page refresh replaces a stale overview cursor", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  let refreshed = false;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
+    resolvePage: (cursor) => {
+      if (cursor === null) {
+        return refreshed
+          ? { items: [workspaceOverview(201)], has_more: true, next_cursor: "new-page-2" }
+          : { items: [workspaceOverview(1)], has_more: true, next_cursor: "old-page-2" };
+      }
+      if (cursor === "old-page-2") {
+        return { items: [workspaceOverview(101)], has_more: true, next_cursor: "old-page-3" };
+      }
+      if (cursor === "new-page-2") {
+        return { items: [workspaceOverview(202)], has_more: false, next_cursor: null };
+      }
+      return { items: [workspaceOverview(102)], has_more: false, next_cursor: null };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => overviewRequests).toContain("old-page-2");
+
+  refreshed = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+
+  await expect.poll(() => overviewRequests).toContain("new-page-2");
+});
+
+test("disjoint first-page refresh reopens completed overview history", async ({ page }) => {
+  let refreshed = false;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePage: (cursor) => {
+      if (cursor === "new-page-2") {
+        return { items: [workspaceOverview(202)], has_more: false, next_cursor: null };
+      }
+      return refreshed
+        ? { items: [workspaceOverview(201)], has_more: true, next_cursor: "new-page-2" }
+        : { items: [workspaceOverview(1)], has_more: false, next_cursor: null };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await expect(page.getByText("All 1 matching workspaces loaded.")).toBeVisible();
+
+  refreshed = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load more workspaces" })).toBeVisible();
 });
 
 // Regression for PR #958 operator acceptance: appended history must extend the

@@ -604,6 +604,12 @@ export function useConsoleOverviewLoader({
         );
       } else {
         const firstCursor = usableContinuationCursor(page.next_cursor) ? page.next_cursor : null;
+        const retainedWorkspaceIds = new Set(
+          overviewItemsRef.current.map((item) => item.workspace_id),
+        );
+        const refreshedPageOverlapsRetained = sameQuery && pageItems.some(
+          (item) => retainedWorkspaceIds.has(item.workspace_id),
+        );
         const pagination = !page.has_more
           ? {
               query: capturedQuery,
@@ -611,9 +617,10 @@ export function useConsoleOverviewLoader({
               complete: true,
               fetchedCursors: new Set<string>(),
             }
-          : sameQuery && capturedPagination?.complete
+          : refreshedPageOverlapsRetained && capturedPagination?.complete
             ? capturedPagination
-            : sameQuery && usableContinuationCursor(capturedPagination?.nextCursor)
+            : refreshedPageOverlapsRetained &&
+                usableContinuationCursor(capturedPagination?.nextCursor)
               ? capturedPagination
               : {
                   query: capturedQuery,
