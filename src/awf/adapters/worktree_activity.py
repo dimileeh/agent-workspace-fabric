@@ -11,7 +11,10 @@ since the previous probe?
 Design notes:
 
 * Nothing is excluded. The agent may legitimately write anywhere in its
-  worktree, ``.git`` included.
+  worktree, ``.git`` included. Each scan opens the worktree root without
+  following symlinks, then opens observed descendants descriptor-relative to
+  their already-open parents. A directory renamed after its lstat therefore
+  cannot redirect a queued scan through a replacement symlink.
 * No marker file is written. A marker inside the worktree would show up as dirty
   residue in the verdict / dirty-sink fingerprints, and shelling out to
   ``find(1)`` would add a dependency on the control-plane image's toolchain.
@@ -441,7 +444,7 @@ class _DirectoryIdentity(NamedTuple):
 
 
 class _PinnedDirectory(NamedTuple):
-    """An external directory path and its pre-agent identity, if it existed."""
+    """A directory path and its observed identity, if it existed."""
 
     path: Path
     identity: _DirectoryIdentity | None
@@ -708,7 +711,7 @@ class WorktreeActivityProbe:
             # roots. Resolving them now would trust agent-controlled metadata;
             # omitting them would make a later Git-only write look idle.
             return None
-        stack: list[tuple[str, int | None]] = [(str(self._worktree_path), None)]
+        worktree_stat: os.stat_result | None = None
         for path in (self._worktree_path, *git_paths.watched):
             try:
                 stat_result = _metadata_stat(path)
@@ -725,7 +728,30 @@ class WorktreeActivityProbe:
                     error=str(exc),
                 )
                 return None
+            if path == self._worktree_path:
+                worktree_stat = stat_result
             newest, fingerprint = _absorb(newest, fingerprint, str(path), stat_result)
+        worktree_root = _PinnedDirectory(
+            self._worktree_path,
+            (
+                _DirectoryIdentity(worktree_stat.st_dev, worktree_stat.st_ino)
+                if worktree_stat is not None
+                else None
+            ),
+        )
+        try:
+            worktree_descriptor = _open_pinned_directory(worktree_root)
+        except OSError as exc:
+            # Opening the root without following its final component keeps an
+            # agent-controlled replacement symlink from redirecting the walk.
+            _log.warning(
+                "agent.worktree_activity.subtree_unreadable",
+                worktree_path=str(self._worktree_path),
+                path=str(self._worktree_path),
+                error=str(exc),
+            )
+            return None
+        stack = [(str(self._worktree_path), worktree_descriptor)]
         for root in git_paths.walk_roots:
             try:
                 root_descriptor = _open_pinned_directory(root)
@@ -739,6 +765,8 @@ class WorktreeActivityProbe:
                     path=str(root.path),
                     error=str(exc),
                 )
+                for _path, pending_descriptor in stack:
+                    os.close(pending_descriptor)
                 return None
             stack.append((str(root.path), root_descriptor))
         budget = self._max_entries
@@ -746,8 +774,7 @@ class WorktreeActivityProbe:
             while stack:
                 current, descriptor = stack.pop()
                 try:
-                    scan_target = descriptor if descriptor is not None else current
-                    with os.scandir(scan_target) as entries:
+                    with os.scandir(descriptor) as entries:
                         for entry in entries:
                             if budget <= 0:
                                 _log.warning(
@@ -762,11 +789,7 @@ class WorktreeActivityProbe:
                             # questions, and its failure propagates to the handler
                             # below rather than being folded in as a stable term.
                             stat_result = _entry_stat(entry)
-                            entry_path = (
-                                str(Path(current) / entry.name)
-                                if descriptor is not None
-                                else entry.path
-                            )
+                            entry_path = str(Path(current) / entry.name)
                             newest, fingerprint = _absorb(
                                 newest,
                                 fingerprint,
@@ -774,14 +797,10 @@ class WorktreeActivityProbe:
                                 stat_result,
                             )
                             if stat_module.S_ISDIR(stat_result.st_mode):
-                                child_descriptor = (
-                                    _open_observed_directory(
-                                        entry.name,
-                                        descriptor,
-                                        stat_result,
-                                    )
-                                    if descriptor is not None
-                                    else None
+                                child_descriptor = _open_observed_directory(
+                                    entry.name,
+                                    descriptor,
+                                    stat_result,
                                 )
                                 stack.append((entry_path, child_descriptor))
                 except OSError as exc:
@@ -803,12 +822,10 @@ class WorktreeActivityProbe:
                     )
                     return None
                 finally:
-                    if descriptor is not None:
-                        os.close(descriptor)
+                    os.close(descriptor)
         finally:
             for _path, pending_descriptor in stack:
-                if pending_descriptor is not None:
-                    os.close(pending_descriptor)
+                os.close(pending_descriptor)
         return _Scan(newest_mtime=newest, fingerprint=fingerprint)
 
     def _git_dir_paths(self) -> _GitPaths | None:
