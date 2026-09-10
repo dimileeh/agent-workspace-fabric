@@ -387,6 +387,11 @@ export function ConsoleDashboard() {
         if (deniedGeneration < appliedOverviewGenerationRef.current) {
           return false;
         }
+        // A newer first-page outage owns the retained last-good rail. A late
+        // 401/403 from the older best-effort history batch must not wipe it.
+        if (deniedGeneration < appliedOverviewFailureGenerationRef.current) {
+          return false;
+        }
         // This request started inside an already-applied denial window.
         // Raising the watermark would reject a recovery request that started
         // after the original denial.
@@ -502,6 +507,19 @@ export function ConsoleDashboard() {
           llm_usage: fallbackLlmUsage(item.llm_usage),
           recovery: item.recovery ?? null,
         }));
+      const abortRetainedRefreshForPageFailure = () => {
+        if (
+          epoch !== authorizedFeedEpochRef.current ||
+          consoleAuthDeniedRef.current ||
+          generation < appliedOverviewGenerationRef.current ||
+          generation < appliedOverviewFailureGenerationRef.current ||
+          generation <= revokedOverviewGenerationRef.current
+        ) {
+          return;
+        }
+        overviewRetainedRefreshAbortControllerRef.current?.abort();
+        overviewRetainedRefreshAbortControllerRef.current = null;
+      };
       const fetchOverviewPage = async (cursor: string | null) => {
         if (
           epoch !== authorizedFeedEpochRef.current ||
@@ -520,6 +538,7 @@ export function ConsoleDashboard() {
         if (!result.ok && (result.status === 401 || result.status === 403)) {
           pageError = result.message;
           pageAuthDenied = true;
+          abortRetainedRefreshForPageFailure();
           return null;
         }
         // Transient page failures (5xx/network) retain the last-good rail.
@@ -529,6 +548,7 @@ export function ConsoleDashboard() {
         if (!result.ok) {
           pageError = result.message;
           pageOutage = true;
+          abortRetainedRefreshForPageFailure();
           return null;
         }
         if (

@@ -1389,6 +1389,45 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
 });
 
+test("stale retained-history auth denial cannot wipe a newer first-page outage snapshot", () => {
+  // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hB-MS: retained
+  // history refreshes are fire-and-forget and share the generation of the
+  // first page that launched them. If the next first-page poll applies a
+  // transient outage, a late 401/403 from the older history batch must not
+  // clear the last-good rail, inspector, and logs.
+  const dashboard = dashboardSource.dashboard;
+  const authDeniedBody = overviewAuthDenialHelperBody(dashboard);
+  const newerOutageGuard = authDeniedBody.indexOf(
+    "deniedGeneration < appliedOverviewFailureGenerationRef.current",
+  );
+  const clearOverview = authDeniedBody.indexOf("setOverview([])");
+
+  assert.ok(
+    newerOutageGuard > 0 && newerOutageGuard < clearOverview,
+    "Expected overview auth denial to yield to a newer applied outage before clearing authorized surfaces",
+  );
+  const abortHelperStart = dashboard.indexOf(
+    "const abortRetainedRefreshForPageFailure = () => {",
+  );
+  const pageFetchStart = dashboard.indexOf("const fetchOverviewPage = async", abortHelperStart);
+  assert.ok(abortHelperStart > 0 && pageFetchStart > abortHelperStart);
+  assert.match(
+    dashboard.slice(abortHelperStart, pageFetchStart),
+    /generation < appliedOverviewGenerationRef\.current[\s\S]*?generation < appliedOverviewFailureGenerationRef\.current[\s\S]*?generation <= revokedOverviewGenerationRef\.current[\s\S]*?overviewRetainedRefreshAbortControllerRef\.current\?\.abort\(\);\s*overviewRetainedRefreshAbortControllerRef\.current = null;/,
+    "Expected an applicable first-page failure to abort the superseded retained-history batch without cancelling newer work",
+  );
+  assert.match(
+    dashboard,
+    /pageAuthDenied = true;\s*abortRetainedRefreshForPageFailure\(\);/,
+    "Expected a first-page authorization failure to abort retained history",
+  );
+  assert.match(
+    dashboard,
+    /pageOutage = true;\s*abortRetainedRefreshForPageFailure\(\);/,
+    "Expected a first-page transient outage to abort retained history",
+  );
+});
+
 function overviewAuthDenialHelperBody(dashboard) {
   const helperStart = dashboard.indexOf(
     "const applyOverviewAuthDenial = (deniedGeneration: number, message: string): boolean => {",
