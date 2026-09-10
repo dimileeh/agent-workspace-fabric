@@ -780,6 +780,7 @@ test("routine refresh updates and removes retained workspaces outside page one",
   await expect(page.getByText(`101–200 of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
 
   refreshRetained = true;
+  batchRequests.length = 0;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
 
   await expect.poll(() => batchRequests.length).toBeGreaterThan(0);
@@ -787,9 +788,17 @@ test("routine refresh updates and removes retained workspaces outside page one",
   expect(batchRequests[0]).toContain("ws_perf_0102");
   expect(batchRequests[0]).not.toContain("ws_perf_0001");
   expect(batchRequests[0].length).toBeLessThanOrEqual(200);
-  await expect(page.getByText(`101–${PAGE_SIZE * 2 - 1} of ${PAGE_SIZE * 2 - 1} loaded`, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Previous workspace results" }).click();
   await expect(retainedCard.getByText("completed", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0102")).toHaveCount(0);
+  await expect(
+    page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2 - 1} loaded`, { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('[data-testid^="workspace-card-"]').first()).toHaveAttribute(
+    "data-testid",
+    "workspace-card-ws_perf_0101",
+  );
+  await expect(page.getByRole("button", { name: "Previous workspace results" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Next workspace results" })).toBeEnabled();
 });
 
 test("bounds retained-history refresh work per poll and rotates across loaded rows", async ({
