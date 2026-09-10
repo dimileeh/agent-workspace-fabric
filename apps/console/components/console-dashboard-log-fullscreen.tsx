@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDown, ArrowUp, RefreshCw, Terminal, X } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { formatAgentLabel } from "@/lib/agent-format";
 import { resolveWorkspaceStreamSubscription } from "@/lib/console-capabilities";
@@ -339,6 +339,7 @@ export function WorkspaceLogColumn({
   // newer warning, or re-stamp one a later success already cleared.
   const appliedTailFailureGenerationRef = useRef<Record<string, number>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
+  const loadSelectedTailsRef = useRef<() => Promise<void>>(async () => undefined);
   const [listingDenied, setListingDenied] = useState(false);
   // Applied listing 200 generation. A static or closed listing does not change
   // selectedTailRefreshKey, and replacing the stream list does not have to
@@ -722,6 +723,10 @@ export function WorkspaceLogColumn({
     }
   }, [allowLogs, selectedStreams, streams, workspace.workspace_id]);
 
+  useLayoutEffect(() => {
+    loadSelectedTailsRef.current = loadSelectedTails;
+  }, [loadSelectedTails]);
+
   useEffect(() => {
     selectedStreamsRef.current = selectedStreams;
   }, [selectedStreams]);
@@ -993,7 +998,7 @@ export function WorkspaceLogColumn({
         setStreamProbeNonce(0);
         if (!listingDeniedRef.current && !tailAuthDeniedRef.current) {
           setError(() => listingOutageMessageRef.current);
-          void loadSelectedTails();
+          void loadSelectedTailsRef.current();
         }
       }
       return;
@@ -1233,7 +1238,7 @@ export function WorkspaceLogColumn({
         eventSourceRef.current = null;
       }
     };
-  }, [allowStreamLogs, capabilities, listingDenied, loadSelectedTails, streamAuthDenied, streamProbeNonce, tailAuthDenied, workspace.workspace_id]);
+  }, [allowStreamLogs, capabilities, listingDenied, streamAuthDenied, streamProbeNonce, tailAuthDenied, workspace.workspace_id]);
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">
