@@ -12,12 +12,11 @@ export const streamTest = base.extend<{
     const responses = new Set<ServerResponse>();
     try {
       await provide(async (frames) => {
-        const server = createServer((request, response) => {
+        const server = createServer((_request, response) => {
           response.writeHead(200, {
             "content-type": "text/event-stream; charset=utf-8",
             "cache-control": "no-cache",
-            "access-control-allow-origin": request.headers.origin ?? "http://127.0.0.1:3100",
-            "access-control-allow-credentials": "true",
+            "access-control-allow-origin": "*",
           });
           responses.add(response);
           response.on("close", () => responses.delete(response));
