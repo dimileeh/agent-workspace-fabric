@@ -34,6 +34,7 @@ useCallback,
 useEffect,
 useId,
 useLayoutEffect,
+useMemo,
 useRef,
 useState
 } from "react";
@@ -690,8 +691,37 @@ export function WorkspaceSelectionToolbar({
 }
 
 export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
+export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;
 export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
 const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
+
+function workspaceRowAtOffset(rowOffsets: number[], offset: number): number {
+  let low = 0;
+  let high = Math.max(0, rowOffsets.length - 2);
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rowOffsets[middle + 1] <= offset) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+function workspaceRowsBeforeOffset(rowOffsets: number[], offset: number): number {
+  let low = 0;
+  let high = rowOffsets.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rowOffsets[middle] < offset) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
 
 type WorkspaceCardProps = {
   item: WorkspaceOverview;
@@ -927,14 +957,23 @@ export function WorkspaceList({
   onLoadMore: () => void;
 }) {
   const [windowStart, setWindowStart] = useState(0);
+  const [pageStart, setPageStart] = useState(0);
   const [virtualRowHeight, setVirtualRowHeight] = useState(
     WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX,
+  );
+  const [measuredRowHeights, setMeasuredRowHeights] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
   );
   const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
   const [copyToastVisible, setCopyToastVisible] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const renderedWindowRef = useRef<HTMLDivElement | null>(null);
-  const measuredRowHeightRef = useRef(false);
+  const measuredWindowWidthRef = useRef<number | null>(null);
+  const measuredRootFontSizeRef = useRef<number | null>(null);
+  const pendingScrollAnchorRef = useRef<{
+    workspaceId: string;
+    offsetRatio: number;
+  } | null>(null);
   const preserveScrollTopRef = useRef<number | null>(null);
   const suppressScrollLoadRef = useRef(false);
   const suppressScrollFrameRef = useRef<number | null>(null);
@@ -944,12 +983,24 @@ export function WorkspaceList({
   const nearBottomTriggeredRef = useRef(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const selectedWasLoadedRef = useRef(false);
-  const maxWindowStart = Math.max(
+  const maxPageStart = Math.max(
     0,
     Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) *
       WORKSPACE_RENDER_WINDOW_SIZE,
   );
+  const maxWindowStart = maxPageStart;
   const windowEnd = Math.min(items.length, windowStart + WORKSPACE_RENDER_WINDOW_SIZE);
+  const pageEnd = Math.min(items.length, pageStart + WORKSPACE_RENDER_WINDOW_SIZE);
+  const rowOffsets = useMemo(() => {
+    const offsets = [0];
+    for (const item of items) {
+      offsets.push(
+        offsets[offsets.length - 1] +
+          (measuredRowHeights.get(item.workspace_id) ?? virtualRowHeight),
+      );
+    }
+    return offsets;
+  }, [items, measuredRowHeights, virtualRowHeight]);
 
   const scrollWithoutLoading = useCallback((top: number) => {
     const scrollContainer = scrollContainerRef.current;
@@ -982,32 +1033,98 @@ export function WorkspaceList({
       ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
         WORKSPACE_RENDER_WINDOW_SIZE
       : null;
+    setPageStart((current) =>
+      selectedWindowStart ?? Math.min(current, maxPageStart),
+    );
     setWindowStart((current) =>
-      selectedWindowStart ?? Math.min(current, maxWindowStart),
+      selectedWindowStart !== null
+        ? Math.min(selectedWindowStart, maxWindowStart)
+        : Math.min(current, maxWindowStart),
     );
     if (selectedWindowStart !== null) {
-      scrollWithoutLoading(selectedWindowStart * virtualRowHeight);
+      scrollWithoutLoading(rowOffsets[selectedWindowStart] ?? 0);
     }
-  }, [items, maxWindowStart, scrollWithoutLoading, selectedId, virtualRowHeight]);
+  }, [items, maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading, selectedId]);
 
   useLayoutEffect(() => {
     const renderedWindow = renderedWindowRef.current;
     const renderedCount = windowEnd - windowStart;
-    if (measuredRowHeightRef.current || !renderedWindow || renderedCount <= 0) return;
-    const measuredRowHeight = renderedWindow.scrollHeight / renderedCount;
-    if (measuredRowHeight > 0) {
-      measuredRowHeightRef.current = true;
-      setVirtualRowHeight(measuredRowHeight);
-    }
-  }, [windowEnd, windowStart]);
+    if (!renderedWindow || renderedCount <= 0) return;
+
+    const measureRows = () => {
+      const measuredWindowWidth = renderedWindow.getBoundingClientRect().width;
+      const measuredRootFontSize = Number.parseFloat(
+        getComputedStyle(document.documentElement).fontSize,
+      );
+      const layoutScaleChanged =
+        (measuredWindowWidthRef.current !== null &&
+          Math.abs(measuredWindowWidthRef.current - measuredWindowWidth) >= 0.5) ||
+        (measuredRootFontSizeRef.current !== null &&
+          Math.abs(measuredRootFontSizeRef.current - measuredRootFontSize) >= 0.5);
+      const measuredHeights = layoutScaleChanged
+        ? new Map<string, number>()
+        : new Map(measuredRowHeights);
+      let heightsChanged = layoutScaleChanged;
+      let measuredHeightTotal = 0;
+      Array.from(renderedWindow.children).forEach((child, childIndex) => {
+        const item = items[windowStart + childIndex];
+        const measuredHeight = child.getBoundingClientRect().height;
+        if (!item || measuredHeight <= 0) return;
+        measuredHeightTotal += measuredHeight;
+        if (Math.abs((measuredHeights.get(item.workspace_id) ?? 0) - measuredHeight) >= 0.5) {
+          heightsChanged = true;
+          measuredHeights.set(item.workspace_id, measuredHeight);
+        }
+      });
+      const measuredRowHeight = measuredHeightTotal / renderedCount;
+      const estimateChanged = measuredRowHeight > 0 &&
+        Math.abs(measuredRowHeight - virtualRowHeight) >= 0.5;
+      if (!heightsChanged && !estimateChanged) return;
+
+      const scrollContainer = scrollContainerRef.current;
+      if (scrollContainer && items.length > 0) {
+        const anchorIndex = workspaceRowAtOffset(rowOffsets, scrollContainer.scrollTop);
+        const anchorHeight = rowOffsets[anchorIndex + 1] - rowOffsets[anchorIndex];
+        pendingScrollAnchorRef.current = {
+          workspaceId: items[anchorIndex].workspace_id,
+          offsetRatio: anchorHeight > 0
+            ? (scrollContainer.scrollTop - rowOffsets[anchorIndex]) / anchorHeight
+            : 0,
+        };
+      }
+      measuredWindowWidthRef.current = measuredWindowWidth;
+      measuredRootFontSizeRef.current = measuredRootFontSize;
+      setMeasuredRowHeights(measuredHeights);
+      if (estimateChanged) {
+        setVirtualRowHeight(measuredRowHeight);
+      }
+    };
+
+    measureRows();
+    const resizeObserver = new ResizeObserver(measureRows);
+    Array.from(renderedWindow.children).forEach((child) => resizeObserver.observe(child));
+    return () => resizeObserver.disconnect();
+  }, [items, measuredRowHeights, rowOffsets, virtualRowHeight, windowEnd, windowStart]);
 
   useLayoutEffect(() => {
-    const scrollTop = preserveScrollTopRef.current ?? scrollContainerRef.current?.scrollTop;
+    const pendingAnchor = pendingScrollAnchorRef.current;
+    pendingScrollAnchorRef.current = null;
+    const anchorIndex = pendingAnchor
+      ? items.findIndex((item) => item.workspace_id === pendingAnchor.workspaceId)
+      : -1;
+    const anchorHeight = anchorIndex >= 0
+      ? rowOffsets[anchorIndex + 1] - rowOffsets[anchorIndex]
+      : 0;
+    const anchoredScrollTop = pendingAnchor && anchorIndex >= 0
+      ? rowOffsets[anchorIndex] + pendingAnchor.offsetRatio * anchorHeight
+      : null;
+    const scrollTop = anchoredScrollTop ??
+      preserveScrollTopRef.current;
     preserveScrollTopRef.current = null;
-    if (scrollTop !== undefined) {
+    if (scrollTop !== null) {
       scrollWithoutLoading(scrollTop);
     }
-  }, [items.length, scrollWithoutLoading]);
+  }, [items, rowOffsets, scrollWithoutLoading]);
 
   useEffect(() => {
     if (previousLoadingMoreRef.current && !loadingMore) {
@@ -1048,18 +1165,45 @@ export function WorkspaceList({
 
   const updateWindowAndLoadNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
-    const visibleRow = Math.floor(
-      (element.scrollTop + element.clientHeight / 2) / virtualRowHeight,
+    if (suppressScrollLoadRef.current || items.length === 0) return;
+    const controlsHeight = element.querySelector<HTMLElement>(":scope > .sticky")?.offsetHeight ?? 0;
+    const firstVisibleRow = Math.max(
+      0,
+      Math.min(items.length - 1, workspaceRowAtOffset(rowOffsets, element.scrollTop)),
     );
-    const visibleWindowStart = Math.min(
-      maxWindowStart,
-      Math.floor(visibleRow / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE,
+    const lastVisibleRow = Math.max(
+      firstVisibleRow + 1,
+      Math.min(
+        items.length,
+        workspaceRowsBeforeOffset(
+          rowOffsets,
+          element.scrollTop + element.clientHeight - controlsHeight,
+        ),
+      ),
     );
+    const visiblePageStart = Math.min(
+      maxPageStart,
+      Math.floor(firstVisibleRow / WORKSPACE_RENDER_WINDOW_SIZE) *
+        WORKSPACE_RENDER_WINDOW_SIZE,
+    );
+    const overscanStart = Math.max(0, firstVisibleRow - WORKSPACE_RENDER_OVERSCAN_ROWS);
+    const overscanEnd = Math.min(
+      items.length,
+      lastVisibleRow + WORKSPACE_RENDER_OVERSCAN_ROWS,
+    );
+    let visibleWindowStart = visiblePageStart;
+    if (overscanStart < visibleWindowStart) {
+      visibleWindowStart = overscanStart;
+    }
+    if (overscanEnd > visibleWindowStart + WORKSPACE_RENDER_WINDOW_SIZE) {
+      visibleWindowStart = overscanEnd - WORKSPACE_RENDER_WINDOW_SIZE;
+    }
+    visibleWindowStart = Math.max(0, Math.min(visibleWindowStart, maxWindowStart));
+    setPageStart((current) => current === visiblePageStart ? current : visiblePageStart);
     setWindowStart((current) =>
       current === visibleWindowStart ? current : visibleWindowStart,
     );
 
-    if (suppressScrollLoadRef.current) return;
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;
@@ -1075,13 +1219,14 @@ export function WorkspaceList({
       preserveScrollTopRef.current = element.scrollTop;
       onLoadMore();
     }
-  }, [hasMore, loadingMore, maxWindowStart, onLoadMore, virtualRowHeight]);
+  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, onLoadMore, rowOffsets]);
 
   const showWindow = useCallback((nextStart: number) => {
-    const boundedStart = Math.max(0, Math.min(nextStart, maxWindowStart));
-    setWindowStart(boundedStart);
-    scrollWithoutLoading(boundedStart * virtualRowHeight);
-  }, [maxWindowStart, scrollWithoutLoading, virtualRowHeight]);
+    const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
+    setPageStart(boundedStart);
+    setWindowStart(Math.min(boundedStart, maxWindowStart));
+    scrollWithoutLoading(rowOffsets[boundedStart] ?? 0);
+  }, [maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading]);
 
   const loadMoreFromButton = useCallback(() => {
     // Playwright and real browsers may scroll the footer into view before the
@@ -1140,8 +1285,8 @@ export function WorkspaceList({
   }
 
   const selectedSet = new Set(selectedWorkspaceIds);
-  const topSpacerHeight = windowStart * virtualRowHeight;
-  const bottomSpacerHeight = (items.length - windowEnd) * virtualRowHeight;
+  const topSpacerHeight = rowOffsets[windowStart];
+  const bottomSpacerHeight = rowOffsets[items.length] - rowOffsets[windowEnd];
   return (
     <div
       className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
@@ -1151,13 +1296,13 @@ export function WorkspaceList({
     >
       {items.length > WORKSPACE_RENDER_WINDOW_SIZE ? (
         <div className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-600">
-          <span>{windowStart + 1}–{windowEnd} of {items.length} loaded</span>
+          <span>{pageStart + 1}–{pageEnd} of {items.length} loaded</span>
           <div className="flex gap-1">
             <button
               type="button"
               aria-label="Previous workspace results"
-              disabled={windowStart === 0}
-              onClick={() => showWindow(windowStart - WORKSPACE_RENDER_WINDOW_SIZE)}
+              disabled={pageStart === 0}
+              onClick={() => showWindow(pageStart - WORKSPACE_RENDER_WINDOW_SIZE)}
               className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
             >
               Previous
@@ -1165,8 +1310,8 @@ export function WorkspaceList({
             <button
               type="button"
               aria-label="Next workspace results"
-              disabled={windowEnd >= items.length}
-              onClick={() => showWindow(windowStart + WORKSPACE_RENDER_WINDOW_SIZE)}
+              disabled={pageEnd >= items.length}
+              onClick={() => showWindow(pageStart + WORKSPACE_RENDER_WINDOW_SIZE)}
               className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
             >
               Next

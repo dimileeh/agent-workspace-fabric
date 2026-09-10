@@ -324,6 +324,178 @@ test("scroll traverses bounded history windows in both directions", async ({ pag
   expect(overviewRequests).toEqual([null, "100", "200"]);
 });
 
+test("virtualization keeps the viewport covered while crossing a row-window boundary", async ({
+  page,
+}) => {
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePageItem: (item) => ({ ...item, status: "completed" }),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: 0 }));
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+  const firstWindowHeight = await list.locator('[data-testid^="workspace-card-"]').evaluateAll(
+    (cards) => cards.reduce((height, card) => height + card.getBoundingClientRect().height, 0),
+  );
+  await list.evaluate((element, top) => element.scrollTo({ top }), firstWindowHeight - 200);
+  await expect.poll(async () =>
+    list.locator('[data-testid^="workspace-card-"]').first().getAttribute("data-testid"),
+  ).not.toBe("workspace-card-ws_perf_0001");
+
+  const geometry = await list.evaluate((element) => {
+    const rows = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    );
+    const header = element.querySelector<HTMLElement>(":scope > .sticky");
+    const viewport = element.getBoundingClientRect();
+    return {
+      firstRowTop: rows.at(0)?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY,
+      lastRowBottom: rows.at(-1)?.getBoundingClientRect().bottom ?? Number.NEGATIVE_INFINITY,
+      viewportTop: header?.getBoundingClientRect().bottom ?? viewport.top,
+      viewportBottom: viewport.bottom,
+    };
+  });
+  expect(geometry.firstRowTop).toBeLessThanOrEqual(geometry.viewportTop + 1);
+  expect(geometry.lastRowBottom).toBeGreaterThanOrEqual(geometry.viewportBottom - 1);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+});
+
+test("virtualization remeasures variable rows after filtering and viewport resize", async ({
+  page,
+}) => {
+  const filteredSize = PAGE_SIZE * 2;
+  const variableTitle =
+    "Variable height workspace with a deliberately verbose title that wraps as the workspace rail narrows ".repeat(2);
+  await page.setViewportSize({ width: 1_000, height: 720 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePageItem: (item) => {
+      const index = Number.parseInt(item.workspace_id.slice(-4), 10);
+      const includedByFilter = index <= PAGE_SIZE ||
+        (index > PAGE_SIZE * 2 && index <= PAGE_SIZE * 3);
+      const hasLongTitle = (index > 50 && index <= PAGE_SIZE) || index > 250;
+      return {
+        ...item,
+        status: "completed",
+        title: includedByFilter
+          ? hasLongTitle
+            ? `${variableTitle}${item.workspace_id}`
+            : `Variable height compact ${item.workspace_id}`
+          : item.title,
+      };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
+    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
+  }
+
+  await page.getByRole("button", { name: "Filters" }).click();
+  await page.getByPlaceholder("Search workspaces").fill("Variable height");
+  await expect(page.getByText(new RegExp(`of ${filteredSize} loaded$`))).toBeVisible();
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: 0 }));
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+
+  const rowMetrics = async () => list.evaluate((element, totalRows) => {
+    const rows = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    );
+    const headerHeight = element.querySelector<HTMLElement>(":scope > .sticky")?.offsetHeight ?? 0;
+    const footerHeight = element.querySelector<HTMLElement>(
+      '[data-testid="workspace-history-scope"]',
+    )?.offsetHeight ?? 0;
+    const renderedHeight = rows.reduce((height, row) => height + row.getBoundingClientRect().height, 0);
+    return {
+      renderedAverage: renderedHeight / rows.length,
+      unrenderedAverage: (element.scrollHeight - headerHeight - footerHeight - renderedHeight) /
+        (totalRows - rows.length),
+    };
+  }, filteredSize);
+  const visibleAnchor = async () => list.evaluate((element) => {
+    const viewportTop = element.querySelector<HTMLElement>(":scope > .sticky")
+      ?.getBoundingClientRect().bottom ?? element.getBoundingClientRect().top;
+    const row = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    ).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    const bounds = row?.getBoundingClientRect();
+    return {
+      id: row?.dataset.testid ?? null,
+      offsetRatio: bounds ? (bounds.top - viewportTop) / bounds.height : null,
+    };
+  });
+  const wideMetrics = await rowMetrics();
+  const anchorScrollTop = await list.locator('[data-testid^="workspace-card-"]').evaluateAll(
+    (cards) => cards.slice(0, 40).reduce(
+      (height, card) => height + card.getBoundingClientRect().height,
+      cards[40].getBoundingClientRect().height * 0.25,
+    ),
+  );
+  await list.evaluate(
+    (element, top) => element.scrollTo({ top }),
+    anchorScrollTop,
+  );
+  const wideAnchor = await visibleAnchor();
+  await page.setViewportSize({ width: 1_280, height: 720 });
+  await expect.poll(async () => (await rowMetrics()).renderedAverage).toBeGreaterThan(
+    wideMetrics.renderedAverage,
+  );
+  await expect.poll(async () => {
+    const metrics = await rowMetrics();
+    return Math.abs(metrics.renderedAverage - metrics.unrenderedAverage);
+  }).toBeLessThan(2);
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(wideAnchor.id);
+  const resizedAnchor = await visibleAnchor();
+  expect(resizedAnchor.offsetRatio).toBeCloseTo(wideAnchor.offsetRatio ?? 0, 1);
+
+  const standardFontMetrics = await rowMetrics();
+  const standardFontAnchor = await visibleAnchor();
+  await page.getByRole("button", { name: "Use larger font size" }).click();
+  await expect.poll(async () => (await rowMetrics()).renderedAverage).toBeGreaterThan(
+    standardFontMetrics.renderedAverage,
+  );
+  await expect.poll(async () => {
+    const metrics = await rowMetrics();
+    return Math.abs(metrics.renderedAverage - metrics.unrenderedAverage);
+  }).toBeLessThan(2);
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(standardFontAnchor.id);
+
+  const resizedHeight = await list.locator('[data-testid^="workspace-card-"]').evaluateAll(
+    (cards) => cards.reduce((height, card) => height + card.getBoundingClientRect().height, 0),
+  );
+  await list.evaluate((element, top) => element.scrollTo({ top }), resizedHeight - 100);
+  await expect.poll(async () =>
+    list.locator('[data-testid^="workspace-card-"]').first().getAttribute("data-testid"),
+  ).not.toBe("workspace-card-ws_perf_0001");
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+  const boundaryGeometry = await list.evaluate((element) => {
+    const rows = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    );
+    const header = element.querySelector<HTMLElement>(":scope > .sticky");
+    const viewport = element.getBoundingClientRect();
+    return {
+      firstRowTop: rows.at(0)?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY,
+      lastRowBottom: rows.at(-1)?.getBoundingClientRect().bottom ?? Number.NEGATIVE_INFINITY,
+      viewportTop: header?.getBoundingClientRect().bottom ?? viewport.top,
+      viewportBottom: viewport.bottom,
+    };
+  });
+  expect(boundaryGeometry.firstRowTop).toBeLessThanOrEqual(boundaryGeometry.viewportTop + 1);
+  expect(boundaryGeometry.lastRowBottom).toBeGreaterThanOrEqual(
+    boundaryGeometry.viewportBottom - 1,
+  );
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hDQDq: selections
 // retained across overview render windows must not mount one live column per ID.
 test("fullscreen logs cap retained selections across overview windows", async ({ page }) => {
@@ -412,7 +584,7 @@ test("bounds retained-history refresh work per poll and rotates across loaded ro
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  const loadedSummary = page.getByText(/^1–100 of \d+ loaded$/);
+  const loadedSummary = page.getByText(/^\d+–\d+ of \d+ loaded$/);
   const loadedCount = async () => {
     if (await loadedSummary.count() === 0) {
       return PAGE_SIZE;

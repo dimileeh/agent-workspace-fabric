@@ -618,6 +618,11 @@ test("workspace cards are windowed and memoized away from inspector-only renders
   );
   assert.match(
     overview,
+    /export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;/,
+    "Expected bounded overscan around the visible workspace rows",
+  );
+  assert.match(
+    overview,
     /const WorkspaceCard = memo\(function WorkspaceCard/,
     "Expected unchanged cards to be memoized",
   );
@@ -625,6 +630,11 @@ test("workspace cards are windowed and memoized away from inspector-only renders
     overview,
     /items\.slice\(windowStart, windowEnd\)\.map/,
     "Expected WorkspaceList to mount only its current result window",
+  );
+  assert.match(
+    overview,
+    /const resizeObserver = new ResizeObserver\(measureRows\);/,
+    "Expected variable workspace rows to be remeasured after layout changes",
   );
   assert.match(
     overview,
