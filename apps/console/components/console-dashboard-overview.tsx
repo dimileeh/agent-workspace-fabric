@@ -1168,7 +1168,7 @@ export function WorkspaceList({
 
   const updateWindowAndLoadNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
-    if (suppressScrollLoadRef.current || items.length === 0) return;
+    if (items.length === 0) return;
     const controlsHeight = element.querySelector<HTMLElement>(":scope > .sticky")?.offsetHeight ?? 0;
     const firstVisibleRow = Math.max(
       0,
@@ -1207,6 +1207,7 @@ export function WorkspaceList({
       current === visibleWindowStart ? current : visibleWindowStart,
     );
 
+    if (suppressScrollLoadRef.current) return;
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;

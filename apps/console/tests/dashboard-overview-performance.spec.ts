@@ -548,6 +548,86 @@ test("keeps the visible row anchored when a refresh changes row heights", async 
   expect(afterRefresh.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hIfD1: a
+// programmatic anchor restore must still move the virtual window when shorter
+// rows expose content beyond the previously mounted 100-card range.
+test("height restore keeps the viewport covered across a virtual-window boundary", async ({
+  page,
+}) => {
+  const wrappedTitle =
+    "A deliberately long workspace title that wraps throughout the narrow workspace rail ".repeat(5);
+  let useCompactTitles = false;
+  const resizeItem = (item: ReturnType<typeof workspaceOverview>) => ({
+    ...item,
+    title: useCompactTitles
+      ? `Compact ${item.workspace_id}`
+      : `${wrappedTitle}${item.workspace_id}`,
+  });
+  await page.setViewportSize({ width: 1_280, height: 1_160 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePageItem: resizeItem,
+    resolveBatchItem: resizeItem,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
+    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
+  }
+
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: 0 }));
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  const anchor = page.getByTestId("workspace-card-ws_perf_0198");
+  await expect(anchor).toBeAttached();
+  const anchorScrollTop = await anchor.evaluate((element) => {
+    const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
+    if (!listElement) throw new Error("workspace list is missing");
+    const controlsHeight = listElement.querySelector<HTMLElement>(":scope > .sticky")
+      ?.offsetHeight ?? 0;
+    return listElement.scrollTop + element.getBoundingClientRect().top -
+      listElement.getBoundingClientRect().top - controlsHeight;
+  });
+  await list.evaluate((element, top) => element.scrollTo({ top }), anchorScrollTop);
+  await expect(anchor).toBeVisible();
+
+  const viewportCoverage = () => list.evaluate((element) => {
+    const rows = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    );
+    const viewport = element.getBoundingClientRect();
+    return {
+      firstRowTop: rows.at(0)?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY,
+      lastRowBottom: rows.at(-1)?.getBoundingClientRect().bottom ?? Number.NEGATIVE_INFINITY,
+      viewportTop: element.querySelector<HTMLElement>(":scope > .sticky")
+        ?.getBoundingClientRect().bottom ?? viewport.top,
+      viewportBottom: viewport.bottom,
+    };
+  });
+  const expandedAnchorHeight = await anchor.evaluate(
+    (element) => element.getBoundingClientRect().height,
+  );
+  const beforeResize = await viewportCoverage();
+  expect(beforeResize.firstRowTop).toBeLessThanOrEqual(beforeResize.viewportTop + 1);
+  expect(beforeResize.lastRowBottom).toBeGreaterThanOrEqual(beforeResize.viewportBottom - 1);
+
+  useCompactTitles = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByTestId("workspace-title-ws_perf_0198")).toHaveText(
+    "Compact ws_perf_0198",
+  );
+  await expect.poll(
+    () => anchor.evaluate((element) => element.getBoundingClientRect().height),
+  ).toBeLessThan(expandedAnchorHeight);
+  await expect.poll(async () => (await viewportCoverage()).lastRowBottom).toBeGreaterThanOrEqual(
+    (await viewportCoverage()).viewportBottom - 1,
+  );
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hDQDq: selections
 // retained across overview render windows must not mount one live column per ID.
 test("fullscreen logs cap retained selections across overview windows", async ({ page }) => {
