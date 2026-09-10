@@ -157,12 +157,8 @@ async def _finish_cycle_for_terminal_pr(
             workspace_id,
             message=f"monitor: abort ({AbortReason.pr_closed_externally.value})",
             reason_code=AbortReason.pr_closed_externally,
+            on_transition_committed=_publish_terminal_writes,
         )
-        # ``_terminate_failed`` returns as soon as its transition commits — it has no
-        # post-commit cleanup to outlive — so publishing on its result is already
-        # commit-adjacent.
-        if terminated:
-            await _publish_terminal_writes()
     if not terminated:
         # The terminate sink refused the write (superseded owner, or the row
         # already left ``monitoring_pr``). Skipping the two writes above is not

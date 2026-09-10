@@ -585,6 +585,90 @@ async def test_terminal_moot_cycle_publishes_artifacts_before_cancellable_cleanu
 
 
 @pytest.mark.unit
+async def test_closed_terminal_moot_cycle_publishes_before_cancellable_session_exit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A committed closed-PR failure cannot outlive its terminal publication.
+
+    Regression for PRRT_kwDOSJAM6s6g_XHw. ``_terminate_failed`` commits while
+    still inside the async session context. Cancellation during that context's
+    ``__aexit__`` must not strand a failed workspace without the defer signal and
+    persisted monitor state that downstream polling expects.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    artifacts_root = tmp_path / "artifacts"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        await session.commit()
+
+    session_exit_started = asyncio.Event()
+    session_count = 0
+
+    @asynccontextmanager
+    async def _cancellable_first_exit_factory() -> AsyncIterator[AsyncSession]:
+        nonlocal session_count
+        session_count += 1
+        current_session = session_count
+        async with factory() as session:
+            try:
+                yield session
+            finally:
+                if current_session == 1:
+                    session_exit_started.set()
+                    await asyncio.Event().wait()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifacts_root,
+        gh=_ScriptedGh(),
+    )
+    runner._deps = replace(runner._deps, session_factory=_cancellable_first_exit_factory)
+    runner._monitor_owner_id = "worker-current"
+    state = _stale_state()
+
+    terminal_task = asyncio.create_task(
+        _finish_cycle_for_terminal_pr(
+            runner,
+            workspace_id=workspace_id,
+            operation=None,
+            push_result=_GitPushResult(
+                pushed=False,
+                failed=False,
+                returncode=0,
+                reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+                pr_terminal=_PostActionPrTerminalState(status=_status(closed=True)),
+            ),
+            state=state,
+            pr_number=42,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+    )
+    await session_exit_started.wait()
+    terminal_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await terminal_task
+
+    signal = json.loads((artifacts_root / f"{workspace_id}.defer-signal.json").read_text())
+    assert signal["terminal_action"] == "Abort"
+    assert signal["merged"] is False
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.status == "failed"
+    assert workspace.monitor_last_commit_sha == "stalesha0000"
+
+
+@pytest.mark.unit
 async def test_short_circuit_arm_publishes_defer_signal_before_cancellable_cleanup(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

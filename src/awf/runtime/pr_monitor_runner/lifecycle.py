@@ -1224,12 +1224,18 @@ async def _terminate_failed(
     reason_code: AbortReason | str | None = None,
     details: Mapping[str, Any] | None = None,
     failure_reason: FailureReason = FailureReason.infrastructure_failure,
+    on_transition_committed: Callable[[], Awaitable[None]] | None = None,
 ) -> bool:
     """Fail the workspace at the abort sink.
 
     Returns True only when this runner actually owned the row and committed the
     ``failed`` transition — same contract as ``_terminate_completed`` so callers
     can fence their own monitor-state writes on it (PRRT_kwDOSJAM6s6flswY).
+
+    ``on_transition_committed`` publishes owner-fenced terminal writes
+    cancellation-safe immediately after the commit and before the async session's
+    cancellable ``__aexit__``, mirroring ``_terminate_completed``. Once the row is
+    terminal no later monitor can recreate those writes (PRRT_kwDOSJAM6s6g_XHw).
     """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -1310,4 +1316,6 @@ async def _terminate_failed(
         # emitted attention_required (PRRT_kwDOSJAM6s6XY5JH).
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
+        if on_transition_committed is not None:
+            await _run_transition_committed_callback(on_transition_committed)
     return True

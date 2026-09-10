@@ -318,16 +318,15 @@ async def _execute(
 
     if isinstance(action, Abort):
         # Same seam as the ``ShortCircuitCompleted`` arm above: the workspace-scoped
-        # writes run AFTER the terminate sink and are gated on its owner fence, so a
-        # runner that lost its monitor claim mid-cycle publishes neither the "monitor
-        # is done" defer signal nor (via ``run()``'s post-``_execute`` persist) its
-        # stale monitor state while the row is still ``monitoring_pr`` under the live
-        # claimant (PRRT_kwDOSJAM6s6fsrlC).
-        if await self._terminate_failed(
-            workspace_id,
-            message=f"monitor: abort ({action.reason.value})",
-            reason_code=action.reason,
-        ):
+        # writes are gated on its owner fence, so a runner that lost its monitor claim
+        # mid-cycle publishes neither the "monitor is done" defer signal nor (via
+        # ``run()``'s post-``_execute`` persist) its stale monitor state while the row
+        # is still ``monitoring_pr`` under the live claimant
+        # (PRRT_kwDOSJAM6s6fsrlC). Publish at the transition commit rather than the
+        # sink's return so cancellation during the session exit cannot strand a
+        # terminal row with no defer signal (PRRT_kwDOSJAM6s6g_XHw).
+        async def _publish_abort_defer_signal() -> None:
+            """Publish the terminal artifact once the ``failed`` write commits."""
             self._write_defer_signal(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
@@ -336,7 +335,13 @@ async def _execute(
                 status=status,
                 state=state,
             )
-        else:
+
+        if not await self._terminate_failed(
+            workspace_id,
+            message=f"monitor: abort ({action.reason.value})",
+            reason_code=action.reason,
+            on_transition_committed=_publish_abort_defer_signal,
+        ):
             state.monitor_writes_suppressed = True
         return True
 
