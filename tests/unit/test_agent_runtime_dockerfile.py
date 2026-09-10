@@ -221,6 +221,7 @@ def test_agent_runtime_checks_grok_acp_stdio_contract() -> None:
 
     assert "timeout 15s env" in dockerfile
     assert "grok --always-approve --no-auto-update -m grok-build agent stdio" in dockerfile
+    assert ('> "$grok_acp_output" || true; \\\n    jq -e -s --arg expected_version') in dockerfile
     assert '"method":"initialize"' in dockerfile
     assert '"method":"authenticate"' in dockerfile
     assert '"method":"session/new"' in dockerfile

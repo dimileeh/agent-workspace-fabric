@@ -284,7 +284,7 @@ RUN set -eux; \
       | timeout 15s env -u XAI_API_KEY -u GROK_CODE_XAI_API_KEY \
           HOME="$grok_acp_home" GROK_HOME="$grok_acp_home/.grok" \
           grok --always-approve --no-auto-update -m grok-build agent stdio \
-          > "$grok_acp_output"; \
+          > "$grok_acp_output" || true; \
     jq -e -s --arg expected_version "$GROK_VERSION" ' \
       def by_id($id): first(.[] | select(.id == $id)); \
       (by_id(1).jsonrpc == "2.0") and \
