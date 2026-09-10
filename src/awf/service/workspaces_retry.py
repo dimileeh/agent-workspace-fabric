@@ -360,25 +360,6 @@ async def retry_workspace_row(
                 existing_operation,
                 retry_identity=retry_identity,
             )
-    # Prefetch forge PR state from an unlocked read in a short-lived session.
-    # ``get_for_update`` holds SELECT ... FOR UPDATE for the rest of the
-    # transaction, and forge reads use RetryPolicy.READ (sleep+retry). Looking up
-    # PR state under that row lock would block concurrent controls or another
-    # retry for the source workspace — the same hazard avoided below for
-    # host-port advisory locks. Performing the preview on the request session
-    # would still autobegin and retain its pool connection across forge
-    # backoff; a sibling session closes before the await so the request
-    # connection is not held. Preview never enters the request identity map, so
-    # caller-held instances (planning-scope auto-retry) stay attached.
-    preview = await _load_retry_preview_outside_request_session(session, workspace_id)
-    if preview is None:
-        raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
-    prefetched_feature_pr = await _prefetch_existing_feature_pr_state(
-        preview,
-        pr_lifecycle_checker=pr_lifecycle_checker,
-    )
-
-    if retry_idempotency_key is not None:
         await operations.acquire_idempotency_key_lock(retry_idempotency_key)
         existing_operation = await operations.get_by_idempotency_key(retry_idempotency_key)
         if existing_operation is not None:
@@ -387,6 +368,25 @@ async def retry_workspace_row(
                 existing_operation,
                 retry_identity=retry_identity,
             )
+    # Prefetch forge PR state from an unlocked read in a short-lived session.
+    # ``get_for_update`` holds SELECT ... FOR UPDATE for the rest of the
+    # transaction, and forge reads use RetryPolicy.READ (sleep+retry). Looking up
+    # PR state under that row lock would block concurrent controls or another
+    # retry for the source workspace — the same hazard avoided below for
+    # host-port advisory locks. Performing the preview on the request session
+    # would still autobegin and retain its pool connection across forge backoff;
+    # a sibling session closes before the await so unkeyed requests do not hold a
+    # connection. Keyed requests intentionally retain only their operation-key
+    # serialization lock so a replay cannot race this prefetch. Preview never
+    # enters the request identity map, so caller-held instances
+    # (planning-scope auto-retry) stay attached.
+    preview = await _load_retry_preview_outside_request_session(session, workspace_id)
+    if preview is None:
+        raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
+    prefetched_feature_pr = await _prefetch_existing_feature_pr_state(
+        preview,
+        pr_lifecycle_checker=pr_lifecycle_checker,
+    )
 
     source = await repo.get_for_update(workspace_id)
     if source is None:
