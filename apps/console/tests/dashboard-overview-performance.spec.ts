@@ -203,13 +203,20 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await page.getByRole("button", { name: "Load more workspaces" }).click();
   await expect.poll(() => overviewRequests).toEqual([null, "100", "200"]);
   await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3} loaded`, { exact: true })).toBeVisible();
+  await page.getByTestId("workspace-card-ws_perf_0101").click();
+  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
+  const scrollTopBeforeRefresh = await list.evaluate((element) => element.scrollTop);
 
   const requestsAfterHistory = overviewRequests.length;
   await page.waitForTimeout(5_500);
   expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
   expect(overviewRequests.at(-1)).toBeNull();
-  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
-  expect(await list.evaluate((element) => element.scrollTop)).toBe(scrollTopAfterAppend);
+  await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(scrollTopBeforeRefresh);
+  await page.getByRole("button", { name: "Close inspector" }).click();
 
   const filters = page.getByRole("button", { name: "Filters" });
   await filters.click();

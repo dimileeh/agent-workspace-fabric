@@ -922,17 +922,28 @@ export function WorkspaceList({
   const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nearBottomTriggeredRef = useRef(false);
+  const previousSelectedIdRef = useRef<string | null>(null);
+  const selectedWasLoadedRef = useRef(false);
 
   useEffect(() => {
     const selectedIndex = selectedId
       ? items.findIndex((item) => item.workspace_id === selectedId)
       : -1;
-    const selectedStart =
-      selectedIndex < 0
-        ? null
-        : Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE;
+    const selectedBecameLoaded =
+      selectedIndex >= 0 &&
+      selectedId === previousSelectedIdRef.current &&
+      !selectedWasLoadedRef.current;
+    const shouldFollowSelection =
+      selectedIndex >= 0 &&
+      (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
+    previousSelectedIdRef.current = selectedId;
+    selectedWasLoadedRef.current = selectedIndex >= 0;
     const maxStart = Math.max(0, Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE);
-    setWindowStart((current) => selectedStart ?? Math.min(current, maxStart));
+    setWindowStart((current) =>
+      shouldFollowSelection
+        ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) * WORKSPACE_RENDER_WINDOW_SIZE
+        : Math.min(current, maxStart),
+    );
   }, [items, selectedId]);
 
   useEffect(() => () => {

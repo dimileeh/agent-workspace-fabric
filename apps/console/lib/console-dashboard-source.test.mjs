@@ -614,6 +614,11 @@ test("workspace cards are windowed and memoized away from inspector-only renders
   );
   assert.match(
     overview,
+    /const previousSelectedIdRef = useRef<string \| null>\(null\);[\s\S]*?const selectedBecameLoaded =[\s\S]*?selectedId === previousSelectedIdRef\.current &&[\s\S]*?!selectedWasLoadedRef\.current;[\s\S]*?selectedId !== previousSelectedIdRef\.current \|\| selectedBecameLoaded/,
+    "Expected selection to move the window only on selection change or first arrival, not every poll",
+  );
+  assert.match(
+    overview,
     /const remaining = element\.scrollHeight - element\.scrollTop - element\.clientHeight;[\s\S]*?remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX[\s\S]*?onLoadMore\(\)/,
     "Expected a near-bottom workspace-list scroll to request one more page",
   );
