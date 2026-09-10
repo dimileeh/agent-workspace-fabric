@@ -273,6 +273,35 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByText("1 selected for logs", { exact: true })).toBeVisible();
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hDQDq: selections
+// retained across overview render windows must not mount one live column per ID.
+test("fullscreen logs cap retained selections across overview windows", async ({ page }) => {
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  for (const index of [1, 2, 3]) {
+    await page.getByLabel(`Select Performance workspace ${index} for fullscreen logs`).check();
+  }
+
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  for (const index of [101, 102, 103]) {
+    await page.getByLabel(`Select Performance workspace ${index} for fullscreen logs`).check();
+  }
+
+  await expect(page.getByText("6 selected for logs; first 5 will open", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  await expect(modal.getByText("5 workspace columns", { exact: true })).toBeVisible();
+  for (const workspaceId of ["ws_perf_0001", "ws_perf_0002", "ws_perf_0003", "ws_perf_0101", "ws_perf_0102"]) {
+    await expect(modal.getByText(workspaceId, { exact: true })).toBeVisible();
+  }
+  await expect(modal.getByText("ws_perf_0103", { exact: true })).toHaveCount(0);
+});
+
 test("routine refresh updates and removes retained workspaces outside page one", async ({ page }) => {
   const batchRequests: string[][] = [];
   let refreshRetained = false;

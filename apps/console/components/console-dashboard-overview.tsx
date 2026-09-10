@@ -38,7 +38,10 @@ useState
 } from "react";
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
-import { displayedTaskKey } from "@/lib/console-dashboard-derived";
+import {
+  displayedTaskKey,
+  MAX_FULLSCREEN_LOG_WORKSPACES,
+} from "@/lib/console-dashboard-derived";
 import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
@@ -656,7 +659,12 @@ export function WorkspaceSelectionToolbar({
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2 text-xs">
-      <span className="text-slate-500">{selectedCount} selected for logs</span>
+      <span className="text-slate-500">
+        {selectedCount} selected for logs
+        {selectedCount > MAX_FULLSCREEN_LOG_WORKSPACES
+          ? `; first ${MAX_FULLSCREEN_LOG_WORKSPACES} will open`
+          : ""}
+      </span>
       <div className="flex items-center gap-2">
         <button
           type="button"

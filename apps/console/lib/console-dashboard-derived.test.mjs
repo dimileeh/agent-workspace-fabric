@@ -253,6 +253,19 @@ test("filterAndSortOverview and orderFullscreenWorkspaceIds preserve selection o
   assert.deepEqual(orderFullscreenWorkspaceIds(["w1", "w2"], filtered), ["w1", "w2"]);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hDQDq: retained
+// selections can span many 100-card windows, but opening them must not mount
+// an unbounded number of polling and streaming fullscreen columns.
+test("orderFullscreenWorkspaceIds caps retained multi-workspace log fan-out", () => {
+  const selection = ["w1", "w2", "w3", "w4", "w5", "w6", "w7"];
+  const filtered = [{ workspace_id: "w7" }, { workspace_id: "w6" }];
+
+  assert.deepEqual(
+    orderFullscreenWorkspaceIds(selection, filtered),
+    ["w7", "w6", "w1", "w2", "w3"],
+  );
+});
+
 test("filterAndSortOverview matches task_key shown on workspace cards", () => {
   const overview = [
     {

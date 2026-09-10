@@ -12,6 +12,11 @@ import type { ConsoleCapabilities, WorkspaceOverview } from "./types.ts";
 export type WorkspaceSortKey = "created_at" | "updated_at";
 export type SortDirection = "asc" | "desc";
 
+// Each fullscreen column owns recurring listing/tail requests and an
+// EventSource. Keep the comparison view below common per-origin connection
+// ceilings while still supporting the existing five-column layout.
+export const MAX_FULLSCREEN_LOG_WORKSPACES = 5;
+
 type DisplayedTaskKeySource = {
   task_key?: string | null;
   task_tag?: string | null;
@@ -320,7 +325,7 @@ export function orderFullscreenWorkspaceIds(
     .filter((workspace) => selected.has(workspace.workspace_id))
     .map((workspace) => workspace.workspace_id);
   const remaining = selection.filter((workspaceId) => !orderedVisible.includes(workspaceId));
-  return [...orderedVisible, ...remaining];
+  return [...orderedVisible, ...remaining].slice(0, MAX_FULLSCREEN_LOG_WORKSPACES);
 }
 
 export type AutomaticLogTailRefreshCandidate = {
