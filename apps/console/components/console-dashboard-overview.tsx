@@ -1207,6 +1207,7 @@ export function WorkspaceList({
     historyLoadPendingRef.current = true;
     void onLoadMore().finally(() => {
       historyLoadPendingRef.current = false;
+      suppressNextButtonLoadRef.current = false;
     });
     return true;
   }, [onLoadMore]);
@@ -1289,8 +1290,7 @@ export function WorkspaceList({
   }, [maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading]);
 
   const loadMoreFromButton = useCallback(() => {
-    // Consume a click paired with the browser's immediately preceding
-    // scroll-to-button load, even when that fast request has already settled.
+    // Consume a click paired with an in-flight scroll-to-button load.
     if (suppressNextButtonLoadRef.current && !historyError) {
       suppressNextButtonLoadRef.current = false;
       return;

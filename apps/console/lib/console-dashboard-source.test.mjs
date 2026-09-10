@@ -643,7 +643,12 @@ test("workspace cards are windowed and memoized away from inspector-only renders
   );
   assert.match(
     overview,
-    /const remaining = element\.scrollHeight - element\.scrollTop - element\.clientHeight;[\s\S]*?remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX[\s\S]*?onLoadMore\(\)/,
+    /const requestHistoryPage = useCallback\([\s\S]*?onLoadMore\(\)/,
+    "Expected the guarded workspace-history loader to request one more page",
+  );
+  assert.match(
+    overview,
+    /const remaining = element\.scrollHeight - element\.scrollTop - element\.clientHeight;[\s\S]*?remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX[\s\S]*?requestHistoryPage\(\)/,
     "Expected a near-bottom workspace-list scroll to request one more page",
   );
   assert.match(

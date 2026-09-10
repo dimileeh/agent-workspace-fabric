@@ -1172,3 +1172,30 @@ test("failed scroll loading keeps an accessible one-page retry", async ({ page }
   expect(overviewRequests).toEqual([null, "100", "100"]);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 });
+
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hPe-d: a settled
+// near-bottom autoload must not consume a later explicit fallback click.
+test("settled scroll loading leaves the Load more fallback actionable", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
+    resolvePageItems: (items, cursor) => cursor === "100" ? items.slice(0, 1) : items,
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect(page.getByText("1–100 of 101 loaded", { exact: true })).toBeVisible();
+  expect(overviewRequests).toEqual([null, "100"]);
+
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  await loadMore.evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
+
+  await expect.poll(() => overviewRequests).toEqual([null, "100", "101"]);
+});
