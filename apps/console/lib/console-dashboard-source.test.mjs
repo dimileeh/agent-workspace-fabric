@@ -3328,6 +3328,21 @@ test("operator action state is guarded by current workspace selection", () => {
   );
 });
 
+test("operator action post-mutation reloads are guarded by authorized feed epoch", () => {
+  const mutating = dashboardSource.mutatingControls;
+  const successStart = mutating.indexOf(
+    "const success = summarizeWorkspaceOperatorSuccess",
+  );
+  assert.ok(successStart >= 0, "Expected the operator-action success continuation");
+  const successSource = mutating.slice(successStart);
+
+  assert.match(
+    successSource,
+    /const caps = await loadCapabilities\(\);\s*if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}\s*await Promise\.all/,
+    "Expected operator actions to re-check the auth epoch after capability negotiation and before post-mutation reloads",
+  );
+});
+
 test("inspector omits unsupported diagnostic panels instead of empty shells", () => {
   const inspector = dashboardSource.inspector;
   assert.match(inspector, /\{showWorkspaceRuntime \? <RuntimePanel runtime=\{detail\.runtime\} \/> : null\}/);

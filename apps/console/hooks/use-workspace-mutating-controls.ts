@@ -223,6 +223,9 @@ export function useWorkspaceMutatingControls({
       });
       {
         const caps = await loadCapabilities();
+        if (epoch !== authorizedFeedEpochRef.current) {
+          return;
+        }
         await Promise.all([
           loadOverview(),
           loadWorkspace(workspaceId),
