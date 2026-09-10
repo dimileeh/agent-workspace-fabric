@@ -11,7 +11,7 @@ import {
   overviewListPath,
   reconcileOverviewFirstPage,
   reconcileOverviewRetainedItems,
-  retainedOverviewIdBatches,
+  retainedOverviewIdBatch,
   usableContinuationCursor,
 } from "./overview-list.ts";
 
@@ -85,23 +85,40 @@ test("reconcileOverviewFirstPage keeps unchanged rows stable and retains loaded 
   assert.equal(reconciled[2], current[2]);
 });
 
-test("retainedOverviewIdBatches excludes page one and caps requests at the API limit", () => {
+test("retainedOverviewIdBatch excludes page one and rotates one API-sized batch", () => {
   const current = Array.from({ length: OVERVIEW_REFRESH_BATCH_SIZE * 2 + 3 }, (_, index) => ({
     workspace_id: `ws_${index}`,
   }));
-  const batches = retainedOverviewIdBatches(current, [
+  const pageItems = [
     { workspace_id: "ws_0" },
     { workspace_id: "ws_1" },
     { workspace_id: "ws_1" },
-  ]);
+  ];
 
-  assert.deepEqual(batches.map((batch) => batch.length), [
-    OVERVIEW_REFRESH_BATCH_SIZE,
-    OVERVIEW_REFRESH_BATCH_SIZE,
-    1,
-  ]);
-  assert.deepEqual(batches[0].slice(0, 2), ["ws_2", "ws_3"]);
-  assert.equal(new Set(batches.flat()).size, current.length - 2);
+  const first = retainedOverviewIdBatch(current, pageItems, 0);
+  const second = retainedOverviewIdBatch(current, pageItems, first.nextOffset);
+  const final = retainedOverviewIdBatch(current, pageItems, second.nextOffset);
+  const wrapped = retainedOverviewIdBatch(current, pageItems, final.nextOffset);
+
+  assert.equal(first.workspaceIds.length, OVERVIEW_REFRESH_BATCH_SIZE);
+  assert.deepEqual(first.workspaceIds.slice(0, 2), ["ws_2", "ws_3"]);
+  assert.equal(second.workspaceIds.length, OVERVIEW_REFRESH_BATCH_SIZE);
+  assert.deepEqual(second.workspaceIds.slice(0, 2), ["ws_202", "ws_203"]);
+  assert.deepEqual(final.workspaceIds, ["ws_402"]);
+  assert.equal(final.nextOffset, 0);
+  assert.deepEqual(wrapped.workspaceIds, first.workspaceIds);
+  assert.equal(
+    new Set([...first.workspaceIds, ...second.workspaceIds, ...final.workspaceIds]).size,
+    current.length - 2,
+  );
+  assert.deepEqual(
+    retainedOverviewIdBatch(current.slice(0, 5), pageItems, second.nextOffset),
+    { workspaceIds: ["ws_2", "ws_3", "ws_4"], nextOffset: 0 },
+  );
+  assert.deepEqual(retainedOverviewIdBatch(pageItems, pageItems, 0), {
+    workspaceIds: [],
+    nextOffset: 0,
+  });
 });
 
 test("reconcileOverviewRetainedItems refreshes history in place and removes missing rows", () => {

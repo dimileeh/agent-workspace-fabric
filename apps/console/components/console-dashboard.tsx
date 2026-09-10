@@ -23,7 +23,7 @@ import {
   overviewItemMatchesQuery,
   overviewListPath,
   reconcileOverviewRetainedItems,
-  retainedOverviewIdBatches,
+  retainedOverviewIdBatch,
   usableContinuationCursor,
 } from "@/lib/overview-list";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
@@ -238,6 +238,10 @@ export function ConsoleDashboard() {
   // Retained history is best-effort maintenance behind the live first page.
   // Superseding overview work aborts it so stalled batches cannot accumulate.
   const overviewRetainedRefreshAbortControllerRef = useRef<AbortController | null>(null);
+  const overviewRetainedRefreshCursorRef = useRef<{ query: unknown; offset: number }>({
+    query: null,
+    offset: 0,
+  });
   const overviewItemsRef = useRef<WorkspaceOverview[]>([]);
   const overviewPaginationRef = useRef<OverviewPagination | null>(null);
   const overviewSelectionLookupRef = useRef<{ query: unknown; workspaceId: string } | null>(null);
@@ -621,9 +625,14 @@ export function ConsoleDashboard() {
       }
       const pageItems = normalizeOverview(page.items);
       const sameQuery = capturedPagination?.query === capturedQuery;
-      const retainedIdBatches = !continuation && sameQuery && page.has_more
-        ? retainedOverviewIdBatches(overviewItemsRef.current, pageItems)
-        : [];
+      const retainedRefreshCursor = overviewRetainedRefreshCursorRef.current;
+      const retainedBatch = !continuation && sameQuery && page.has_more
+        ? retainedOverviewIdBatch(
+            overviewItemsRef.current,
+            pageItems,
+            retainedRefreshCursor.query === capturedQuery ? retainedRefreshCursor.offset : 0,
+          )
+        : { workspaceIds: [], nextOffset: 0 };
       // A successful newer live page supersedes older best-effort history.
       // Wait until success is known before aborting so a prior completed
       // authorization denial still wins over a merely-started request.
@@ -633,6 +642,12 @@ export function ConsoleDashboard() {
         appliedOverviewGenerationRef.current,
         generation,
       );
+      if (!continuation) {
+        overviewRetainedRefreshCursorRef.current = {
+          query: capturedQuery,
+          offset: retainedBatch.nextOffset,
+        };
+      }
       if (continuation) {
         const fetchedCursors = new Set(capturedPagination?.fetchedCursors ?? []);
         if (usableContinuationCursor(requestedCursor)) {
@@ -712,7 +727,7 @@ export function ConsoleDashboard() {
       if (!continuation) {
         setLastRefresh(new Date());
       }
-      if (retainedIdBatches.length > 0) {
+      if (retainedBatch.workspaceIds.length > 0) {
         const retainedRefreshController = new AbortController();
         const retainedRefreshTimeout = window.setTimeout(
           () => retainedRefreshController.abort(),
@@ -722,40 +737,38 @@ export function ConsoleDashboard() {
           const refreshedRetainedItems: WorkspaceOverview[] = [];
           const missingRetainedIds: string[] = [];
           try {
-            for (const workspaceIds of retainedIdBatches) {
-              const result = await apiPost<OverviewBatchResponse>(
-                awfPath("workspaces/overview/batch"),
-                { workspace_ids: workspaceIds },
-                { signal: retainedRefreshController.signal },
-              );
-              if (retainedRefreshController.signal.aborted) {
-                return;
-              }
-              if (!result.ok && (result.status === 401 || result.status === 403)) {
-                applyOverviewAuthDenial(generation, result.message);
-                return;
-              }
-              if (!result.ok) {
-                applyOverviewOutage(generation, result.message);
-                return;
-              }
-              if (
-                epoch !== authorizedFeedEpochRef.current ||
-                consoleAuthDeniedRef.current ||
-                generation !== overviewRequestGenerationRef.current ||
-                overviewQueryRef.current !== capturedQuery
-              ) {
-                return;
-              }
-              for (const item of normalizeOverview(result.data.items)) {
-                if (overviewItemMatchesQuery(item, capturedQuery)) {
-                  refreshedRetainedItems.push(item);
-                } else {
-                  missingRetainedIds.push(item.workspace_id);
-                }
-              }
-              missingRetainedIds.push(...result.data.missing_workspace_ids);
+            const result = await apiPost<OverviewBatchResponse>(
+              awfPath("workspaces/overview/batch"),
+              { workspace_ids: retainedBatch.workspaceIds },
+              { signal: retainedRefreshController.signal },
+            );
+            if (retainedRefreshController.signal.aborted) {
+              return;
             }
+            if (!result.ok && (result.status === 401 || result.status === 403)) {
+              applyOverviewAuthDenial(generation, result.message);
+              return;
+            }
+            if (!result.ok) {
+              applyOverviewOutage(generation, result.message);
+              return;
+            }
+            if (
+              epoch !== authorizedFeedEpochRef.current ||
+              consoleAuthDeniedRef.current ||
+              generation !== overviewRequestGenerationRef.current ||
+              overviewQueryRef.current !== capturedQuery
+            ) {
+              return;
+            }
+            for (const item of normalizeOverview(result.data.items)) {
+              if (overviewItemMatchesQuery(item, capturedQuery)) {
+                refreshedRetainedItems.push(item);
+              } else {
+                missingRetainedIds.push(item.workspace_id);
+              }
+            }
+            missingRetainedIds.push(...result.data.missing_workspace_ids);
             if (
               retainedRefreshController.signal.aborted ||
               epoch !== authorizedFeedEpochRef.current ||

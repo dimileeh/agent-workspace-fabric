@@ -319,6 +319,53 @@ test("routine refresh updates and removes retained workspaces outside page one",
   await expect(retainedCard.getByText("completed", { exact: true })).toBeVisible();
 });
 
+test("bounds retained-history refresh work per poll and rotates across loaded rows", async ({
+  page,
+}) => {
+  const overviewRequests: Array<string | null> = [];
+  const batchRequests: string[][] = [];
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const loadedSummary = page.getByText(/^1–100 of \d+ loaded$/);
+  const loadedCount = async () => {
+    if (await loadedSummary.count() === 0) {
+      return PAGE_SIZE;
+    }
+    const match = (await loadedSummary.first().textContent())?.match(/of (\d+) loaded/);
+    return Number(match?.[1] ?? 0);
+  };
+  for (let attempt = 0; attempt < 5 && await loadedCount() < 600; attempt += 1) {
+    const before = await loadedCount();
+    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    await expect.poll(loadedCount).toBeGreaterThan(before);
+  }
+  expect(await loadedCount()).toBeGreaterThanOrEqual(600);
+
+  overviewRequests.length = 0;
+  batchRequests.length = 0;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => batchRequests.length).toBeGreaterThan(0);
+
+  const batchesAfterFirstRefresh = batchRequests.length;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => batchRequests.length).toBeGreaterThan(batchesAfterFirstRefresh);
+
+  const firstPageRequests = overviewRequests.filter((cursor) => cursor === null).length;
+  expect(batchRequests.length).toBeLessThanOrEqual(firstPageRequests);
+
+  expect(batchRequests[0].length).toBeLessThanOrEqual(200);
+  expect(batchRequests[1].length).toBeLessThanOrEqual(200);
+  expect(batchRequests[0]).not.toContain("ws_perf_0001");
+  expect(batchRequests[1]).not.toContain("ws_perf_0001");
+  expect(batchRequests[1].some((workspaceId) => batchRequests[0].includes(workspaceId))).toBe(false);
+});
+
 test("stalled retained history does not block first-page publication or the next poll", async ({
   page,
 }) => {

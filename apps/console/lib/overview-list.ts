@@ -127,11 +127,12 @@ export function reconcileOverviewFirstPage(
   return reconciled;
 }
 
-/** Split already-loaded rows outside the refreshed first page into bounded ID batches. */
-export function retainedOverviewIdBatches(
+/** Select one rotating API-sized batch of loaded rows outside the refreshed first page. */
+export function retainedOverviewIdBatch(
   current: WorkspaceOverview[],
   pageItems: WorkspaceOverview[],
-): string[][] {
+  offset: number,
+): { workspaceIds: string[]; nextOffset: number } {
   const seen = new Set(pageItems.map((item) => item.workspace_id));
   const retainedIds: string[] = [];
   for (const item of current) {
@@ -141,11 +142,17 @@ export function retainedOverviewIdBatches(
     seen.add(item.workspace_id);
     retainedIds.push(item.workspace_id);
   }
-  const batches: string[][] = [];
-  for (let index = 0; index < retainedIds.length; index += OVERVIEW_REFRESH_BATCH_SIZE) {
-    batches.push(retainedIds.slice(index, index + OVERVIEW_REFRESH_BATCH_SIZE));
+  if (retainedIds.length === 0) {
+    return { workspaceIds: [], nextOffset: 0 };
   }
-  return batches;
+  // A prior batch may have removed enough rows to move the saved offset past
+  // the new tail. Restart that rotation instead of returning an empty batch.
+  const start = offset >= retainedIds.length ? 0 : offset;
+  const workspaceIds = retainedIds.slice(start, start + OVERVIEW_REFRESH_BATCH_SIZE);
+  const nextOffset = start + workspaceIds.length >= retainedIds.length
+    ? 0
+    : start + workspaceIds.length;
+  return { workspaceIds, nextOffset };
 }
 
 /**
