@@ -102,6 +102,7 @@ async def _run_monitor_agent_with_service_recovery(
     timeout_rerun_floor_sink: list[str] | None = None,
     timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
     timeout_preservation_sink: list[str] | None = None,
+    timeout_rerun_requires_preservation: bool = False,
 ) -> AgentRunResult:
     """Run the monitor agent while recovering from agent-service failures.
 
@@ -122,6 +123,12 @@ async def _run_monitor_agent_with_service_recovery(
     awaits keeping the timed-out run's work while neither that channel nor the
     floor sink is populated, so it is marked for the duration
     (PRRT_kwDOSJAM6s6fy7ju).
+
+    A rollback-capable caller that cannot provide those sinks sets
+    ``timeout_rerun_requires_preservation`` instead. Recovery may still restart
+    the unhealthy service, but the original timeout propagates rather than
+    authorizing a rerun whose later rollback could delete the timed-out run's
+    work.
     """
     worktree_path = self._worktrees_root / workspace_id
     async with hold_exclusive_worktree_writer_lock(worktree_path):
@@ -139,6 +146,7 @@ async def _run_monitor_agent_with_service_recovery(
             timeout_rerun_floor_sink=timeout_rerun_floor_sink,
             timeout_rerun_dirty_sink=timeout_rerun_dirty_sink,
             timeout_preservation_sink=timeout_preservation_sink,
+            timeout_rerun_requires_preservation=timeout_rerun_requires_preservation,
         )
 
 
@@ -157,6 +165,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
     timeout_rerun_floor_sink: list[str] | None = None,
     timeout_rerun_dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
     timeout_preservation_sink: list[str] | None = None,
+    timeout_rerun_requires_preservation: bool = False,
 ) -> AgentRunResult:
     hosted_pr_identity = (
         await _hosted_pr_identity_for_workspace(self, workspace_id, state=state)
@@ -260,6 +269,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=exc.reason_code,
                 preservation_sink=timeout_preservation_sink,
+                preservation_required=timeout_rerun_requires_preservation,
             ):
                 # Preservation could not be secured: either the timed-out run's
                 # edits are still dirty and no SHA floor can cover them
@@ -328,6 +338,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                         dirty_sink=timeout_rerun_dirty_sink,
                         timeout_reason_code=masked_timeout_reason_code,
                         preservation_sink=timeout_preservation_sink,
+                        preservation_required=timeout_rerun_requires_preservation,
                     )
                     if not preserved:
                         # Bookkeeping alone cannot keep this exit's rollback off
@@ -352,6 +363,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 dirty_sink=timeout_rerun_dirty_sink,
                 timeout_reason_code=masked_timeout_reason_code,
                 preservation_sink=timeout_preservation_sink,
+                preservation_required=timeout_rerun_requires_preservation,
             ):
                 # Unsecured preservation gives the rerun up here too, exactly as in
                 # the ``AgentRunError`` branch above (PRRT_kwDOSJAM6s6fwTyO,

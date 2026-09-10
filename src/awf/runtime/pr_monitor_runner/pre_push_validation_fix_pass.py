@@ -549,6 +549,11 @@ async def _run_pre_push_validation_fix_pass(
             command_evidence=command_evidence,
             operation_start_head=fix_start_head,
             state=state,
+            # This caller hard-resets to ``fix_start_head`` on cleanup and
+            # plumbing failures. Without the floor/dirty sinks used by the
+            # comment-verdict path, a timeout rerun could make those handlers
+            # delete the timed-out run's commits and edits.
+            timeout_rerun_requires_preservation=True,
         )
     except AgentRunError as exc:
         append_command_evidence(

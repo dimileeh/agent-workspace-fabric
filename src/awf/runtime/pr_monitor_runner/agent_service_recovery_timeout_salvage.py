@@ -51,6 +51,7 @@ async def _record_timeout_rerun_floor(
     dirty_sink: Callable[[str], Awaitable[bool]] | None = None,
     timeout_reason_code: str = AGENT_TIMEOUT,
     preservation_sink: list[str] | None = None,
+    preservation_required: bool = False,
 ) -> bool:
     """Publish the HEAD a timed-out run is leaving behind before it is rerun.
 
@@ -135,9 +136,17 @@ async def _record_timeout_rerun_floor(
     whether it is still there is itself a post-timeout filesystem probe, so it
     belongs inside the protected, bounded sequence rather than in front of it
     (PRRT_kwDOSJAM6s6f5YrT); see ``_worktree_definitely_missing``.
+
+    A rollback-capable caller sets ``preservation_required``. If it supplies no
+    floor sink, it cannot receive either half of this preservation contract:
+    dirty edits cannot be covered by a published commit, and later rollback
+    cannot be raised past the timed-out run's commits. Refuse its rerun so the
+    original timeout reaches the caller unchanged. Callers that leave the flag
+    false retain the legacy behavior and remain responsible for not rewinding
+    work that an untracked timeout rerun leaves behind.
     """
     if sink is None:
-        return True
+        return not preservation_required
     worktree_path = self._worktrees_root / workspace_id
 
     if preservation_sink is not None:

@@ -121,6 +121,8 @@ async def _run_locked(
     sink: list[str] | None,
     dirty_sink: Any | None = None,
     preservation_sink: list[str] | None = None,
+    *,
+    preservation_required: bool = False,
 ) -> AgentRunResult:
     return await agent_service_recovery._run_monitor_agent_with_service_recovery_locked(
         runner,
@@ -132,6 +134,7 @@ async def _run_locked(
         timeout_rerun_floor_sink=sink,
         timeout_rerun_dirty_sink=dirty_sink,
         timeout_preservation_sink=preservation_sink,
+        timeout_rerun_requires_preservation=preservation_required,
     )
 
 
@@ -152,6 +155,24 @@ async def test_recovered_timeout_publishes_the_pre_rerun_head(
     assert runner.runs == 2
     assert sink == [_PRE_RERUN_HEAD]
     assert runner.head_reads == [tmp_path / _WORKSPACE_ID]
+
+
+@pytest.mark.unit
+async def test_rollback_capable_caller_without_a_floor_sink_refuses_the_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback-capable caller cannot preserve the timed-out run without a sink."""
+    (tmp_path / _WORKSPACE_ID).mkdir()
+    runner = _RecoveryRunner(tmp_path)
+    _stub_recovery(monkeypatch, recovered=1)
+
+    with pytest.raises(AgentRunError) as caught:
+        await _run_locked(runner, None, preservation_required=True)
+
+    assert caught.value.reason_code == "AGENT_IDLE_TIMEOUT"
+    assert runner.runs == 1
+    assert runner.head_reads == []
 
 
 @pytest.mark.unit
