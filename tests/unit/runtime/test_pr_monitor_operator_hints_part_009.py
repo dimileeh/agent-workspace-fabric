@@ -231,6 +231,32 @@ def test_operator_hint_thread_key_extraction_does_not_span_whitespace() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "thread_key",
+    [
+        "bb:acme/widgets#12:345",
+        "bbtask:acme/widgets#12:345",
+    ],
+)
+def test_thread_retirement_rejects_bitbucket_key_prefix_in_longer_token(
+    thread_key: str,
+) -> None:
+    """A malformed suffixed key cannot retire its valid-prefix human gate."""
+    state = _parked_thread_state(thread_id=thread_key)
+    expected = dict(state.threads_addressed_ids)
+    malformed_key = f"{thread_key}abc"
+
+    assert _operator_hint_review_thread_id_candidates(malformed_key) == ()
+
+    _mark_referenced_needs_human_feedback_answered(
+        state,
+        hint=_guide(f"Accept {malformed_key}."),
+    )
+
+    assert state.threads_addressed_ids == expected
+
+
+@pytest.mark.unit
 def test_comment_retirement_unchanged_when_directive_also_names_a_thread() -> None:
     """One directive naming both classes routes each to its own arm."""
     state = MonitorState(

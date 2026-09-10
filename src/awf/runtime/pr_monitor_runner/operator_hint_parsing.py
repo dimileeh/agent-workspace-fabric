@@ -61,8 +61,8 @@ _OPERATOR_HINT_REVIEW_THREAD_ID_RE = re.compile(
     \b
     (?:
         PRRT_[A-Za-z0-9_-]+
-        | bbtask:[^\s/\#]+/[^\s\#]+\#\d+:\d+
-        | bb:[^\s/\#]+/[^\s\#]+\#\d+:\d+
+        | bbtask:[^\s/\#]+/[^\s\#]+\#\d+:\d+\b
+        | bb:[^\s/\#]+/[^\s\#]+\#\d+:\d+\b
     )
     """,
     re.VERBOSE,
