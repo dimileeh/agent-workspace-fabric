@@ -350,6 +350,11 @@ class TestGrokAdapter:
                 "xai-test-key",
                 "xai.api_key",
             ),
+            (
+                [{"id": "grok.com"}, {"id": "cached_token"}],
+                None,
+                "cached_token",
+            ),
             ([{"id": "grok.com"}], None, "grok.com"),
         ],
     )
