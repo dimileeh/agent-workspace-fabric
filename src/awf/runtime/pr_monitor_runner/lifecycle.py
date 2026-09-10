@@ -410,6 +410,16 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
             return
+        if _superseded_monitor_owner(self, ws):
+            # Do not rely on every caller propagating a refused terminal
+            # transition into ``monitor_writes_suppressed``. In particular, a
+            # cleanup failure can return terminal after its failure sink loses the
+            # owner race, then reach the outer persist with an otherwise writable
+            # state. Fence the shared write seam while the workspace row is locked
+            # so a superseded runner cannot overwrite the live claimant's thread
+            # map or last-commit SHA (PRRT_kwDOSJAM6s6hFfgs).
+            state.monitor_writes_suppressed = True
+            return
         now_monotonic = time.monotonic()
         now_wall = datetime.now(UTC)
         db_threads_addressed = dict(ws.monitor_threads_addressed or {})

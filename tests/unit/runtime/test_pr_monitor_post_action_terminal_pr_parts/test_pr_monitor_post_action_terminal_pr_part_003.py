@@ -503,6 +503,50 @@ async def test_persist_state_refuses_to_write_a_superseded_state(
     assert workspace.monitor_last_commit_sha == "livesha00000"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("monitor_owner_id", ["worker-stale", None])
+async def test_persist_state_fences_a_superseded_monitor_owner_under_the_row_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monitor_owner_id: str | None,
+) -> None:
+    """Every state persist must verify ownership without relying on caller flags.
+
+    Regression for PRRT_kwDOSJAM6s6hFfgs. Cleanup-failure handlers can ignore a
+    refused terminal transition and return to ``run()`` without setting
+    ``monitor_writes_suppressed``. Cover both a claimed runner that lost its lease
+    and an inline handoff taken over by a claimed recovery monitor.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-current"
+        workspace.monitor_threads_addressed = {"t-live": "fix_committed"}
+        workspace.monitor_last_commit_sha = "livesha00000"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_ScriptedGh(),
+    )
+    runner._monitor_owner_id = monitor_owner_id
+    state = _stale_state()
+    assert state.monitor_writes_suppressed is False
+
+    await runner._persist_state(workspace_id, state)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+    assert workspace is not None
+    assert workspace.monitor_threads_addressed == {"t-live": "fix_committed"}
+    assert workspace.monitor_last_commit_sha == "livesha00000"
+    assert state.monitor_writes_suppressed is True
+
+
 def _cancelled_post_merge_reconciler(
     artifacts_root: Path, observed: dict[str, object]
 ) -> Callable[..., Any]:
