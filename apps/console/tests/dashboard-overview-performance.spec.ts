@@ -14,6 +14,9 @@ type OverviewRouteOptions = {
   failFirstContinuation?: boolean;
   onRequest?: (cursor: string | null) => void;
   onBatchRequest?: (workspaceIds: string[]) => void;
+  resolveBatchItem?: (
+    item: ReturnType<typeof workspaceOverview>,
+  ) => ReturnType<typeof workspaceOverview> | null;
 };
 
 function workspaceOverview(index: number) {
@@ -55,7 +58,10 @@ async function installLargeFleetOverview(
     const body = route.request().postDataJSON() as { workspace_ids: string[] };
     options.onBatchRequest?.(body.workspace_ids);
     const requested = new Set(body.workspace_ids);
-    const items = fleet.filter((item) => requested.has(item.workspace_id));
+    const items = fleet
+      .filter((item) => requested.has(item.workspace_id))
+      .map((item) => options.resolveBatchItem ? options.resolveBatchItem(item) : item)
+      .filter((item): item is ReturnType<typeof workspaceOverview> => item !== null);
     await fulfillJson(route, {
       items,
       missing_workspace_ids: body.workspace_ids.filter(
@@ -234,6 +240,50 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
 
   await page.getByLabel("Select Performance workspace 1301 for fullscreen logs").check();
   await expect(page.getByText("1 selected for logs", { exact: true })).toBeVisible();
+});
+
+test("routine refresh updates and removes retained workspaces outside page one", async ({ page }) => {
+  const batchRequests: string[][] = [];
+  let refreshRetained = false;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+    resolveBatchItem: (item) => {
+      if (!refreshRetained) {
+        return item;
+      }
+      if (item.workspace_id === "ws_perf_0101") {
+        return {
+          ...item,
+          status: "completed",
+          updated_at: "2026-09-10T13:00:00.000Z",
+        };
+      }
+      return item.workspace_id === "ws_perf_0102" ? null : item;
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  const retainedCard = page.getByTestId("workspace-card-ws_perf_0101");
+  await expect(retainedCard.getByText("running", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0102")).toBeVisible();
+  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3} loaded`, { exact: true })).toBeVisible();
+
+  refreshRetained = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect.poll(() => batchRequests.length).toBeGreaterThan(0);
+  expect(batchRequests[0]).toContain("ws_perf_0101");
+  expect(batchRequests[0]).toContain("ws_perf_0102");
+  expect(batchRequests[0]).not.toContain("ws_perf_0001");
+  expect(batchRequests[0].length).toBeLessThanOrEqual(200);
+  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3 - 1} loaded`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Previous workspace results" }).click();
+  await expect(retainedCard.getByText("completed", { exact: true })).toBeVisible();
 });
 
 test("a deep link resolves an older workspace without mounting the intervening fleet", async ({

@@ -552,17 +552,17 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   );
 });
 
-test("loadOverview publishes one page for routine polls and fetches one continuation page on demand", () => {
+test("loadOverview refreshes retained IDs in bounded batches and fetches one continuation page on demand", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
-    /import \{[\s\S]*?appendUniqueOverviewItems,[\s\S]*?overviewListPath,[\s\S]*?reconcileOverviewFirstPage,[\s\S]*?usableContinuationCursor,[\s\S]*?\} from "@\/lib\/overview-list";/,
+    /import \{[\s\S]*?appendUniqueOverviewItems,[\s\S]*?overviewListPath,[\s\S]*?reconcileOverviewRetainedItems,[\s\S]*?retainedOverviewIdBatches,[\s\S]*?usableContinuationCursor,[\s\S]*?\} from "@\/lib\/overview-list";/,
     "Expected loadOverview to import incremental overview reconciliation helpers",
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?const requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?reconcileOverviewFirstPage\(overviewItemsRef\.current, pageItems\)/,
-    "Expected loadOverview to reconcile page one and append only one requested continuation page",
+    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?const requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?if \(!continuation && sameQuery && page\.has_more\) \{[\s\S]*?retainedOverviewIdBatches\([\s\S]*?for \(const workspaceIds of retainedIdBatches\) \{[\s\S]*?overview\/batch[\s\S]*?workspace_ids: workspaceIds[\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?reconcileOverviewRetainedItems\(/,
+    "Expected loadOverview to batch-refresh retained rows and append only one requested continuation page",
   );
   assert.doesNotMatch(
     dashboard,

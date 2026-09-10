@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   OVERVIEW_LIST_MAX_PAGES,
   OVERVIEW_LIST_PAGE_SIZE,
+  OVERVIEW_REFRESH_BATCH_SIZE,
   appendUniqueOverviewItems,
   collectOverviewPages,
   overviewListPath,
   reconcileOverviewFirstPage,
+  reconcileOverviewRetainedItems,
+  retainedOverviewIdBatches,
   usableContinuationCursor,
 } from "./overview-list.ts";
 
@@ -55,6 +58,49 @@ test("reconcileOverviewFirstPage keeps unchanged rows stable and retains loaded 
   assert.notEqual(reconciled[1], current[1]);
   assert.equal(reconciled[1].title, "new two");
   assert.equal(reconciled[2], current[2]);
+});
+
+test("retainedOverviewIdBatches excludes page one and caps requests at the API limit", () => {
+  const current = Array.from({ length: OVERVIEW_REFRESH_BATCH_SIZE * 2 + 3 }, (_, index) => ({
+    workspace_id: `ws_${index}`,
+  }));
+  const batches = retainedOverviewIdBatches(current, [
+    { workspace_id: "ws_0" },
+    { workspace_id: "ws_1" },
+    { workspace_id: "ws_1" },
+  ]);
+
+  assert.deepEqual(batches.map((batch) => batch.length), [
+    OVERVIEW_REFRESH_BATCH_SIZE,
+    OVERVIEW_REFRESH_BATCH_SIZE,
+    1,
+  ]);
+  assert.deepEqual(batches[0].slice(0, 2), ["ws_2", "ws_3"]);
+  assert.equal(new Set(batches.flat()).size, current.length - 2);
+});
+
+test("reconcileOverviewRetainedItems refreshes history in place and removes missing rows", () => {
+  const current = [
+    { workspace_id: "ws_1", title: "old first" },
+    { workspace_id: "ws_2", title: "unchanged history" },
+    { workspace_id: "ws_3", title: "stale history", status: "running" },
+    { workspace_id: "ws_4", title: "removed history" },
+  ];
+  const reconciled = reconcileOverviewRetainedItems(
+    current,
+    [{ workspace_id: "ws_1", title: "new first" }],
+    [
+      { workspace_id: "ws_2", title: "unchanged history" },
+      { workspace_id: "ws_3", title: "fresh history", status: "completed" },
+    ],
+    ["ws_4"],
+  );
+
+  assert.deepEqual(reconciled.map((item) => item.workspace_id), ["ws_1", "ws_2", "ws_3"]);
+  assert.equal(reconciled[0].title, "new first");
+  assert.equal(reconciled[1], current[1]);
+  assert.notEqual(reconciled[2], current[2]);
+  assert.equal(reconciled[2].status, "completed");
 });
 
 test("collectOverviewPages follows next_cursor across pages", async () => {

@@ -21,7 +21,8 @@ import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
 import {
   appendUniqueOverviewItems,
   overviewListPath,
-  reconcileOverviewFirstPage,
+  reconcileOverviewRetainedItems,
+  retainedOverviewIdBatches,
   usableContinuationCursor,
 } from "@/lib/overview-list";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
@@ -606,11 +607,54 @@ export function ConsoleDashboard() {
       ) {
         return;
       }
+      const pageItems = normalizeOverview(page.items);
+      const sameQuery = capturedPagination?.query === capturedQuery;
+      const refreshedRetainedItems: WorkspaceOverview[] = [];
+      const missingRetainedIds: string[] = [];
+      if (!continuation && sameQuery && page.has_more) {
+        const retainedIdBatches = retainedOverviewIdBatches(
+          overviewItemsRef.current,
+          pageItems,
+        );
+        for (const workspaceIds of retainedIdBatches) {
+          const result = await apiPost<OverviewBatchResponse>(
+            awfPath("workspaces/overview/batch"),
+            { workspace_ids: workspaceIds },
+          );
+          if (!result.ok && (result.status === 401 || result.status === 403)) {
+            pageError = result.message;
+            pageAuthDenied = true;
+            break;
+          }
+          if (!result.ok) {
+            pageError = result.message;
+            pageOutage = true;
+            break;
+          }
+          if (
+            epoch !== authorizedFeedEpochRef.current ||
+            consoleAuthDeniedRef.current ||
+            generation !== overviewRequestGenerationRef.current ||
+            overviewQueryRef.current !== capturedQuery
+          ) {
+            return;
+          }
+          refreshedRetainedItems.push(...normalizeOverview(result.data.items));
+          missingRetainedIds.push(...result.data.missing_workspace_ids);
+        }
+        if (pageAuthDenied) {
+          applyOverviewAuthDenial(generation, pageError ?? "");
+          return;
+        }
+        if (pageOutage) {
+          applyOverviewOutage(generation, pageError ?? "");
+          return;
+        }
+      }
       appliedOverviewGenerationRef.current = Math.max(
         appliedOverviewGenerationRef.current,
         generation,
       );
-      const pageItems = normalizeOverview(page.items);
       if (continuation) {
         const fetchedCursors = new Set(capturedPagination?.fetchedCursors ?? []);
         if (usableContinuationCursor(requestedCursor)) {
@@ -641,7 +685,6 @@ export function ConsoleDashboard() {
               : null,
         );
       } else {
-        const sameQuery = capturedPagination?.query === capturedQuery;
         const firstCursor = usableContinuationCursor(page.next_cursor) ? page.next_cursor : null;
         const pagination = !page.has_more
           ? {
@@ -662,7 +705,12 @@ export function ConsoleDashboard() {
                 };
         overviewPaginationRef.current = pagination;
         const refreshed = sameQuery && page.has_more
-          ? reconcileOverviewFirstPage(overviewItemsRef.current, pageItems)
+          ? reconcileOverviewRetainedItems(
+              overviewItemsRef.current,
+              pageItems,
+              refreshedRetainedItems,
+              missingRetainedIds,
+            )
           : appendUniqueOverviewItems([], pageItems);
         overviewItemsRef.current = refreshed;
         setOverview(refreshed);

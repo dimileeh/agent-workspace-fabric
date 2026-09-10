@@ -4,6 +4,8 @@ import { awfPath } from "./console-urls.ts";
 // Overview list is cursor-paginated (API max 500). Request a small page so the
 // dashboard can paint promptly and fetch later pages only as the operator asks.
 export const OVERVIEW_LIST_PAGE_SIZE = 100;
+// POST /workspaces/overview/batch accepts at most 200 unique IDs.
+export const OVERVIEW_REFRESH_BATCH_SIZE = 200;
 // Defensive ceiling so a misbehaving cursor cannot loop forever;
 // 100 * 50 covers 5k workspaces, beyond typical local/Core fleets.
 export const OVERVIEW_LIST_MAX_PAGES = 50;
@@ -104,6 +106,53 @@ export function reconcileOverviewFirstPage(
     }
   }
   return reconciled;
+}
+
+/** Split already-loaded rows outside the refreshed first page into bounded ID batches. */
+export function retainedOverviewIdBatches(
+  current: WorkspaceOverview[],
+  pageItems: WorkspaceOverview[],
+): string[][] {
+  const seen = new Set(pageItems.map((item) => item.workspace_id));
+  const retainedIds: string[] = [];
+  for (const item of current) {
+    if (seen.has(item.workspace_id)) {
+      continue;
+    }
+    seen.add(item.workspace_id);
+    retainedIds.push(item.workspace_id);
+  }
+  const batches: string[][] = [];
+  for (let index = 0; index < retainedIds.length; index += OVERVIEW_REFRESH_BATCH_SIZE) {
+    batches.push(retainedIds.slice(index, index + OVERVIEW_REFRESH_BATCH_SIZE));
+  }
+  return batches;
+}
+
+/**
+ * Install fresh projections for the retained history without moving its rows.
+ * Missing IDs are removed; byte-equivalent rows retain object identity so
+ * memoized cards do not rerender on every poll.
+ */
+export function reconcileOverviewRetainedItems(
+  current: WorkspaceOverview[],
+  pageItems: WorkspaceOverview[],
+  refreshedItems: WorkspaceOverview[],
+  missingWorkspaceIds: string[],
+): WorkspaceOverview[] {
+  const firstPageIds = new Set(pageItems.map((item) => item.workspace_id));
+  const refreshedById = new Map(refreshedItems.map((item) => [item.workspace_id, item]));
+  const missingIds = new Set(missingWorkspaceIds);
+  return reconcileOverviewFirstPage(current, pageItems).flatMap((item) => {
+    if (firstPageIds.has(item.workspace_id)) {
+      return [item];
+    }
+    const refreshed = refreshedById.get(item.workspace_id);
+    if (refreshed) {
+      return JSON.stringify(item) === JSON.stringify(refreshed) ? [item] : [refreshed];
+    }
+    return missingIds.has(item.workspace_id) ? [] : [item];
+  });
 }
 
 // Accumulate overview rows across pages until exhaustion or the page ceiling.
