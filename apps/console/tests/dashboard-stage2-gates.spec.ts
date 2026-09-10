@@ -294,7 +294,7 @@ test("retry authorization denial disables mutating controls while renegotiation 
     stallCapabilities = true;
     await retry.click();
 
-    await expect(page.getByText(/mutation permission revoked/)).toBeVisible();
+    await expect(page.getByText("mutation permission revoked", { exact: true })).toBeVisible();
     await expect(retry).toBeDisabled();
     await expect(remonitor).toBeDisabled();
   } finally {

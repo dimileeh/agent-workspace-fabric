@@ -999,6 +999,14 @@ export function WorkspaceList({
     }
   }, [hasMore, loadingMore, onLoadMore]);
 
+  const loadMoreFromButton = useCallback(() => {
+    // Playwright and real browsers may scroll the footer into view before the
+    // click dispatches. Mark that near-bottom transition as handled so one
+    // explicit click cannot race the scroll handler into loading two pages.
+    nearBottomTriggeredRef.current = true;
+    onLoadMore();
+  }, [onLoadMore]);
+
   const historyFooter = (
     <div
       className="grid gap-2 border-t border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600"
@@ -1015,7 +1023,7 @@ export function WorkspaceList({
         <button
           type="button"
           disabled={loadingMore}
-          onClick={onLoadMore}
+          onClick={loadMoreFromButton}
           className="inline-flex h-8 w-full items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:opacity-50"
         >
           {loadingMore

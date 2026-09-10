@@ -333,7 +333,7 @@ test("routine refresh updates and removes retained workspaces outside page one",
   const retainedCard = page.getByTestId("workspace-card-ws_perf_0101");
   await expect(retainedCard.getByText("running", { exact: true })).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0102")).toBeVisible();
-  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3} loaded`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
 
   refreshRetained = true;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
@@ -343,7 +343,7 @@ test("routine refresh updates and removes retained workspaces outside page one",
   expect(batchRequests[0]).toContain("ws_perf_0102");
   expect(batchRequests[0]).not.toContain("ws_perf_0001");
   expect(batchRequests[0].length).toBeLessThanOrEqual(200);
-  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3 - 1} loaded`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`101–${PAGE_SIZE * 2 - 1} of ${PAGE_SIZE * 2 - 1} loaded`, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Previous workspace results" }).click();
   await expect(retainedCard.getByText("completed", { exact: true })).toBeVisible();
 });

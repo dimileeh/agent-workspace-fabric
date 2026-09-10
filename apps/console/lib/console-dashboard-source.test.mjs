@@ -42,6 +42,10 @@ const dashboardSource = {
     new URL("../hooks/use-console-fleet-feeds.ts", import.meta.url),
     "utf8",
   ),
+  overviewLoader: readFileSync(
+    new URL("../hooks/use-console-overview-loader.ts", import.meta.url),
+    "utf8",
+  ),
   format: readFileSync(new URL("./format.ts", import.meta.url), "utf8"),
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
@@ -77,7 +81,7 @@ const dashboardSource = {
 // and detail-loader searches working without weakening the behavioral checks.
 // Fullscreen logs, detail-visit reset, and optional-feed release are searched
 // on their own keys — concatenating them would hide moved slice boundaries.
-dashboardSource.dashboard = `${dashboardSource.dashboard}\n${dashboardSource.capabilities}`;
+dashboardSource.dashboard = `${dashboardSource.dashboard}\n${dashboardSource.overviewLoader}\n${dashboardSource.capabilities}`;
 dashboardSource.detailLoader = `${dashboardSource.detailLoader}\n${dashboardSource.feedSettlement}`;
 
 test("task details modal does not render the legacy Effort fact", () => {
@@ -542,7 +546,7 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\([\s\S]*?overviewQueryRef\.current;[\s\S]*?\}, \[overviewQueryRef, selectedIdRef, setSelectedId\]\);/,
+    /const loadOverview = useCallback\([\s\S]*?overviewQueryRef\.current;[\s\S]*?\}, \[[\s\S]*?overviewQueryRef,[\s\S]*?selectedIdRef,[\s\S]*?setSelectedId,[\s\S]*?\]\);/,
     "Expected loadOverview deps to exclude status/agent/repo filters",
   );
   assert.doesNotMatch(
@@ -599,8 +603,8 @@ test("loadOverview refreshes one rotating retained-ID batch and fetches one cont
     /const loadOverview = useCallback\([\s\S]*?setError\(\s*collected\.truncated/,
     "Expected loadOverview not to write truncation into the shared error state wiped by loadWorkspace",
   );
-  assert.match(dashboard, /apiPost<[\s\S]*?overview\/batch[\s\S]*?workspace_ids: \[workspaceId\]/,
-    "Expected an unloaded URL selection to use bounded batch overview lookup rather than history collection");
+  assert.match(dashboard, /apiPostWithDeadline<[\s\S]*?overview\/batch[\s\S]*?workspace_ids: \[workspaceId\]/,
+    "Expected an unloaded URL selection to use a deadline-bounded batch lookup rather than history collection");
 });
 
 test("workspace cards are windowed and memoized away from inspector-only renders", () => {
@@ -1377,10 +1381,7 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
     "Expected overview auth denial to clear overview and dependent surfaces",
   );
   const loadOverviewStart = dashboard.indexOf("const loadOverview = useCallback");
-  const loadOverviewEnd = dashboard.indexOf(
-    "}, [overviewQueryRef, selectedIdRef, setSelectedId]);",
-    loadOverviewStart,
-  );
+  const loadOverviewEnd = dashboard.indexOf("\n  return loadOverview;", loadOverviewStart);
   assert.ok(loadOverviewEnd > loadOverviewStart, "Expected loadOverview callback end");
   assert.doesNotMatch(
     dashboard.slice(loadOverviewStart, loadOverviewEnd),

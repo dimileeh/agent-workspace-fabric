@@ -5654,10 +5654,11 @@ test("fullscreen logs preserve listing outage across a successful tail", async (
 });
 
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gOqTl: a later /stream
-// handshake must not drop a listing network/5xx that was stored while the
-// stream-auth latch owned the banner. Tail recovery already restores that
-// outage; probe recovery has to do the same or last-good streams look current.
-test("fullscreen logs restore listing outage after stream probe recovery", async ({ page }) => {
+// handshake must not drop the newest listing outage stored while the stream-
+// auth latch owned the banner. A hanging listing now settles at apiGet's
+// deadline before the delayed stream probe, so probe recovery must surface
+// that newer timeout or last-good streams look current.
+test("fullscreen logs restore latest listing outage after stream probe recovery", async ({ page }) => {
   test.setTimeout(60_000);
   let streamPhase: "deny" | "probe" = "deny";
   let listingMode: "ok" | "outage" | "hang" = "ok";
@@ -5670,6 +5671,7 @@ test("fullscreen logs restore listing outage after stream probe recovery", async
   const retainedMarker = "retained-tail-before-stream-denial";
   const denialMessage = "Workspace stream authorization denied.";
   const outageMessage = "log listing outage during stream probe";
+  const deadlineOutageMessage = /Console API request timed out after \d+ms/;
 
   await page.route("**/api/awf/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -5812,7 +5814,8 @@ test("fullscreen logs restore listing outage after stream probe recovery", async
   await expect.poll(() => hangingListings.length, { timeout: 12_000 }).toBeGreaterThan(0);
   const opensAtOutage = streamOpens;
   await expect.poll(() => streamOpens, { timeout: 30_000 }).toBeGreaterThan(opensAtOutage);
-  await expect(modal.getByText(outageMessage)).toBeVisible({ timeout: 12_000 });
+  await expect(modal.getByText(deadlineOutageMessage)).toBeVisible({ timeout: 12_000 });
+  await expect(modal.getByText(outageMessage)).toHaveCount(0);
   await expect(modal.getByText(denialMessage)).toHaveCount(0);
   await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
   await expect(output).toContainText("No log data loaded.");
@@ -5823,6 +5826,7 @@ test("fullscreen logs restore listing outage after stream probe recovery", async
   }
   await expect.poll(() => listingRecoveries, { timeout: 12_000 }).toBeGreaterThan(0);
   await expect(modal.getByText(outageMessage)).toHaveCount(0);
+  await expect(modal.getByText(deadlineOutageMessage)).toHaveCount(0);
   await expect(modal.getByRole("checkbox", { name: "active.stdout" })).toBeVisible();
 });
 

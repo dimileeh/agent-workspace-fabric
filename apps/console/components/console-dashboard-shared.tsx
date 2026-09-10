@@ -619,6 +619,21 @@ export async function apiPost<T>(
   }
 }
 
+export async function apiPostWithDeadline<T>(
+  path: string,
+  body?: unknown,
+): Promise<ApiEnvelope<T>> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => {
+    controller.abort(new Error(`Console API request timed out after ${pollRequestDeadlineMs}ms`));
+  }, pollRequestDeadlineMs);
+  try {
+    return await apiPost<T>(path, body, { signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export function operatorActionPath(action: WorkspaceOperatorAction, workspaceId: string): string {
   return operatorPath(`workspaces/${encodeURIComponent(workspaceId)}/${action}`);
 }

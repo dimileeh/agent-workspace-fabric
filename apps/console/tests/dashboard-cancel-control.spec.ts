@@ -182,7 +182,7 @@ test.describe("Operator cancel control", () => {
       stallCapabilities = true;
       await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
 
-      await expect(page.getByText(/operator permission revoked/)).toBeVisible();
+      await expect(page.getByText("operator permission revoked", { exact: true })).toBeVisible();
       await expect(cancelButton).toBeDisabled();
     } finally {
       releaseRenegotiation();
