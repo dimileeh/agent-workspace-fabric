@@ -218,6 +218,80 @@ async def test_pre_push_validation_fix_pass_returns_post_agent_mirror_repair_fai
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("timeout_reason_code", ("AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"))
+async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_does_not_roll_back(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_reason_code: str,
+) -> None:
+    """A cleanup error masking a watchdog timeout keeps the timed-out run's work."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+
+    fix_start_head = "2" * 40
+    workspace_id, runner, cmd, _adapter = await _make_fix_pass_runner(factory, tmp_path)
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf_timeout_cleanup",
+        source="agent",
+        label="monitor-pre-push-validation-fix",
+        message="tagged process still running",
+    )
+    cleanup_error.agent_reason_code = timeout_reason_code
+    repair_calls = 0
+    rollback_calls: list[str] = []
+
+    async def _run_agent_with_recovery(**kwargs: object) -> None:
+        assert kwargs["timeout_rerun_requires_preservation"] is True
+        raise cleanup_error
+
+    async def _repair_mirror_hooks(**_kwargs: object) -> str | None:
+        nonlocal repair_calls
+        repair_calls += 1
+        return _MIRROR_HOOKS_PATH_POISONED_REASON if repair_calls == 2 else None
+
+    async def _rollback_failed_fix_pass(*_args: object, **kwargs: object) -> None:
+        rollback_calls.append(str(kwargs["reason"]))
+
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _run_agent_with_recovery,
+    )
+    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _worktree_path: tmp_path)
+    monkeypatch.setattr(
+        fix_pass, "_repair_pre_push_validation_fix_mirror_hooks", _repair_mirror_hooks
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_failed_fix_pass,
+    )
+
+    committed, failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=_failed_validation_result(
+            pre_push_validation,
+            tmp_path,
+            workspace_head_sha=fix_start_head,
+        ),
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert (committed, failure_reason) == (False, _MIRROR_HOOKS_PATH_POISONED_REASON)
+    assert rollback_calls == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("mirror_failure_reason", "rollback_failure_reason", "expected_failure_reason"),
     (

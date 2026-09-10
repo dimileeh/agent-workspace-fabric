@@ -39,6 +39,9 @@ from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
+from awf.runtime.pr_monitor_runner.agent_service_recovery_timeout_salvage import (
+    _masked_agent_timeout_reason_code,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
@@ -578,30 +581,37 @@ async def _run_pre_push_validation_fix_pass(
     ):
         raise
     except ComposeExecCleanupError as exc:
+        masked_timeout_reason_code = _masked_agent_timeout_reason_code(exc)
         _log.warning(
             "monitor.pre_push_validation_fix_cleanup_failed",
             workspace_id=workspace_id,
             pass_number=pass_number,
             reason_code=exc.reason_code,
+            agent_reason_code=masked_timeout_reason_code,
         )
-        rollback_failure_reason = await _rollback_failed_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            restore_ref=fix_start_head,
-            pass_number=pass_number,
-            reason="compose_cleanup_failed",
-        )
-        mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
-            workspace_id=workspace_id,
-            pass_number=pass_number,
-            mirror_path=mirror_path,
-        )
-        if mirror_repair_failure_reason is not None:
-            return False, mirror_repair_failure_reason
-        if rollback_failure_reason is not None:
-            return False, rollback_failure_reason
-        return False, None
+        if masked_timeout_reason_code is None:
+            rollback_failure_reason = await _rollback_failed_fix_pass(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                restore_ref=fix_start_head,
+                pass_number=pass_number,
+                reason="compose_cleanup_failed",
+            )
+            mirror_repair_failure_reason = await _repair_pre_push_validation_fix_mirror_hooks(
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                mirror_path=mirror_path,
+            )
+            if mirror_repair_failure_reason is not None:
+                return False, mirror_repair_failure_reason
+            if rollback_failure_reason is not None:
+                return False, rollback_failure_reason
+            return False, None
+        # Recovery refused an unsafe rerun so this timeout could reach us with
+        # its work intact. Continue exactly like the AgentRunError timeout path;
+        # the post-agent sink below captures its commits and edits without first
+        # resetting through them (PRRT_kwDOSJAM6s6hDEjX).
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_failed",
