@@ -440,6 +440,29 @@ test("stalled retained history does not block first-page publication or the next
   await releaseHistory();
 });
 
+test("stalled selected-workspace lookup releases the next overview poll", async ({ page }) => {
+  const firstPageRequests: number[] = [];
+  const batchRequests: string[][] = [];
+  await mockAwfConsoleApi(page);
+  const releaseSelectedLookups = await installLargeFleetOverview(page, {
+    onRequest: (cursor) => {
+      if (cursor === null) {
+        firstPageRequests.push(Date.now());
+      }
+    },
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+    shouldDelayBatch: () => true,
+  });
+
+  await page.goto("/?workspaceId=ws_perf_1301");
+  await expect.poll(() => batchRequests).toEqual([["ws_perf_1301"]]);
+  await expect
+    .poll(() => firstPageRequests.length, { timeout: 18_000 })
+    .toBeGreaterThan(1);
+
+  await releaseSelectedLookups();
+});
+
 test("failed retained history does not discard a successful first-page refresh", async ({
   page,
 }) => {

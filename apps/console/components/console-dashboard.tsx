@@ -78,6 +78,7 @@ apiPost,
 compareLogEntries,
 emptyDetail,
 pollMs,
+pollRequestDeadlineMs,
 toLogWorkspaceTarget,
 toggleStream,
 toggleWorkspaceSelection,
@@ -562,10 +563,23 @@ export function ConsoleDashboard() {
         return result.data;
       };
       const fetchSelectedOverview = async (workspaceId: string) => {
-        const result = await apiPost<OverviewBatchResponse>(
-          awfPath("workspaces/overview/batch"),
-          { workspace_ids: [workspaceId] },
-        );
+        const result = await (async () => {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => {
+            controller.abort(
+              new Error(`Console API request timed out after ${pollRequestDeadlineMs}ms`),
+            );
+          }, pollRequestDeadlineMs);
+          try {
+            return await apiPost<OverviewBatchResponse>(
+              awfPath("workspaces/overview/batch"),
+              { workspace_ids: [workspaceId] },
+              { signal: controller.signal },
+            );
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        })();
         if (!result.ok && (result.status === 401 || result.status === 403)) {
           applyOverviewAuthDenial(generation, result.message);
           return;
