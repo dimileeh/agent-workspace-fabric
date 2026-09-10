@@ -471,8 +471,8 @@ test("workspace detail feed outage keeps last-successful runtime and events", as
 
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMt: a network/5xx on
 // one detail feed must warn as soon as that request settles, even if a sibling
-// hangs. Promise.all never reaches firstFailure, and apiGet has no timeout, so
-// the last-successful snapshot would otherwise stay up without the outage.
+// hangs. Promise.all does not reach firstFailure until apiGet's deadline, so
+// the last-successful snapshot would otherwise stay up too long without the outage.
 for (const failedFeed of ["runtime", "events", "operations", "logs", "workspace"] as const) {
   test(`detail ${failedFeed} outage warns without waiting for a hanging sibling`, async ({
     page,
@@ -3410,7 +3410,7 @@ test("later runtime and operations 401 does not block a newer in-flight refresh"
 // operations 401/403 that already applied at settlement owns the inspector
 // banner. A sibling 5xx must not replace that authorization reason while
 // another request still hangs, and the later Promise.all merge must not
-// either — apiGet has no timeout, so the reason would otherwise never return.
+// either — waiting for apiGet's deadline would delay the reason's return.
 for (const deniedFeed of ["runtime", "operations"] as const) {
   test(`settled ${deniedFeed} auth denial is not replaced by a sibling detail outage`, async ({
     page,

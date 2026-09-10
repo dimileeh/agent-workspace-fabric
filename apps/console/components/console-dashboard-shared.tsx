@@ -47,6 +47,7 @@ const parsedPollMs = Number.parseInt(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS
 export const pollMs = Number.isFinite(parsedPollMs) && Number.isInteger(parsedPollMs) && parsedPollMs > 0
   ? Math.max(MIN_POLL_MS, parsedPollMs)
   : DEFAULT_POLL_MS;
+export const pollRequestDeadlineMs = pollMs * 2;
 // A /stream 401/403 must not reconnect on every detail or listing poll — that
 // thrash treated a still-denied route as recovered. Wait past a couple of
 // polls so a later probe can clear the route latch after a successful
@@ -574,8 +575,12 @@ export function formatPercent(value: number): string {
 }
 
 export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => {
+    controller.abort(new Error(`Console API request timed out after ${pollRequestDeadlineMs}ms`));
+  }, pollRequestDeadlineMs);
   try {
-    const response = await fetch(path, { cache: "no-store" });
+    const response = await fetch(path, { cache: "no-store", signal: controller.signal });
     return await parseApiResponse<T>(response);
   } catch (error) {
     return {
@@ -583,6 +588,8 @@ export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
       status: 0,
       message: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 

@@ -5171,8 +5171,8 @@ test(`fullscreen logs retry a static tail refresh failure on unchanged listing a
 // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gIJVF: a fullscreen
 // network/5xx tail failure must copy into the refresh warning as soon as that
 // read settles. Promise.all never reaches the batch copy while a sibling tail
-// hangs, and apiGet has no timeout, so the column would keep the last snapshot
-// with no stale/error warning.
+// hangs, so waiting for apiGet's deadline would keep the last snapshot in the
+// column too long with no stale/error warning.
 for (const outageStatus of [0, 503] as const) {
 test(`fullscreen logs surface a tail refresh failure without waiting for a hanging sibling (${outageStatus === 0 ? "network" : outageStatus})`, async ({
   page,

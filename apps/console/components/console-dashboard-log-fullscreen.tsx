@@ -460,9 +460,9 @@ export function WorkspaceLogColumn({
 
     const applyTailRefreshFailure = (failure: Extract<LogTailReadResult, { ok: false }>) => {
       // Network/5xx must warn as soon as this read settles. Copying failures
-      // only after Promise.all never runs while a sibling tail hangs, and
-      // apiGet has no timeout, so the column would keep the last snapshot
-      // with no stale/error warning. A newer reload merely starting is not
+      // only after Promise.all waits until a hanging sibling reaches apiGet's
+      // deadline, so the column would keep the last snapshot too long with no
+      // stale/error warning. A newer reload merely starting is not
       // recovery — discard this warning only when this stream itself has a
       // strictly newer successful snapshot, a newer failure already owns this
       // stream, or authorization/listing denial has cleared the column. A

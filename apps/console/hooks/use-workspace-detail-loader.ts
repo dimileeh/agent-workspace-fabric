@@ -94,14 +94,13 @@ type UseWorkspaceDetailLoaderArgs = {
  * in flight, hanging, or failing transiently is not.
  * Network/5xx failures are recorded the same way: the shared outage warning
  * is stamped when that request settles, without clearing the last-successful
- * snapshot. Promise.all never reaches firstFailure while any sibling hangs,
- * and apiGet has no timeout, so waiting would leave cached diagnostics up
- * indefinitely without the required warning.
+ * snapshot. Promise.all does not reach firstFailure until a hanging sibling
+ * reaches apiGet's deadline, so waiting would delay the required warning.
  * A base-detail denial also drops cached listing and tail text immediately;
  * a later sibling 200 must not write that log data back while the latch is
- * held. apiGet has no timeout, so waiting for every sibling would leave the
- * inspector EventSource and cached workspace or log data available after
- * authorization was revoked.
+ * held. Waiting for every sibling until apiGet's deadline would leave the
+ * inspector EventSource and cached workspace or log data available too long
+ * after authorization was revoked.
  * Snapshot frames must not write revoked workspace metadata back while that
  * latch is held.
  * A 401/403 on /workspaces/{id}/events latches event-feed denial and clears

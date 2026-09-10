@@ -823,8 +823,8 @@ test("loadWorkspace retains last-good diagnostics on transient feed failure; cle
 test("detail settlement handlers record transient feed outages without waiting for siblings", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gGgMt: a network/5xx
   // that settles while any sibling hangs must stamp the outage warning.
-  // Promise.all / firstFailure never runs until every request settles, and
-  // apiGet has no timeout.
+  // Promise.all / firstFailure does not run until every request settles, which
+  // can take until apiGet's deadline.
   const dashboard = dashboardSource.detailLoader;
   const helperStart = dashboard.indexOf("const applyDetailFeedTransientOutage = ");
   assert.ok(helperStart > 0, "Expected a settlement-time transient outage helper");
@@ -1666,6 +1666,40 @@ test("capability-gated feed polls chain after the previous invocation settles", 
       `Expected ${loader} to stay on the serialized gated poll`,
     );
   }
+});
+
+test("browser API GETs have a deadline so serialized polling can resume", () => {
+  // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hAval: both
+  // serialized polling hooks schedule their next tick in `finally`. A browser
+  // fetch that never settles therefore freezes its feed unless apiGet aborts
+  // every request after one shared, finite deadline.
+  const shared = dashboardSource.shared;
+  const apiGetStart = shared.indexOf("export async function apiGet");
+  const apiGetEnd = shared.indexOf("export async function apiPost", apiGetStart);
+  assert.ok(apiGetStart > 0, "Expected the browser apiGet helper");
+  assert.ok(apiGetEnd > apiGetStart, "Expected apiGet to end before apiPost");
+  const apiGet = shared.slice(apiGetStart, apiGetEnd);
+
+  assert.match(
+    shared,
+    /export const pollRequestDeadlineMs = pollMs \* 2;/,
+    "Expected one poll-derived request deadline for every serialized GET loader",
+  );
+  assert.match(
+    apiGet,
+    /const controller = new AbortController\(\);[\s\S]*?window\.setTimeout\([\s\S]*?controller\.abort\([\s\S]*?pollRequestDeadlineMs/,
+    "Expected apiGet to abort requests that outlive the polling deadline",
+  );
+  assert.match(
+    apiGet,
+    /fetch\(path, \{ cache: "no-store", signal: controller\.signal \}\)/,
+    "Expected browser GET fetches to use the deadline's abort signal",
+  );
+  assert.match(
+    apiGet,
+    /finally \{[\s\S]*?window\.clearTimeout\(timeout\);[\s\S]*?\}/,
+    "Expected apiGet to release its deadline timer after settlement",
+  );
 });
 
 test("periodic capability polls skip while a request is still in flight", () => {

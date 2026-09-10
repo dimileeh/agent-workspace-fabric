@@ -391,9 +391,9 @@ const outstandingOutageNewerThan = (settledGeneration: number) => {
   return false;
 };
 
-// Network/5xx must warn as soon as this request settles. firstFailure
-// only runs after Promise.all, and apiGet has no timeout, so a hanging
-// sibling would leave the last-successful snapshot looking current.
+// Network/5xx must warn as soon as this request settles. firstFailure only
+// runs after Promise.all, so a hanging sibling would leave the last-successful
+// snapshot looking current until apiGet's deadline.
 const applyDetailFeedTransientOutage = (
   feed: "workspace" | "runtime" | "events" | "operations" | "logs",
   result: ApiEnvelope<unknown>,
