@@ -3210,6 +3210,13 @@ test("workspace mutation requests have deadlines", () => {
   assert.ok(retryStart >= 0, "Expected retrySelectedWorkspace callback");
   assert.ok(operatorStart > retryStart, "Expected runWorkspaceOperatorAction callback");
 
+  const shared = dashboardSource.shared;
+  const deadlinePostStart = shared.indexOf("export async function apiPostWithDeadline");
+  const deadlinePostEnd = shared.indexOf("export function operatorActionPath", deadlinePostStart);
+  assert.ok(deadlinePostStart >= 0, "Expected the deadline-aware browser POST helper");
+  assert.ok(deadlinePostEnd > deadlinePostStart, "Expected the deadline POST helper boundary");
+  const deadlinePost = shared.slice(deadlinePostStart, deadlinePostEnd);
+
   assert.match(
     mutating.slice(retryStart, operatorStart),
     /await apiPostWithDeadline<WorkspaceRetryResponse>\(/,
@@ -3219,6 +3226,21 @@ test("workspace mutation requests have deadlines", () => {
     mutating.slice(operatorStart),
     /await apiPostWithDeadline<WorkspaceControlResponse \| Operation>\(/,
     "Expected operator-action requests to settle after the console API deadline",
+  );
+  assert.match(
+    deadlinePost,
+    /const controller = new AbortController\(\);[\s\S]*?window\.setTimeout\([\s\S]*?controller\.abort\([\s\S]*?pollRequestDeadlineMs/,
+    "Expected deadline-aware POSTs to abort after the shared finite request deadline",
+  );
+  assert.match(
+    deadlinePost,
+    /apiPost<T>\(path, body, \{ signal: controller\.signal \}\)/,
+    "Expected deadline-aware POSTs to pass the timed signal to the raw POST helper",
+  );
+  assert.match(
+    deadlinePost,
+    /finally \{[\s\S]*?window\.clearTimeout\(timeout\);[\s\S]*?\}/,
+    "Expected deadline-aware POSTs to release the timer after settlement",
   );
 });
 
