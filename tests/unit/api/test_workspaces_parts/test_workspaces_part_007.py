@@ -778,10 +778,10 @@ class TestWorkspaceDirectRoutes:
             event_order=1,
             occurred_at=base,
         )
-        # The same-tick IDs deliberately sort opposite to append order so the
-        # overview must use persisted event_order to select the latest state.
+        # The same-tick terminal IDs deliberately sort opposite to append order
+        # so both reverse scans must use persisted event_order.
         older_state_changed_event = SimpleNamespace(
-            id="evt_state_changed_z",
+            id="evt_state_changed_ready",
             workspace_id=workspace_id,
             event_type="workspace.state_changed",
             old_state=WorkspaceStatus.requested.value,
@@ -789,10 +789,10 @@ class TestWorkspaceDirectRoutes:
             reason_code="READY",
             payload=None,
             event_order=2,
-            occurred_at=base + timedelta(seconds=4),
+            occurred_at=base + timedelta(seconds=3),
         )
         state_changed_event = SimpleNamespace(
-            id="evt_state_changed_a",
+            id="evt_state_changed_running",
             workspace_id=workspace_id,
             event_type="workspace.state_changed",
             old_state=WorkspaceStatus.ready.value,
@@ -800,6 +800,28 @@ class TestWorkspaceDirectRoutes:
             reason_code="STARTED",
             payload=None,
             event_order=3,
+            occurred_at=base + timedelta(seconds=3),
+        )
+        older_terminal_event = SimpleNamespace(
+            id="evt_terminal_z",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.running.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="FAILED",
+            payload=None,
+            event_order=4,
+            occurred_at=base + timedelta(seconds=4),
+        )
+        latest_terminal_event = SimpleNamespace(
+            id="evt_terminal_a",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.failed.value,
+            new_state=WorkspaceStatus.cancelled.value,
+            reason_code="CANCELLED",
+            payload=None,
+            event_order=5,
             occurred_at=base + timedelta(seconds=4),
         )
         latest_event = SimpleNamespace(
@@ -810,11 +832,18 @@ class TestWorkspaceDirectRoutes:
             new_state=None,
             reason_code="TEST",
             payload={"source": "unit"},
-            event_order=4,
+            event_order=6,
             occurred_at=base + timedelta(seconds=5),
         )
         events = SinglePassEvents(
-            [latest_event, state_changed_event, created_event, older_state_changed_event]
+            [
+                latest_event,
+                latest_terminal_event,
+                state_changed_event,
+                created_event,
+                older_terminal_event,
+                older_state_changed_event,
+            ]
         )
         workspace = SimpleNamespace(
             id=workspace_id,
@@ -830,7 +859,7 @@ class TestWorkspaceDirectRoutes:
             task_policy={},
             events=events,
             operations=[],
-            status=WorkspaceStatus.running.value,
+            status=WorkspaceStatus.cancelled.value,
             pr_url="https://github.com/example/app/pull/7",
             pr_number=7,
             failure_reason=None,
@@ -862,7 +891,11 @@ class TestWorkspaceDirectRoutes:
         assert item.last_event.event_type == "workspace.test_marker"
         assert item.latest_state_change is not None
         assert item.latest_state_change.event_type == "workspace.state_changed"
-        assert item.latest_state_change.new_state == WorkspaceStatus.running.value
+        assert item.latest_state_change.new_state == WorkspaceStatus.cancelled.value
+        assert item.latest_workflow_terminal_state_change is not None
+        assert (
+            item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.cancelled.value
+        )
         assert events.iterations == 1
         assert item.pr_number == 7
         assert item.pr_url == "https://github.com/example/app/pull/7"
