@@ -1162,6 +1162,25 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
+      lifecycle: [
+        item.lifecycle[0],
+        {
+          ...item.lifecycle[1],
+          ended_at: "2026-09-06T12:05:00.000100Z",
+        },
+      ],
+      latest_workflow_terminal_state_change: stateChanged(
+        "running",
+        "failed",
+        "2026-09-06T12:05:00.000900Z",
+      ),
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a same-millisecond terminal event at a different instant must not corroborate the lifecycle finish",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
       status: "destroying",
       last_event: stateChanged("running", "destroying", "2026-09-06T12:05:00Z"),
     }),

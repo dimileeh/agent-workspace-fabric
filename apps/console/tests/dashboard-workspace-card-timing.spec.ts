@@ -267,7 +267,28 @@ test("destroying cards preserve terminal timing only after a workflow terminal b
       stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
     ],
   });
-  await mockAwfConsoleApi(page, { overviewItems: [postTerminal, directDestroy] });
+  const retriedDirectDestroy = overview("ws_destroying_retried_direct", "destroying", {
+    latest_workflow_terminal_state_change: stateChangedEvent(
+      "ws_destroying_retried_direct",
+      "running",
+      "failed",
+      "2026-09-06T12:08:00Z",
+    ),
+    latest_state_change: stateChangedEvent(
+      "ws_destroying_retried_direct",
+      "ready",
+      "destroying",
+      "2026-09-06T12:22:00Z",
+    ),
+    last_activity_at: "2026-09-06T12:22:00Z",
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
+    ],
+  });
+  await mockAwfConsoleApi(page, {
+    overviewItems: [postTerminal, directDestroy, retriedDirectDestroy],
+  });
   await page.route(
     `**/api/awf/workspaces/${postTerminal.workspace_id}`,
     async (route) => {
@@ -300,6 +321,13 @@ test("destroying cards preserve terminal timing only after a workflow terminal b
   await expect(directTiming).toContainText("Last activity");
   await expect(directTiming).not.toContainText("Finished");
   await expect(directTiming).not.toContainText("Duration");
+
+  const retriedDirectTiming = page.getByTestId(
+    `workspace-timing-${retriedDirectDestroy.workspace_id}`,
+  );
+  await expect(retriedDirectTiming).toContainText("Last activity");
+  await expect(retriedDirectTiming).not.toContainText("Finished");
+  await expect(retriedDirectTiming).not.toContainText("Duration");
 
   await terminalCard.click();
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();
