@@ -2637,8 +2637,8 @@ test("fullscreen tail 401/403 applies while a newer reload is in flight", () => 
   );
   assert.match(
     body,
-    /appliedTailGenerationRef\.current = Math\.max\(appliedTailGenerationRef\.current, generation\)/,
-    "Expected a landed tail 200 to record its generation as applied",
+    /const prior = appliedTailSuccessGenerationRef\.current\[streamId\] \?\? 0;\s*if \(generation >= prior\) \{\s*appliedTailSuccessGenerationRef\.current\[streamId\] = generation;/,
+    "Expected a landed tail 200 to advance only its stream's applied generation",
   );
   assert.match(
     body,
@@ -2701,8 +2701,8 @@ test("fullscreen loadSelectedTails retains last-successful tails on transient re
   const applyBody = body.slice(retainEnd);
   assert.match(
     applyBody,
-    /\.\.\.successes\.map\(\(result\) => result\.entry\)/,
-    "Expected only successful tail reads to replace fullscreen entries",
+    /const appliedSuccesses = successes\.filter\(\s*\(result\) =>\s*appliedTailSuccessGenerationRef\.current\[result\.entry\.streamId\] === generation,\s*\);[\s\S]*?\.\.\.appliedSuccesses\.map\(\(result\) => result\.entry\)/,
+    "Expected only per-stream-owned successful tail reads to replace fullscreen entries",
   );
   assert.doesNotMatch(
     applyBody,
@@ -2770,11 +2770,11 @@ test("fullscreen listing refresh retries denied tails when metadata is unchanged
 
 test("fullscreen tail outage compares recovery against the failed stream", () => {
   // Regression for PR #933 review thread PRRT_kwDOSJAM6s6gNmx0: a newer
-  // success for stream A advances the global applied generation. An older
-  // network/5xx for stream B must still warn unless B itself has a newer
-  // applied success — deselecting B, completing an A-only wave, then
-  // reselecting B while its new read hangs otherwise leaves B's snapshot
-  // visible with no outage warning.
+  // success for stream A must not suppress an older network/5xx for stream B,
+  // or discard an older success for B, unless B itself has a newer applied
+  // success. Deselecting B, completing an A-only wave, then reselecting B
+  // while its new read hangs otherwise leaves B's snapshot visible with no
+  // outage warning.
   const logs = dashboardSource.logFullscreen;
   const loadIdx = logs.indexOf("const loadSelectedTails = useCallback");
   assert.ok(loadIdx > 0, "Expected loadSelectedTails callback");
@@ -2799,20 +2799,25 @@ test("fullscreen tail outage compares recovery against the failed stream", () =>
     /generation < appliedTailGenerationRef\.current/,
     "Expected a sibling tail success not to discard another stream's network/5xx outage",
   );
-  const supersededStart = body.indexOf("generation !== tailRequestGenerationRef.current ||");
-  assert.ok(supersededStart > failureEnd, "Expected a superseded tail-wave gate after the per-read failure handler");
-  const supersededEnd = body.indexOf("const successes = results.filter", supersededStart);
-  assert.ok(supersededEnd > supersededStart, "Expected the superseded tail-wave gate to end before success application");
-  const supersededBody = body.slice(supersededStart, supersededEnd);
   assert.match(
-    supersededBody,
-    /generation < appliedTailGenerationRef\.current/,
-    "Expected a sibling success to still withhold this wave's 200s",
+    body,
+    /else if \(!result\.ok\) \{\s*applyTailRefreshFailure\(result\);\s*\}/,
+    "Expected each network/5xx completion to record its outage before the tail wave settles",
+  );
+  const filtersStart = body.indexOf("const successes = results.filter");
+  assert.ok(filtersStart > failureEnd, "Expected per-stream result filters after the per-read failure handler");
+  const filtersEnd = body.indexOf("for (const success of successes)", filtersStart);
+  assert.ok(filtersEnd > filtersStart, "Expected per-stream result filters before success application");
+  const filtersBody = body.slice(filtersStart, filtersEnd);
+  assert.match(
+    filtersBody,
+    /result\.ok &&\s*generation >= \(appliedTailSuccessGenerationRef\.current\[result\.entry\.streamId\] \?\? 0\)/,
+    "Expected each tail 200 to compare against its own stream's applied success",
   );
   assert.match(
-    supersededBody,
-    /if \(!result\.ok\) \{\s*applyTailRefreshFailure\(result\);\s*\}/,
-    "Expected a superseded tail completion to record unrecovered network/5xx before returning",
+    filtersBody,
+    /!result\.ok &&\s*generation >= \(appliedTailSuccessGenerationRef\.current\[result\.streamId\] \?\? 0\) &&\s*appliedTailFailureGenerationRef\.current\[result\.streamId\] === generation/,
+    "Expected each tail failure to compare against its own stream's applied success and failure generation",
   );
 });
 
