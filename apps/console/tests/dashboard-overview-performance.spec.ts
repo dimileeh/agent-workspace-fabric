@@ -814,12 +814,14 @@ test("virtualization keeps the viewport covered while crossing a row-window boun
 test("virtualization remeasures variable rows after filtering and viewport resize", async ({
   page,
 }) => {
+  const overviewRequests: Array<string | null> = [];
   const filteredSize = PAGE_SIZE * 2;
   const variableTitle =
     "Variable height workspace with a deliberately verbose title that wraps as the workspace rail narrows ".repeat(2);
   await page.setViewportSize({ width: 1_000, height: 720 });
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
     resolvePageItem: (item) => {
       const index = Number.parseInt(item.workspace_id.slice(-4), 10);
       const includedByFilter = index <= PAGE_SIZE ||
@@ -839,13 +841,14 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
-  for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
-    // Keep this measurement test independent from near-bottom autoload. A
-    // Playwright locator click scrolls the moving footer into view and can
-    // trigger multiple continuation pages before the assertion observes it.
-    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
-    await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
+  for (const [index, loaded] of [PAGE_SIZE * 2, PAGE_SIZE * 3].entries()) {
+    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    await expect(page.getByTestId("workspace-history-scope").locator("span")).toHaveText(
+      `${loaded} loaded. More matching workspaces are available. Search and client-side filters cover loaded workspaces only.`,
+    );
+    await expect.poll(() => overviewRequests).toEqual(
+      [null, ...Array.from({ length: index + 1 }, (_, offset) => String((offset + 1) * PAGE_SIZE))],
+    );
   }
 
   await page.getByRole("button", { name: "Filters" }).click();
@@ -1592,9 +1595,8 @@ test("settled scroll loading leaves the Load more fallback actionable", async ({
   await page.getByRole("button", { name: "Next workspace results" }).click();
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
   const loadMore = page.getByRole("button", { name: "Load more workspaces" });
-  await loadMore.evaluate(
-    (button: HTMLButtonElement) => button.click(),
-  );
+  await loadMore.focus();
+  await loadMore.press("Enter");
 
   await expect.poll(() => overviewRequests).toEqual([null, "100", "101"]);
 });
