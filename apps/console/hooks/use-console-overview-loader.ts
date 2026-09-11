@@ -44,6 +44,7 @@ type OverviewQuery = {
 
 type OverviewPagination = {
   query: unknown;
+  firstCursor: string | null;
   nextCursor: string | null;
   complete: boolean;
   fetchedCursors: Set<string>;
@@ -585,6 +586,7 @@ export function useConsoleOverviewLoader({
           (nextCursor === requestedCursor || fetchedCursors.has(nextCursor));
         overviewPaginationRef.current = {
           query: capturedQuery,
+          firstCursor: capturedPagination?.firstCursor ?? null,
           nextCursor: page.has_more && !repeatedCursor ? nextCursor : null,
           complete: !page.has_more,
           fetchedCursors,
@@ -611,24 +613,30 @@ export function useConsoleOverviewLoader({
           (item) => retainedWorkspaceIds.has(item.workspace_id),
         );
         // A status transition can add an unseen matching row ahead of a retained
-        // cursor, so filtered refreshes must reopen from the first-page boundary.
+        // cursor. Reopen filtered history when that boundary changes, but keep
+        // the active continuation progress across routine polls of the same page.
+        const retainedPagination =
+          refreshedPageOverlapsRetained &&
+          capturedPagination !== null &&
+          usableContinuationCursor(capturedPagination.nextCursor) &&
+          (filters.status === undefined || capturedPagination.firstCursor === firstCursor)
+            ? capturedPagination
+            : null;
         const pagination = !page.has_more
           ? {
               query: capturedQuery,
+              firstCursor: null,
               nextCursor: null,
               complete: true,
               fetchedCursors: new Set<string>(),
             }
-          : filters.status === undefined &&
-              refreshedPageOverlapsRetained &&
-              usableContinuationCursor(capturedPagination?.nextCursor)
-              ? capturedPagination
-              : {
-                  query: capturedQuery,
-                  nextCursor: firstCursor,
-                  complete: false,
-                  fetchedCursors: new Set<string>(),
-                };
+          : retainedPagination ?? {
+              query: capturedQuery,
+              firstCursor,
+              nextCursor: firstCursor,
+              complete: false,
+              fetchedCursors: new Set<string>(),
+            };
         overviewPaginationRef.current = pagination;
         const refreshed = sameQuery && page.has_more
           ? reconcileOverviewRetainedItems(

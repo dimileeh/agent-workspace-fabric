@@ -480,6 +480,65 @@ test("filtered refresh reopens partial history from the first-page cursor", asyn
   expect(completedRequests).not.toContain("stale-completed-page-3");
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hU_13: routine
+// first-page polls must not move a filtered continuation back to page 2.
+test("filtered routine poll preserves pagination progress", async ({ page }) => {
+  const completedRequests: Array<string | null> = [];
+  const completedItems = (start: number, end: number) =>
+    Array.from({ length: end - start + 1 }, (_, index) => ({
+      ...workspaceOverview(start + index),
+      status: "completed",
+    }));
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolveBatchItem: (item) => ({ ...item, status: "completed" }),
+    resolvePage: (cursor, status) => {
+      if (status !== "completed") {
+        return null;
+      }
+      completedRequests.push(cursor);
+      if (cursor === "completed-page-2") {
+        return {
+          items: completedItems(PAGE_SIZE + 1, PAGE_SIZE * 2),
+          has_more: true,
+          next_cursor: "completed-page-3",
+        };
+      }
+      if (cursor === "completed-page-3") {
+        return {
+          items: completedItems(PAGE_SIZE * 2 + 1, PAGE_SIZE * 2 + 1),
+          has_more: false,
+          next_cursor: null,
+        };
+      }
+      return {
+        items: completedItems(1, PAGE_SIZE),
+        has_more: true,
+        next_cursor: "completed-page-2",
+      };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Filters" }).click();
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: /Status all/ }).click();
+  await statusGroup.getByLabel("completed").check();
+  await expect.poll(() => completedRequests).toContain(null);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => completedRequests).toContain("completed-page-2");
+
+  const pageTwoRequest = completedRequests.indexOf("completed-page-2");
+  await expect.poll(
+    () => completedRequests.slice(pageTwoRequest + 1),
+    { timeout: 7_000 },
+  ).toContain(null);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+
+  await expect.poll(() => completedRequests).toContain("completed-page-3");
+});
+
 // Regression for PR #958 operator acceptance: appended history must extend the
 // virtual scroll range instead of requiring the explicit paging controls.
 test("scroll traverses bounded history windows in both directions", async ({ page }) => {

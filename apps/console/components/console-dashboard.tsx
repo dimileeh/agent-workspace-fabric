@@ -73,6 +73,7 @@ toggleWorkspaceSelection,
 
 type OverviewPagination = {
   query: unknown;
+  firstCursor: string | null;
   nextCursor: string | null;
   complete: boolean;
   fetchedCursors: Set<string>;
