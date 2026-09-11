@@ -838,18 +838,18 @@ const WorkspaceCard = memo(function WorkspaceCard({
                     </span>
                     <div
                       className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500"
-                      data-testid={`workspace-card-timing-${item.workspace_id}`}
+                      data-testid={`workspace-timing-${item.workspace_id}`}
                     >
                       <span>Created {formatDateTime(item.created_at)}</span>
                       {terminal ? (
                         <>
-                          <span data-testid={`workspace-card-finished-${item.workspace_id}`}>
+                          <span data-testid={`workspace-finished-${item.workspace_id}`}>
                             Finished{" "}
                             {terminalTiming?.finishedAt
                               ? formatDateTime(terminalTiming.finishedAt)
                               : "not recorded"}
                           </span>
-                          <span data-testid={`workspace-card-duration-${item.workspace_id}`}>
+                          <span data-testid={`workspace-duration-${item.workspace_id}`}>
                             Duration{" "}
                             {recordedDurationLabel(terminalTiming?.durationSeconds) ?? "not recorded"}
                           </span>

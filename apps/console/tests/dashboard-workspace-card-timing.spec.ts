@@ -107,7 +107,7 @@ for (const surface of surfaces) {
 
     for (const item of [running, monitoring]) {
       const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
-      const timing = card.getByTestId(`workspace-card-timing-${item.workspace_id}`);
+      const timing = card.getByTestId(`workspace-timing-${item.workspace_id}`);
       await expect(timing).toContainText("Created");
       await expect(timing).toContainText("Last activity");
       await expect(timing).not.toContainText("Updated");
@@ -148,16 +148,16 @@ test("hosted terminal cards use workflow finish and recorded duration for every 
 
   for (const [index, item] of terminals.entries()) {
     const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
-    const timing = card.getByTestId(`workspace-card-timing-${item.workspace_id}`);
+    const timing = card.getByTestId(`workspace-timing-${item.workspace_id}`);
     await expect(timing).toContainText("Created");
     await expect(timing).toContainText("Finished");
     await expect(timing).toContainText("Duration");
     await expect(timing).not.toContainText("Last activity");
     await expect(timing).not.toContainText("Updated");
-    await expect(card.getByTestId(`workspace-card-finished-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-finished-${item.workspace_id}`)).toContainText(
       formatDateTime(item.workflow_finished_at),
     );
-    await expect(card.getByTestId(`workspace-card-duration-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-duration-${item.workspace_id}`)).toContainText(
       `${20 + index}m 0s`,
     );
   }
@@ -199,10 +199,10 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
     [destroyed, "2026-09-06T12:09:00Z", "9m 0s"],
   ] as const) {
     const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
-    await expect(card.getByTestId(`workspace-card-finished-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-finished-${item.workspace_id}`)).toContainText(
       formatDateTime(finished),
     );
-    await expect(card.getByTestId(`workspace-card-duration-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-duration-${item.workspace_id}`)).toContainText(
       duration,
     );
   }
@@ -222,10 +222,10 @@ test("local terminal task details use the card lifecycle timing", async ({ page 
   await waitForConsoleReady(page);
 
   const card = page.getByTestId(`workspace-card-${completed.workspace_id}`);
-  await expect(card.getByTestId(`workspace-card-finished-${completed.workspace_id}`)).toContainText(
+  await expect(card.getByTestId(`workspace-finished-${completed.workspace_id}`)).toContainText(
     formatDateTime("2026-09-06T12:10:00Z"),
   );
-  await expect(card.getByTestId(`workspace-card-duration-${completed.workspace_id}`)).toContainText(
+  await expect(card.getByTestId(`workspace-duration-${completed.workspace_id}`)).toContainText(
     "10m 0s",
   );
 
@@ -321,29 +321,29 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
 
   for (const item of [missing, invalid, completedStageWithoutStart, retryAmbiguous]) {
     const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
-    await expect(card.getByTestId(`workspace-card-finished-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-finished-${item.workspace_id}`)).toContainText(
       "not recorded",
     );
-    await expect(card.getByTestId(`workspace-card-duration-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-duration-${item.workspace_id}`)).toContainText(
       "not recorded",
     );
   }
 
   for (const item of [missingDuration, mismatchedDuration, lifecycleGap]) {
     const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
-    await expect(card.getByTestId(`workspace-card-finished-${item.workspace_id}`)).not.toContainText(
+    await expect(card.getByTestId(`workspace-finished-${item.workspace_id}`)).not.toContainText(
       "not recorded",
     );
-    await expect(card.getByTestId(`workspace-card-duration-${item.workspace_id}`)).toContainText(
+    await expect(card.getByTestId(`workspace-duration-${item.workspace_id}`)).toContainText(
       "not recorded",
     );
   }
 
   const zeroCard = page.getByTestId("workspace-card-ws_timing_zero");
-  await expect(zeroCard.getByTestId("workspace-card-finished-ws_timing_zero")).not.toContainText(
+  await expect(zeroCard.getByTestId("workspace-finished-ws_timing_zero")).not.toContainText(
     "not recorded",
   );
-  await expect(zeroCard.getByTestId("workspace-card-duration-ws_timing_zero")).toContainText(
+  await expect(zeroCard.getByTestId("workspace-duration-ws_timing_zero")).toContainText(
     "0s",
   );
 });
