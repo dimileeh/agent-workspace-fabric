@@ -337,17 +337,25 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       item.latest_state_change ??
       item.last_event;
     const terminalEventMs = recordedMilliseconds(terminalEvent?.occurred_at);
+    const cleanupFailureConfirmsCancelledBoundary =
+      item.status === "failed" &&
+      terminalEvent?.new_state === "cancelled" &&
+      item.latest_state_change?.event_type === "workspace.state_changed" &&
+      item.latest_state_change.old_state === "destroying" &&
+      item.latest_state_change.new_state === "failed";
     const eventMatchesTerminalStatus =
       terminalEvent?.new_state === item.status ||
       (item.status === "destroyed" &&
         (terminalEvent?.new_state === "failed" ||
-          terminalEvent?.new_state === "cancelled"));
+          terminalEvent?.new_state === "cancelled")) ||
+      cleanupFailureConfirmsCancelledBoundary;
     // Pauses such as blocked/recovering are absent from lifecycle summaries.
     // For terminal paths without a completed stage, only trust that boundary
     // when a retained workflow state-change corroborates the actual terminal
-    // transition. A destroyed workspace may retain the failed/cancelled
-    // boundary that preceded its later cleanup transitions. `last_event`
-    // remains a compatibility fallback for older overview payloads.
+    // transition. Cleanup may retain an earlier failed/cancelled boundary
+    // after successful destruction, or after cancellation cleanup itself
+    // fails. `last_event` remains a compatibility fallback for older overview
+    // payloads.
     if (
       terminalEvent?.event_type !== "workspace.state_changed" ||
       terminalEvent.old_state !== latestEntered.stage.stage ||
