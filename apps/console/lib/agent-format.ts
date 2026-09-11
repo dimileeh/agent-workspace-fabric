@@ -353,7 +353,10 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
 
   const explicitFinishedMs = recordedMilliseconds(resolvedFinishedAt);
   if (resolvedFinishedAt != null && explicitFinishedMs == null) {
-    return { finishedAt: null, durationSeconds: null };
+    return {
+      finishedAt: null,
+      durationSeconds: recordedDurationSeconds(item.duration_seconds),
+    };
   }
 
   const lifecycleTiming = lifecycleWorkflowTiming(item);

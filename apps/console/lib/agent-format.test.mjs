@@ -460,6 +460,22 @@ test("resolveWorkflowTiming preserves explicit duration without a terminal finis
     finishedAt: null,
     durationSeconds: null,
   });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      workflow_finished_at: "not-a-timestamp",
+      duration_seconds: 125,
+    }),
+    { finishedAt: null, durationSeconds: 125 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      workflow_finished_at: "not-a-timestamp",
+      duration_seconds: -1,
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
 });
 
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
