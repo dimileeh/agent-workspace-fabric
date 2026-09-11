@@ -1069,6 +1069,8 @@ export function WorkspaceList({
       selectedId === null &&
       Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
     ) {
+      setPageStart(0);
+      setWindowStart(0);
       scrollWithoutLoading(0);
       return;
     }

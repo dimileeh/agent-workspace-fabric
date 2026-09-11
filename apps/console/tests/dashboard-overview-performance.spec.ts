@@ -304,6 +304,47 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByText("1 selected for logs", { exact: true })).toBeVisible();
 });
 
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6hp4wm: a list shrink
+// can clamp the DOM scroll position before the virtual page is repaired. The
+// repair must happen in the layout effect so an empty window is never painted.
+test("membership shrink repairs an at-top virtual window before paint", async ({ page }) => {
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+
+  await page.getByRole("button", { name: "Filters" }).click();
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => {
+    element.dataset.paintedEmptyWindow = "false";
+    new MutationObserver(() => {
+      if (!element.querySelector('[data-testid^="workspace-card-"]')) {
+        requestAnimationFrame(() => {
+          if (!element.querySelector('[data-testid^="workspace-card-"]')) {
+            element.dataset.paintedEmptyWindow = "true";
+          }
+        });
+      }
+    }).observe(element, { childList: true, subtree: true });
+  });
+
+  await page.getByPlaceholder("Search workspaces").fill("ws_perf_0001");
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+  await list.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  await expect(list).toHaveAttribute("data-painted-empty-window", "false");
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(1);
+});
+
 test("a newer user scroll supersedes a pending history restore", async ({ page }) => {
   const overviewRequests: Array<string | null> = [];
   await mockAwfConsoleApi(page);
