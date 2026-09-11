@@ -575,7 +575,7 @@ export function WorkspaceSummary({
         </div>
       }
     >
-      <div className="grid min-w-0 gap-4">
+      <div className="grid min-w-0 grid-cols-1 gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-lg font-semibold">{overview.title}</h2>
