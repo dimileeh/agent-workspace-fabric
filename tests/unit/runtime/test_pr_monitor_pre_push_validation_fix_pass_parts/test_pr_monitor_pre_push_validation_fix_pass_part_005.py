@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -324,6 +325,139 @@ async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_preserves_th
     assert len(commit_calls) == 1
     assert commit_calls[0]["operation_start_head"] == fix_start_head
     assert cleanup_calls == ([committed_head] if dirty_changes_committed else [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure_path",
+    (
+        "post_agent_mirror_repair",
+        "recovery_anchor_missing",
+        "filesystem_recovery_failed",
+        "recovered_delta_failed",
+        "recovered_protected_scope_blocked",
+    ),
+)
+async def test_pre_push_validation_fix_pass_early_failure_preserves_timeout_cleanup_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_path: str,
+) -> None:
+    """Post-agent preservation failures cannot mask unproven timeout cleanup."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+
+    fix_start_head = "6" * 40
+    recovered_head = "7" * 40
+    workspace_id, runner, cmd, _adapter = await _make_fix_pass_runner(factory, tmp_path)
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf_timeout_cleanup_early_failure",
+        source="agent",
+        label="monitor-pre-push-validation-fix",
+        message="tagged process still running",
+    )
+    cleanup_error.agent_reason_code = "AGENT_TIMEOUT"
+    repair_calls = 0
+
+    if failure_path == "recovered_delta_failed":
+        cmd.queue_result(returncode=1, stderr="could not inspect recovered delta")
+    elif failure_path == "recovered_protected_scope_blocked":
+        cmd.queue_result(returncode=0, stdout="M\0pyproject.toml\0")
+
+    async def _run_agent_with_recovery(**_kwargs: object) -> None:
+        raise cleanup_error
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return fix_start_head
+
+    async def _repair_mirror_hooks(**_kwargs: object) -> str | None:
+        nonlocal repair_calls
+        repair_calls += 1
+        if failure_path == "post_agent_mirror_repair" and repair_calls == 2:
+            return _MIRROR_HOOKS_PATH_POISONED_REASON
+        return None
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return False
+
+    async def _mirror_commit_object_exists(*_args: object, **_kwargs: object) -> bool:
+        return failure_path != "recovery_anchor_missing"
+
+    async def _open_merge_candidate_head_sha(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _recover_missing_head_object_from_filesystem(
+        *_args: object,
+        **_kwargs: object,
+    ) -> str | None:
+        if failure_path == "filesystem_recovery_failed":
+            return None
+        return recovered_head
+
+    async def _protected_scope_violations(*_args: object, **_kwargs: object) -> list[object]:
+        if failure_path == "recovered_protected_scope_blocked":
+            return [SimpleNamespace(path="pyproject.toml")]
+        raise AssertionError("protected-scope check should not run for this failure path")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        raise AssertionError("commit should not run after the selected preservation failure")
+
+    async def _rollback_failed_fix_pass(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("timeout preservation must not roll back timed-out work")
+
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _run_agent_with_recovery,
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _path: tmp_path)
+    monkeypatch.setattr(
+        fix_pass,
+        "_repair_pre_push_validation_fix_mirror_hooks",
+        _repair_mirror_hooks,
+    )
+    monkeypatch.setattr(fix_pass, "verify_head_object_exists", _verify_head_object_exists)
+    monkeypatch.setattr(fix_pass, "_mirror_commit_object_exists", _mirror_commit_object_exists)
+    monkeypatch.setattr(fix_pass, "_open_merge_candidate_head_sha", _open_merge_candidate_head_sha)
+    monkeypatch.setattr(
+        fix_pass,
+        "_recover_missing_head_object_from_filesystem",
+        _recover_missing_head_object_from_filesystem,
+    )
+    monkeypatch.setattr(
+        fix_pass,
+        "_protected_scope_violations_for_recovered_commit",
+        _protected_scope_violations,
+    )
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_rollback_failed_pre_push_validation_fix_pass",
+        _rollback_failed_fix_pass,
+    )
+
+    with pytest.raises(ComposeExecCleanupError) as raised:
+        await pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=_failed_validation_result(
+                pre_push_validation,
+                tmp_path,
+                workspace_head_sha=fix_start_head,
+            ),
+            pass_number=1,
+            total_passes=1,
+            validation_commands=("pytest -q",),
+        )
+
+    assert raised.value is cleanup_error
 
 
 @pytest.mark.unit

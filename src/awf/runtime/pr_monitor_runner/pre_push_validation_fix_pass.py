@@ -662,7 +662,7 @@ async def _run_pre_push_validation_fix_pass(
         mirror_path=mirror_path,
     )
     if mirror_repair_failure_reason is not None:
-        return False, mirror_repair_failure_reason
+        return _finish_fix_pass(False, mirror_repair_failure_reason)
 
     head_object_exists = await verify_head_object_exists(worktree_path)
     recovered_head_for_protected_scope: str | None = None
@@ -688,7 +688,7 @@ async def _run_pre_push_validation_fix_pass(
                 )
                 recovery_head = await _open_merge_candidate_head_sha(self, workspace_id)
         if recovery_head is None:
-            return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+            return _finish_fix_pass(False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON)
         recovered = await _recover_missing_head_object_from_filesystem(
             self,
             workspace_id=workspace_id,
@@ -698,7 +698,7 @@ async def _run_pre_push_validation_fix_pass(
             command_evidence=command_evidence,
         )
         if recovered is None:
-            return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+            return _finish_fix_pass(False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON)
         fix_pass_baseline_head = recovery_head
         _log.info(
             "monitor.pre_push_validation_fix_head_object_missing_recovered",
@@ -760,7 +760,7 @@ async def _run_pre_push_validation_fix_pass(
                 )
                 if rollback_failure_reason is not None:
                     return False, rollback_failure_reason
-                return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
+                return _finish_fix_pass(False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON)
             recovered_paths = _changed_paths_from_name_status_z(recovered_delta.stdout or "")
             if recovered_paths:
                 try:
@@ -800,7 +800,7 @@ async def _run_pre_push_validation_fix_pass(
                     )
                     if rollback_failure_reason is not None:
                         return False, rollback_failure_reason
-                    return False, _PROTECTED_SCOPE_REPAIR_FAILED_REASON
+                    return _finish_fix_pass(False, _PROTECTED_SCOPE_REPAIR_FAILED_REASON)
         committed = bool(
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
