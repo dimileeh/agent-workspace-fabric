@@ -690,6 +690,55 @@ test("resolveWorkflowTiming rejects lifecycle stages that end before they start"
   );
 });
 
+test("resolveWorkflowTiming rejects stage durations that contradict their timestamps", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "completed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00Z",
+        ended_at: "2026-09-06T12:10:00.999Z",
+        duration_seconds: 600,
+        status: "completed",
+      },
+      {
+        stage: "completed",
+        started_at: "2026-09-06T12:10:00.999Z",
+        ended_at: "2026-09-06T12:10:00.999Z",
+        duration_seconds: 0,
+        status: "completed",
+      },
+    ],
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: "2026-09-06T12:10:00.999Z",
+    durationSeconds: 600,
+  });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [
+        {
+          ...item.lifecycle[0],
+          duration_seconds: 1,
+        },
+        item.lifecycle[1],
+      ],
+    }),
+    {
+      finishedAt: "2026-09-06T12:10:00.999Z",
+      durationSeconds: null,
+    },
+    "a supplied duration must not override the validated stage interval",
+  );
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {

@@ -383,10 +383,15 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   let previousEndMs: number | null = null;
   for (const entry of durationStages) {
     const stageDuration = recordedDurationSeconds(entry.stage.duration_seconds);
+    const intervalDurationSeconds =
+      entry.endedMs == null
+        ? null
+        : Math.floor((entry.endedMs - entry.startedMs) / 1000);
     if (
       entry.endedMs == null ||
       entry.endedMs > finishedMs ||
       stageDuration == null ||
+      stageDuration !== intervalDurationSeconds ||
       (previousEndMs != null && previousEndMs !== entry.startedMs)
     ) {
       return { finishedAt, finishedMs, durationSeconds: null };
