@@ -1105,8 +1105,17 @@ export function WorkspaceList({
         ? Math.min(selectedWindowStart, maxWindowStart)
         : Math.min(current, maxWindowStart),
     );
-    if (selectedWindowStart !== null) {
-      scrollWithoutLoading(rowOffsets[selectedWindowStart] ?? 0);
+    const scrollContainer = scrollContainerRef.current;
+    if (selectedWindowStart !== null && scrollContainer) {
+      const controlsHeight = scrollContainer.querySelector<HTMLElement>(":scope > .sticky")
+        ?.offsetHeight ?? 0;
+      const viewportStart = scrollContainer.scrollTop;
+      const viewportEnd = viewportStart + scrollContainer.clientHeight - controlsHeight;
+      const selectedRowStart = rowOffsets[selectedIndex] ?? 0;
+      const selectedRowEnd = rowOffsets[selectedIndex + 1] ?? selectedRowStart;
+      if (selectedRowEnd <= viewportStart || selectedRowStart >= viewportEnd) {
+        scrollWithoutLoading(selectedRowStart);
+      }
     }
   }, [items, maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading, selectedId]);
 

@@ -820,6 +820,39 @@ test("virtualization keeps the viewport covered while crossing a row-window boun
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hYPze: selecting a
+// visible row must not jump the rail to the start of its 100-row window.
+test("selecting a visible workspace keeps its rail position", async ({ page }) => {
+  await page.setViewportSize({ width: 1_000, height: 720 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  const selected = page.getByTestId("workspace-card-ws_perf_0075");
+  await selected.evaluate((element) => {
+    const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
+    if (!listElement) throw new Error("workspace list is missing");
+    const controlsHeight = listElement.querySelector<HTMLElement>(":scope > .sticky")
+      ?.offsetHeight ?? 0;
+    const viewportTop = listElement.getBoundingClientRect().top + controlsHeight;
+    listElement.scrollTo({
+      top: listElement.scrollTop + element.getBoundingClientRect().top - viewportTop,
+    });
+  });
+  await expect(selected).toBeVisible();
+  const scrollTopBeforeSelection = await list.evaluate((element) => element.scrollTop);
+  expect(scrollTopBeforeSelection).toBeGreaterThan(0);
+
+  await selected.click();
+
+  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await expect(selected).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop))
+    .toBe(scrollTopBeforeSelection);
+});
+
 test("virtualization remeasures variable rows after filtering and viewport resize", async ({
   page,
 }) => {
