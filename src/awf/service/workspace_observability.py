@@ -401,6 +401,10 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
             event
             for event in reversed(ordered_events)
             if event.event_type == "workspace.state_changed"
+            or (
+                event.event_type == "workspace.remonitor_requested"
+                and event.old_state != event.new_state
+            )
         ),
         None,
     )

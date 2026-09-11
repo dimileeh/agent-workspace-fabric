@@ -211,6 +211,30 @@ const TERMINAL_WORKFLOW_STATUSES = new Set<WorkspaceOverview["status"]>([
   "destroyed",
 ]);
 
+type RetainedTerminalEvent = NonNullable<
+  WorkspaceOverview["latest_workflow_terminal_state_change"]
+>;
+
+function terminalEventMatchesWorkflowStatus(
+  item: WorkspaceOverview,
+  terminalEvent: RetainedTerminalEvent,
+): boolean {
+  const cleanupFailureConfirmsCancelledBoundary =
+    item.status === "failed" &&
+    terminalEvent.new_state === "cancelled" &&
+    item.latest_state_change?.event_type === "workspace.state_changed" &&
+    item.latest_state_change.old_state === "destroying" &&
+    item.latest_state_change.new_state === "failed";
+  return (
+    terminalEvent.new_state === item.status ||
+    ((item.status === "destroying" || item.status === "destroyed") &&
+      (terminalEvent.new_state === "completed" ||
+        terminalEvent.new_state === "failed" ||
+        terminalEvent.new_state === "cancelled")) ||
+    cleanupFailureConfirmsCancelledBoundary
+  );
+}
+
 /**
  * True when workflow timing should be presented as terminal. Destroy cleanup
  * is post-terminal only when its latest state transition entered cleanup from
@@ -318,6 +342,35 @@ function recordedMilliseconds(value: string | null | undefined): number | null {
   }
   const milliseconds = Date.parse(value);
   return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+function retainedTerminalEventTiming(item: WorkspaceOverview): {
+  finishedAt: string;
+  finishedMs: number;
+} | null {
+  // Recovery makes the collapsed lifecycle ambiguous. Its dedicated terminal
+  // event is still authoritative only when it belongs to the latest recovery.
+  const recoveryStartedAt = item.recovery?.started_at;
+  const terminalEvent = item.latest_workflow_terminal_state_change;
+  if (
+    recoveryStartedAt == null ||
+    terminalEvent?.event_type !== "workspace.state_changed" ||
+    (terminalEvent.new_state !== "completed" &&
+      terminalEvent.new_state !== "failed" &&
+      terminalEvent.new_state !== "cancelled") ||
+    !terminalEventMatchesWorkflowStatus(item, terminalEvent)
+  ) {
+    return null;
+  }
+
+  const finishedMs = recordedMilliseconds(terminalEvent.occurred_at);
+  if (
+    finishedMs == null ||
+    compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt) !== 1
+  ) {
+    return null;
+  }
+  return { finishedAt: terminalEvent.occurred_at, finishedMs };
 }
 
 function recordedDurationSeconds(value: number | null | undefined): number | null {
@@ -428,19 +481,6 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       item.latest_workflow_terminal_state_change ??
       item.latest_state_change ??
       item.last_event;
-    const cleanupFailureConfirmsCancelledBoundary =
-      item.status === "failed" &&
-      terminalEvent?.new_state === "cancelled" &&
-      item.latest_state_change?.event_type === "workspace.state_changed" &&
-      item.latest_state_change.old_state === "destroying" &&
-      item.latest_state_change.new_state === "failed";
-    const eventMatchesTerminalStatus =
-      terminalEvent?.new_state === item.status ||
-      ((item.status === "destroying" || item.status === "destroyed") &&
-        (terminalEvent?.new_state === "completed" ||
-          terminalEvent?.new_state === "failed" ||
-          terminalEvent?.new_state === "cancelled")) ||
-      cleanupFailureConfirmsCancelledBoundary;
     // Pauses such as blocked/recovering are absent from lifecycle summaries.
     // For terminal paths without a completed stage, only trust that boundary
     // when a retained workflow state-change corroborates the actual terminal
@@ -451,7 +491,7 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     if (
       terminalEvent?.event_type !== "workspace.state_changed" ||
       terminalEvent.old_state !== latestEntered.stage.stage ||
-      !eventMatchesTerminalStatus ||
+      !terminalEventMatchesWorkflowStatus(item, terminalEvent) ||
       compareRecordedInstants(terminalEvent.occurred_at, finishedAt) !== 0
     ) {
       return null;
@@ -514,8 +554,9 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
 /**
  * Resolve the workflow timing displayed by console surfaces. Terminal local
  * overviews and evidenced post-terminal cleanup may derive timing from one
- * complete lifecycle interval; active workspaces retain their explicit timing
- * fields and never infer a finish.
+ * complete lifecycle interval. Recovered terminal overviews may retain only
+ * their terminal event, which supplies a finish but not a duration. Active
+ * workspaces retain their explicit timing fields and never infer a finish.
  */
 export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflowTiming {
   const resolvedFinishedAt = resolveWorkflowFinishedAt(item);
@@ -529,8 +570,17 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
   const explicitFinishedMs = recordedMilliseconds(resolvedFinishedAt);
 
   const lifecycleTiming = lifecycleWorkflowTiming(item);
-  const finishedAt = resolvedFinishedAt ?? lifecycleTiming?.finishedAt ?? null;
-  const finishedMs = explicitFinishedMs ?? lifecycleTiming?.finishedMs ?? null;
+  const retainedTerminalTiming = retainedTerminalEventTiming(item);
+  const finishedAt =
+    resolvedFinishedAt ??
+    lifecycleTiming?.finishedAt ??
+    retainedTerminalTiming?.finishedAt ??
+    null;
+  const finishedMs =
+    explicitFinishedMs ??
+    lifecycleTiming?.finishedMs ??
+    retainedTerminalTiming?.finishedMs ??
+    null;
   if (finishedAt == null || finishedMs == null) {
     return {
       finishedAt: null,
