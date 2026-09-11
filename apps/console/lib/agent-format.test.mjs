@@ -841,6 +841,29 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
+      status: "failed",
+      latest_workflow_terminal_state_change: stateChanged(
+        "running",
+        "cancelled",
+        "2026-09-06T12:05:00Z",
+      ),
+      latest_state_change: stateChanged(
+        "destroying",
+        "failed",
+        "2026-09-06T12:20:00Z",
+      ),
+      last_event: stateChanged(
+        "destroying",
+        "failed",
+        "2026-09-06T12:20:00Z",
+      ),
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+    "cleanup failure must not hide the earlier cancellation transition",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
       latest_state_change: stateChanged(
         "running",
         "failed",
