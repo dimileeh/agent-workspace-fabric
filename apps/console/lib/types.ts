@@ -232,6 +232,8 @@ export interface WorkspaceOverview {
   last_event: WorkspaceEvent | null;
   /** Latest state transition, retained when a newer non-state audit event exists. */
   latest_state_change?: WorkspaceEvent | null;
+  /** Latest completed/failed/cancelled transition, retained across destroy cleanup. */
+  latest_workflow_terminal_state_change?: WorkspaceEvent | null;
   pr_url: string | null;
   pr_number?: number | null;
   failure_reason: string | null;
