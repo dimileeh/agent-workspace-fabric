@@ -269,6 +269,25 @@ function recordedDurationSeconds(value: number | null | undefined): number | nul
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+function recordedIntervalDurationSeconds(
+  startedAt: string,
+  startedMs: number,
+  endedAt: string,
+  endedMs: number,
+): number {
+  const submillisecondMicroseconds = (value: string): number => {
+    const fractionalSeconds = RFC3339_DATE_TIME.exec(value)?.[7] ?? "";
+    return Number(fractionalSeconds.slice(4, 7).padEnd(3, "0"));
+  };
+  const elapsedMilliseconds = endedMs - startedMs;
+  const elapsedWholeSeconds = Math.floor(elapsedMilliseconds / 1000);
+  const elapsedMicroseconds =
+    (elapsedMilliseconds - elapsedWholeSeconds * 1000) * 1000 +
+    submillisecondMicroseconds(endedAt) -
+    submillisecondMicroseconds(startedAt);
+  return elapsedWholeSeconds + Math.floor(elapsedMicroseconds / 1_000_000);
+}
+
 function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   finishedAt: string;
   finishedMs: number;
@@ -391,9 +410,14 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   for (const entry of durationStages) {
     const stageDuration = recordedDurationSeconds(entry.stage.duration_seconds);
     const intervalDurationSeconds =
-      entry.endedMs == null
+      entry.stage.ended_at == null || entry.endedMs == null
         ? null
-        : Math.floor((entry.endedMs - entry.startedMs) / 1000);
+        : recordedIntervalDurationSeconds(
+            entry.startedAt,
+            entry.startedMs,
+            entry.stage.ended_at,
+            entry.endedMs,
+          );
     if (
       entry.endedMs == null ||
       entry.endedMs > finishedMs ||
