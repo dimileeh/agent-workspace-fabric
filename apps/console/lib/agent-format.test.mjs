@@ -478,6 +478,26 @@ test("resolveWorkflowTiming preserves explicit duration without a terminal finis
   );
 });
 
+test("resolveWorkflowTiming preserves duration when an unused finished_at differs", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "completed",
+    recovery: null,
+    workflow_finished_at: "2026-09-06T12:12:00Z",
+    duration_seconds: 600,
+    lifecycle: [],
+  };
+
+  assert.deepEqual(
+    resolveWorkflowTiming({ ...item, finished_at: "2026-09-06T12:10:00Z" }),
+    { finishedAt: "2026-09-06T12:12:00Z", durationSeconds: 600 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({ ...item, finished_at: "not-a-timestamp" }),
+    { finishedAt: "2026-09-06T12:12:00Z", durationSeconds: 600 },
+  );
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {

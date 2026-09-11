@@ -340,9 +340,9 @@ test("confirmed KPI lower bounds stay qualified while exact values win", () => {
     { value: monitoring.value, suffix: monitoring.suffix },
     { value: 0, suffix: " confirmed" },
   );
-  assert.match(active.hint, /project total is incomplete/);
+  assert.match(active.hint, /exact metric count is incomplete/);
   assert.match(completed.hint, /last 24h/);
-  assert.match(completed.hint, /project total is incomplete/);
+  assert.match(completed.hint, /exact metric count is incomplete/);
   assert.equal(lowerBounds.counts.active, null);
 
   const exactPayload = summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } });
@@ -372,6 +372,28 @@ test("confirmed KPI lower bounds stay qualified while exact values win", () => {
     },
     { value: 0, suffix: undefined },
   );
+});
+
+test("confirmed KPI hints describe metric gaps when every workflow status is known", () => {
+  const summary = parseDashboardSummary(
+    summaryWithCountEvidence({ total: 1, known: 1, unknown: 0, confirmed: { active: 1 } }),
+  );
+  assert.ok(summary);
+  summary.coverage.notes = ["terminal_timestamp_unavailable", "attention_evidence_unavailable"];
+
+  const kpis = fleetKpisFromDashboardSummary({
+    summary,
+    summaryStale: false,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: false,
+    includeSummary: true,
+  });
+  for (const id of ["active", "completed"]) {
+    const hint = kpis.find((item) => item.id === id).hint;
+    assert.match(hint, /exact metric count is incomplete/);
+    assert.doesNotMatch(hint, /project total is incomplete/);
+  }
 });
 
 test("missing count evidence keeps null KPIs as honest dashes", () => {

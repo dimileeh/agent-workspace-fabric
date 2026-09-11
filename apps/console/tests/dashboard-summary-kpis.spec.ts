@@ -165,9 +165,9 @@ for (const viewport of [
     await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1 confirmed");
     await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0 confirmed");
     await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0 confirmed");
-    await expect(kpi(page, "Running")).toContainText("project total is incomplete");
+    await expect(kpi(page, "Running")).toContainText("exact metric count is incomplete");
     await expect(kpi(page, "Completed")).toContainText("last 24h");
-    await expect(kpi(page, "Completed")).toContainText("project total is incomplete");
+    await expect(kpi(page, "Completed")).toContainText("exact metric count is incomplete");
 
     const coverage = page.getByTestId("dashboard-summary-coverage");
     await expect(coverage).toContainText("25 of 30 workflow statuses known; 5 unknown");
@@ -178,9 +178,9 @@ for (const viewport of [
     for (const label of ["Running", "Monitoring PR", "Completed"]) {
       const card = kpi(page, label);
       const valueBox = await card.locator(".kpi-value").boundingBox();
-      const hintBox = await card.getByText(/project total is incomplete/).boundingBox();
+      const hintBox = await card.getByText(/exact metric count is incomplete/).boundingBox();
       expect(valueBox, `${label} value is measurable`).not.toBeNull();
-      expect(hintBox, `${label} incomplete-total hint is measurable`).not.toBeNull();
+      expect(hintBox, `${label} incomplete-metric hint is measurable`).not.toBeNull();
       expect(valueBox!.y + valueBox!.height, `${label} value does not overlap its hint`).toBeLessThanOrEqual(
         hintBox!.y + 1,
       );

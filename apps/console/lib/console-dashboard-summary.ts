@@ -134,7 +134,7 @@ function countRelationshipsAreValid(counts: Record<DashboardCountKey, number | n
   return true;
 }
 
-const CONFIRMED_COUNT_HINT = "confirmed lower bound; project total is incomplete";
+const CONFIRMED_COUNT_HINT = "confirmed lower bound; exact metric count is incomplete";
 
 function displayCount(
   exact: number | null | undefined,

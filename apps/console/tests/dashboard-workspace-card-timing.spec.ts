@@ -315,7 +315,7 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
     workflow_finished_at: "2026-09-06T12:12:00Z",
     duration_seconds: null,
   });
-  const mismatchedDuration = overview("ws_duration_mismatch", "completed", {
+  const distinctFinishedAtDuration = overview("ws_duration_distinct_finish", "completed", {
     workflow_finished_at: "2026-09-06T12:12:00Z",
     finished_at: "2026-09-06T12:10:00Z",
     duration_seconds: 600,
@@ -373,7 +373,7 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
       missing,
       invalid,
       missingDuration,
-      mismatchedDuration,
+      distinctFinishedAtDuration,
       lifecycleGap,
       completedStageWithoutStart,
       retryAmbiguous,
@@ -394,7 +394,7 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
     );
   }
 
-  for (const item of [missingDuration, mismatchedDuration, lifecycleGap]) {
+  for (const item of [missingDuration, lifecycleGap]) {
     const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
     await expect(card.getByTestId(`workspace-finished-${item.workspace_id}`)).not.toContainText(
       "not recorded",
@@ -403,6 +403,14 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
       "not recorded",
     );
   }
+
+  const distinctFinishCard = page.getByTestId("workspace-card-ws_duration_distinct_finish");
+  await expect(
+    distinctFinishCard.getByTestId("workspace-finished-ws_duration_distinct_finish"),
+  ).not.toContainText("not recorded");
+  await expect(
+    distinctFinishCard.getByTestId("workspace-duration-ws_duration_distinct_finish"),
+  ).toContainText("10m 0s");
 
   const zeroCard = page.getByTestId("workspace-card-ws_timing_zero");
   await expect(zeroCard.getByTestId("workspace-finished-ws_timing_zero")).not.toContainText(
