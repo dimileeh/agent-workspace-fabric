@@ -839,8 +839,12 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
 
   await page.goto("/");
   await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
-    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    // Keep this measurement test independent from near-bottom autoload. A
+    // Playwright locator click scrolls the moving footer into view and can
+    // trigger multiple continuation pages before the assertion observes it.
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
     await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
   }
 
