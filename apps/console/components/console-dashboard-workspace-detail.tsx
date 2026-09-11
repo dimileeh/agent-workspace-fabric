@@ -29,6 +29,7 @@ formatRequestedEffort,
 formatRequestedModel,
 mergeWorkspacePresentationFields,
 resolveWorkflowFinishedAt,
+resolveWorkflowTiming,
 } from "@/lib/agent-format";
 import { displayedTaskKey } from "@/lib/console-dashboard-derived";
 import {
@@ -115,9 +116,10 @@ export function TaskDetailsModal({
 }) {
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
-  const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
+  const workflowTiming = resolveWorkflowTiming(workspace);
+  const workflowFinishedAt = workflowTiming.finishedAt;
   const finishedAt = distinctFinishedAt(workspace);
-  const recordedDuration = recordedDurationLabel(workspace.duration_seconds);
+  const recordedDuration = recordedDurationLabel(workflowTiming.durationSeconds);
   const taskKey = displayedTaskKey(workspace);
 
   useIsomorphicLayoutEffect(() => {
@@ -575,7 +577,7 @@ export function WorkspaceSummary({
         </div>
       }
     >
-      <div className="grid min-w-0 gap-4">
+      <div className="grid min-w-0 grid-cols-1 gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-lg font-semibold">{overview.title}</h2>

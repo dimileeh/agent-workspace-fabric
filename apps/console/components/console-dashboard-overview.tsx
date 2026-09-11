@@ -39,7 +39,11 @@ useRef,
 useState
 } from "react";
 
-import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
+import {
+formatAgentLabel,
+formatAgentTitle,
+resolveWorkflowTiming
+} from "@/lib/agent-format";
 import {
   displayedTaskKey,
   MAX_FULLSCREEN_LOG_WORKSPACES,
@@ -59,6 +63,7 @@ compactDuration,
 compactId,
 formatDateTime,
 lifecycleStages,
+recordedDurationLabel,
 relativeTime,
 toneClass,
 type StatusTone
@@ -68,6 +73,7 @@ import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
 import type {
+ConsoleDashboardCountEvidence,
 WorkspaceOverview
 } from "@/lib/types";
 import {
@@ -258,12 +264,14 @@ export function FleetHealthStrip({
   lastSuccessAt,
   coverageStatus,
   coverageNotes,
+  countEvidence,
 }: {
   kpis: FleetKpi[];
   error?: string | null;
   lastSuccessAt?: string | null;
   coverageStatus?: "complete" | "partial" | "unknown" | null;
   coverageNotes?: readonly string[] | null;
+  countEvidence?: ConsoleDashboardCountEvidence | null;
 }) {
   const anyStale = kpis.some((kpi) => kpi.stale);
   // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
@@ -271,6 +279,7 @@ export function FleetHealthStrip({
   // look fully current either.
   const coverageNotice = formatDashboardCoverageNotice(
     coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
+    countEvidence,
   );
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
@@ -737,6 +746,13 @@ type WorkspaceCardProps = {
   onCopy: (event: SyntheticEvent<HTMLElement>, workspaceId: string) => void;
 };
 
+const TERMINAL_WORKSPACE_CARD_STATUSES = new Set<WorkspaceOverview["status"]>([
+  "completed",
+  "failed",
+  "cancelled",
+  "destroyed",
+]);
+
 const WorkspaceCard = memo(function WorkspaceCard({
   item,
   selected,
@@ -757,6 +773,8 @@ const WorkspaceCard = memo(function WorkspaceCard({
     ? attentionAgeSeconds(attentionSince(item))
     : null;
   const taskKey = displayedTaskKey(item);
+  const terminal = TERMINAL_WORKSPACE_CARD_STATUSES.has(item.status);
+  const terminalTiming = terminal ? resolveWorkflowTiming(item) : null;
   return (
     <div
       data-testid={`workspace-card-${item.workspace_id}`}
@@ -818,14 +836,32 @@ const WorkspaceCard = memo(function WorkspaceCard({
                         </span>
                       ) : null}
                     </span>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
-                      <span>created {formatDateTime(item.created_at)}</span>
-                      <span>updated {formatDateTime(item.updated_at)}</span>
-                      {item.last_activity_at ? (
+                    <div
+                      className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500"
+                      data-testid={`workspace-timing-${item.workspace_id}`}
+                    >
+                      <span>Created {formatDateTime(item.created_at)}</span>
+                      {terminal ? (
+                        <>
+                          <span data-testid={`workspace-finished-${item.workspace_id}`}>
+                            Finished{" "}
+                            {terminalTiming?.finishedAt
+                              ? formatDateTime(terminalTiming.finishedAt)
+                              : "not recorded"}
+                          </span>
+                          <span data-testid={`workspace-duration-${item.workspace_id}`}>
+                            Duration{" "}
+                            {recordedDurationLabel(terminalTiming?.durationSeconds) ?? "not recorded"}
+                          </span>
+                        </>
+                      ) : (
                         <span data-testid={`workspace-last-activity-${item.workspace_id}`}>
-                          activity {formatDateTime(item.last_activity_at)}
+                          Last activity{" "}
+                          {item.last_activity_at
+                            ? formatDateTime(item.last_activity_at)
+                            : "not recorded"}
                         </span>
-                      ) : null}
+                      )}
                     </div>
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
                       <Bot size={13} aria-hidden className="shrink-0" />

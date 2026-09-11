@@ -1,6 +1,8 @@
 import { capacityUtilizationPct } from "./format.ts";
 import type {
   ConsoleBackendKind,
+  ConsoleDashboardCountEvidence,
+  ConsoleDashboardCounts,
   ConsoleDashboardSummary,
   ResourceSaturationSummary,
 } from "./types.ts";
@@ -11,6 +13,19 @@ function expectedSummaryScope(backendKind: ConsoleBackendKind): "local" | "tenan
 }
 
 const DASH = "—";
+const DASHBOARD_COUNT_KEYS = [
+  "active",
+  "executing",
+  "monitoring_pr",
+  "awaiting_operator",
+  "awaiting_human",
+  "retrying",
+  "queued",
+  "completed_last_window",
+  "cancelled_last_window",
+  "failed_last_window",
+] as const;
+type DashboardCountKey = (typeof DASHBOARD_COUNT_KEYS)[number];
 
 /**
  * OpenAPI `format: date-time` / RFC 3339 profile: full date-time with `T`/`t`
@@ -80,12 +95,64 @@ export type SummaryFleetKpi = {
   stale?: boolean;
 };
 
-function displayCount(value: number | null | undefined): string | number {
-  // Null ≠ zero: incomplete/unknown counts render as an em dash.
-  if (value == null) {
-    return DASH;
+function countRelationshipsAreValid(counts: Record<DashboardCountKey, number | null>): boolean {
+  const {
+    active,
+    executing,
+    monitoring_pr: monitoringPr,
+    awaiting_operator: awaitingOperator,
+    awaiting_human: awaitingHuman,
+    retrying,
+    queued,
+  } = counts;
+  for (const subset of [executing, monitoringPr, queued, awaitingOperator, retrying]) {
+    if (active != null && subset != null && subset > active) {
+      return false;
+    }
   }
-  return value;
+  if (awaitingHuman != null && monitoringPr != null && awaitingHuman > monitoringPr) {
+    return false;
+  }
+  for (const disjointCount of [awaitingOperator, retrying]) {
+    if (
+      active != null &&
+      executing != null &&
+      disjointCount != null &&
+      disjointCount + executing > active
+    ) {
+      return false;
+    }
+  }
+  if (active != null) {
+    const disjointParts = [executing, monitoringPr, queued, awaitingOperator, retrying].filter(
+      (value): value is number => value != null,
+    );
+    if (disjointParts.length >= 2 && disjointParts.reduce((sum, value) => sum + value, 0) > active) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const CONFIRMED_COUNT_HINT = "confirmed lower bound; project total is incomplete";
+
+function displayCount(
+  exact: number | null | undefined,
+  confirmed: number | null | undefined,
+  baseHint?: string,
+): Pick<SummaryFleetKpi, "value" | "suffix" | "hint"> {
+  if (exact != null) {
+    return { value: exact, hint: baseHint };
+  }
+  if (confirmed != null) {
+    return {
+      value: confirmed,
+      suffix: " confirmed",
+      hint: baseHint ? `${baseHint} · ${CONFIRMED_COUNT_HINT}` : CONFIRMED_COUNT_HINT,
+    };
+  }
+  // Null ≠ zero: incomplete/unknown counts without evidence render as an em dash.
+  return { value: DASH };
 }
 
 const COVERAGE_NOTE_LABELS: Record<string, string> = {
@@ -111,6 +178,7 @@ function formatCoverageNote(note: string): string {
  */
 export function formatDashboardCoverageNotice(
   coverage: { status: string; notes?: readonly string[] | null } | null | undefined,
+  countEvidence?: ConsoleDashboardCountEvidence | null,
 ): string | null {
   if (!coverage || (coverage.status !== "partial" && coverage.status !== "unknown")) {
     return null;
@@ -118,6 +186,11 @@ export function formatDashboardCoverageNotice(
   const notes = (coverage.notes ?? [])
     .map((note) => formatCoverageNote(note))
     .filter((note) => note.length > 0);
+  if (countEvidence) {
+    notes.unshift(
+      `${countEvidence.status_known_workspaces} of ${countEvidence.total_workspaces} workflow statuses known; ${countEvidence.status_unknown_workspaces} unknown`,
+    );
+  }
   const headline = coverage.status === "partial" ? "partial coverage" : "coverage unknown";
   if (notes.length === 0) {
     return `${headline} — some counts are incomplete`;
@@ -143,8 +216,11 @@ export function fleetKpisFromDashboardSummary(options: {
     includeSummary,
   } = options;
   const counts = summary?.counts ?? null;
+  const confirmedCounts = summary?.count_evidence?.confirmed_counts ?? null;
   const windowHint = summary ? `last ${summary.window.since_hours}h` : undefined;
   const capacity = showCapacity && saturation ? capacityUtilizationPct(saturation) : null;
+  const displayedNumber = (key: DashboardCountKey): number | null =>
+    counts?.[key] ?? confirmedCounts?.[key] ?? null;
 
   // Contract: unsupported/omitted fleet_summary must omit the widget, not render dash shells.
   // Available-but-null summary still emits counters as — (loading / first-load failure).
@@ -153,77 +229,86 @@ export function fleetKpisFromDashboardSummary(options: {
         {
           id: "active",
           label: "Active",
-          value: displayCount(counts?.active),
+          ...displayCount(counts?.active, confirmedCounts?.active),
           stale: summaryStale,
         },
         {
           id: "running",
           label: "Running",
-          value: displayCount(counts?.executing),
-          tone: counts?.executing ? "info" : undefined,
+          ...displayCount(counts?.executing, confirmedCounts?.executing),
+          tone: displayedNumber("executing") ? "info" : undefined,
           stale: summaryStale,
         },
         {
           id: "monitoring_pr",
           label: "Monitoring PR",
-          value: displayCount(counts?.monitoring_pr),
-          tone: counts?.monitoring_pr ? "info" : undefined,
+          ...displayCount(counts?.monitoring_pr, confirmedCounts?.monitoring_pr),
+          tone: displayedNumber("monitoring_pr") ? "info" : undefined,
           stale: summaryStale,
         },
         {
           id: "blocked",
           label: "Awaiting operator",
-          value: displayCount(counts?.awaiting_operator),
-          tone: counts?.awaiting_operator ? "warn" : undefined,
+          ...displayCount(counts?.awaiting_operator, confirmedCounts?.awaiting_operator),
+          tone: displayedNumber("awaiting_operator") ? "warn" : undefined,
           stale: summaryStale,
         },
         {
           id: "recovering",
           label: "Auto-retrying",
-          value: displayCount(counts?.retrying),
-          tone: counts?.retrying ? "info" : undefined,
+          ...displayCount(counts?.retrying, confirmedCounts?.retrying),
+          tone: displayedNumber("retrying") ? "info" : undefined,
           stale: summaryStale,
         },
         {
           id: "awaiting_human",
           label: "Awaiting human",
-          value: displayCount(counts?.awaiting_human),
-          tone: counts?.awaiting_human ? "warn" : undefined,
+          ...displayCount(counts?.awaiting_human, confirmedCounts?.awaiting_human),
+          tone: displayedNumber("awaiting_human") ? "warn" : undefined,
           stale: summaryStale,
         },
         {
           id: "queued",
           label: "Queued",
-          value: displayCount(counts?.queued),
-          tone: counts?.queued ? "warn" : undefined,
-          hint:
-            counts?.queued != null && counts.queued > 0
-              ? "awaiting capacity"
-              : undefined,
+          ...displayCount(
+            counts?.queued,
+            confirmedCounts?.queued,
+            displayedNumber("queued") ? "awaiting capacity" : undefined,
+          ),
+          tone: displayedNumber("queued") ? "warn" : undefined,
           stale: summaryStale,
         },
         {
           id: "completed",
           label: "Completed",
-          value: displayCount(counts?.completed_last_window),
-          tone: counts?.completed_last_window ? "good" : undefined,
-          hint: counts?.completed_last_window != null ? windowHint : undefined,
+          ...displayCount(
+            counts?.completed_last_window,
+            confirmedCounts?.completed_last_window,
+            windowHint,
+          ),
+          tone: displayedNumber("completed_last_window") ? "good" : undefined,
           stale: summaryStale,
         },
         {
           id: "cancelled",
           label: "Cancelled",
-          value: displayCount(counts?.cancelled_last_window),
-          tone: counts?.cancelled_last_window ? "warn" : undefined,
-          hint: counts?.cancelled_last_window != null ? windowHint : undefined,
+          ...displayCount(
+            counts?.cancelled_last_window,
+            confirmedCounts?.cancelled_last_window,
+            windowHint,
+          ),
+          tone: displayedNumber("cancelled_last_window") ? "warn" : undefined,
           stale: summaryStale,
         },
         {
           id: "failed",
           label: "Failed",
-          value: displayCount(counts?.failed_last_window),
-          tone: counts?.failed_last_window ? "bad" : undefined,
-          hint: counts?.failed_last_window != null ? windowHint : undefined,
+          ...displayCount(
+            counts?.failed_last_window,
+            confirmedCounts?.failed_last_window,
+            windowHint,
+          ),
+          tone: displayedNumber("failed_last_window") ? "bad" : undefined,
           stale: summaryStale,
         },
       ]
@@ -260,7 +345,7 @@ export function parseDashboardSummary(
   const record = payload as Record<string, unknown>;
   if (!hasOnlyKeys(record, [
     "schema_version", "scope", "generated_at", "as_of", "last_success_at",
-    "window", "coverage", "counts", "overlap",
+    "window", "coverage", "counts", "count_evidence", "overlap",
   ])) {
     return null;
   }
@@ -351,23 +436,11 @@ export function parseDashboardSummary(
     return null;
   }
   const counts = record.counts as Record<string, unknown>;
-  const requiredCountKeys = [
-    "active",
-    "executing",
-    "monitoring_pr",
-    "awaiting_operator",
-    "awaiting_human",
-    "retrying",
-    "queued",
-    "completed_last_window",
-    "cancelled_last_window",
-    "failed_last_window",
-  ] as const;
-  if (!hasOnlyKeys(counts, requiredCountKeys)) {
+  if (!hasOnlyKeys(counts, DASHBOARD_COUNT_KEYS)) {
     return null;
   }
   let anyCountNull = false;
-  for (const key of requiredCountKeys) {
+  for (const key of DASHBOARD_COUNT_KEYS) {
     if (!(key in counts)) {
       return null;
     }
@@ -384,27 +457,6 @@ export function parseDashboardSummary(
   // Reject complete + null so hosted snapshots cannot replace last-good KPIs
   // with dashes under a purported complete result.
   if (anyCountNull && coverage.status === "complete") {
-    return null;
-  }
-  // Immediately after the per-value loop: reject contradictory domain subsets
-  // among related non-null counts so malformed hosted snapshots fail closed and
-  // the console retains the last-good KPI snapshot.
-  const active = counts.active as number | null;
-  const executing = counts.executing as number | null;
-  const monitoringPr = counts.monitoring_pr as number | null;
-  const awaitingHuman = counts.awaiting_human as number | null;
-  const awaitingOperator = counts.awaiting_operator as number | null;
-  const retrying = counts.retrying as number | null;
-  const queued = counts.queued as number | null;
-  if (active != null && executing != null && executing > active) {
-    return null;
-  }
-  // monitoring_pr is a non-terminal status bucket ⊆ active.
-  if (active != null && monitoringPr != null && monitoringPr > active) {
-    return null;
-  }
-  // queued (requested) is a non-terminal status bucket ⊆ active.
-  if (active != null && queued != null && queued > active) {
     return null;
   }
   if (!record.overlap || typeof record.overlap !== "object" || Array.isArray(record.overlap)) {
@@ -425,57 +477,76 @@ export function parseDashboardSummary(
       return null;
     }
   }
-  if (
-    awaitingHuman != null &&
-    monitoringPr != null &&
-    awaitingHuman > monitoringPr
-  ) {
+  const exactCounts = counts as unknown as ConsoleDashboardCounts;
+  if (!countRelationshipsAreValid(exactCounts)) {
     return null;
   }
-  if (awaitingOperator != null) {
-    if (active != null && awaitingOperator > active) {
+
+  if ("count_evidence" in record && record.count_evidence !== null) {
+    if (
+      !record.count_evidence ||
+      typeof record.count_evidence !== "object" ||
+      Array.isArray(record.count_evidence)
+    ) {
       return null;
     }
-    if (active != null && executing != null && awaitingOperator + executing > active) {
+    const evidence = record.count_evidence as Record<string, unknown>;
+    const evidenceKeys = [
+      "total_workspaces",
+      "status_known_workspaces",
+      "status_unknown_workspaces",
+      "confirmed_counts",
+    ] as const;
+    if (!hasOnlyKeys(evidence, evidenceKeys) || !evidenceKeys.every((key) => key in evidence)) {
       return null;
     }
-  }
-  if (retrying != null) {
-    if (active != null && retrying > active) {
+    if (
+      !isNonNegativeInteger(evidence.total_workspaces) ||
+      !isNonNegativeInteger(evidence.status_known_workspaces) ||
+      !isNonNegativeInteger(evidence.status_unknown_workspaces) ||
+      evidence.status_known_workspaces + evidence.status_unknown_workspaces !==
+        evidence.total_workspaces
+    ) {
       return null;
     }
-    if (active != null && executing != null && retrying + executing > active) {
+    if (
+      !evidence.confirmed_counts ||
+      typeof evidence.confirmed_counts !== "object" ||
+      Array.isArray(evidence.confirmed_counts)
+    ) {
       return null;
     }
-  }
-  // Combined disjoint active status buckets: pairwise subset checks miss cases
-  // like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
-  // executing, monitoring_pr, and queued are always distinct statuses;
-  // awaiting_operator / retrying are always in active ∉ executing under v1.
-  if (active != null) {
-    let disjointActiveSum = 0;
-    let partCount = 0;
-    if (executing != null) {
-      disjointActiveSum += executing;
-      partCount += 1;
+    const confirmed = evidence.confirmed_counts as Record<string, unknown>;
+    if (
+      !hasOnlyKeys(confirmed, DASHBOARD_COUNT_KEYS) ||
+      !DASHBOARD_COUNT_KEYS.every(
+        (key) =>
+          key in confirmed &&
+          isNonNegativeInteger(confirmed[key]) &&
+          confirmed[key] <= (evidence.status_known_workspaces as number),
+      )
+    ) {
+      return null;
     }
-    if (monitoringPr != null) {
-      disjointActiveSum += monitoringPr;
-      partCount += 1;
+    const confirmedCounts = confirmed as Record<DashboardCountKey, number>;
+    if (
+      confirmedCounts.active +
+        confirmedCounts.completed_last_window +
+        confirmedCounts.cancelled_last_window +
+        confirmedCounts.failed_last_window >
+      evidence.status_known_workspaces
+    ) {
+      return null;
     }
-    if (queued != null) {
-      disjointActiveSum += queued;
-      partCount += 1;
+    if (!countRelationshipsAreValid(confirmedCounts)) {
+      return null;
     }
-    if (awaitingOperator != null) {
-      disjointActiveSum += awaitingOperator;
-      partCount += 1;
+    for (const key of DASHBOARD_COUNT_KEYS) {
+      if (exactCounts[key] != null && exactCounts[key] !== confirmedCounts[key]) {
+        return null;
+      }
     }
-    if (retrying != null) {
-      disjointActiveSum += retrying;
-      partCount += 1;
-    }
-    if (partCount >= 2 && disjointActiveSum > active) {
+    if (coverage.status === "complete" && evidence.status_unknown_workspaces !== 0) {
       return null;
     }
   }

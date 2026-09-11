@@ -1,5 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import type { ConsoleDashboardSummary } from "@/lib/types";
+
 import { localDashboardSummary, hostedDashboardSummary, mockAwfConsoleApi } from "./fixtures/console-api";
 
 async function waitForConsoleReady(page: Page) {
@@ -9,6 +11,46 @@ async function waitForConsoleReady(page: Page) {
 
 const kpi = (page: Page, label: string) =>
   page.getByText(label, { exact: true }).locator("..").filter({ has: page.locator(".kpi-value") });
+
+function hostedCountEvidenceSummary(): ConsoleDashboardSummary {
+  const base = hostedDashboardSummary() as ConsoleDashboardSummary;
+  return {
+    ...base,
+    coverage: {
+      status: "partial",
+      notes: ["terminal_timestamp_unavailable", "attention_evidence_unavailable"],
+    },
+    counts: {
+      active: 1,
+      executing: null,
+      monitoring_pr: null,
+      awaiting_operator: 0,
+      awaiting_human: null,
+      retrying: null,
+      queued: null,
+      completed_last_window: null,
+      cancelled_last_window: null,
+      failed_last_window: null,
+    },
+    count_evidence: {
+      total_workspaces: 30,
+      status_known_workspaces: 25,
+      status_unknown_workspaces: 5,
+      confirmed_counts: {
+        active: 1,
+        executing: 1,
+        monitoring_pr: 0,
+        awaiting_operator: 0,
+        awaiting_human: 0,
+        retrying: 0,
+        queued: 0,
+        completed_last_window: 0,
+        cancelled_last_window: 0,
+        failed_last_window: 0,
+      },
+    },
+  };
+}
 
 test("KPI values come from dashboard-summary when saturation absent", async ({ page }) => {
   const requested: string[] = [];
@@ -101,6 +143,54 @@ test("unknown dashboard coverage renders an explicit notice without a request er
   await expect(coverage).toContainText("provider lag");
   await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
 });
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 900 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`count evidence stays qualified and readable on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await mockAwfConsoleApi(page, {
+      mode: "hosted",
+      dashboardSummary: hostedCountEvidenceSummary(),
+    });
+
+    await page.goto("/");
+    await waitForConsoleReady(page);
+
+    // Exact values retain their existing naked rendering and win over matching evidence.
+    await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1");
+    await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0");
+    // Null exact values use explicit, visible lower-bound qualification, including zero.
+    await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1 confirmed");
+    await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0 confirmed");
+    await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0 confirmed");
+    await expect(kpi(page, "Running")).toContainText("project total is incomplete");
+    await expect(kpi(page, "Completed")).toContainText("last 24h");
+    await expect(kpi(page, "Completed")).toContainText("project total is incomplete");
+
+    const coverage = page.getByTestId("dashboard-summary-coverage");
+    await expect(coverage).toContainText("25 of 30 workflow statuses known; 5 unknown");
+    await expect(coverage).toContainText("terminal timestamp unavailable");
+    await expect(coverage).toContainText("attention evidence unavailable");
+    await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
+
+    for (const label of ["Running", "Monitoring PR", "Completed"]) {
+      const card = kpi(page, label);
+      const valueBox = await card.locator(".kpi-value").boundingBox();
+      const hintBox = await card.getByText(/project total is incomplete/).boundingBox();
+      expect(valueBox, `${label} value is measurable`).not.toBeNull();
+      expect(hintBox, `${label} incomplete-total hint is measurable`).not.toBeNull();
+      expect(valueBox!.y + valueBox!.height, `${label} value does not overlap its hint`).toBeLessThanOrEqual(
+        hintBox!.y + 1,
+      );
+    }
+    const hasHorizontalOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    );
+    expect(hasHorizontalOverflow).toBe(false);
+  });
+}
 
 test("status counters stay consistent for escalation/retry/terminal fixtures", async ({ page }) => {
   await mockAwfConsoleApi(page, {

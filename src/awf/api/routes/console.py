@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
@@ -535,6 +536,127 @@ class ConsoleDashboardCountsResponse(BaseModel):
     failed_last_window: StrictInt | None = Field(ge=0)
 
 
+_DASHBOARD_COUNT_FIELDS = (
+    "active",
+    "executing",
+    "monitoring_pr",
+    "awaiting_operator",
+    "awaiting_human",
+    "retrying",
+    "queued",
+    "completed_last_window",
+    "cancelled_last_window",
+    "failed_last_window",
+)
+
+
+def _validate_dashboard_count_relationships(
+    counts: Mapping[str, int | None],
+    *,
+    label: str,
+) -> None:
+    """Enforce the shared v1 subset/disjoint rules for exacts or lower bounds."""
+    active = counts["active"]
+    executing = counts["executing"]
+    monitoring_pr = counts["monitoring_pr"]
+    awaiting_operator = counts["awaiting_operator"]
+    awaiting_human = counts["awaiting_human"]
+    retrying = counts["retrying"]
+    queued = counts["queued"]
+
+    for subset_name, subset in (
+        ("executing", executing),
+        ("monitoring_pr", monitoring_pr),
+        ("queued", queued),
+        ("awaiting_operator", awaiting_operator),
+        ("retrying", retrying),
+    ):
+        if active is not None and subset is not None and subset > active:
+            raise ValueError(f"{label}.{subset_name} must be <= {label}.active")
+    if awaiting_human is not None and monitoring_pr is not None and awaiting_human > monitoring_pr:
+        raise ValueError(f"{label}.awaiting_human must be <= {label}.monitoring_pr")
+    for disjoint_name, disjoint_count in (
+        ("awaiting_operator", awaiting_operator),
+        ("retrying", retrying),
+    ):
+        if (
+            active is not None
+            and executing is not None
+            and disjoint_count is not None
+            and disjoint_count + executing > active
+        ):
+            raise ValueError(
+                f"{label}.{disjoint_name} + {label}.executing must be <= {label}.active"
+            )
+
+    # Current active status buckets are mutually disjoint. With nullable exact
+    # counters, validate the relationship among the available parts only.
+    if active is not None:
+        disjoint_parts = [
+            value
+            for value in (executing, monitoring_pr, queued, awaiting_operator, retrying)
+            if value is not None
+        ]
+        if len(disjoint_parts) >= 2 and sum(disjoint_parts) > active:
+            raise ValueError(f"sum of disjoint {label} active status buckets must be <= active")
+
+
+class ConsoleDashboardConfirmedCountsResponse(BaseModel):
+    """Strict confirmed lower bounds using the exact v1 count-key inventory."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active: StrictInt = Field(ge=0)
+    executing: StrictInt = Field(ge=0)
+    monitoring_pr: StrictInt = Field(ge=0)
+    awaiting_operator: StrictInt = Field(ge=0)
+    awaiting_human: StrictInt = Field(ge=0)
+    retrying: StrictInt = Field(ge=0)
+    queued: StrictInt = Field(ge=0)
+    completed_last_window: StrictInt = Field(ge=0)
+    cancelled_last_window: StrictInt = Field(ge=0)
+    failed_last_window: StrictInt = Field(ge=0)
+
+
+class ConsoleDashboardCountEvidenceResponse(BaseModel):
+    """Population coverage and confirmed lower bounds from the summary snapshot.
+
+    Known plus unknown equals total; every confirmed counter is at most the
+    known population and follows the v1 count relationships. At the summary
+    level, every non-null exact counter equals its confirmed counterpart.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_workspaces: StrictInt = Field(ge=0)
+    status_known_workspaces: StrictInt = Field(ge=0)
+    status_unknown_workspaces: StrictInt = Field(ge=0)
+    confirmed_counts: ConsoleDashboardConfirmedCountsResponse
+
+    @model_validator(mode="after")
+    def population_and_confirmed_counts_are_consistent(self) -> Self:
+        if self.status_known_workspaces + self.status_unknown_workspaces != self.total_workspaces:
+            raise ValueError(
+                "status_known_workspaces + status_unknown_workspaces must equal total_workspaces"
+            )
+        confirmed = self.confirmed_counts.model_dump()
+        if any(value > self.status_known_workspaces for value in confirmed.values()):
+            raise ValueError("every confirmed count must be <= status_known_workspaces")
+        confirmed_status_categories = (
+            confirmed["active"]
+            + confirmed["completed_last_window"]
+            + confirmed["cancelled_last_window"]
+            + confirmed["failed_last_window"]
+        )
+        if confirmed_status_categories > self.status_known_workspaces:
+            raise ValueError(
+                "sum of confirmed active and terminal status categories must be "
+                "<= status_known_workspaces"
+            )
+        _validate_dashboard_count_relationships(confirmed, label="confirmed_counts")
+        return self
+
+
 class ConsoleDashboardOverlapResponse(BaseModel):
     """Fixed v1 count-semantics invariants (literal true; no provider toggles).
 
@@ -561,6 +683,14 @@ class ConsoleDashboardSummaryResponse(BaseModel):
     window: ConsoleDashboardWindowResponse
     coverage: ConsoleDashboardCoverageResponse
     counts: ConsoleDashboardCountsResponse
+    count_evidence: ConsoleDashboardCountEvidenceResponse | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Optional same-snapshot population evidence and confirmed lower bounds; "
+            "semantic sibling-field invariants are enforced by producers and readers."
+        ),
+    )
     overlap: ConsoleDashboardOverlapResponse
 
     @model_validator(mode="after")
@@ -599,84 +729,24 @@ class ConsoleDashboardSummaryResponse(BaseModel):
         payloads fail closed rather than rendering impossible KPI relationships.
         """
         counts = self.counts
-        count_values = (
-            counts.active,
-            counts.executing,
-            counts.monitoring_pr,
-            counts.awaiting_operator,
-            counts.awaiting_human,
-            counts.retrying,
-            counts.queued,
-            counts.completed_last_window,
-            counts.cancelled_last_window,
-            counts.failed_last_window,
-        )
+        exact = counts.model_dump()
         # Contract: null counters require coverage.status partial|unknown.
-        if self.coverage.status == "complete" and any(value is None for value in count_values):
+        if self.coverage.status == "complete" and any(
+            exact[key] is None for key in _DASHBOARD_COUNT_FIELDS
+        ):
             raise ValueError("coverage.status complete requires all counts to be non-null")
-        if (
-            counts.active is not None
-            and counts.executing is not None
-            and counts.executing > counts.active
-        ):
-            raise ValueError("counts.executing must be <= counts.active")
-        if (
-            counts.active is not None
-            and counts.monitoring_pr is not None
-            and counts.monitoring_pr > counts.active
-        ):
-            raise ValueError("counts.monitoring_pr must be <= counts.active")
-        if (
-            counts.active is not None
-            and counts.queued is not None
-            and counts.queued > counts.active
-        ):
-            raise ValueError("counts.queued must be <= counts.active")
-        # Overlap flags are Literal[True] fixed v1 invariants; always enforce when
-        # related counts are present (null counts + partial/unknown coverage instead).
-        if (
-            counts.awaiting_human is not None
-            and counts.monitoring_pr is not None
-            and counts.awaiting_human > counts.monitoring_pr
-        ):
-            raise ValueError("counts.awaiting_human must be <= counts.monitoring_pr")
-        if counts.awaiting_operator is not None:
-            if counts.active is not None and counts.awaiting_operator > counts.active:
-                raise ValueError("counts.awaiting_operator must be <= counts.active")
-            if (
-                counts.active is not None
-                and counts.executing is not None
-                and counts.awaiting_operator + counts.executing > counts.active
-            ):
+        _validate_dashboard_count_relationships(exact, label="counts")
+        if self.count_evidence is not None:
+            evidence = self.count_evidence
+            confirmed = evidence.confirmed_counts.model_dump()
+            for key in _DASHBOARD_COUNT_FIELDS:
+                exact_value = exact[key]
+                if exact_value is not None and exact_value != confirmed[key]:
+                    raise ValueError(f"exact count counts.{key} must equal confirmed_counts.{key}")
+            if self.coverage.status == "complete" and evidence.status_unknown_workspaces != 0:
                 raise ValueError(
-                    "counts.awaiting_operator + counts.executing must be <= counts.active"
+                    "coverage.status complete requires status_unknown_workspaces to be zero"
                 )
-        if counts.retrying is not None:
-            if counts.active is not None and counts.retrying > counts.active:
-                raise ValueError("counts.retrying must be <= counts.active")
-            if (
-                counts.active is not None
-                and counts.executing is not None
-                and counts.retrying + counts.executing > counts.active
-            ):
-                raise ValueError("counts.retrying + counts.executing must be <= counts.active")
-        # Combined disjoint active status buckets: pairwise checks miss cases
-        # like active=3 with executing=monitoring_pr=awaiting_operator=retrying=1.
-        # queued (requested) is always a distinct non-terminal status ⊆ active.
-        if counts.active is not None:
-            disjoint_parts: list[int] = []
-            if counts.executing is not None:
-                disjoint_parts.append(counts.executing)
-            if counts.monitoring_pr is not None:
-                disjoint_parts.append(counts.monitoring_pr)
-            if counts.queued is not None:
-                disjoint_parts.append(counts.queued)
-            if counts.awaiting_operator is not None:
-                disjoint_parts.append(counts.awaiting_operator)
-            if counts.retrying is not None:
-                disjoint_parts.append(counts.retrying)
-            if len(disjoint_parts) >= 2 and sum(disjoint_parts) > counts.active:
-                raise ValueError("sum of disjoint active status buckets must be <= counts.active")
         return self
 
 

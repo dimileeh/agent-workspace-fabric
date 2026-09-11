@@ -51,8 +51,12 @@ def test_capabilities_fixtures_validate(name: str) -> None:
 )
 def test_dashboard_summary_fixtures_validate(name: str) -> None:
     payload = _load(name)
+    assert isinstance(payload, dict)
+    assert "count_evidence" not in payload
     model = ConsoleDashboardSummaryResponse.model_validate(payload)
     assert model.schema_version == 1
+    assert model.count_evidence is None
+    assert "count_evidence" not in model.model_dump(mode="json")
     if name.endswith("no-prior-success.json"):
         assert model.coverage.status == "partial"
         assert model.last_success_at is None
