@@ -115,7 +115,7 @@ test("fullscreen applies a slow successful tail while advancing metadata starts 
         : item,
     ),
   };
-  let advanceMetadata = false;
+  let holdSlowTails = false;
   let metadataRevision = 0;
   let slowTailStarts = 0;
   let streamRequests = 0;
@@ -127,10 +127,7 @@ test("fullscreen applies a slow successful tail while advancing metadata starts 
   await page.route("**/api/awf/console/capabilities", async (route) => {
     await fulfillJson(route, pollingOnlyCapabilities);
   });
-  await page.route("**/api/awf/workspaces/ws_logs/logs", async (route) => {
-    if (advanceMetadata && slowTailStarts >= metadataRevision) {
-      metadataRevision += 1;
-    }
+  await page.route(/\/api\/awf\/workspaces\/ws_logs\/logs(?:\?.*)?$/, async (route) => {
     await fulfillJson(
       route,
       listEnvelope([
@@ -143,8 +140,8 @@ test("fullscreen applies a slow successful tail while advancing metadata starts 
       ]),
     );
   });
-  await page.route("**/api/awf/workspaces/ws_logs/logs/active.stdout", async (route) => {
-    if (!advanceMetadata) {
+  await page.route(/\/api\/awf\/workspaces\/ws_logs\/logs\/active\.stdout(?:\?.*)?$/, async (route) => {
+    if (!holdSlowTails) {
       await fulfillJson(route, logRead("active.stdout", baselineMarker));
       return;
     }
@@ -152,15 +149,11 @@ test("fullscreen applies a slow successful tail while advancing metadata starts 
     heldTails.push(gate);
     slowTailStarts += 1;
     const tailNumber = slowTailStarts;
-    if (slowTailStarts === 2) {
-      advanceMetadata = false;
-      heldTails[0]?.resolve();
-    }
     await gate.promise;
     const marker = tailNumber === 1 ? firstSlowMarker : secondSlowMarker;
     await fulfillJson(route, logRead("active.stdout", marker));
   });
-  await page.route("**/api/awf/workspaces/ws_logs/stream", async (route) => {
+  await page.route(/\/api\/awf\/workspaces\/ws_logs\/stream(?:\?.*)?$/, async (route) => {
     streamRequests += 1;
     await fulfillJson(route, { detail: { message: "workspace_stream unsupported" } }, 404);
   });
@@ -171,13 +164,23 @@ test("fullscreen applies a slow successful tail while advancing metadata starts 
 
   const output = page.locator(".fixed.inset-0.z-50").getByTestId("log-output");
   await expect(output).toContainText(baselineMarker);
-  advanceMetadata = true;
+  holdSlowTails = true;
+  await page.locator(".fixed.inset-0.z-50").getByRole("button", { name: "Tail all" }).click();
+  await expect.poll(() => slowTailStarts).toBe(1);
 
-  await expect.poll(() => slowTailStarts, { timeout: 15_000 }).toBe(2);
+  // The dashboard inspector and fullscreen column both read this workspace.
+  // Advance their shared metadata only after Tail all has started the first
+  // fullscreen read, then wait for both consumers to start their next reads.
+  metadataRevision = 1;
+  await expect.poll(() => slowTailStarts, { timeout: 15_000 }).toBeGreaterThanOrEqual(3);
+
+  heldTails[0]?.resolve();
   await expect(output).toContainText(firstSlowMarker, { timeout: 4_000 });
   expect(streamRequests).toBe(0);
 
-  heldTails[1]?.resolve();
+  for (const heldTail of heldTails.slice(1)) {
+    heldTail.resolve();
+  }
   await expect(output).toContainText(secondSlowMarker, { timeout: 4_000 });
 });
 

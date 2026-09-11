@@ -2799,6 +2799,19 @@ test("fullscreen tail outage compares recovery against the failed stream", () =>
     /generation < appliedTailGenerationRef\.current/,
     "Expected a sibling tail success not to discard another stream's network/5xx outage",
   );
+  const currentSelectionChecks = failureBody.match(
+    /!selectedStreamsRef\.current\.includes\(failure\.streamId\)/g,
+  );
+  assert.equal(
+    currentSelectionChecks?.length,
+    2,
+    "Expected pending outages to use current per-stream selection in both the immediate guard and queued updater",
+  );
+  assert.doesNotMatch(
+    failureBody,
+    /selectionGeneration !== tailSelectionGenerationRef\.current/,
+    "Expected deselecting and reselecting a failed stream not to suppress its pending outage",
+  );
   assert.match(
     body,
     /else if \(!result\.ok\) \{\s*applyTailRefreshFailure\(result\);\s*\}/,

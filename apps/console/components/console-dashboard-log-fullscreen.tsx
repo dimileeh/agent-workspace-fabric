@@ -470,15 +470,16 @@ export function WorkspaceLogColumn({
       // stale/error warning. A newer reload merely starting is not
       // recovery — discard this warning only when this stream itself has a
       // strictly newer successful snapshot, a newer failure already owns this
-      // stream, or authorization/listing denial has cleared the column. A
-      // sibling success advances the global applied generation and must not
-      // drop B's outage while B's own read is still hanging.
+      // stream, the stream is currently deselected, or authorization/listing
+      // denial has cleared the column. Use current per-stream membership here:
+      // deselecting then reselecting B while its newer read hangs must not drop
+      // an older B outage merely because the overall selection changed.
       if (isFullscreenTailAuthFailure(failure.status)) {
         return;
       }
       if (
         epoch !== columnEpochRef.current ||
-        selectionGeneration !== tailSelectionGenerationRef.current ||
+        !selectedStreamsRef.current.includes(failure.streamId) ||
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
         streamAuthDeniedRef.current ||
@@ -498,7 +499,7 @@ export function WorkspaceLogColumn({
       setTailRefreshErrors((current) => {
         if (
           epoch !== columnEpochRef.current ||
-          selectionGeneration !== tailSelectionGenerationRef.current ||
+          !selectedStreamsRef.current.includes(failure.streamId) ||
           listingDeniedRef.current ||
           tailAuthDeniedRef.current ||
           streamAuthDeniedRef.current ||
