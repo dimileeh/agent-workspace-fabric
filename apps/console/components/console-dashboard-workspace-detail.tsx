@@ -28,7 +28,6 @@ formatConfirmedExecutionModel,
 formatRequestedEffort,
 formatRequestedModel,
 mergeWorkspacePresentationFields,
-resolveWorkflowFinishedAt,
 resolveWorkflowTiming,
 } from "@/lib/agent-format";
 import { displayedTaskKey } from "@/lib/console-dashboard-derived";
@@ -523,12 +522,18 @@ export function WorkspaceSummary({
   const coordinationWarnings =
     workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
   const presentationFields = mergeWorkspacePresentationFields(overview, workspace);
-  const workflowTiming = {
+  const workflowTimingInput = {
+    ...overview,
+    status: workspace?.status ?? overview.status,
+    lifecycle: workspace?.lifecycle ?? overview.lifecycle,
+    recovery,
     workflow_finished_at: workspace?.workflow_finished_at ?? overview.workflow_finished_at,
     finished_at: workspace?.finished_at ?? overview.finished_at,
+    duration_seconds: workspace?.duration_seconds ?? overview.duration_seconds,
   };
-  const workflowFinishedAt = resolveWorkflowFinishedAt(workflowTiming);
-  const finishedAt = distinctFinishedAt(workflowTiming);
+  const workflowTiming = resolveWorkflowTiming(workflowTimingInput);
+  const workflowFinishedAt = workflowTiming.finishedAt;
+  const finishedAt = distinctFinishedAt(workflowTimingInput);
   const taskKey = displayedTaskKey(workspace) ?? displayedTaskKey(overview);
 
   return (
@@ -648,10 +653,10 @@ export function WorkspaceSummary({
           {finishedAt ? (
             <Fact label="Finished" value={formatDateTime(finishedAt)} />
           ) : null}
-          {(workspace?.duration_seconds ?? overview.duration_seconds) != null ? (
+          {workflowTiming.durationSeconds != null ? (
             <Fact
               label="Duration"
-              value={compactDuration(workspace?.duration_seconds ?? overview.duration_seconds)}
+              value={compactDuration(workflowTiming.durationSeconds)}
             />
           ) : null}
         </div>

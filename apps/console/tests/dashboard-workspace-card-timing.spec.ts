@@ -7,7 +7,7 @@ import type {
 } from "@/lib/types";
 import { formatDateTime } from "@/lib/format";
 
-import { mockAwfConsoleApi } from "./fixtures/console-api";
+import { fulfillJson, mockAwfConsoleApi } from "./fixtures/console-api";
 
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
@@ -206,6 +206,40 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
       duration,
     );
   }
+});
+
+test("local terminal inspector uses the card lifecycle timing", async ({ page }) => {
+  const completed = overview("ws_local_inspector_timing", "completed", {
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:02:00Z", 120),
+      stage("running", "2026-09-06T12:02:00Z", "2026-09-06T12:10:00Z", 480),
+      stage("completed", "2026-09-06T12:10:00Z", "2026-09-06T12:20:00Z", 600),
+    ],
+  });
+  await mockAwfConsoleApi(page, { overviewItems: [completed] });
+  await page.route(
+    `**/api/awf/workspaces/${completed.workspace_id}`,
+    async (route) => {
+      await fulfillJson(route, {
+        ...completed,
+        id: completed.workspace_id,
+        version: 1,
+      });
+    },
+  );
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId(`workspace-card-${completed.workspace_id}`).click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  const workflowFinished = inspector
+    .getByText("Workflow finished", { exact: true })
+    .locator("..");
+  await expect(workflowFinished).toContainText(formatDateTime("2026-09-06T12:10:00Z"));
+  const duration = inspector.getByText("Duration", { exact: true }).locator("..");
+  await expect(duration).toContainText("10m 0s");
 });
 
 test("local terminal task details use the card lifecycle timing", async ({ page }) => {

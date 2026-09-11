@@ -137,6 +137,25 @@ test("task details modal uses resolved workflow timing", () => {
   );
 });
 
+test("workspace summary uses resolved workflow timing", () => {
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6hlFuW: local terminal
+  // cards infer timing from one complete lifecycle interval, and the inspector
+  // must use the same resolver rather than dropping back to explicit fields.
+  const summarySource = extractFunctionSource("WorkspaceSummary");
+
+  assert.match(
+    summarySource,
+    /resolveWorkflowTiming\(workflowTimingInput\)/,
+    "Expected WorkspaceSummary to share the card workflow timing resolver",
+  );
+  assert.match(summarySource, /workflowFinishedAt = workflowTiming\.finishedAt/);
+  assert.match(
+    summarySource,
+    /workflowTiming\.durationSeconds != null \? \([\s\S]*?compactDuration\(workflowTiming\.durationSeconds\)/,
+    "Expected WorkspaceSummary to render resolved explicit or lifecycle duration",
+  );
+});
+
 test("task details modal locks body scroll in a layout effect", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
   const scrollLockEffect = modalSource.match(
