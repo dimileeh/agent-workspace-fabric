@@ -39,6 +39,7 @@ from awf.runtime.pr_monitor_runner.types import _PostActionPrTerminalState
 
 MONITOR_ACTION_MOOT_EVENT = "workspace.monitor_action_moot"
 MONITOR_ACTION_MOOT_RECHECK_FAILED_EVENT = "workspace.monitor_action_moot_recheck_failed"
+_TERMINAL_HEAD_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 async def _record_recheck_failed_event(
@@ -126,7 +127,8 @@ async def _post_action_pr_terminal_state(
     non-``None`` result means the caller must NOT push, must NOT pause into
     ``blocked``, and must NOT post a PR comment; one
     ``workspace.monitor_action_moot`` event has already been appended recording
-    the operation, the local unpushed HEAD, and the observed PR state.
+    the operation, the local unpushed HEAD when available, and the observed PR
+    state.
     """
     resolved_repo = repo if repo is not None else await _post_action_repo_ref(self, workspace_id)
     if resolved_repo is None:
@@ -176,11 +178,33 @@ async def _post_action_pr_terminal_state(
     if not (status.merged or status.closed):
         return None
 
+    terminal_worktree_path = (
+        worktree_path if worktree_path is not None else self._worktrees_root / workspace_id
+    )
+    try:
+        local_head_sha = await self._rev_parse_head(
+            terminal_worktree_path,
+            timeout_seconds=_TERMINAL_HEAD_PROBE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        # Provenance is best-effort once the forge has confirmed terminal state.
+        # Ordinary spawn/filesystem faults must not replace that authoritative
+        # result; cancellation remains a BaseException and still propagates.
+        local_head_sha = None
+        _log.warning(
+            "monitor.post_action_pr_terminal_head_probe_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            exc_type=type(exc).__name__,
+            reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+        )
+
     observation = _PostActionPrTerminalState(
         status=status,
-        local_head_sha=await self._rev_parse_head(
-            worktree_path if worktree_path is not None else self._worktrees_root / workspace_id
-        ),
+        local_head_sha=local_head_sha,
     )
     _log.warning(
         "monitor.post_action_pr_terminal",

@@ -263,6 +263,64 @@ async def test_open_pr_recheck_returns_none_and_records_nothing(
 
 
 @pytest.mark.unit
+async def test_terminal_recheck_head_probe_is_bounded_and_best_effort(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed audit-only HEAD read cannot block confirmed terminal handling."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    gh = _ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000"))
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    observed_timeouts: list[float | None] = []
+
+    async def _failing_head_probe(
+        probe_path: Path,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> str | None:
+        assert probe_path == worktree
+        observed_timeouts.append(timeout_seconds)
+        raise OSError("cannot spawn git")
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _failing_head_probe)
+
+    with structlog.testing.capture_logs() as captured:
+        observation = await runner._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=42,
+            operation_id="op-head-probe",
+            operation_type="comment_repair",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            context="unit_test",
+            worktree_path=worktree,
+        )
+
+    assert observation is not None
+    assert observation.merged is True
+    assert observation.local_head_sha is None
+    assert len(observed_timeouts) == 1
+    assert observed_timeouts[0] is not None
+    assert observed_timeouts[0] > 0
+    events = await _moot_events(factory, workspace_id)
+    assert len(events) == 1
+    assert events[0].payload["local_head_sha"] is None  # type: ignore[attr-defined,index]
+    assert any(
+        entry.get("event") == "monitor.post_action_pr_terminal_head_probe_failed"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
 async def test_recheck_forge_error_records_a_diagnostic_event(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
