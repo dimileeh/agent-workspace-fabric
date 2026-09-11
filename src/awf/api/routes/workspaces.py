@@ -761,6 +761,10 @@ async def retry_workspace(
     workspace_id: str,
     provider_readiness_override: Annotated[bool, Query()] = False,
     provider_readiness_override_reason: Annotated[str | None, Query(max_length=512)] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", max_length=128),
+    ] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceRetryResponse | JSONResponse:
     """Retry a failed workspace, returning 202 on acceptance or 409 on host-port conflict."""
@@ -770,6 +774,9 @@ async def retry_workspace(
             workspace_id,
             provider_readiness_override=provider_readiness_override,
             provider_readiness_override_reason=provider_readiness_override_reason,
+            idempotency_key=idempotency_key.strip() or None
+            if idempotency_key is not None
+            else None,
         )
     except (
         WorkspaceCreateHostPortConflictError,

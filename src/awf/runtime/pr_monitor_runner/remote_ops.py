@@ -68,6 +68,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
+    _PostActionPrTerminalState,
 )
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_CLEANUP_FAILED,
@@ -165,6 +166,25 @@ class _GitPushResult:
     decision (a protected-scope violation in an unpushed commit, WS-2). The row
     already left ``monitoring_pr``; the monitor loop ends this cycle WITHOUT
     terminally failing the workspace and the offending commit is preserved."""
+    parked_needs_human: bool = False
+    """Unpublished repair commits AWF could not attribute were parked for a human
+    (#935). The worktree is untouched, nothing was reset, and the row stays in
+    ``monitoring_pr`` with the awaiting-human attention flag set. Like
+    ``paused_into_blocked`` this ends the monitor cycle WITHOUT terminally failing
+    the workspace — the preserved commits must survive for the operator."""
+    operator_hint_timeout_retry: bool = False
+    """The operator-hint agent hit the #932 watchdog with its work preserved and
+    the hint spent its single retry: the hint stays ``pending`` so ``decide()``
+    re-issues ``AddressOperatorHint`` next cycle. Nothing was pushed and no human
+    was notified, but the attempt still FAILED — the loop records this envelope's
+    ``reason_code`` (the watchdog code) under an explicit retry outcome instead of
+    a succeeded no-op, so the retry cannot hide the timeout from operation
+    history (AGENTS.md: retries must preserve reason codes)."""
+    pr_terminal: _PostActionPrTerminalState | None = None
+    """The action finished AFTER its PR merged/closed, so nothing was pushed,
+    paused, or notified (#910). Set only on the non-paused, non-failed moot
+    envelope; the monitor loop reads the carried fresh ``PRStatus`` to run the
+    same terminal handling ``decide()`` would return on the next poll."""
 
     @property
     def error_message(self: Any) -> str | None:
@@ -197,8 +217,9 @@ class _GitPushResult:
         """Return whether the push failure should end monitor recovery."""
         # A pause into ``blocked`` is NOT a terminal failure: the workspace is
         # preserved for an operator decision, not failed. The loop ends the
-        # cycle via the dedicated paused-into-blocked handling instead.
-        if self.paused_into_blocked:
+        # cycle via the dedicated paused-into-blocked handling instead. The same
+        # carve-out applies to an unpublished-repair park (#935).
+        if self.paused_into_blocked or self.parked_needs_human:
             return False
         return self.failed and (
             self.protected_scope_blocked
@@ -225,7 +246,10 @@ class _GitPushResult:
                 AGENT_NON_FIXED_WITH_MUTATION,
                 _COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED,
                 _COMMENT_REPAIR_ROLLBACK_FAILED,
-                _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING,
+                # #935: ``_COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING`` is
+                # deliberately absent — unattributable unpushed commits park the
+                # workspace for a human with the worktree intact instead of failing
+                # it and stranding accepted repair work.
                 VALIDATION_WORKTREE_CLEANUP_FAILED,
                 VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
                 VALIDATION_WORKTREE_STATUS_FAILED,
@@ -299,6 +323,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         _REPAIR_WORKTREE_STATUS_FAILED_REASON,
     }:
         return "repair_start_blocked"
+    if push_result.reason_code == _COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING:
+        return "comment_repair_unpublished_parked"
     return "git_push_failed"
 
 
@@ -1019,6 +1045,29 @@ async def _run_sync_base(
                     reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                     details=repair_details,
                 )
+
+        async def _moot_or_failure(failure: _GitPushResult) -> _GitPushResult:
+            """Re-read PR state before a post-agent early failure return (#910).
+
+            The sync-base terminal guard sits after the conflict-resolution commit
+            sink, so every failure returned between the agent launch and that seam
+            bypassed it: a conflict resolution that outlived its PR handed the loop
+            a ``failed`` result, and the loop terminally failed a workspace whose PR
+            had merged instead of completing it as moot. Mirrors the CI-repair and
+            operator-hint paths (``PRRT_kwDOSJAM6s6fl0eo``). Fails OPEN: the guard
+            returns ``None`` and ``failure`` stands exactly as before.
+            """
+            moot = await runner._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="sync_base_post_agent_failure",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            )
+            return moot if moot is not None else failure
+
         try:
             agent_run_kwargs: dict[str, Any] = {
                 "workspace_id": workspace_id,
@@ -1035,13 +1084,15 @@ async def _run_sync_base(
             await runner._run_monitor_agent_with_service_recovery(**agent_run_kwargs)
         except AgentRunError as exc:
             if exc.reason_code == "HOSTED_GIT_PREPARATION_BASE_REF_MISMATCH":
-                return _GitPushResult(
-                    pushed=False,
-                    failed=True,
-                    returncode=exc.result.returncode,
-                    stderr=exc.result.stderr,
-                    reason_code=exc.reason_code,
-                    details=exc.details,
+                return await _moot_or_failure(
+                    _GitPushResult(
+                        pushed=False,
+                        failed=True,
+                        returncode=exc.result.returncode,
+                        stderr=exc.result.stderr,
+                        reason_code=exc.reason_code,
+                        details=exc.details,
+                    )
                 )
             agent_run_err = exc
             append_command_evidence(
@@ -1056,28 +1107,34 @@ async def _run_sync_base(
         ):
             raise
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorHeadObjectMissingError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except Exception as exc:
             # Runtime plumbing can fail outside ``AgentRunError`` after the agent
@@ -1101,13 +1158,18 @@ async def _run_sync_base(
                         reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
                         **repair_details,
                     )
-                    return _GitPushResult(
-                        pushed=False,
-                        failed=True,
-                        returncode=1,
-                        stderr="could not repair poisoned mirror hooks path after sync-base agent failure",
-                        reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
-                        details=repair_details,
+                    return await _moot_or_failure(
+                        _GitPushResult(
+                            pushed=False,
+                            failed=True,
+                            returncode=1,
+                            stderr=(
+                                "could not repair poisoned mirror hooks path after "
+                                "sync-base agent failure"
+                            ),
+                            reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+                            details=repair_details,
+                        )
                     )
             post_agent_err = exc
 
@@ -1122,42 +1184,68 @@ async def _run_sync_base(
                 operation_start_head=operation_start_head,
             )
         except _MonitorPolicyBlockedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorHeadObjectMissingError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
         except _MonitorMirrorHooksPathRepairFailedError as exc:
-            return _GitPushResult(
-                pushed=False,
-                failed=True,
-                returncode=1,
-                stderr=str(exc),
-                reason_code=exc.reason_code,
+            return await _moot_or_failure(
+                _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             )
 
         if post_agent_err is not None:
             raise post_agent_err
 
         if agent_run_err is not None:
+            # Re-read PR state BEFORE the provider handler, not at the seam
+            # below: a ``fallback`` / ``auth_failed`` recovery action RAISES out
+            # of ``_run_sync_base`` entirely and ``runner.run()`` turns both into
+            # ``_terminate_failed``, so a conflict resolution whose PR merged
+            # mid-run would be failed with ``PROVIDER_FALLBACK`` /
+            # ``PROVIDER_AUTH_FAILED`` without ever reaching the terminal guard
+            # (#910, PRRT_kwDOSJAM6s6fvT6u). Mirrors the CI-repair path.
+            provider_moot_result = await runner._post_action_pr_terminal_push_result_if_moot(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="sync_base_post_agent_failure",
+                operation_id=operation_id,
+                operation_type=operation_type,
+                repo=repo,
+                worktree_path=worktree_path,
+            )
+            if provider_moot_result is not None:
+                return provider_moot_result
             await runner._handle_provider_agent_run_error(workspace_id, agent_run_err)
             _log.warning(
                 "monitor.sync_base_cli_failed",
@@ -1165,6 +1253,20 @@ async def _run_sync_base(
                 stderr=agent_run_err.result.stderr[:400],
             )
 
+    # The base merge (and any conflict-resolution agent pass) may have outlived
+    # the PR: ``decide()`` only short-circuits merged/closed at the START of a
+    # poll cycle, so re-read PR state before any push or protected pause (#910).
+    moot_result = await runner._post_action_pr_terminal_push_result_if_moot(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context="sync_base",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        repo=repo,
+        worktree_path=worktree_path,
+    )
+    if moot_result is not None:
+        return moot_result
     protected_scope_block = await runner._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -1196,6 +1298,7 @@ async def _run_sync_base(
                 operation_type=operation_type,
                 monitor_log=monitor_log,
                 source_head_sha=pr_head_sha,
+                repo=repo,
             )
         return _GitPushResult(
             pushed=False,
@@ -1213,6 +1316,14 @@ async def _run_sync_base(
         remote_url=remote_push_url,
         state=state,
         operation_start_head=operation_start_head,
+        # Re-arm the terminal guard AFTER pre-push validation: the check above ran
+        # before a validation suite (plus its fix passes) that can take minutes, so
+        # the PR can go terminal in between (PRRT_kwDOSJAM6s6fjOze).
+        pr_number=pr_number,
+        pr_terminal_context="sync_base",
+        repo=repo,
+        operation_id=operation_id,
+        operation_type=operation_type,
     )
     if (
         state is None

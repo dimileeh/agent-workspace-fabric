@@ -18,6 +18,13 @@ from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
 
 
+class _NoTrustedGitRootsExecutor:
+    def _trusted_git_roots_for_workspace(
+        self, *, workspace_id: str, repo_url: str
+    ) -> tuple[Path, Path] | None:
+        return None
+
+
 @pytest.mark.unit
 async def test_execute_repairs_mirror_hooks_path_before_post_agent_commit(
     monkeypatch: pytest.MonkeyPatch,
@@ -66,7 +73,7 @@ async def test_execute_repairs_mirror_hooks_path_before_post_agent_commit(
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -264,7 +271,7 @@ async def test_execute_marks_post_agent_missing_head_when_recovery_helper_absent
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -436,7 +443,7 @@ async def test_execute_recovers_missing_head_before_agent_cleanup_failure(
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -640,7 +647,7 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -847,7 +854,7 @@ async def test_execute_preserves_agent_cleanup_failure_when_recovered_head_verif
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -1026,7 +1033,7 @@ async def test_execute_preserves_agent_cleanup_failure_when_head_recovery_fails(
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -1205,7 +1212,7 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,

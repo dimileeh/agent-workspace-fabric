@@ -33,7 +33,10 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.feedback_policy import preferred_duplicate_review_thread
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_key,
+    _outdated_resolve_requeued_key,
+)
 from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorState,
@@ -82,6 +85,37 @@ def _outdated_thread_is_resolvable(state: MonitorState, thread: ReviewThread) ->
     if verdict != "defer":
         return False
     return _deferred_issue_already_filed(state, thread)
+
+
+def _thread_has_live_operator_decision(state: MonitorState, thread: ReviewThread) -> bool:
+    """True while a guide's operator ruling still owns this thread's next pass (#939).
+
+    A guide that answers a parked ``needs_human`` *clears* the thread verdict and
+    stashes the directive under ``__operator_decision__:<thread id>`` so the
+    thread re-enters ``AddressComments`` and the agent re-triages it with the
+    ruling quoted. Both pre-decision hygiene steps below key on "no ``thread_id``
+    verdict", so an outdated thread in exactly that window looks unseeded to
+    them. Left alone they would seed a verdict from the branch/comment evidence
+    the operator just ruled on — ``needs_human`` (straight back to the same human
+    wait, ruling unread) when a reviewer reply postdates the earlier ``fix:
+    address <thread id>`` commit, or ``fix_committed`` (thread resolved without
+    the requested re-triage) otherwise. Neither is hygiene's call while a live
+    ruling is pending, so both steps skip these threads and the guide-created
+    requeue owns the next pass (PRRT_kwDOSJAM6s6fwt3a).
+
+    The exemption is self-limiting: the marker is dropped once the thread records
+    a verdict other than ``agent_failed`` (``_mark_review_thread_addressed``) or
+    when a reviewer reply makes the ruling stale (``_operator_decision_for_thread``),
+    and any recorded verdict already excludes the thread from both steps.
+
+    That is why this keys on the LIVE marker only. The *retired* sidecar
+    (``__retired_operator_decision__``) deliberately outlives the verdict that
+    answered the ruling so a rollback can restore it, so honoring it here would
+    make the exemption permanent — hygiene would skip the thread forever and the
+    merge gate would hold at ``NotifyHuman`` on an invisible conversation, the
+    very #484 wedge seeding exists to prevent.
+    """
+    return state.threads_addressed_ids.get(_operator_decision_key(thread.thread_id)) is not None
 
 
 def _thread_identifier_set(thread: ReviewThread) -> set[str]:
@@ -276,6 +310,9 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     suppress AddressComments while never calling ``resolve_thread``, letting a
     CLEAN snapshot merge over an open forge thread — or required-conversation
     protection loop on NotifyHuman (PRRT_kwDOSJAM6s6dfPZ2).
+
+    Threads carrying a live operator ruling are excluded too — see
+    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a).
     """
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     unseeded = [
@@ -283,6 +320,10 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         for thread in status.outdated_unresolved_inline_threads
         if thread.thread_id not in active_thread_ids
         and state.threads_addressed_ids.get(thread.thread_id) is None
+        # #939: a guide-cleared thread carrying a live operator ruling is awaiting
+        # re-triage through ``AddressComments``, not a verdict reconstructed from
+        # the evidence the operator just ruled on (PRRT_kwDOSJAM6s6fwt3a).
+        and not _thread_has_live_operator_decision(state, thread)
         # #548: never seed ``fix_committed`` from branch evidence onto a thread
         # that already holds a blocking sibling comment verdict (``needs_human`` /
         # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
@@ -432,13 +473,22 @@ def _reconcile_comment_keyed_outdated_verdicts(
     Dual-feed IDs are skipped for the same reason as branch-evidence seeding
     (PRRT_kwDOSJAM6s6dfPZ2): promoting a resolvable verdict onto a shared id
     before hygiene's active-wins skip suppresses AddressComments without ever
-    resolving the forge thread. Active-path ownership handles those IDs.
+    resolving the forge thread. Active-path ownership handles those IDs. Threads
+    carrying a live operator ruling are skipped as well — see
+    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a).
     """
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     for thread in status.outdated_unresolved_inline_threads:
         if thread.thread_id in active_thread_ids:
             continue
         if state.threads_addressed_ids.get(thread.thread_id) is not None:
+            continue
+        # #939: an operator guide cleared this thread's ``needs_human`` and stashed
+        # its ruling; the requeue it created owns the next pass. Promoting a
+        # comment-keyed verdict (or the mixed-verdict ``needs_human`` below) here
+        # would resolve the thread — or re-park it — without the agent ever reading
+        # the directive (PRRT_kwDOSJAM6s6fwt3a).
+        if _thread_has_live_operator_decision(state, thread):
             continue
         # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
         # ``fix_committed`` and a reply ``needs_human``. Promoting the resolvable

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, cast
 from awf.db.enums import AgentRuntime
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from awf.adapters.base import AgentAdapter, AgentDefaults
     from awf.adapters.runtime_executor import AgentRuntimeExecutor
     from awf.adapters.usage import UsageSampler
@@ -39,6 +41,7 @@ def get_adapter(
     agent_idle_timeout_seconds: float = 3600.0,
     usage_sampler: UsageSampler | None = None,
     runtime_executor: AgentRuntimeExecutor | None = None,
+    trusted_git_roots: tuple[Path, Path] | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime."""
     if isinstance(runtime, str) and not isinstance(runtime, AgentRuntime):
@@ -63,6 +66,7 @@ def get_adapter(
             agent_idle_timeout_seconds=agent_idle_timeout_seconds,
             usage_sampler=usage_sampler,
             runtime_executor=runtime_executor,
+            trusted_git_roots=trusted_git_roots,
         )
     return cast(
         "AgentAdapter",
@@ -75,5 +79,6 @@ def get_adapter(
             agent_idle_timeout_seconds=agent_idle_timeout_seconds,
             usage_sampler=usage_sampler,
             runtime_executor=runtime_executor,
+            trusted_git_roots=trusted_git_roots,
         ),
     )

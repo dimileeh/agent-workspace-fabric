@@ -14,6 +14,7 @@ from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.runtime.logs import LogStore
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+from awf.runtime.pr_monitor_models import PRStatus
 from awf.runtime.pr_monitor_runner.config import PostMergeTargetReconciler
 from awf.runtime.pr_monitor_runner.constants import (
     _MIRROR_HOOKS_PATH_POISONED_REASON,
@@ -26,6 +27,41 @@ from awf.runtime.validation import ValidationRunner
 class _BaseFetchHandlingResult:
     retry: bool
     reason_code: str
+
+
+@dataclass(frozen=True)
+class _PostActionPrTerminalState:
+    """A post-action observation that the PR is already merged or closed (#910).
+
+    Built by ``_post_action_pr_terminal_state`` from a FRESH ``fetch_pr_status``
+    taken after a long monitor action finished, together with the local unpushed
+    HEAD the action produced. Carried on ``_GitPushResult.pr_terminal`` so the
+    monitor loop can run the same terminal handling ``decide()`` would have
+    chosen on the next poll, without re-fetching.
+    """
+
+    status: PRStatus
+    local_head_sha: str | None = None
+
+    @property
+    def merged(self) -> bool:
+        """Return whether the forge reports the PR as merged."""
+        return self.status.merged
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the PR is closed without having been merged."""
+        return self.status.closed and not self.status.merged
+
+    @property
+    def merge_commit_sha(self) -> str | None:
+        """Return the merge commit sha when the PR merged."""
+        return self.status.merge_commit_sha if self.status.merged else None
+
+    @property
+    def pr_state(self) -> str:
+        """Return the operator-facing terminal PR state label."""
+        return "merged" if self.merged else "closed"
 
 
 class BaseFetchError(Exception):
@@ -183,3 +219,21 @@ class _MonitorHeadObjectMissingError(Exception):
         """Store the terminal monitor reason code with the exception message."""
         super().__init__(message)
         self.reason_code = reason_code
+
+
+# Failures the dirty-worktree commit sink can raise that already carry their own
+# reason code or recovery escalation, as opposed to an untyped repository/Git
+# error. Shared by every comment-verdict sink so the classification cannot drift
+# between the timeout-preserve and compose-cleanup paths.
+SINK_INFRASTRUCTURE_ERRORS = (
+    ProviderRecoveryRetryError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryAuthError,
+    _MonitorAgentServiceRecoverySupersededError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
+    ProtectedScopeDiffError,
+)

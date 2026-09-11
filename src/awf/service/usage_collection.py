@@ -527,7 +527,7 @@ class _CcusageSampleContext(UsageSampleContext):
         await asyncio.shield(self._pending_write)
 
     async def _run_ccusage(self) -> tuple[NormalizedUsage | None, str | None, str | None]:
-        # Expected ccusage CLI contract (pinned at 20.0.3 in
+        # Expected ccusage CLI contract (pinned at 20.0.20 in
         # docker/agent-runtime.Dockerfile): ``ccusage <source> daily --json --offline
         # --config <neutral>``, where ``<source>`` is a positional provider
         # sub-command ("claude" / "codex" / "gemini" / "opencode"; see
@@ -540,7 +540,7 @@ class _CcusageSampleContext(UsageSampleContext):
         # this invocation degrade to REASON_COMMAND_FAILED, so re-verify the argument
         # order and flags whenever the Dockerfile pin is bumped. ``--offline`` is
         # ccusage's global ``-O`` option and is accepted by every source subcommand,
-        # including ``opencode``, at the pinned 20.0.3 (verified: ``ccusage opencode
+        # including ``opencode``, at the pinned 20.0.20 (verified: ``ccusage opencode
         # daily --help`` lists ``-O, --offline`` and the full invocation exits 0), so
         # it does not degrade opencode runs even though the docs page omits it.
         invocation = build_tracked_compose_exec(

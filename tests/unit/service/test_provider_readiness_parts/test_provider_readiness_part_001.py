@@ -294,7 +294,7 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
         ("codex", "codex", "gpt-custom", "ok"),
         ("claude_code", "claude_code", "claude-opus-5", "ok"),
         ("cursor", "cursor", "auto", "ok"),
-        ("antigravity", "antigravity", "gemini-3.1-pro-preview", "ok"),
+        ("antigravity", "antigravity", "gemini-3.1-pro", "ok"),
         ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
         ("grok", "grok", "grok-build", "ok"),
     ]
@@ -419,7 +419,7 @@ def test_selected_antigravity_preflight_requires_env_key_and_runtime_cli(
 
     assert result["provider"] == "antigravity"
     assert result["agent"] == "antigravity"
-    assert result["model"] == "gemini-3.1-pro-preview"
+    assert result["model"] == "gemini-3.1-pro"
     assert result["readiness_status"] == "ready"
     assert result["auth_status"] == "ok"
     assert result["auth_source"] == "GEMINI_API_KEY"
@@ -443,7 +443,7 @@ def test_selected_antigravity_preflight_blocks_missing_env_key(tmp_path: Path) -
 
     assert result["provider"] == "antigravity"
     assert result["agent"] == "antigravity"
-    assert result["model"] == "gemini-3.1-pro-preview"
+    assert result["model"] == "gemini-3.1-pro"
     assert result["readiness_status"] == "blocked"
     assert result["auth_status"] == "fail"
     assert result["auth_source"] == "not_observed"

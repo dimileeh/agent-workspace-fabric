@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import (
     UTC,
     datetime,
@@ -395,9 +395,30 @@ def _merge_concurrent_operator_freeze_state(
 
 
 async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> None:
+    if state.monitor_writes_suppressed:
+        # A terminal-PR cycle found this runner superseded as the monitor owner and
+        # its terminate sink refused the write behind the owner fence. This snapshot
+        # is stale by construction: writing it would overwrite the live claimant's
+        # ``monitor_threads_addressed`` / ``monitor_last_commit_sha``, so unresolved
+        # feedback could read as addressed. The fence belongs at the write seam, not
+        # only at the caller that first observed the refusal, so no other persist
+        # path (the pre-``_execute`` flush, the provider-recovery handlers) can route
+        # around it. The new owner re-derives everything from the DB
+        # (PRRT_kwDOSJAM6s6fsqcA).
+        return
     async with self._deps.session_factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(workspace_id)
         if ws is None:
+            return
+        if _superseded_monitor_owner(self, ws):
+            # Do not rely on every caller propagating a refused terminal
+            # transition into ``monitor_writes_suppressed``. In particular, a
+            # cleanup failure can return terminal after its failure sink loses the
+            # owner race, then reach the outer persist with an otherwise writable
+            # state. Fence the shared write seam while the workspace row is locked
+            # so a superseded runner cannot overwrite the live claimant's thread
+            # map or last-commit SHA (PRRT_kwDOSJAM6s6hFfgs).
+            state.monitor_writes_suppressed = True
             return
         now_monotonic = time.monotonic()
         now_wall = datetime.now(UTC)
@@ -586,6 +607,49 @@ async def _clear_preserved_marker_and_consume_grants_durably(self: Any, workspac
             await s.commit()
 
 
+def _superseded_monitor_owner(self: Any, ws: Workspace) -> bool:
+    """Return True when this runner no longer owns ``ws``'s monitor claim.
+
+    Two supersession shapes, shared by both terminal sinks:
+
+    * a CLAIMED runner whose lease expired and was reassigned to a newer worker by
+      ``claim_monitoring_pr`` while this runner stayed alive; and
+    * the inline initial handoff, which runs with no monitor claim
+      (``_monitor_owner_id is None``) while the row sits unclaimed in
+      ``monitoring_pr`` — exactly the state a recovery monitor on another worker can
+      immediately claim. Once it has, ``monitor_claimed_by`` is no longer ``None``
+      and this inline runner is the stale one. Mirrors the ``fence_unclaimed_monitor``
+      arm of the pause CAS (PRRT_kwDOSJAM6s6KTj4R).
+
+    A genuine inline handoff with no takeover leaves ``monitor_claimed_by`` ``None``
+    and is NOT superseded.
+    """
+    superseded_claimed_runner = (
+        self._monitor_owner_id is not None and ws.monitor_claimed_by != self._monitor_owner_id
+    )
+    superseded_inline_handoff = self._monitor_owner_id is None and ws.monitor_claimed_by is not None
+    return superseded_claimed_runner or superseded_inline_handoff
+
+
+async def _run_transition_committed_callback(
+    callback: Callable[[], Awaitable[None]],
+) -> None:
+    """Finish terminal publication before propagating outer cancellation."""
+    callback_task: asyncio.Future[None] = asyncio.ensure_future(callback())
+    cancellation_requested = False
+    while not callback_task.done():
+        try:
+            await asyncio.shield(callback_task)
+        except asyncio.CancelledError:
+            # Cancellation targets the outer monitor task, not the terminal write.
+            # Re-await across repeated shutdown cancels so the committed transition
+            # cannot outlive its authoritative completion artifact.
+            cancellation_requested = True
+    callback_task.result()
+    if cancellation_requested:
+        raise asyncio.CancelledError
+
+
 async def _terminate_completed(
     self: Any,
     workspace_id: str,
@@ -595,12 +659,44 @@ async def _terminate_completed(
     base_branch: str | None = None,
     compose_project: str | None = None,
     compose_file: Path | None = None,
-) -> None:
+    on_transition_committed: Callable[[], Awaitable[None]] | None = None,
+) -> bool:
+    """Complete the workspace at the merged sink.
+
+    Returns True only when this runner actually owned the row and committed the
+    ``completed`` transition, so callers can gate their own monitor-state writes
+    (``_persist_state``, the defer signal) on the same atomic owner fence instead
+    of publishing them ahead of it (PRRT_kwDOSJAM6s6flswY).
+
+    ``on_transition_committed`` is that gated publication, run cancellation-safe
+    the moment the transition commits and BEFORE both the async session's
+    cancellable ``__aexit__`` and the post-commit work below (target-branch
+    reconciliation, filesystem/Compose GC). The row is terminal from the commit
+    onward, so no monitor is ever started for it again: a caller that waited for
+    this coroutine to RETURN would silently drop its terminal artifact whenever
+    cancellation or process loss landed in that cleanup, breaking
+    ``_write_defer_signal``'s contract that the file always exists once the monitor
+    is done (PRRT_kwDOSJAM6s6fvDbP / PRRT_kwDOSJAM6s6g8fr-). Callbacks keep the
+    best-effort contract of the writes they wrap — raising here skips the cleanup
+    below.
+
+    Callers MUST honor the returned ownership boolean before publishing any
+    merge-success monitor write: a False return means a newer claimant owns the row,
+    so the caller has to suppress its own monitor-state flush (and route any
+    commit-adjacent artifact through ``on_transition_committed`` rather than emitting
+    it after the call). ``merge_loop.handle_merge_action``'s ``Merge`` arm is the
+    reference caller — it sets ``state.monitor_writes_suppressed`` on False and passes
+    its defer-signal write as ``on_transition_committed`` (PRRT_kwDOSJAM6s6fvGsq).
+    """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
-        ws = await repo.get(workspace_id)
+        # Lock the row before the owner fence below, exactly as ``_terminate_failed``
+        # does: a plain ``get`` leaves a TOCTOU window where this stale runner reads
+        # its old ``monitor_claimed_by``, a newer worker reclaims the monitor lease,
+        # and this session still commits ``completed`` at the transition below.
+        ws = await repo.get_for_update(workspace_id)
         if ws is None:
-            return
+            return False
         if ws.status != WorkspaceStatus.monitoring_pr.value:
             if (
                 ws.status == WorkspaceStatus.completed.value
@@ -615,7 +711,33 @@ async def _terminate_completed(
                 reason_code="MONITOR_DONE",
             )
             await s.commit()
-            return
+            return False
+        if _superseded_monitor_owner(self, ws):
+            # Mirror the ``_terminate_failed`` owner fence at the merged sink. The
+            # status guard above misses this race because the takeover keeps the row
+            # in ``monitoring_pr``, so without this a superseded runner could
+            # transition the live claimant's workspace to ``completed`` (and run the
+            # target-branch reconcile + filesystem GC under it). The #910 post-action
+            # terminal guard makes that reachable: a long action that loses its claim
+            # mid-flight and then observes the PR merged reaches this sink directly.
+            # Dropping the write is safe — the new owner's next poll sees the merged
+            # PR and completes the workspace itself (PRRT_kwDOSJAM6s6KIep5,
+            # PRRT_kwDOSJAM6s6KTj4R).
+            _log.warning(
+                "monitor.terminal_completed_ignored_superseded_owner",
+                workspace_id=workspace_id,
+                reason_code="MONITOR_DONE",
+                monitor_owner_id=self._monitor_owner_id,
+                monitor_claimed_by=ws.monitor_claimed_by,
+            )
+            await _record_ignored_monitor_terminal_callback(
+                repo,
+                ws,
+                requested_status=WorkspaceStatus.completed,
+                reason_code="MONITOR_DONE",
+            )
+            await s.commit()
+            return False
         if pr_merge_sha:
             ws.pr_merge_sha = pr_merge_sha
         await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
@@ -626,6 +748,8 @@ async def _terminate_completed(
         # NotifyHuman episode (issuecomment-5225662425 / PR #805).
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
+        if on_transition_committed is not None:
+            await _run_transition_committed_callback(on_transition_committed)
     if repo_url and base_branch:
         await self._reconcile_target_branch_after_merge(
             workspace_id=workspace_id,
@@ -640,6 +764,7 @@ async def _terminate_completed(
         compose_project=compose_project,
         compose_file=compose_file,
     )
+    return True
 
 
 async def _reconcile_target_branch_after_merge(
@@ -1109,7 +1234,19 @@ async def _terminate_failed(
     reason_code: AbortReason | str | None = None,
     details: Mapping[str, Any] | None = None,
     failure_reason: FailureReason = FailureReason.infrastructure_failure,
-) -> None:
+    on_transition_committed: Callable[[], Awaitable[None]] | None = None,
+) -> bool:
+    """Fail the workspace at the abort sink.
+
+    Returns True only when this runner actually owned the row and committed the
+    ``failed`` transition — same contract as ``_terminate_completed`` so callers
+    can fence their own monitor-state writes on it (PRRT_kwDOSJAM6s6flswY).
+
+    ``on_transition_committed`` publishes owner-fenced terminal writes
+    cancellation-safe immediately after the commit and before the async session's
+    cancellable ``__aexit__``, mirroring ``_terminate_completed``. Once the row is
+    terminal no later monitor can recreate those writes (PRRT_kwDOSJAM6s6g_XHw).
+    """
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
         # Lock the row before the owner fence below: a plain ``get`` leaves a
@@ -1120,7 +1257,7 @@ async def _terminate_failed(
         # through the commit so the fence check and the state write are atomic.
         ws = await repo.get_for_update(workspace_id)
         if ws is None:
-            return
+            return False
         rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
         rc = rc or "MONITOR_ABORT"
         if ws.status != WorkspaceStatus.monitoring_pr.value:
@@ -1131,23 +1268,11 @@ async def _terminate_failed(
                 reason_code=rc,
             )
             await s.commit()
-            return
-        superseded_claimed_runner = (
-            self._monitor_owner_id is not None and ws.monitor_claimed_by != self._monitor_owner_id
-        )
-        # The inline initial handoff runs with no monitor claim
-        # (``_monitor_owner_id`` is None) while the row sits unclaimed in
-        # ``monitoring_pr`` — exactly the state ``claim_monitoring_pr`` can
-        # immediately reclaim for a recovery monitor on another worker. Once a
-        # recovery monitor has claimed it, ``monitor_claimed_by`` is no longer
-        # None and this inline runner is the stale one. Mirror the
-        # ``fence_unclaimed_monitor`` arm of the pause CAS here so the stale
-        # inline runner does not clobber the takeover to ``failed``
-        # (PRRT_kwDOSJAM6s6KTj4R).
-        superseded_inline_handoff = (
-            self._monitor_owner_id is None and ws.monitor_claimed_by is not None
-        )
-        if superseded_claimed_runner or superseded_inline_handoff:
+            return False
+        # Both supersession shapes — an expired-lease takeover and a taken-over
+        # inline handoff — live in ``_superseded_monitor_owner``, shared with the
+        # ``completed`` sink so the two terminal writes fence identically.
+        if _superseded_monitor_owner(self, ws):
             # A superseded monitor runner — its lease expired and a newer worker
             # reclaimed the row (``claim_monitoring_pr`` reassigns expired leases),
             # OR an inline initial handoff whose unclaimed row was taken over by a
@@ -1176,7 +1301,7 @@ async def _terminate_failed(
                 reason_code=rc,
             )
             await s.commit()
-            return
+            return False
         safe_message = redact_audit_text(message, limit=2000)
         ws.failure_reason = failure_reason.value
         ws.failure_message = safe_message
@@ -1201,3 +1326,6 @@ async def _terminate_failed(
         # emitted attention_required (PRRT_kwDOSJAM6s6XY5JH).
         await repo.clear_workspace_attention(workspace_id)
         await s.commit()
+        if on_transition_committed is not None:
+            await _run_transition_committed_callback(on_transition_committed)
+    return True

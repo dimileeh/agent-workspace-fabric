@@ -3,20 +3,50 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-One policy lives here, scoped to the retry that follows an explicit
-``AGENT_FIXED_WITHOUT_EVIDENCE`` rejection:
+Four policies live here, all scoped to the correction retry — the attempt that
+runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
 
+* **Path-level evidence on the correction** — attempt 0 keeps the strict
+  line-anchored gate, so a misplaced or absent fix still earns its correction
+  round. Once the agent has been told its FIXED carried no line evidence and
+  re-affirms FIXED, a contentful commit in the item's *own* range
+  (``item_start_head``..HEAD) that changes the reviewed *file* is accepted as
+  evidence. Real fixes routinely land off the anchor (a helper above the
+  caller, a guard at the call site); escalating those to a human is the
+  unnecessary escalation #925 set out to remove. This is never the first gate,
+  and the range is the item's own, so the commit cannot be a stale, foreign, or
+  pre-existing change. Restores the PR #926 D1 behaviour on top of #928.
+* **Package-level evidence on the correction** (#952) — after the line-anchored
+  and the path-level checks have both failed, the same item-own range is
+  accepted when it changes any file in the reviewed file's *package* (the
+  bundle-scope rule: same parent directory, or descendant paths). A
+  same-package change is the normal shape of a callee-anchored review ("honour
+  the ownership result in that caller" is anchored on the callee and fixed in
+  the caller), and of a line-limit split that moved the reviewed code into a
+  sibling module — where every correct fix is off-path by construction. Eight
+  escalations on 2026-09-07 (PRs #922, #934, #939) were exactly those shapes,
+  each costing an operator decision for a fix that was correct. The widening
+  changes the *radius* of the existing "an unrelated edit could satisfy the
+  gate" risk, not its kind: the strict rule already accepts an unrelated edit
+  to the reviewed file itself. Attempt 0 stays strict, cross-package commits
+  keep escalating with the commit preserved, and the unmappable-anchor sentinel
+  stays fail-closed. A request to remove this acceptance (PR #929 /
+  issue:5558086911) is answered DEFER — it is an explicit operator decision.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
   rolling the commit back discards the change and strands the review thread
   (issue #925, observed six times on PR #922). Keep the commit; for
-  ``false_positive`` / ``defer``, accept ``fix_committed`` only when
-  item-scoped related-line evidence already exists (near-anchor / callee),
-  otherwise escalate to ``needs_human``. An explicit corrected ``needs_human``
-  always stays ``needs_human`` (commit still preserved) so related-line
-  evidence cannot override a requested human gate (issue:5558086911). Path
-  membership alone is not item-scoped FIXED evidence.
+  ``false_positive`` / ``defer``, accept ``fix_committed`` when item-scoped
+  evidence exists (related-line, or correction-time path-level), otherwise
+  escalate to ``needs_human``. An explicit corrected ``needs_human`` always
+  stays ``needs_human`` (commit still preserved) so evidence cannot override a
+  requested human gate (issue:5558086911).
+* **No monitor failure on an unsubstantiated correction fix** — a correction
+  FIXED whose contentful commit carries no item-scoped evidence used to roll
+  back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``, failing the whole
+  monitor (ws_46bc0f45 on PR #922). The commit is preserved and the item
+  escalates to ``needs_human`` instead.
 """
 
 from __future__ import annotations
@@ -26,10 +56,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    read_protocol_attempt_start_head,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -37,8 +72,9 @@ _log = get_logger(__name__)
 
 # A non-FIXED correction verdict whose reason cites the commit this item just
 # made. Never a rollback trigger. ``false_positive`` / ``defer`` may become
-# FIXED when item-scoped related-line evidence exists; an explicit
-# ``needs_human`` stays escalated with the commit preserved.
+# FIXED when item-scoped evidence exists (related-line, or correction-time
+# path-level); an explicit ``needs_human`` stays escalated with the commit
+# preserved.
 AGENT_NON_FIX_CITES_OWN_COMMIT = "AGENT_NON_FIX_CITES_OWN_COMMIT"
 
 # Abbreviated-or-full commit references. Seven hex chars is Git's own minimum
@@ -185,6 +221,128 @@ async def correction_reason_cites_own_item_commit(
     )
 
 
+async def path_level_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    state: MonitorState | None,
+    dirty_changes_committed: bool,
+) -> bool:
+    """Re-run the FIXED evidence check without the line anchor (#925 D1).
+
+    Same probe, same ``item_start_head``..HEAD range, only the line constraint
+    dropped: the range must still be a contentful descendant of the item's own
+    start that changes the reviewed path. Callers must gate this on the
+    correction attempt — it is the answer to "the agent was told its FIXED had
+    no line evidence and re-affirmed FIXED", never the first evidence check.
+
+    Resolved through ``comment_verdict`` at call time, like the rest of the
+    split-out verdict helpers, so monkeypatches on that module still reach the
+    escalated check as well as the line-anchored one.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict
+
+    return await comment_verdict._item_fix_evidence(
+        runner,
+        worktree_path=worktree_path,
+        item_start_head=item_start_head,
+        item_path=item_path,
+        item_line=None,
+        state=state,
+        dirty_changes_committed=dirty_changes_committed,
+    )
+
+
+async def package_level_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    state: MonitorState | None,
+    dirty_changes_committed: bool,
+) -> bool:
+    """Accept a same-package change as correction-attempt FIXED evidence (#952).
+
+    The last of the three correction-attempt evidence checks: same
+    ``item_start_head``..HEAD range and the same contentful-descendant
+    requirement as the line-anchored and path-level gates, only the scope
+    predicate widened from "the reviewed line" to "the reviewed file's package"
+    — the existing bundle-scope rule ``_commit_range_in_item_scope`` /
+    ``_changed_path_in_item_scope`` (same parent directory, or descendant
+    paths), which also covers a module extracted out of the reviewed file.
+
+    Why this is safe, and why it is needed (issue #952): the correction attempt
+    only runs after AWF told the agent its FIXED lacked evidence and the agent
+    re-affirmed FIXED; the range is the item's *own*, so the commit cannot be
+    stale or foreign; and a same-package change is the normal shape of a
+    callee-anchored review — "honour the ownership result in that caller" is
+    anchored on the callee but fixed in the caller, and a line-limit split moves
+    reviewed code into a sibling module so that every correct fix is off-path by
+    construction. Eight escalations on 2026-09-07 (PRs #922, #934, #939) were
+    correct fixes of exactly those two shapes, each costing an operator
+    decision. The widening changes the *radius* of the existing "an unrelated
+    edit could satisfy the gate" risk, not its kind: the strict rule already
+    accepts an unrelated edit to the reviewed file itself. Attempt 0 stays
+    strict so a no-op FIXED still earns its correction round, cross-package
+    commits keep escalating to ``needs_human`` with the commit preserved, and
+    the unmappable-anchor sentinel stays fail-closed. If a reviewer asks for
+    this acceptance to be removed again (PR #929 / issue:5558086911), the answer
+    is DEFER: it is an explicit operator decision recorded in issue #952.
+
+    ``dirty_changes_committed`` is accepted for signature parity with the other
+    two evidence helpers and deliberately never consulted: the earlier checks
+    already produced the degraded dirty-sink fallback, so the widest gate must
+    never be the one that invents evidence for a lightweight or mocked runner.
+    """
+    del dirty_changes_committed
+
+    if item_start_head is None or item_path is None or not worktree_path.exists():
+        return False
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    in_item_scope = getattr(runner, "_commit_range_in_item_scope", None)
+    if not (callable(descends) and callable(trees_differ) and callable(in_item_scope)):
+        return False
+
+    candidate_heads: list[str] = []
+    end_head = await runner._rev_parse_head(worktree_path)
+    if end_head:
+        candidate_heads.append(end_head)
+    if state is not None and state.hosted_terminal_head_advanced:
+        hosted_head = (state.last_push_sha or "").strip()
+        if hosted_head and hosted_head not in candidate_heads:
+            candidate_heads.append(hosted_head)
+
+    for candidate in candidate_heads:
+        if candidate.lower() == item_start_head.lower():
+            continue
+        if not await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=candidate,
+        ):
+            continue
+        if not await trees_differ(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+        ):
+            continue
+        if not await in_item_scope(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+            item_path=item_path,
+        ):
+            continue
+        return True
+    return False
+
+
 def correction_self_citation_outcome(
     *,
     workspace_id: str,
@@ -195,15 +353,25 @@ def correction_self_citation_outcome(
 ) -> VerdictResult:
     """Disposition for a self-citing non-FIXED correction verdict (#925 D2).
 
-    An explicit corrected ``needs_human`` always stays ``needs_human``: related-
-    line evidence must not convert a requested human gate into a resolvable
-    ``fix_committed`` (issue:5558086911). For ``false_positive`` / ``defer``,
-    item-scoped related-line FIXED evidence means the item is what the agent
-    said on its first attempt — FIXED — so the commit stays and the thread can
-    be resolved. Without that evidence, the commit is still preserved (rolling
-    back a change the agent points at as the fix is exactly the #925 defect)
-    and the item escalates to ``needs_human``. Path membership alone is not
-    enough for ``fix_committed``.
+    ``has_path_evidence`` is the caller's item-scoped FIXED evidence: the
+    line-anchored check, **or** — because this only ever runs on the correction
+    attempt — the path-level re-check of the item's own commit range
+    (``path_level_item_fix_evidence``), **or** the package-level re-check of
+    that same range (``package_level_item_fix_evidence``, #952). The guard reads
+    whatever the correction accepted as evidence, so a sibling-module fix the
+    agent then points at as "already addressed" resolves the thread instead of
+    escalating. An explicit corrected ``needs_human``
+    always stays ``needs_human``: no evidence converts a requested human gate
+    into a resolvable ``fix_committed`` (issue:5558086911). For
+    ``false_positive`` / ``defer``, item-scoped evidence means the item is what
+    the agent said on its first attempt — FIXED — so the commit stays and the
+    thread can be resolved. Without that evidence, the commit is still
+    preserved (rolling back a change the agent points at as the fix is exactly
+    the #925 defect) and the item escalates to ``needs_human`` so the merge gate
+    keeps blocking with a reason code. The preserved commit travels with the
+    cycle's ordinary push; on a push failure it follows the ordinary
+    unpublished-repair path while the recorded ``needs_human`` reason keeps
+    describing the change.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
@@ -219,8 +387,8 @@ def correction_self_citation_outcome(
     if has_path_evidence and verdict != "needs_human":
         outcome = (
             f"Accepted as FIXED: the correction verdict cited a commit this item "
-            f"made (attempt tip {short_tip}), with item-scoped related-line "
-            f"evidence. Agent reason: {reason}"
+            f"made (attempt tip {short_tip}), with item-scoped fix evidence. "
+            f"Agent reason: {reason}"
         )
         return VerdictResult(verdict="fix_committed", reason=_bounded(outcome))
     if verdict == "needs_human":
@@ -229,13 +397,109 @@ def correction_self_citation_outcome(
             f"own commit {short_tip}; the commit is preserved and escalation "
             f"stands. Agent reason: {reason}"
         )
-        return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+        return VerdictResult(
+            verdict="needs_human",
+            reason=_bounded(outcome),
+        )
     outcome = (
         f"Correction verdict cited this item's own commit {short_tip} without "
         f"item-scoped fix evidence; the commit is preserved for human review. "
         f"Agent reason: {reason}"
     )
-    return VerdictResult(verdict="needs_human", reason=_bounded(outcome))
+    return VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(outcome),
+    )
+
+
+async def preserved_correction_tip(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    rev_parse_head: object,
+    fallback: str | None,
+) -> str | None:
+    """Post-sink correction HEAD — the commit an escalation actually preserves.
+
+    The correction-start baseline and the tip verified after attempt 0 are both
+    *pre*-correction: when attempt 0 was malformed without moving HEAD and
+    attempt 1 authored the commit, citing either points a human at the original
+    commit rather than the one kept for review (PRRT_kwDOSJAM6s6fpjBy). Read
+    HEAD after the commit sink instead. Provenance must never cost the preserved
+    fix, so a missing worktree or an unreadable HEAD degrades to ``fallback``
+    rather than raising or triggering a rollback.
+    """
+    if not worktree_path.exists():
+        return fallback
+    try:
+        head = await read_protocol_attempt_start_head(
+            runner,
+            worktree_path=worktree_path,
+            rev_parse_head=rev_parse_head if callable(rev_parse_head) else None,
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.agent_verdict_correction_preserved_tip_unreadable",
+            workspace_id=workspace_id,
+            exc_type=type(exc).__name__,
+            error=redact_secrets(str(exc))[:400],
+        )
+        return fallback
+    return head or fallback
+
+
+def correction_unscoped_fix_outcome(
+    *,
+    workspace_id: str,
+    reason: str | None,
+    attempt_tip: str | None,
+    item_path: str | None,
+) -> VerdictResult:
+    """Disposition for a correction-attempt FIXED with no item-scoped evidence.
+
+    The agent made a contentful change and calls it the fix, but the commit
+    touches none of the reviewed paths, so AWF cannot accept FIXED. The
+    same-file off-anchor case no longer reaches here: on the correction attempt
+    ``path_level_item_fix_evidence`` accepts a commit that changes the reviewed
+    file, and ``package_level_item_fix_evidence`` accepts one that changes a
+    file in the reviewed file's package (#952). What is left is a commit in
+    another package entirely (or, with an unmappable anchor, one AWF cannot
+    place at all — that stays fail-closed). The protocol
+    used to roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
+    which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
+    #922 after a protocol-violation correction, where attempt 1's off-anchor
+    FIXED met the strict gate again. The commit is preserved for human review
+    and the item escalates to ``needs_human`` so the merge gate blocks with a
+    reason. The preserved commit travels with the cycle's ordinary push; on a
+    push failure it follows the ordinary unpublished-repair path while the
+    recorded reason keeps describing the change. A FIXED with no contentful
+    change at all is an unsupported claim rather than a misplaced fix and still
+    terminates.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict import (
+        AGENT_FIXED_WITHOUT_EVIDENCE,
+        VerdictResult,
+    )
+
+    short_tip = (attempt_tip or "")[:12]
+    _log.warning(
+        "monitor.agent_verdict_correction_fixed_outside_item_scope",
+        workspace_id=workspace_id,
+        reason_code=AGENT_FIXED_WITHOUT_EVIDENCE,
+        attempt_tip=attempt_tip,
+        item_path=item_path,
+    )
+    outcome = (
+        f"FIXED claimed on the correction attempt, but this item's commit "
+        f"(attempt tip {short_tip}) carries no item-scoped evidence for "
+        f"{item_path or '<unknown>'}; the commit is preserved for human review. "
+        f"Agent reason: {reason}"
+    )
+    return VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(outcome),
+    )
 
 
 def _bounded(reason: str) -> str:

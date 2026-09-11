@@ -9,10 +9,12 @@ the thread dispositioned but unresolved.
 These tests pin the corrected policy: a non-FIXED correction verdict
 (``false_positive``, ``defer``, or ``needs_human``) that cites this item's own
 attempt-0 commit never causes a rollback (commit preserved; ``needs_human``
-without item-scoped related-line evidence, ``fix_committed`` when related-line
-evidence is present). Path membership alone must not escalate to
-``fix_committed`` — related off-anchor fixes are accepted by the line-scoped
-gate (near-anchor / callee), not by discarding the line constraint.
+without item-scoped evidence, ``fix_committed`` when evidence is present). On
+the correction attempt that evidence is re-checked at path level over the
+item's own commit range (#925 D1): the agent has already been told its FIXED
+lacked line evidence, so a re-affirmed change to the reviewed file is an honest
+off-anchor fix. A commit that misses the reviewed path — or an anchor AWF
+cannot map at all — still escalates with the commit preserved.
 """
 
 from __future__ import annotations
@@ -36,7 +38,6 @@ from awf.runtime.pr_monitor_runner import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
-    AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
     AgentVerdictProtocolError,
 )
@@ -163,22 +164,23 @@ async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
 
 
 @pytest.mark.unit
-async def test_unrelated_same_file_edit_not_accepted_as_fix_after_evidence_correction(
+async def test_off_anchor_fix_accepted_at_path_level_after_evidence_correction(
     tmp_path: Path,
 ) -> None:
-    """Path membership alone must not produce ``fix_committed`` (issue:5558086911).
+    """#925 D1: a re-affirmed same-file fix is accepted on the correction.
 
-    After the line-anchored gate rejects FIXED, a contentful edit elsewhere in
-    the reviewed file is not item-scoped evidence. Related off-anchor fixes
-    (near-anchor / callee) already pass the line-scoped gate; discarding the
-    line constraint would let an unrelated same-file edit resolve the thread.
+    The line-anchored gate rejects attempt 0 and the correction prompt says so
+    explicitly. When the agent re-affirms FIXED and the item's own commit range
+    changes the reviewed file, that is an honest off-anchor fix (a helper above
+    the caller, a guard at the call site) — resolving the thread beats sending a
+    human after a change AWF can see.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=[
-            "AWF-VERDICT: FIXED: renamed an unrelated helper in the same file",
-            "AWF-VERDICT: FIXED: still only the unrelated helper",
+            "AWF-VERDICT: FIXED: fixed the helper above the anchored call",
+            "AWF-VERDICT: FIXED: same change, the fix belongs above the anchor",
         ],
         heads_after_attempt=[_ATTEMPT0_HEAD, _ATTEMPT0_HEAD],
         dirty_after_attempt=[True, False],
@@ -186,19 +188,20 @@ async def test_unrelated_same_file_edit_not_accepted_as_fix_after_evidence_corre
         line_touched=False,
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address(runner, _thread("thread_unrelated_same_file"))
+    verdict = await _address(runner, _thread("thread_off_anchor_same_file"))
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
+    assert runner.current_head == _ATTEMPT0_HEAD
     assert len(runner.prompts) == 2
     assert _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT in runner.prompts[1]
 
 
 @pytest.mark.unit
-async def test_correction_false_positive_citing_own_commit_keeps_fix_and_escalates(
+async def test_correction_false_positive_citing_own_commit_returns_fixed(
     tmp_path: Path,
 ) -> None:
-    """#925 D2: self-citing FALSE POSITIVE keeps the commit; path-only ≠ FIXED."""
+    """#925 D2 + D1: a self-citing FALSE POSITIVE with path evidence is the fix."""
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -215,7 +218,7 @@ async def test_correction_false_positive_citing_own_commit_keeps_fix_and_escalat
     with structlog.testing.capture_logs() as captured:
         verdict = await _address(runner, _thread("PRRT_self_cite"))
 
-    assert verdict == "needs_human"
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     events = [entry.get("event") for entry in captured]
@@ -228,7 +231,7 @@ async def test_correction_false_positive_citing_own_commit_keeps_fix_and_escalat
     assert len(self_citation) == 1
     assert self_citation[0]["reason_code"] == AGENT_NON_FIX_CITES_OWN_COMMIT
     assert self_citation[0]["verdict"] == "false_positive"
-    assert self_citation[0]["has_path_evidence"] is False
+    assert self_citation[0]["has_path_evidence"] is True
 
 
 @pytest.mark.unit
@@ -363,6 +366,8 @@ def test_correction_self_citation_outcome_preserves_explicit_needs_human() -> No
         has_path_evidence=True,
     )
     assert outcome.verdict == "needs_human"
+    # The commit stays in the worktree, so the escalation is publish-dependent
+    # exactly like the no-evidence one (PRRT_kwDOSJAM6s6fpjBw).
     assert outcome.reason is not None
     assert "human review" in outcome.reason.lower() or "Agent reason:" in outcome.reason
 
@@ -471,6 +476,7 @@ def test_correction_self_citation_outcome_bounds_the_stored_reason() -> None:
         has_path_evidence=True,
     )
     assert fixed.verdict == "fix_committed"
+    # An accepted fix already flows through the ordinary publish-dependent path.
     assert fixed.reason is not None
     assert len(fixed.reason) == 500
     assert fixed.reason.endswith("…")
@@ -496,7 +502,9 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
 
     When the review line cannot be mapped from the anchor head onto item-start
     history the remap records the ``-1`` sentinel. That is "we cannot tell where
-    this item lives", not related-line evidence, so both attempts stay strict.
+    this item lives", so neither attempt accepts FIXED — the correction's
+    path-level re-check is skipped too, and the item escalates with the commit
+    kept.
     """
     (tmp_path / "ws_protocol").mkdir()
 
@@ -521,21 +529,23 @@ async def test_unmappable_anchor_line_stays_fail_closed_on_the_correction(
         line_touched=False,
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,  # type: ignore[arg-type]
-            workspace_id="ws_protocol",
-            prompt="ORIGINAL REVIEW PROMPT",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=_ITEM_START_HEAD,
-            evidence_item_path=_REVIEWED_PATH,
-            evidence_item_line=42,
-            evidence_anchor_head="c" * 40,
-        )
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,  # type: ignore[arg-type]
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=_ITEM_START_HEAD,
+        evidence_item_path=_REVIEWED_PATH,
+        evidence_item_line=42,
+        evidence_anchor_head="c" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Never accepted as FIXED. The contentful commit is preserved and the item
+    # escalates rather than terminating the protocol (#925 follow-up).
+    assert result.verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
@@ -589,7 +599,7 @@ async def test_correction_citing_non_tip_attempt_commit_keeps_the_fix(
     commits the leftovers on top, so the verified tip is the sink commit. A
     correction verdict that cites the *fix* commit used to miss the tip-only
     comparison, roll the attempt back to item start, and discard both commits.
-    Path-only touch is not item-scoped FIXED evidence; escalate to needs_human.
+    The range changes the reviewed file, so the correction accepts it as FIXED.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _RangeAwareVerdictRunner(
@@ -608,7 +618,7 @@ async def test_correction_citing_non_tip_attempt_commit_keeps_the_fix(
     with structlog.testing.capture_logs() as captured:
         verdict = await _address(runner, _thread("PRRT_self_cite_non_tip"))
 
-    assert verdict == "needs_human"
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     assert runner.rev_list_ranges == [f"{_ITEM_START_HEAD}..{_ATTEMPT0_HEAD}"]
@@ -632,7 +642,7 @@ async def test_correction_citing_own_commit_recovered_at_correction_start_keeps_
     unset, but the correction-start probe recovers the very same attempt-0 commit.
     Comparing the citation against the unset tip alone made self-citation invisible
     and rolled the legitimate change back — the #925 defect in a different disguise.
-    Without related-line evidence the commit is preserved as ``needs_human``.
+    The correction's path-level evidence accepts the recovered commit as the fix.
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -655,7 +665,7 @@ async def test_correction_citing_own_commit_recovered_at_correction_start_keeps_
     with structlog.testing.capture_logs() as captured:
         verdict = await _address(runner, _thread("PRRT_self_cite_recovered_start"))
 
-    assert verdict == "needs_human"
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert runner.current_head == _ATTEMPT0_HEAD
     self_citation = [
@@ -831,7 +841,7 @@ async def test_correction_citing_second_parent_fix_preserves_commit_no_rollback(
             operation_start_head=item_start,
         )
 
-    assert verdict == "needs_human"
+    assert verdict == "fix_committed"
     assert runner.reset_targets == []
     assert runner.current_head == merge_tip
     assert all("--first-parent" not in cmd for cmd in runner.rev_list_cmds)

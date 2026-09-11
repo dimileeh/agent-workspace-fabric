@@ -38,6 +38,7 @@ from awf.service.gc_terminal_passes import (
 from tests.unit.service.test_worker import (
     _in_process_merge_coordinator,
     _settings,
+    _stub_worktree_activity_git_roots,
 )
 
 
@@ -50,6 +51,8 @@ async def session_factory(
 
 class _AnyInit:
     """A no-op stand-in for the node/runtime classes the runtime constructs."""
+
+    worktree_activity_git_roots = _stub_worktree_activity_git_roots
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass

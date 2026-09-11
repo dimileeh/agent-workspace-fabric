@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-06T17:00:00Z",
+  "as_of": "2026-09-06T17:00:00Z",
+  "queue": {
+    "queued_count": 4,
+    "oldest_wait_seconds": 120,
+    "oldest_workspace_id": "ws_oldest"
+  },
+  "provisioning": {
+    "in_progress": 2,
+    "pending": 1
+  },
+  "admission": {
+    "ok": true,
+    "status": "ok",
+    "reason": "within_quota",
+    "detail": null,
+    "quota": {
+      "limit": 50,
+      "in_use": 12,
+      "available": 38
+    }
+  }
+}

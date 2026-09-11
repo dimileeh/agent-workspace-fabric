@@ -717,9 +717,11 @@ class TestWorkspaceDirectRoutes:
         assert response.cursor is None
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("task_tag", [None, "AIRA-T109"])
     async def test_overview_route_reuses_ordered_events_for_last_event(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        task_tag: str | None,
     ) -> None:
         class SinglePassEvents:
             def __init__(self, events: list[SimpleNamespace]) -> None:
@@ -759,6 +761,7 @@ class TestWorkspaceDirectRoutes:
             id=workspace_id,
             task_external_id=None,
             task_title="single pass overview",
+            task_tag=task_tag,
             repo_url="git@github.com:example/app.git",
             branch_base="main",
             branch_name="awf/ws-singlepass",
@@ -801,6 +804,8 @@ class TestWorkspaceDirectRoutes:
         assert events.iterations == 1
         assert item.pr_number == 7
         assert item.pr_url == "https://github.com/example/app/pull/7"
+        assert item.task_key == task_tag
+        assert item.task_tag == task_tag
 
     @pytest.mark.unit
     async def test_existing_events_stale_reasons_get_retry_and_list_routes_directly(

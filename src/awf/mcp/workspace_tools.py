@@ -514,6 +514,11 @@ def register_workspace_tools(
             max_length=512,
             description="Audit reason for provider_readiness_override.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Optional replay key matching the REST Idempotency-Key header.",
+        ),
     ) -> StructuredToolResult:
         """Retry a failed or cancelled workspace as a fresh attempt."""
         try:
@@ -521,6 +526,7 @@ def register_workspace_tools(
                 workspace_id,
                 provider_readiness_override=provider_readiness_override,
                 provider_readiness_override_reason=provider_readiness_override_reason,
+                idempotency_key=_normalize_mcp_idempotency_key(idempotency_key),
             )
         except WorkspaceProviderReadinessBlockedError as exc:
             return _provider_readiness_blocked_result(exc)

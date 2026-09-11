@@ -20,10 +20,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
 
+from awf.common.logging import get_logger
+
 COMMAND_TIMEOUT_REASON = "COMMAND_TIMEOUT"
 COMMAND_IDLE_TIMEOUT_REASON = "COMMAND_IDLE_TIMEOUT"
 _TIMEOUT_RETURN_CODE = 124
 _TERMINATE_GRACE_SECONDS = 5.0
+
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,61 @@ class AsyncCommandRunner(Protocol):
 
 StreamCallback = Callable[[str], Awaitable[None] | None]
 
+ActivityProbe = Callable[[], Awaitable[bool | None] | bool | None]
+"""Answers "did anything change since the previous probe?".
+
+Injected by callers that can observe liveness the child's stdout cannot show —
+an agent CLI in print mode writes files for an hour before emitting a byte. The
+probe owns its own baseline: each call reports activity *since the last call*.
+
+``None`` means "could not tell" and is treated as activity, so only a probe that
+positively reports "nothing moved" lets the idle timeout fire; the wall timeout
+stays the hard cap for a child that really is wedged. Kept generic here; the
+concrete worktree-scanning implementation lives in
+``awf.adapters.worktree_activity`` (AGENTS.md: core stays project-neutral).
+"""
+
+
+def mark_masked_command_reason_code(exc: BaseException, reason_code: str) -> None:
+    """Tag ``exc`` with the command classification whose result it is masking.
+
+    ``run_streaming`` classifies a watchdog timeout *before* it writes the
+    synthetic diagnostic to the caller's log sink, and that write awaits: a
+    cancellation delivered there escapes with the run already classified but
+    nothing returned. Callers read the tag back with ``getattr`` and republish
+    it in their own vocabulary (``adapters.failure_reasons``) so a timed-out
+    run's work is still preserved rather than rolled back (#932).
+    """
+    exc.command_reason_code = reason_code  # type: ignore[attr-defined]
+
+
+def _probe_is_async(probe: ActivityProbe) -> bool:
+    """True when *calling* ``probe`` yields to the loop instead of doing the work.
+
+    A coroutine function — including a callable object with an ``async def
+    __call__``, which is the shape of the worktree probe — returns immediately,
+    so the resulting await is interruptible by the watchdog's budget.
+    """
+    if inspect.iscoroutinefunction(probe):
+        return True
+    # ``iscoroutinefunction`` only inspects the object itself, so a callable
+    # instance needs its class's ``__call__`` checked separately.
+    return inspect.iscoroutinefunction(inspect.getattr_static(type(probe), "__call__", None))
+
+
+async def _probe_answer(probe: ActivityProbe) -> bool | None:
+    """Invoke ``probe`` without letting a synchronous body block the event loop.
+
+    ``ActivityProbe`` also admits a plain callable, and a timeout can only
+    interrupt code that yields: a sync probe walking the worktree inline would
+    hold the watchdog — its wall-deadline check included — for the whole walk,
+    which is exactly the stall the caller's budget exists to cap. Non-async
+    probes therefore run in a worker thread.
+    """
+    maybe_awaitable = probe() if _probe_is_async(probe) else await asyncio.to_thread(probe)
+    observed = await maybe_awaitable if inspect.isawaitable(maybe_awaitable) else maybe_awaitable
+    return None if observed is None else bool(observed)
+
 
 class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
     """Optional extension for runners that can stream stdout/stderr chunks."""
@@ -74,6 +133,7 @@ class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
         cwd: str | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> CommandResult: ...
 
 
@@ -155,6 +215,7 @@ class AsyncioSubprocessRunner:
         cwd: str | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> CommandResult:
         _validate_timeout("wall_timeout_seconds", wall_timeout_seconds)
         _validate_timeout("idle_timeout_seconds", idle_timeout_seconds)
@@ -214,14 +275,86 @@ class AsyncioSubprocessRunner:
                 last_output_at = loop.time()
                 await _emit(parts, callback, decoder.decode(chunk))
 
+        async def _observed_activity(budget_seconds: float | None) -> bool | None:
+            """Ask the injected probe whether the watched state moved.
+
+            Fails **open**: a probe that cannot answer returns ``None``
+            ("unknown"), which the watchdog counts as activity. An unreadable or
+            over-budget probe says nothing about whether the child is alive, and
+            killing a healthy run on that non-answer is the #932 defect again.
+            The wall deadline is the hard cap that still ends a wedged run.
+            "Cannot answer" covers any ordinary failure, not just an OS one:
+            ``ActivityProbe`` is an injected callable, so a bug in one (a
+            ``ValueError`` from a path with a NUL byte, say) is still only a
+            missing observation. Letting it escape ``gather`` would terminate a
+            child the probe knows nothing about and raise past the
+            timeout-preservation path instead of returning a classified result —
+            fail *closed*, the exact inversion of this contract. The failure is
+            recorded, not swallowed: the reason is logged here and the resulting
+            extension is warned about by the caller. ``CancelledError`` is a
+            ``BaseException`` and is deliberately not absorbed.
+
+            The call is bounded by ``budget_seconds`` — the tightest cap the run
+            still has. A worktree scan runs in a thread and so cannot be
+            interrupted from here, so an unbounded wait on a stalled ``scandir``
+            would park the watchdog and no deadline would ever be re-read.
+            Abandoning the wait (the thread finishes on its own) and reporting
+            "unknown" hands control straight back to the watchdog loop.
+            ``_probe_answer`` keeps a *synchronous* probe off the loop for the
+            same reason: inline blocking work is unreachable by any budget.
+            """
+            assert activity_probe is not None
+            try:
+                observed = await asyncio.wait_for(
+                    _probe_answer(activity_probe), timeout=budget_seconds
+                )
+            except Exception as exc:  # noqa: BLE001 - probe failure is "unknown", see above.
+                _log.warning(
+                    "command.idle_watchdog.activity_probe_failed",
+                    exc_type=type(exc).__name__,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                    probe_budget_seconds=budget_seconds,
+                )
+                return None
+            return None if observed is None else bool(observed)
+
+        async def _observed_activity_or_child_exit(
+            budget_seconds: float | None, wait_task: asyncio.Task[int]
+        ) -> bool | None:
+            """Race the probe against the child's exit; first one home wins.
+
+            The budget alone bounds a stalled probe, but it is the *wrong* bound
+            once the child is gone: the watchdog is part of the surrounding
+            ``gather``, so awaiting the remainder of that budget holds a
+            completed run — real exit code and all — open for the rest of the
+            wall budget, or for a full idle window (tens of minutes) in
+            idle-only mode. A child that has exited cannot go idle, so its
+            answer is the only one that still matters: the probe wait is
+            abandoned exactly as an over-budget one is, reported as "unknown"
+            so no idle kill can be based on it. The caller re-checks
+            ``wait_task`` and returns.
+            """
+            probe_task = asyncio.create_task(_observed_activity(budget_seconds))
+            try:
+                await asyncio.wait({probe_task, wait_task}, return_when=asyncio.FIRST_COMPLETED)
+                return probe_task.result() if probe_task.done() else None
+            finally:
+                # Also runs when the watchdog itself is cancelled, so the probe
+                # is never left running behind a torn-down run.
+                if not probe_task.done():
+                    probe_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await probe_task
+
         async def _watchdog(wait_task: asyncio.Task[int]) -> None:
-            nonlocal timeout_reason
+            nonlocal timeout_reason, last_output_at
             if wall_timeout_seconds is None and idle_timeout_seconds is None:
                 return
 
             wall_deadline = (
                 started_at + wall_timeout_seconds if wall_timeout_seconds is not None else None
             )
+            activity_extensions = 0
 
             while not wait_task.done():
                 now = loop.time()
@@ -231,10 +364,66 @@ class AsyncioSubprocessRunner:
                     else None
                 )
 
+                # The wall deadline is checked first and is never extended: it
+                # is the hard cap a live-but-looping agent must still hit.
                 if wall_deadline is not None and now >= wall_deadline:
                     timeout_reason = COMMAND_TIMEOUT_REASON
                     break
                 if idle_deadline is not None and now >= idle_deadline:
+                    # Probe only at the deadline (not on a poll cadence) so the
+                    # cost stays at one scan per idle window.
+                    output_at = last_output_at
+                    observed: bool | None = False
+                    if activity_probe is not None:
+                        # The probe may not outlive the cap it runs under: it gets
+                        # the remaining wall budget and no more. With no wall
+                        # timeout the idle window is the only cap, and it bounds
+                        # the probe just the same — an unbounded await parks the
+                        # watchdog so the idle deadline is never re-read, and
+                        # because the watchdog is part of ``gather`` it also holds
+                        # the whole run open after the child has exited.
+                        # ``idle_deadline - output_at`` is one full idle window.
+                        # The wait is also raced against the child's exit, so a
+                        # stalled probe cannot hold a finished run for whatever
+                        # is left of that budget.
+                        observed = await _observed_activity_or_child_exit(
+                            max(wall_deadline - loop.time(), 0.0)
+                            if wall_deadline is not None
+                            else idle_deadline - output_at,
+                            wait_task,
+                        )
+                    if wait_task.done():
+                        # The child can also *finish* while the probe is in
+                        # flight, and a silent exit moves no output clock. A
+                        # completed child is not idle: returning here keeps its
+                        # real exit code instead of overwriting it with 124 and
+                        # sending a successful run through timeout preservation.
+                        return
+                    if last_output_at > output_at:
+                        # The probe is not instantaneous — a worktree scan runs
+                        # off the event loop — so the child can emit output while
+                        # it is in flight. That output *is* liveness: re-read the
+                        # idle clock rather than kill a run that just spoke.
+                        continue
+                    if observed is not False:
+                        # Observed activity *and* an unanswerable probe both
+                        # extend: only a probe that positively reports "nothing
+                        # moved" may let the idle timeout fire.
+                        activity_extensions += 1
+                        last_output_at = loop.time()
+                        if observed is None:
+                            _log.warning(
+                                "command.idle_watchdog.activity_unknown_extended",
+                                idle_timeout_seconds=idle_timeout_seconds,
+                                extensions=activity_extensions,
+                            )
+                        else:
+                            _log.info(
+                                "command.idle_watchdog.activity_extended",
+                                idle_timeout_seconds=idle_timeout_seconds,
+                                extensions=activity_extensions,
+                            )
+                        continue
                     timeout_reason = COMMAND_IDLE_TIMEOUT_REASON
                     break
 
@@ -256,25 +445,93 @@ class AsyncioSubprocessRunner:
         ]
         watchdog_task = asyncio.create_task(_watchdog(wait_task))
         tasks.append(watchdog_task)
+        # Everything after the watchdog sets ``timeout_reason`` is teardown of an
+        # already-classified run: the terminate/reap await inside the watchdog,
+        # the cleanup below, and the diagnostic write. A cancellation delivered
+        # anywhere in that window (the worker tearing the run down), or an
+        # ordinary failure raised in it, would otherwise escape untagged, the
+        # caller would see a plain cancellation or an unclassified error,
+        # and the verdict protocol's rollback path would delete the timed-out
+        # run's edits and commits instead of preserving them (#932). One handler
+        # spans the whole window so the classification always travels out on it.
         try:
-            await asyncio.gather(*tasks)
-        finally:
-            if proc.returncode is None:
-                await _terminate_process(proc, wait_task)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            teardown_exc: Exception | None = None
+            try:
+                await asyncio.gather(*tasks)
+            except Exception as exc:  # noqa: BLE001 - re-raised below when unclassified.
+                # Same doctrine as the diagnostic write further down, one step
+                # earlier: terminating a timed-out child makes it flush a last
+                # line, that line reaches the caller's log sink from inside
+                # ``gather``, and a raising sink is an *ordinary* exception the
+                # tag handler below does not cover. Letting it out hands the
+                # caller an unclassified failure for an already-classified run,
+                # and the verdict protocol's generic path rewinds the timed-out
+                # agent's edits instead of preserving them (#932). Only a
+                # classified run may step over it — without a watchdog verdict
+                # this exception *is* the outcome and must still propagate.
+                if timeout_reason is None:
+                    raise
+                teardown_exc = exc
+            finally:
+                if proc.returncode is None:
+                    await _terminate_process(proc, wait_task)
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
-        returncode = wait_task.result()
-        if timeout_reason is not None:
-            diagnostic = _timeout_diagnostic(
-                timeout_reason,
-                wall_timeout_seconds=wall_timeout_seconds,
-                idle_timeout_seconds=idle_timeout_seconds,
-            )
-            await _emit(stderr_parts, on_stderr, diagnostic)
-            returncode = _TIMEOUT_RETURN_CODE
+            if teardown_exc is not None:
+                # The cancelled reader may leave ``wait_task`` without a result,
+                # and the classification below overwrites the code anyway.
+                _log.warning(
+                    "command.timeout_teardown_failed",
+                    exc_type=type(teardown_exc).__name__,
+                    reason_code=timeout_reason,
+                )
+                returncode = _TIMEOUT_RETURN_CODE
+            else:
+                returncode = wait_task.result()
+            if timeout_reason is not None:
+                diagnostic = _timeout_diagnostic(
+                    timeout_reason,
+                    wall_timeout_seconds=wall_timeout_seconds,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                    activity_probe_enabled=activity_probe is not None,
+                )
+                returncode = _TIMEOUT_RETURN_CODE
+                # ``_emit`` appends to ``stderr_parts`` before it awaits the sink,
+                # so the classified result below carries the diagnostic either way
+                # and only the *live* sink write is still at risk. A sink failure
+                # is not the run's verdict either: log it and step over it rather
+                # than hand the caller an ordinary error for a classified run.
+                try:
+                    await _emit(stderr_parts, on_stderr, diagnostic)
+                except Exception as exc:  # noqa: BLE001 - see above.
+                    _log.warning(
+                        "command.timeout_diagnostic_emit_failed",
+                        exc_type=type(exc).__name__,
+                        reason_code=timeout_reason,
+                    )
+        except (asyncio.CancelledError, Exception) as escaping_exc:
+            # Whatever escapes still propagates — the caller asked for teardown,
+            # or the teardown genuinely failed — but once the run is classified it
+            # carries that classification with it. Ordinary failures count as much
+            # as cancellations: the ``finally`` above reaps the child *outside*
+            # the handler that absorbs a failing sink, so an OS error out of
+            # ``_terminate_process`` (a signal the control plane may not send, a
+            # reap that fails) escapes here rather than there. Untagged, the
+            # adapter reads it as an unclassified failure and the verdict
+            # protocol's generic path rewinds the timed-out run's edits and
+            # commits instead of preserving them (PRRT_kwDOSJAM6s6f9ASo).
+            # ``_run_agent_cli`` in ``awf.adapters.base`` reads this tag back and
+            # republishes it in agent vocabulary for *both* escaping classes —
+            # cancellations in place, ordinary failures escalated into a tagged
+            # ``ComposeExecCleanupError`` — so either way the verdict protocol
+            # takes its preserve path and keeps the timed-out work
+            # (PRRT_kwDOSJAM6s6f9RQl).
+            if timeout_reason is not None:
+                mark_masked_command_reason_code(escaping_exc, timeout_reason)
+            raise
 
         return CommandResult(
             returncode=returncode,
@@ -399,8 +656,9 @@ class FakeCommandRunner:
         env: Mapping[str, str] | None = None,
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
+        activity_probe: ActivityProbe | None = None,
     ) -> CommandResult:
-        del wall_timeout_seconds, idle_timeout_seconds
+        del wall_timeout_seconds, idle_timeout_seconds, activity_probe
         result = await self.run(
             args,
             input_bytes=input_bytes,
@@ -453,10 +711,15 @@ def _timeout_diagnostic(
     *,
     wall_timeout_seconds: float | None,
     idle_timeout_seconds: float | None,
+    activity_probe_enabled: bool = False,
 ) -> str:
     if reason_code == COMMAND_IDLE_TIMEOUT_REASON:
+        # Only widen the wording when a probe actually watched for activity, so
+        # the message never claims a check the run did not perform.
+        suffix = " or worktree activity" if activity_probe_enabled else ""
         return (
-            f"command idle timeout after {_format_seconds(idle_timeout_seconds)}s without output\n"
+            f"command idle timeout after {_format_seconds(idle_timeout_seconds)}s "
+            f"without output{suffix}\n"
         )
     return f"command wall timeout after {_format_seconds(wall_timeout_seconds)}s\n"
 

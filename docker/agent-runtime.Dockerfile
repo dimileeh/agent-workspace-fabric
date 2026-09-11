@@ -145,24 +145,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.147.0
+ARG CODEX_VERSION=0.153.4
 # 2.1.226+ is required for Claude Opus 5 (the default model in defaults.py);
 # older CLIs reject `--model claude-opus-5`. Keep this >= the default model's
 # minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.226
-ARG OPENCODE_VERSION=1.17.18
-ARG GROK_VERSION=0.2.94
-ARG CURSOR_VERSION=2026.07.20-8cc9c0b
-ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4
-ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb
+ARG CLAUDE_CODE_VERSION=2.1.263
+ARG OPENCODE_VERSION=1.18.29
+ARG GROK_VERSION=1.0.13
+ARG CURSOR_VERSION=2026.09.02-c22c1a3
+ARG CURSOR_X64_SHA256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c
+ARG CURSOR_ARM64_SHA256=fb7bc635be6172ebcf68f907fd9217e3614da51916455c6d7fdb66690997884c
 # Antigravity CLI (agy). Pinned by GitHub release asset + sha256 per arch.
-# Operator must verify the arm64 sha before merge; CI validates linux/amd64 only.
-ARG ANTIGRAVITY_VERSION=1.1.13
-ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9
-ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8
+ARG ANTIGRAVITY_VERSION=1.1.27
+ARG ANTIGRAVITY_AMD64_SHA256=f874d4f6b8a73c2df660f580f25fb656fcb6e64adbfd746e6692e837fd9a20be
+ARG ANTIGRAVITY_ARM64_SHA256=97fc9fe5a6067406cd02cbe4ae6e362c9623a24d33bec486911246c17ceb6a94
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
-ARG CCUSAGE_VERSION=20.0.3
+ARG CCUSAGE_VERSION=20.0.20
 
 # Install a pinned Cursor CLI release only after verifying its architecture-
 # specific checksum. The official convenience installer is mutable.
@@ -245,6 +244,8 @@ RUN set -eux; \
     test -x /usr/local/bin/agy; \
     agy --version
 
+# Grok's ACP probe uses an isolated unauthenticated home. Its expected session
+# errors and advertised auth exchange prove compatibility without build secrets.
 RUN set -eux; \
     max_attempts=3; \
     attempt=1; \
@@ -273,6 +274,30 @@ RUN set -eux; \
     opencode --version || true; \
     grok --version; \
     grok -p "" --always-approve --no-alt-screen --no-auto-update --output-format plain --model grok-build --help >/dev/null; \
+    grok_acp_home="$(mktemp -d)"; \
+    grok_acp_output="$(mktemp)"; \
+    printf '%s\n%s\n%s\n%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true}}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+      '{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"awf-contract-probe","prompt":[{"type":"text","text":""}]}}' \
+      '{"jsonrpc":"2.0","id":4,"method":"authenticate","params":{"methodId":"grok.com","_meta":{"headless":true}}}' \
+      | timeout 15s env -u XAI_API_KEY -u GROK_CODE_XAI_API_KEY \
+          HOME="$grok_acp_home" GROK_HOME="$grok_acp_home/.grok" \
+          grok --always-approve --no-auto-update -m grok-build agent stdio \
+          > "$grok_acp_output" || true; \
+    jq -e -s --arg expected_version "$GROK_VERSION" ' \
+      def by_id($id): first(.[] | select(.id == $id)); \
+      (by_id(1).jsonrpc == "2.0") and \
+      (by_id(1).result.protocolVersion == 1) and \
+      (by_id(1).result._meta.agentVersion == $expected_version) and \
+      ([by_id(1).result.authMethods[]?.id] | index("grok.com") != null) and \
+      (by_id(2).error.code == -32000) and \
+      (by_id(2).error.message == "Authentication required") and \
+      (by_id(3).error.code == -32602) and \
+      (by_id(3).error.data == "unknown session id") \
+    ' "$grok_acp_output" >/dev/null; \
+    rm -rf -- "$grok_acp_home"; \
+    rm -f -- "$grok_acp_output"; \
     agy --version; \
     agy --help >/dev/null; \
     ccusage --version

@@ -232,11 +232,17 @@ mints a generated generation rather than reusing a stale owned slot.
 Seeding from the terminal predecessor: when a terminal row is superseded, AWF
 copies an allowlisted subset of its `monitor_threads_addressed` onto the fresh
 workspace so the successor does not re-disposition comments its predecessor
-already triaged. Exactly four marker classes cross that boundary — thread /
+already triaged. Exactly five marker classes cross that boundary — thread /
 review-comment / `issue:<id>` verdicts, `__review_comment_body_hash__:*` and
-`__review_thread_body_hash__:*` evidence, and `__deferred_issue_filed__:*`
-markers. Everything else (protected block state, awaiting-check timestamps,
-operator-hint bookkeeping, merge-block and workflow-scope markers) is
+`__review_thread_body_hash__:*` evidence, `__deferred_issue_filed__:*` markers,
+and the `__operator_decision__:*` ruling that un-parked a thread whose verdict
+the operator guide cleared, carrying its `__operator_decision_at__:*` issue-time
+binding (that thread crosses owed an answer, so the ruling travels with it
+instead of the successor re-prompting the agent with the reviewer text it
+already escalated on — and the stamp keeps a reviewer reply that postdates the
+ruling able to retire it). Everything else (protected block state,
+awaiting-check timestamps, operator-hint cycle bookkeeping, merge-block and
+workflow-scope markers) is
 deliberately left behind and re-derived from the live PR. A copy appends a
 `workspace.pr_monitor_adoption_seeded` event with reason code
 `PR_ADOPTION_SEEDED_FROM_PREDECESSOR`, the predecessor workspace id, and the

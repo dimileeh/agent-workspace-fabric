@@ -47,6 +47,12 @@ from awf.runtime.pr_monitor_runner import (
 from awf.runtime.pr_monitor_runner import (
     notify_human_loop as _notify_human_loop,
 )
+from awf.runtime.pr_monitor_runner import (
+    operator_hint_loop as _operator_hint_loop,
+)
+from awf.runtime.pr_monitor_runner import (
+    sync_base_loop as _sync_base_loop,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _CI_TRANSIENT_RERUN_FAILED_REASON,
@@ -55,24 +61,24 @@ from awf.runtime.pr_monitor_runner.constants import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _ci_failure_payload,
     _ci_transient_rerun_attempt,
-    _clear_transient_base_fetch_retry_state,
     _pending_review_feedback_count,
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.loop_helpers import (
+    _finish_cycle_for_terminal_pr,
     _post_workflow_scope_notification_best_effort,
 )
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
+    _finish_parked_comment_repair_cycle,
     _provider_recovery_operation_result_updates,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
 from awf.runtime.pr_monitor_runner.types import (
-    BaseFetchError,
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
@@ -166,9 +172,20 @@ async def _execute(
     # ``_run_fix_cycle`` so unpublished repairs are not abandoned. The marker is
     # cleared after the fix cycle (or immediately when ``decide()`` leaves
     # ``AddressComments``).
+    #
+    # A parked unattributable-commits episode (#935) waits the same way: the
+    # monitor keeps polling ``AddressComments`` while the commits sit on disk, so
+    # the marker keeps ``awaiting_human_since`` from being nulled and re-stamped
+    # every poll (which would reset the operator-visible wait duration).
     awaiting_workflow_scope = state.awaiting_workflow_scope
     if not isinstance(action, AddressComments) and awaiting_workflow_scope:
         state.clear_awaiting_workflow_scope()
+    parked_unpublished_repair = bool(state.parked_unpublished_repair)
+    if not isinstance(action, AddressComments) and parked_unpublished_repair:
+        # ``decide()`` left the repair arm, so the park episode is over: drop the
+        # marker AND let the resume clear below retire the attention flag.
+        state.clear_parked_unpublished_repair()
+        parked_unpublished_repair = False
     # The merge-block attention marker only makes sense while ``decide()`` stays on
     # the ``Merge`` arm (the branch-protection fallback that sets it keeps
     # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
@@ -179,18 +196,78 @@ async def _execute(
     # branch-protection block persists.
     if not isinstance(action, Merge):
         state.clear_merge_block_attention()
-    if not isinstance(action, (NotifyHuman, Merge)) and not awaiting_workflow_scope:
+    if (
+        not isinstance(action, (NotifyHuman, Merge))
+        and not awaiting_workflow_scope
+        and not parked_unpublished_repair
+    ):
         await self._clear_workspace_attention(workspace_id)
 
-    if isinstance(action, ShortCircuitCompleted):
-        self._write_defer_signal(
+    async def _finish_if_pr_terminal(operation: Any, push_result: Any) -> bool | None:
+        """Finish the cycle when the just-run action outlived its PR (#910).
+
+        Called by every agent-action arm right after its ``_run_*`` and BEFORE the
+        paused/failed branches: a merged/closed PR makes the push, the ``blocked``
+        pause, and the human ping moot, so the monitor runs the terminal handling
+        ``decide()`` would return next poll.
+
+        ``None`` means the action was not moot and the arm continues. Otherwise the
+        cycle is over and this returns the *terminate sink's own result*: ``True``
+        when this runner terminated the workspace, ``False`` when the sink refused
+        the write because the runner had been superseded as the monitor owner.
+        Reporting that refusal instead of an unconditional ``True`` keeps a
+        superseded terminal cycle from presenting itself to ``run()`` as a
+        completed terminal cycle whose state is safe to flush — the same seam the
+        propagated ``monitor_writes_suppressed`` marker fences at every
+        ``_persist_state`` (PRRT_kwDOSJAM6s6fsqcA).
+        """
+        moot = await _finish_cycle_for_terminal_pr(
+            self,
+            workspace_id=workspace_id,
+            operation=operation,
+            push_result=push_result,
+            state=state,
+            pr_number=pr_number,
+            repo_url=repo_url,
+            base_branch=base_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
+        if not moot:
+            return None
+        return not state.monitor_writes_suppressed
+
+    async def _finish_if_pr_terminal_after_cleanup_error(
+        operation: Any, *, context: str, operation_type: str
+    ) -> bool | None:
+        """Recheck live PR state before a cleanup-failure terminal fail (#910).
+
+        ``ComposeExecCleanupError`` escapes the ``_run_*`` helpers as an exception,
+        so it never reaches their post-action terminal guards nor the arm's
+        ``_finish_if_pr_terminal`` call below the ``try`` — the handler recorded
+        ``EXEC_PROCESS_CLEANUP_FAILED`` and terminally failed a workspace whose PR
+        had merged or closed while the long action ran, instead of completing it as
+        moot (``PRRT_kwDOSJAM6s6fvDbL``). Run the guard HERE, BEFORE the failure is
+        recorded, so the operation's only outcome is the moot one and the cycle
+        ends through the terminal handling ``decide()`` would return next poll.
+
+        Fails OPEN exactly like every other #910 seam: ``None`` means the PR is
+        still open (or the re-read could not run) and the caller records its
+        cleanup failure unchanged.
+        """
+        moot_result = await self._post_action_pr_terminal_push_result_if_moot(
             workspace_id=workspace_id,
             pr_number=pr_number,
-            terminal_action="ShortCircuitCompleted",
-            merged=True,
-            status=status,
-            state=state,
+            context=context,
+            operation_id=operation.operation_id if operation is not None else None,
+            operation_type=operation_type,
+            repo=repo,
         )
+        if moot_result is None:
+            return None
+        return await _finish_if_pr_terminal(operation, moot_result)
+
+    if isinstance(action, ShortCircuitCompleted):
         await self._record_monitor_state_operation(
             workspace_id=workspace_id,
             action="completed",
@@ -204,30 +281,68 @@ async def _execute(
             result={"status": "succeeded", "outcome": "already_completed"},
             monitor_log=monitor_log,
         )
-        await self._terminate_completed(
+
+        async def _publish_short_circuit_defer_signal() -> None:
+            """Publish the terminal artifact once the ``completed`` write commits."""
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="ShortCircuitCompleted",
+                merged=True,
+                status=status,
+                state=state,
+            )
+
+        # The workspace-scoped writes are gated on the terminate sink's owner fence
+        # — same seam as ``_finish_cycle_for_terminal_pr`` (PRRT_kwDOSJAM6s6flswY /
+        # PRRT_kwDOSJAM6s6fsqcA). A runner that lost its monitor claim mid-cycle must
+        # not publish a "monitor is done" defer signal (nor let ``run()``'s
+        # post-``_execute`` persist flush its stale state) while the row is still
+        # ``monitoring_pr`` under the live claimant, which re-derives the completion
+        # from the merged PR on its own next poll (PRRT_kwDOSJAM6s6fsrlC). The gate is
+        # the sink's transition commit, NOT its return: the callback runs there, ahead
+        # of the cancellable target-branch reconcile + filesystem GC, so a cancellation
+        # inside that cleanup cannot strand a completed workspace with no terminal
+        # artifact that any later monitor would publish (PRRT_kwDOSJAM6s6fvDbP).
+        if not await self._terminate_completed(
             workspace_id,
             pr_merge_sha=status.merge_commit_sha or status.head_sha,
             repo_url=repo_url,
             base_branch=base_branch,
             compose_project=compose_project,
             compose_file=compose_file,
-        )
+            on_transition_committed=_publish_short_circuit_defer_signal,
+        ):
+            state.monitor_writes_suppressed = True
         return True
 
     if isinstance(action, Abort):
-        self._write_defer_signal(
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            terminal_action="Abort",
-            merged=False,
-            status=status,
-            state=state,
-        )
-        await self._terminate_failed(
+        # Same seam as the ``ShortCircuitCompleted`` arm above: the workspace-scoped
+        # writes are gated on its owner fence, so a runner that lost its monitor claim
+        # mid-cycle publishes neither the "monitor is done" defer signal nor (via
+        # ``run()``'s post-``_execute`` persist) its stale monitor state while the row
+        # is still ``monitoring_pr`` under the live claimant
+        # (PRRT_kwDOSJAM6s6fsrlC). Publish at the transition commit rather than the
+        # sink's return so cancellation during the session exit cannot strand a
+        # terminal row with no defer signal (PRRT_kwDOSJAM6s6g_XHw).
+        async def _publish_abort_defer_signal() -> None:
+            """Publish the terminal artifact once the ``failed`` write commits."""
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="Abort",
+                merged=False,
+                status=status,
+                state=state,
+            )
+
+        if not await self._terminate_failed(
             workspace_id,
             message=f"monitor: abort ({action.reason.value})",
             reason_code=action.reason,
-        )
+            on_transition_committed=_publish_abort_defer_signal,
+        ):
+            state.monitor_writes_suppressed = True
         return True
 
     if isinstance(action, WaitForCI):
@@ -266,260 +381,22 @@ async def _execute(
         return False
 
     if isinstance(action, SyncBase):
-        operation = await self._begin_monitor_operation(
+        return await _sync_base_loop.handle_sync_base_action(
+            self,
             workspace_id=workspace_id,
-            operation_type=OperationType.sync_base,
-            action="sync_base",
-            requested_action="sync_base",
-            reason="PR branch is behind the target branch.",
-            reason_code="SYNC_BASE",
+            repo=repo,
             pr_number=pr_number,
             status=status,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            monitor_log=monitor_log,
-            extra_identity=(state.iter_count,),
-        )
-        try:
-            push_result = await self._run_sync_base(
-                workspace_id=workspace_id,
-                state=state,
-                repo=repo,
-                pr_number=pr_number,
-                pr_head_sha=status.head_sha,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                remote_push_url=remote_push_url,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                operation_id=operation.operation_id if operation is not None else None,
-                operation_type=OperationType.sync_base.value,
-                monitor_log=monitor_log,
-            )
-            _clear_transient_base_fetch_retry_state(state, context="sync_base")
-        except _MonitorAgentServiceRecoverySupersededError as exc:
-            await _finish_agent_service_recovery_superseded_operation(
-                self,
-                operation,
-                exc=exc,
-                error_message=str(exc),
-            )
-            raise
-        except _MonitorAgentServiceRecoveryFailedError as exc:
-            await _finish_agent_service_recovery_failed_operation(
-                self,
-                operation,
-                exc=exc,
-                error_message=str(exc),
-            )
-            raise
-        except ProviderRecoveryRetryError:
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "provider_retry",
-                    "reason_code": "PROVIDER_OUTAGE",
-                    "pushed": False,
-                },
-                error_code="PROVIDER_OUTAGE",
-                error_message="Provider recovery requested retry",
-            )
-            raise
-        except ProviderRecoveryFallbackError:
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "provider_fallback",
-                    "reason_code": "PROVIDER_FALLBACK",
-                    "pushed": False,
-                },
-                error_code="PROVIDER_FALLBACK",
-                error_message="Provider recovery triggered fallback",
-            )
-            raise
-        except ProviderRecoveryAuthError:
-            await self._finish_provider_auth_failed_operation(operation)
-            raise
-        except BaseFetchError as exc:
-            base_fetch_result = await self._wait_after_transient_base_fetch_error(
-                exc,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                context="sync_base",
-                state=state,
-                monitor_log=monitor_log,
-            )
-            if base_fetch_result.retry:
-                await self._finish_monitor_operation(
-                    operation,
-                    status=OperationStatus.failed,
-                    result={
-                        "status": "retrying",
-                        "outcome": "transient_base_fetch_error",
-                        "reason_code": base_fetch_result.reason_code,
-                        "pushed": False,
-                    },
-                    error_code=base_fetch_result.reason_code,
-                    error_message=str(exc),
-                )
-                return False
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "base_fetch_failed",
-                    "reason_code": base_fetch_result.reason_code,
-                    "pushed": False,
-                },
-                error_code=base_fetch_result.reason_code,
-                error_message=str(exc),
-            )
-            await self._terminate_failed(
-                workspace_id,
-                message=f"monitor: could not refresh base branch: {exc}"[:2000],
-                reason_code=base_fetch_result.reason_code,
-            )
-            return True
-        except ComposeExecCleanupError as exc:
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
-                },
-                error_code=EXEC_PROCESS_CLEANUP_FAILED,
-                error_message=cleanup_failure_message(exc),
-            )
-            await self._terminate_failed(
-                workspace_id,
-                message=cleanup_failure_message(exc),
-                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-            )
-            return True
-        if push_result.paused_into_blocked:
-            # A protected-scope violation in the base-conflict resolution commit
-            # paused the workspace into ``blocked`` for an operator decision
-            # (WS-2). The row already left ``monitoring_pr`` (preserving the
-            # offending commit); end the monitor cycle cleanly — do NOT terminally
-            # fail. Persist state so the notification dedupe + preserved-commit
-            # marker survive a restart.
-            await self._persist_state(workspace_id, state)
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.succeeded,
-                result={
-                    "status": "succeeded",
-                    "outcome": "protected_scope_paused",
-                    "reason_code": push_result.reason_code,
-                    "pushed": False,
-                },
-            )
-            return True
-        if push_result.failed:
-            reason_code = push_result.reason_code
-            outcome = _git_push_failure_outcome(push_result)
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": outcome,
-                    "reason_code": reason_code,
-                    "pushed": push_result.pushed,
-                },
-                error_code=reason_code,
-                error_message=push_result.error_message,
-            )
-            await self._record_pr_monitor_audit_event(
-                workspace_id=workspace_id,
-                event_type=_AUDIT_GIT_PUSH_EVENT,
-                action="sync_base_push",
-                outcome="failed",
-                reason_code=reason_code,
-                pr_number=pr_number,
-                status=status,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                operation_id=operation.operation_id if operation is not None else None,
-                operation_type=OperationType.sync_base.value,
-                monitor_log=monitor_log,
-                evidence=push_result.failure_evidence(),
-            )
-            if push_result.workflow_scope_required:
-                await _post_workflow_scope_notification_best_effort(
-                    self,
-                    workspace_id=workspace_id,
-                    repo=repo,
-                    pr_number=pr_number,
-                    status=status,
-                    state=state,
-                    blocker_reason=push_result.error_message or push_result.reason_code,
-                )
-            if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
-                await self._terminate_failed(
-                    workspace_id,
-                    message=push_result.error_message or push_result.reason_code,
-                    reason_code=push_result.reason_code,
-                    details=push_result.failure_evidence(),
-                    failure_reason=push_result.failure_reason,
-                )
-                return True
-            self._record_sync_base_progress(
-                state=state,
-                status=status,
-                push_result=push_result,
-            )
-            state.iter_count += 1
-            return False
-        await self._finish_monitor_operation(
-            operation,
-            status=OperationStatus.succeeded,
-            result={
-                "status": "succeeded",
-                "outcome": "base_synced",
-                "pushed": push_result.pushed,
-            },
-        )
-        self._record_sync_base_progress(
             state=state,
-            status=status,
-            push_result=push_result,
-        )
-        await self._record_pr_monitor_audit_event(
-            workspace_id=workspace_id,
-            event_type=_AUDIT_GIT_PUSH_EVENT,
-            action="sync_base_push",
-            outcome="succeeded",
-            reason_code="SYNC_BASE",
-            pr_number=pr_number,
-            status=status,
             base_branch=base_branch,
             remote_branch=remote_branch,
-            operation_id=operation.operation_id if operation is not None else None,
-            operation_type=OperationType.sync_base.value,
+            remote_push_url=remote_push_url,
+            compose_project=compose_project,
+            compose_file=compose_file,
             monitor_log=monitor_log,
+            finish_if_pr_terminal=_finish_if_pr_terminal,
+            finish_if_pr_terminal_after_cleanup_error=(_finish_if_pr_terminal_after_cleanup_error),
         )
-        if push_result.pushed:
-            # SyncBase merged ``origin/<base>`` into the workspace branch and
-            # pushed. Without this call, the ``STALE_TARGET_ADVANCED`` row
-            # the staleness service wrote when target first advanced stays
-            # ``status=active, resolved_at=null`` with ``blocks_merge=true``
-            # — gating every subsequent merge attempt even though the
-            # monitor's own ``base_behind`` check is back to 0. Advance the
-            # candidate's validation base to the SHA we just merged in and
-            # refresh staleness so the resolution propagates atomically.
-            await self._refresh_staleness_after_sync_base(
-                workspace_id=workspace_id,
-                base_branch=base_branch,
-            )
-        state.iter_count += 1
-        return False
 
     if isinstance(action, RerunTransientCI):
         attempt = (
@@ -927,6 +804,13 @@ async def _execute(
             )
             raise
         except ComposeExecCleanupError as exc:
+            cleanup_terminal_result = await _finish_if_pr_terminal_after_cleanup_error(
+                operation,
+                context="ci_repair_cleanup_failure",
+                operation_type=OperationType.ci_repair.value,
+            )
+            if cleanup_terminal_result is not None:
+                return cleanup_terminal_result
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -943,6 +827,9 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
+        pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
+        if pr_terminal_result is not None:
+            return pr_terminal_result
         if push_result.paused_into_blocked:
             # A protected-scope violation in the CI-repair commit paused the
             # workspace into ``blocked`` for an operator decision (WS-2). The row
@@ -995,7 +882,7 @@ async def _execute(
                 evidence=push_result.failure_evidence(),
             )
             if push_result.workflow_scope_required:
-                await _post_workflow_scope_notification_best_effort(
+                notification_moot = await _post_workflow_scope_notification_best_effort(
                     self,
                     workspace_id=workspace_id,
                     repo=repo,
@@ -1004,6 +891,22 @@ async def _execute(
                     state=state,
                     blocker_reason=push_result.error_message or push_result.reason_code,
                 )
+                if notification_moot is not None:
+                    # The notification boundary's fresh read saw the PR go terminal
+                    # between the pre-push guard and this push rejection, so the
+                    # terminal fail below would mark a MERGED workspace failed. Run
+                    # the moot completion path on that observation instead
+                    # (PRRT_kwDOSJAM6s6fvGsp). ``operation`` is ``None``: this arm
+                    # already finished it as ``failed`` above, and that push failure
+                    # is a true audit record worth keeping.
+                    #
+                    # The moot envelope always carries the observation, so — unlike
+                    # the post-``_run_*`` call above, which sees real pushes — this
+                    # call can never report "not moot". Take the terminate sink's
+                    # own result directly instead of guarding on an arc this call
+                    # cannot produce; ``False`` still means the sink refused the
+                    # write because this runner was superseded.
+                    return bool(await _finish_if_pr_terminal(None, notification_moot))
             if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
                 await self._terminate_failed(
                     workspace_id,
@@ -1143,6 +1046,13 @@ async def _execute(
             raise
         except ComposeExecCleanupError as exc:
             state.clear_awaiting_workflow_scope()
+            cleanup_terminal_result = await _finish_if_pr_terminal_after_cleanup_error(
+                operation,
+                context="comment_repair_cleanup_failure",
+                operation_type=OperationType.comment_repair.value,
+            )
+            if cleanup_terminal_result is not None:
+                return cleanup_terminal_result
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.failed,
@@ -1159,6 +1069,9 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
+        pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
+        if pr_terminal_result is not None:
+            return pr_terminal_result
         if push_result.paused_into_blocked:
             # A protected-scope violation paused the workspace into ``blocked``
             # for an operator decision (WS-2). The row already left
@@ -1180,6 +1093,20 @@ async def _execute(
                 },
             )
             return True
+        if push_result.parked_needs_human:
+            # #935: unattributable unpushed commits were preserved for a human. End
+            # the cycle without terminally failing — the work must survive on disk —
+            # and hold the wait in this monitor's polling loop (non-terminal) so the
+            # worker does not reclaim the still-``monitoring_pr`` row every cycle.
+            return await _finish_parked_comment_repair_cycle(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                operation=operation,
+                push_result=push_result,
+                thread_count=len(action.threads),
+                review_comment_count=len(action.review_comments),
+            )
         if push_result.failed:
             reason_code = push_result.reason_code
             outcome = _git_push_failure_outcome(push_result)
@@ -1213,6 +1140,11 @@ async def _execute(
                     workspace_id,
                     reason=push_result.error_message or push_result.reason_code,
                 )
+                # Unlike the two arms above, this one does not consume the helper's
+                # terminal observation: it never terminally fails on a missing
+                # workflow scope, so a PR that ended mid-push reaches its terminal
+                # handling through the next poll's ``decide()`` short-circuit rather
+                # than through a wrong ``failed`` write (PRRT_kwDOSJAM6s6fvGsp).
                 await _post_workflow_scope_notification_best_effort(
                     self,
                     workspace_id=workspace_id,
@@ -1237,6 +1169,14 @@ async def _execute(
             state.iter_count += 1
             return False
         state.clear_awaiting_workflow_scope()
+        # The cycle got all the way through push without parking, so any earlier
+        # park episode is over (PRRT_kwDOSJAM6s6fu_-o) — the parked arm returns via
+        # ``_finish_parked_comment_repair_cycle`` above and never reaches here.
+        # Leaving a stale marker set would keep gating this arm's attention clear
+        # for as long as unresolved feedback holds ``decide()`` on
+        # ``AddressComments``, stranding the operator-visible ``awaiting_human_since``
+        # and park reason.
+        state.clear_parked_unpublished_repair()
         await self._finish_monitor_operation(
             operation,
             status=OperationStatus.succeeded,
@@ -1252,182 +1192,23 @@ async def _execute(
         return False
 
     if isinstance(action, AddressOperatorHint):
-        operation = await self._begin_monitor_operation(
+        return await _operator_hint_loop.handle_operator_hint_action(
+            self,
+            action=action,
             workspace_id=workspace_id,
-            operation_type=OperationType.comment_repair,
-            action="operator_hint_repair",
-            requested_action="address_operator_hint",
-            reason="Operator remonitor hint required repair before merge.",
-            reason_code=action.hint.reason_code,
+            repo=repo,
             pr_number=pr_number,
             status=status,
+            state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
             monitor_log=monitor_log,
-            extra_payload={
-                "operator_hint_operation_id": action.hint.operation_id,
-                "operator_hint_status": action.hint.status,
-            },
-            extra_identity=(action.hint.operation_id, action.hint.reason),
+            remote_push_url=remote_push_url,
+            finish_if_pr_terminal=_finish_if_pr_terminal,
+            finish_if_pr_terminal_after_cleanup_error=(_finish_if_pr_terminal_after_cleanup_error),
         )
-        try:
-            push_result = await self._run_operator_hint_cycle(
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                pr_head_sha=status.head_sha,
-                hint=action.hint,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                remote_push_url=remote_push_url,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                _monitor_log=monitor_log,
-                _operation_id=operation.operation_id if operation is not None else None,
-                _operation_type=OperationType.comment_repair.value,
-            )
-        except _MonitorAgentServiceRecoverySupersededError as exc:
-            await _finish_agent_service_recovery_superseded_operation(
-                self,
-                operation,
-                exc=exc,
-                error_message=str(exc),
-            )
-            raise
-        except _MonitorAgentServiceRecoveryFailedError as exc:
-            await _finish_agent_service_recovery_failed_operation(
-                self,
-                operation,
-                exc=exc,
-                error_message=str(exc),
-            )
-            raise
-        except ProviderRecoveryRetryError:
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "provider_retry",
-                    "reason_code": "PROVIDER_OUTAGE",
-                    "pushed": False,
-                },
-                error_code="PROVIDER_OUTAGE",
-                error_message="Provider recovery requested retry",
-            )
-            raise
-        except ProviderRecoveryFallbackError:
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "provider_fallback",
-                    "reason_code": "PROVIDER_FALLBACK",
-                    "pushed": False,
-                },
-                error_code="PROVIDER_FALLBACK",
-                error_message="Provider recovery triggered fallback",
-            )
-            raise
-        except ProviderRecoveryAuthError:
-            await self._finish_provider_auth_failed_operation(operation)
-            raise
-        except ComposeExecCleanupError as exc:
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
-                },
-                error_code=EXEC_PROCESS_CLEANUP_FAILED,
-                error_message=cleanup_failure_message(exc),
-            )
-            await self._terminate_failed(
-                workspace_id,
-                message=cleanup_failure_message(exc),
-                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-            )
-            return True
-        if push_result.paused_into_blocked:
-            # A directive-revert / grant resume that still trips the protected
-            # gate re-paused the workspace into ``blocked`` (WS-2 §2 re-block).
-            # End the cycle cleanly without terminally failing.
-            await self._persist_state(workspace_id, state)
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.succeeded,
-                result={
-                    "status": "succeeded",
-                    "outcome": "protected_scope_paused",
-                    "reason_code": push_result.reason_code,
-                    "pushed": False,
-                },
-            )
-            return True
-        if push_result.failed:
-            reason_code = push_result.reason_code
-            outcome = _git_push_failure_outcome(push_result)
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": outcome,
-                    "reason_code": reason_code,
-                    "pushed": False,
-                    "failure_evidence": push_result.failure_evidence(),
-                },
-                error_code=reason_code,
-                error_message=push_result.error_message,
-            )
-            if push_result.terminal_monitor_failure:
-                await self._persist_state(workspace_id, state)
-                await self._terminate_failed(
-                    workspace_id,
-                    message=push_result.error_message or push_result.reason_code,
-                    reason_code=push_result.reason_code,
-                    details=push_result.failure_evidence(),
-                    failure_reason=push_result.failure_reason,
-                )
-                return True
-            state.iter_count += 1
-            return False
-        if push_result.pushed or (
-            not push_result.pushed
-            and (
-                state.pending_operator_hint is None
-                or state.pending_operator_hint.status in {"needs_human", "agent_failed"}
-            )
-        ):
-            # Persist terminal, processed no-op, or pushed hint status before
-            # returning to the outer loop so a restart cannot re-run the same
-            # hint as pending.
-            await self._persist_state(workspace_id, state)
-        if push_result.pushed:
-            outcome = "operator_hint_pushed"
-        elif state.pending_operator_hint is None:
-            outcome = "operator_hint_processed"
-        elif (
-            state.pending_operator_hint is not None
-            and state.pending_operator_hint.status == "agent_failed"
-        ):
-            outcome = "operator_hint_agent_failed"
-        else:
-            outcome = "operator_hint_needs_human"
-        await self._finish_monitor_operation(
-            operation,
-            status=OperationStatus.succeeded,
-            result={
-                "status": "succeeded",
-                "outcome": outcome,
-                "pushed": push_result.pushed,
-            },
-        )
-        state.iter_count += 1
-        return False
 
     merge_result = await _merge_loop.handle_merge_action(
         self,

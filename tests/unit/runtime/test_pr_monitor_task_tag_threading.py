@@ -34,7 +34,12 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThread,
 )
-from awf.runtime.pr_monitor_runner import ci_ops, comments, operator_hints
+from awf.runtime.pr_monitor_runner import (
+    ci_ops,
+    comments,
+    operator_hint_retirement,
+    operator_hints,
+)
 from awf.runtime.pr_monitor_runner import remote_ops as pr_remote_ops
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
@@ -51,6 +56,11 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 
+async def _open_pr_post_action_recheck(**_kwargs: object) -> _GitPushResult | None:
+    """#910 post-action PR re-check stub; these threading tests model an OPEN PR."""
+    return None
+
+
 class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
     async def _run_monitor_agent_with_service_recovery(
         self,
@@ -63,8 +73,12 @@ class _MonitorAgentServiceRecoveryRunner(SimpleNamespace):
         command_evidence: list[str] | None = None,
         operation_start_head: str | None = None,
         state: object | None = None,
+        timeout_rerun_floor_sink: list[str] | None = None,
+        timeout_rerun_dirty_sink: object | None = None,
+        timeout_preservation_sink: list[str] | None = None,
     ) -> AgentRunResult:
-        del operation_start_head, state
+        del operation_start_head, state, timeout_rerun_floor_sink, timeout_rerun_dirty_sink
+        del timeout_preservation_sink
         result = await self._deps.adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
@@ -709,6 +723,7 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
         _rev_parse_head=_rev_parse_head,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -792,6 +807,7 @@ async def test_run_ci_fix_repairs_mirror_hooks_before_agent(
         _rev_parse_head=_rev_parse_head,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
     )
@@ -936,7 +952,12 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         return "PROMPT"
 
     monkeypatch.setattr(operator_hints, "operator_hint_prompt", _operator_hint_prompt)
-    monkeypatch.setattr(operator_hints, "mark_operator_hint_processed", lambda _state: None)
+    # ``_finalize_processed_operator_hint`` (and the marker call it makes) now lives in
+    # the sibling ``operator_hint_retirement`` module, so the stub must target the
+    # binding that module resolves.
+    monkeypatch.setattr(
+        operator_hint_retirement, "mark_operator_hint_processed", lambda _state: None
+    )
 
     self = SimpleNamespace(
         _worktrees_root=tmp_path,
@@ -951,6 +972,7 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _clear_block_resume_phase=_clear_block_resume_phase,
         _invoke_cli_for_verdict_result=_invoke,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _rev_parse_head=_rev_parse_head,
     )
@@ -1306,6 +1328,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
+        _post_action_pr_terminal_push_result_if_moot=_open_pr_post_action_recheck,
         _validated_git_push_result=_validated,
         _repair_operation_start_head_result=_repair_operation_start_head_result,
         _deps=SimpleNamespace(runner=fake_runner, adapter=SimpleNamespace(run=_adapter_run)),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import (
@@ -61,6 +62,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         agent_runtime_executor: AgentRuntimeExecutor | None = None,
         hosted_validation: Any | None = None,
         ensure_hosted_monitor_checkout: Callable[[str], Awaitable[None]] | None = None,
+        worktree_activity_git_roots: Callable[..., tuple[Path, Path]] | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -85,6 +87,11 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         hosted monitor resume after a pod replacement (provisioner-owned).
         Local Compose resumes leave it ``None``.
 
+        ``worktree_activity_git_roots`` derives the local linked-worktree admin
+        and common Git paths from GitManager-owned workspace metadata. Local
+        adapters use them to keep repeated idle-watchdog probes from trusting a
+        marker rewritten by an earlier agent invocation.
+
         If both are None the monitor stage is skipped and the executor
         preserves the original ``pushing → completed`` contract (the
         executor_tests no-monitor scenarios still pass)."""
@@ -103,6 +110,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._agent_runtime_executor = agent_runtime_executor
         self._hosted_validation = hosted_validation
         self._ensure_hosted_monitor_checkout = ensure_hosted_monitor_checkout
+        self._worktree_activity_git_roots = worktree_activity_git_roots
 
     async def execute(
         self: Any,
@@ -219,6 +227,18 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         )
 
     # ── Internals ──────────────────────────────────────────────────────────
+
+    def _trusted_git_roots_for_workspace(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+    ) -> tuple[Path, Path] | None:
+        """Resolve GitManager-owned activity roots without reading the checkout."""
+        resolver = self._worktree_activity_git_roots
+        if resolver is None:
+            return None
+        return resolver(workspace_id=workspace_id, repo_url=repo_url)
 
     def _defaults_for(self: Any, agent: AgentRuntime) -> AgentDefaults | None:
         """Return configured agent defaults for ``agent``, including model overrides."""

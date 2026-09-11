@@ -239,6 +239,53 @@ def test_cli_remonitor_forwards_idempotency_key(
 
 
 @pytest.mark.unit
+def test_cli_retry_forwards_optional_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``awf workspace retry`` forwards its optional replay key to REST."""
+    captured: dict[str, Any] = {}
+
+    def _capture(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        captured["method"] = method
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers", {})
+        return httpx.Response(
+            status_code=202,
+            content=json.dumps(
+                {
+                    "source_workspace_id": "ws_failed",
+                    "new_workspace_id": "ws_retry",
+                    "operation_id": "op_retry",
+                    "attempt_number": 2,
+                    "status": "requested",
+                }
+            ).encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr("awf.cli.main.httpx.request", _capture)
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+
+    result = _runner.invoke(
+        cli_app,
+        [
+            "workspace",
+            "retry",
+            "ws_failed",
+            "--idempotency-key",
+            "cli-retry-key",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/v1/workspaces/ws_failed/retry")
+    assert captured["headers"]["Idempotency-Key"] == "cli-retry-key"
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+
+
+@pytest.mark.unit
 async def test_rest_cancel_requires_idempotency_key_with_invalid_request(
     contract_stack: ContractStack,
 ) -> None:

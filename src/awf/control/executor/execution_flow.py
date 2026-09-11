@@ -326,6 +326,10 @@ async def execute(
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
                 usage_sampler=self._usage_sampler,
                 runtime_executor=(self._agent_runtime_executor if hosted_pr_adoption else None),
+                trusted_git_roots=self._trusted_git_roots_for_workspace(
+                    workspace_id=workspace_id,
+                    repo_url=ws.repo_url,
+                ),
             )
             # Ignore checkout-local agent scratch dirs before validation cleanliness
             # can treat them as dirty worktree state.

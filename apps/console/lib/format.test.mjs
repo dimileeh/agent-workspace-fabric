@@ -10,6 +10,7 @@ import {
   lifecycleStages,
   normalizeLifecycle,
   pickWorkspaceLogStreams,
+  recordedDurationLabel,
   renderLogEntries,
   statusGlyph,
   statusTone,
@@ -679,6 +680,15 @@ test("pickWorkspaceLogStreams defaults to all streams", () => {
     ),
     ["validation.01_setup.stdout", "agent.stdout", "agent.stderr"],
   );
+});
+
+test("recordedDurationLabel formats a hosted overview duration and omits missing values", () => {
+  assert.equal(recordedDurationLabel(125), "2m 5s");
+  assert.equal(recordedDurationLabel(0), "0s");
+  assert.equal(recordedDurationLabel(null), null);
+  assert.equal(recordedDurationLabel(undefined), null);
+  assert.equal(recordedDurationLabel(Number.NaN), null);
+  assert.equal(recordedDurationLabel(Number.POSITIVE_INFINITY), null);
 });
 
 test("pickWorkspaceLogStreams preserves an existing valid stream selection", () => {

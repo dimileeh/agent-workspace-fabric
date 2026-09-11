@@ -14,7 +14,6 @@ from awf.common.github_client import RepoRef
 from awf.runtime.pr_monitor import MonitorState, ReviewComment, ReviewThread
 from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_rollback, comments
 from awf.runtime.pr_monitor_runner.comment_verdict import (
-    AGENT_FIXED_WITHOUT_EVIDENCE,
     AGENT_NON_FIXED_WITH_MUTATION,
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
@@ -499,11 +498,20 @@ async def test_protocol_retry_non_fix_verdict_rollback_failure_is_terminal(
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_when_only_same_directory_sibling_changed(
+async def test_same_directory_sibling_fix_accepted_on_the_correction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6bdFvk: sibling-file edits must not satisfy inline FIXED."""
+    """#952 supersedes PRRT_kwDOSJAM6s6bdFvk on the correction attempt only.
+
+    Attempt 0 still rejects the sibling-file edit (the correction prompt is
+    issued), so a no-op FIXED keeps earning its correction round. Once the agent
+    has been told its FIXED carried no item-scoped evidence and re-affirms it,
+    a contentful commit in the item's own range that changes a file in the
+    reviewed file's package is accepted: that is the normal shape of a
+    callee-anchored review, and escalating it cost eight operator decisions on
+    2026-09-07.
+    """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
@@ -522,6 +530,7 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         heads_after_attempt=["b" * 40, "b" * 40],
         dirty_after_attempt=[True, True],
         path_touched=False,
+        in_item_scope=True,
     )
     thread = ReviewThread(
         thread_id="thread_cross_file",
@@ -530,35 +539,37 @@ async def test_fixed_rejected_when_only_same_directory_sibling_changed(
         body_excerpt="fix the helper used here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Attempt 0 was still corrected, and the re-affirmed FIXED is kept rather
+    # than rolled back or escalated (#952).
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
+    assert "no new item-scoped Git change" in runner.prompts[1]
 
 
 @pytest.mark.unit
-async def test_fixed_rejected_on_both_attempts_when_same_file_unrelated_line_changed(
+async def test_same_file_off_anchor_fix_accepted_on_the_correction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue:5381831025 + issue:5558086911: unrelated same-file edits never FIXED.
+    """issue:5381831025 + #925 D1: attempt 0 strict, correction path-level.
 
-    Attempt 0 keeps the strict line-anchored evidence rule (the correction
-    prompt is emitted). The correction must not discard the line constraint and
-    accept path membership alone — that would resolve a still-valid finding.
-    Related off-anchor fixes (near-anchor / callee) pass the line-scoped gate
-    without a path-only fallback. Cross-file cases below still reject on both
-    attempts.
+    Attempt 0 keeps the strict line-anchored evidence rule, so the misplaced
+    FIXED still earns its correction prompt. Having been told its FIXED carried
+    no line evidence, the agent re-affirms it — and the item's own commit range
+    does change the reviewed file, so the off-anchor fix is accepted rather than
+    escalated to a human. Cross-file cases below still reject on both attempts.
     """
     reviewed_path = "src/awf/reviewed.py"
     worktree = tmp_path / "ws_protocol"
@@ -587,19 +598,21 @@ async def test_fixed_rejected_on_both_attempts_when_same_file_unrelated_line_cha
         body_excerpt="fix the null check here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Accepted only on the correction, and only because the commit changes the
+    # reviewed file: the fix is kept, not rolled back and not escalated.
+    assert verdict == "fix_committed"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
     assert "no new item-scoped Git change" in runner.prompts[1]
 
@@ -641,19 +654,22 @@ async def test_bundled_inline_thread_rejects_outside_inline_path(
         ),
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 
@@ -689,19 +705,22 @@ async def test_fixed_rejected_when_contentful_descendant_is_unrelated(
         body_excerpt="fix the null check here",
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address_thread(
-            runner,
-            workspace_id="ws_protocol",
-            repo=RepoRef(owner="o", name="r"),
-            pr_number=1,
-            thread=thread,
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head="a" * 40,
-        )
+    verdict = await _address_thread(
+        runner,
+        workspace_id="ws_protocol",
+        repo=RepoRef(owner="o", name="r"),
+        pr_number=1,
+        thread=thread,
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head="a" * 40,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # The contentful commit misses the anchored path, so FIXED is still not
+    # accepted — but the correction attempt now preserves the commit and
+    # escalates instead of terminating the monitor (#925 follow-up).
+    assert verdict == "needs_human"
+    assert runner.reset_targets == []
     assert len(runner.prompts) == 2
 
 

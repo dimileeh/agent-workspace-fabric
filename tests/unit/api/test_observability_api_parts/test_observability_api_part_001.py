@@ -238,6 +238,43 @@ class TestConsoleViews:
         assert item["owned_paths"] == ["src/awf/api/**", "tests/unit/api/**"]
 
     @pytest.mark.unit
+    async def test_workspace_views_project_task_tag_as_task_key(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """Core stores a Jira-style key as task_tag; console cards read task_key."""
+        tagged = {
+            **_V2_POLICY_BODY,
+            "task": {**_V2_POLICY_BODY["task"], "task_tag": "PROJ-123"},
+        }
+        created = await client.post("/v1/workspaces", json=tagged)
+        assert created.status_code == 202
+        workspace_id = str(created.json()["workspace_id"])
+
+        overview = await client.get("/v1/workspaces/overview")
+        detail = await client.get(f"/v1/workspaces/{workspace_id}")
+
+        assert overview.status_code == 200
+        assert detail.status_code == 200
+        item = overview.json()["items"][0]
+        assert item["workspace_id"] == workspace_id
+        assert item["task_id"] == "TICKET-456"
+        assert item["task_key"] == "PROJ-123"
+        assert item["task_tag"] == "PROJ-123"
+        assert detail.json()["task_tag"] == "PROJ-123"
+        assert detail.json()["task_key"] == "PROJ-123"
+
+        untagged_id = await _create_workspace(client)
+        untagged_overview = await client.get("/v1/workspaces/overview")
+        untagged_detail = await client.get(f"/v1/workspaces/{untagged_id}")
+        untagged_item = next(
+            row for row in untagged_overview.json()["items"] if row["workspace_id"] == untagged_id
+        )
+        assert untagged_item["task_key"] is None
+        assert untagged_item["task_tag"] is None
+        assert untagged_detail.json()["task_key"] is None
+
+    @pytest.mark.unit
     async def test_workspace_overview_exposes_last_event_and_active_operation(
         self,
         client: AsyncClient,

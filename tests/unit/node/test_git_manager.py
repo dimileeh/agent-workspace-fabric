@@ -78,6 +78,26 @@ def manager(work_dir: Path) -> GitManager:
 
 class TestEnsureMirror:
     @pytest.mark.unit
+    async def test_activity_git_roots_come_from_managed_layout(
+        self,
+        manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_probe",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_probe",
+        )
+        git_dir, common_dir = manager.worktree_activity_git_roots(
+            workspace_id="ws_probe",
+            repo_url=str(origin_repo),
+        )
+
+        assert common_dir == layout.mirror_path
+        assert git_dir == git_manager.linked_worktree_git_dir(layout.worktree_path)
+
+    @pytest.mark.unit
     async def test_clones_on_first_call(self, manager: GitManager, origin_repo: Path) -> None:
         mirror = await manager.ensure_mirror(str(origin_repo))
         assert mirror.exists()

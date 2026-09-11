@@ -84,7 +84,7 @@ async def test_pre_push_validation_fix_pass_propagates_recovered_agent_pre_retry
         return True
 
     async def _run_monitor_agent_with_service_recovery(**kwargs: object) -> object:
-        del kwargs
+        assert kwargs["timeout_rerun_requires_preservation"] is True
         raise guard_exc
 
     async def _rollback_failed_fix_pass(_runner: object, **kwargs: object) -> str | None:

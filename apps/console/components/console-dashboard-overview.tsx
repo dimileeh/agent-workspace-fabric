@@ -28,13 +28,23 @@ Type
 } from "lucide-react";
 import {
 type SyntheticEvent,
+type UIEvent,
+memo,
+useCallback,
 useEffect,
 useId,
+useLayoutEffect,
+useMemo,
 useRef,
 useState
 } from "react";
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
+import {
+  displayedTaskKey,
+  MAX_FULLSCREEN_LOG_WORKSPACES,
+} from "@/lib/console-dashboard-derived";
+import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   attentionAgeSeconds,
@@ -242,10 +252,54 @@ export type FleetKpi = {
 // "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
 // KPIs dim per source (saturation vs reliability summary) so only the actually
 // stale values fade, while the warning above stays at full opacity.
-export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
+export function FleetHealthStrip({
+  kpis,
+  error,
+  lastSuccessAt,
+  coverageStatus,
+  coverageNotes,
+}: {
+  kpis: FleetKpi[];
+  error?: string | null;
+  lastSuccessAt?: string | null;
+  coverageStatus?: "complete" | "partial" | "unknown" | null;
+  coverageNotes?: readonly string[] | null;
+}) {
   const anyStale = kpis.some((kpi) => kpi.stale);
+  // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
+  // error — that banner is cleared on success — but do not let non-null counts
+  // look fully current either.
+  const coverageNotice = formatDashboardCoverageNotice(
+    coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
+  );
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
+      {error ? (
+        <div
+          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-2 py-0.5 text-[11px] font-medium text-danger-text"
+          role="alert"
+          data-testid="dashboard-summary-error"
+        >
+          <span aria-hidden>⚠</span>
+          <span>{error}</span>
+          {lastSuccessAt ? (
+            <span className="text-danger-text/80">· last success {lastSuccessAt}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {coverageNotice ? (
+        <div
+          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text"
+          role="status"
+          data-testid="dashboard-summary-coverage"
+        >
+          <span aria-hidden>⚠</span>
+          <span>{coverageNotice}</span>
+          {!error && lastSuccessAt ? (
+            <span className="text-attention-text/80">· last complete {lastSuccessAt}</span>
+          ) : null}
+        </div>
+      ) : null}
       {anyStale ? (
         <div className="mb-2 inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text">
           <span aria-hidden>⚠</span>
@@ -269,24 +323,44 @@ export function FleetHealthStrip({ kpis }: { kpis: FleetKpi[] }) {
   );
 }
 
-const NAV_ITEMS: { id: string; label: string; icon: typeof ListTree }[] = [
-  { id: "awf-workspaces", label: "Workspaces", icon: ListTree },
-  { id: "awf-capacity", label: "Capacity", icon: Server },
-  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest },
-  { id: "awf-failures", label: "Failures", icon: AlertTriangle },
+const NAV_ITEMS: {
+  id: string;
+  label: string;
+  icon: typeof ListTree;
+  key: "workspaces" | "capacity" | "mergeQueue" | "failures";
+}[] = [
+  { id: "awf-workspaces", label: "Workspaces", icon: ListTree, key: "workspaces" },
+  { id: "awf-capacity", label: "Capacity", icon: Server, key: "capacity" },
+  { id: "awf-merge-queue", label: "Merge queue", icon: GitPullRequest, key: "mergeQueue" },
+  { id: "awf-failures", label: "Failures", icon: AlertTriangle, key: "failures" },
 ];
 
 // Section jump-nav. On wide screens the panels sit side by side and need no
 // navigation; on narrow screens they stack into one tall column, so this sticky
 // bar (narrow-only) lets operators jump straight to a section.
-export function SectionNav() {
+// Only offer links whose matching section id is mounted (capability-gated).
+export function SectionNav({
+  showCapacity,
+  showMergeQueue,
+  showFailures,
+}: {
+  showCapacity: boolean;
+  showMergeQueue: boolean;
+  showFailures: boolean;
+}) {
+  const visible = {
+    workspaces: true,
+    capacity: showCapacity,
+    mergeQueue: showMergeQueue,
+    failures: showFailures,
+  };
   const go = (id: string) => document.getElementById(id)?.scrollIntoView({ block: "start" });
   return (
     <nav
       aria-label="Jump to section"
       className="sticky top-0 z-30 flex gap-2 overflow-x-auto border-b border-line bg-canvas px-4 py-2 xl:hidden"
     >
-      {NAV_ITEMS.map((item) => {
+      {NAV_ITEMS.filter((item) => visible[item.key]).map((item) => {
         const Icon = item.icon;
         return (
           <button
@@ -587,7 +661,12 @@ export function WorkspaceSelectionToolbar({
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2 text-xs">
-      <span className="text-slate-500">{selectedCount} selected for logs</span>
+      <span className="text-slate-500">
+        {selectedCount} selected for logs
+        {selectedCount > MAX_FULLSCREEN_LOG_WORKSPACES
+          ? `; first ${MAX_FULLSCREEN_LOG_WORKSPACES} will open`
+          : ""}
+      </span>
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -611,115 +690,91 @@ export function WorkspaceSelectionToolbar({
   );
 }
 
-export function WorkspaceList({
-  items,
-  selectedId,
-  selectedWorkspaceIds,
-  onSelect,
-  onToggleWorkspaceSelection,
-  onOpenDetails,
-  onOpenLogs,
-}: {
-  items: WorkspaceOverview[];
-  selectedId: string | null;
-  selectedWorkspaceIds: string[];
+export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
+export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;
+export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
+const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
+
+function workspaceRowAtOffset(rowOffsets: readonly number[], offset: number): number {
+  let low = 0;
+  let high = Math.max(0, rowOffsets.length - 2);
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rowOffsets[middle + 1] <= offset) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+function workspaceRowsBeforeOffset(rowOffsets: number[], offset: number): number {
+  let low = 0;
+  let high = rowOffsets.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rowOffsets[middle] < offset) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+type WorkspaceCardProps = {
+  item: WorkspaceOverview;
+  selected: boolean;
+  selectedForLogs: boolean;
+  showWorkspaceLogs: boolean;
+  copied: boolean;
+  copyToastVisible: boolean;
   onSelect: (workspaceId: string) => void;
   onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
   onOpenDetails: (workspaceId: string) => void;
   onOpenLogs: (workspaceId: string) => void;
-}) {
-  const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
-  const [copyToastVisible, setCopyToastVisible] = useState(false);
-  const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  onCopy: (event: SyntheticEvent<HTMLElement>, workspaceId: string) => void;
+};
 
-  useEffect(() => {
-    return () => {
-      if (copyFadeTimeoutRef.current !== null) {
-        clearTimeout(copyFadeTimeoutRef.current);
-      }
-      if (copyClearTimeoutRef.current !== null) {
-        clearTimeout(copyClearTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const copyWorkspaceId = async (event: SyntheticEvent<HTMLElement>, workspaceId: string) => {
-    event.preventDefault();
-    event.stopPropagation();
-    // Clear any pending timers upfront so every copy attempt starts from a clean
-    // state — otherwise stale timers from a prior successful copy could fire during
-    // the await or after a failed attempt and unexpectedly mutate the toast state.
-    if (copyFadeTimeoutRef.current !== null) {
-      clearTimeout(copyFadeTimeoutRef.current);
-      copyFadeTimeoutRef.current = null;
-    }
-    if (copyClearTimeoutRef.current !== null) {
-      clearTimeout(copyClearTimeoutRef.current);
-      copyClearTimeoutRef.current = null;
-    }
-    // Use the fallback-aware helper: navigator.clipboard is unavailable over plain
-    // HTTP (e.g. a Tailscale address), so it falls back to execCommand there.
-    const copied = await copyTextToClipboard(workspaceId);
-    if (!copied) {
-      setCopiedWorkspaceId(null);
-      setCopyToastVisible(false);
-      return;
-    }
-    setCopiedWorkspaceId(workspaceId);
-    setCopyToastVisible(true);
-    copyFadeTimeoutRef.current = setTimeout(() => {
-      setCopyToastVisible(false);
-    }, 1000);
-    copyClearTimeoutRef.current = setTimeout(() => {
-      setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
-    }, 1400);
-  };
-
-  if (items.length === 0) {
-    return (
-      <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
-        <div>
-          <ListFilter className="mx-auto mb-3 text-slate-400" size={24} aria-hidden />
-          No workspaces match the current filters.
-        </div>
-      </div>
-    );
-  }
-
-  const selectedSet = new Set(selectedWorkspaceIds);
+const WorkspaceCard = memo(function WorkspaceCard({
+  item,
+  selected,
+  selectedForLogs,
+  showWorkspaceLogs,
+  copied,
+  copyToastVisible,
+  onSelect,
+  onToggleWorkspaceSelection,
+  onOpenDetails,
+  onOpenLogs,
+  onCopy,
+}: WorkspaceCardProps) {
+  const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
+  const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
+  const blockedFor = item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
+  const awaitingHumanFor = isAwaitingHuman(item)
+    ? attentionAgeSeconds(attentionSince(item))
+    : null;
+  const taskKey = displayedTaskKey(item);
   return (
-    <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
-      {items.map((item) => {
-        const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
-        const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
-        // "Blocked for N" from the authoritative `blocked_at` the overview now
-        // carries while blocked; `blockedSince` falls back to the blocked
-        // transition event / `updated_at` only when it is absent.
-        const blockedFor =
-          item.status === "blocked" ? blockedAgeSeconds(blockedSince(item)) : null;
-        // "Awaiting human for N" from the authoritative `awaiting_human_since` the
-        // overview carries while a monitoring_pr workspace is flagged (HUMAN_WAIT).
-        const awaitingHumanFor = isAwaitingHuman(item)
-          ? attentionAgeSeconds(attentionSince(item))
-          : null;
-        return (
-          <div
-            key={item.workspace_id}
-            data-testid={`workspace-card-${item.workspace_id}`}
-            className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
-              selectedId === item.workspace_id ? "bg-blue-50" : "bg-white"
-            }`}
-          >
+    <div
+      data-testid={`workspace-card-${item.workspace_id}`}
+      className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
+        selected ? "bg-blue-50" : "bg-white"
+      }`}
+    >
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
               <div className="flex min-w-0 items-start gap-2">
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(item.workspace_id)}
-                  onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
-                  aria-label={`Select ${item.title} for fullscreen logs`}
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
-                />
+                {showWorkspaceLogs ? (
+                  <input
+                    type="checkbox"
+                    checked={selectedForLogs}
+                    onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
+                    aria-label={`Select ${item.title} for fullscreen logs`}
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
+                  />
+                ) : null}
                 <div className="relative grid min-w-0 flex-1 gap-2 text-left">
                   <button
                     type="button"
@@ -734,17 +789,25 @@ export function WorkspaceList({
                     >
                       {item.title}
                     </span>
+                    {taskKey ? (
+                      <span
+                        className="mono text-[11px] text-slate-500"
+                        data-testid={`workspace-task-key-${item.workspace_id}`}
+                      >
+                        {taskKey}
+                      </span>
+                    ) : null}
                     <span className="relative inline-flex min-w-0 items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={(event) => void copyWorkspaceId(event, item.workspace_id)}
+                        onClick={(event) => onCopy(event, item.workspace_id)}
                         className="workspace-id-copy pointer-events-auto focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                         aria-label={`Copy workspace id ${item.workspace_id}`}
                         title="Copy workspace id"
                       >
                         {item.workspace_id}
                       </button>
-                      {copiedWorkspaceId === item.workspace_id ? (
+                      {copied ? (
                         <span
                           aria-live="polite"
                           className={`pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/2 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 shadow-sm transition duration-300 ${
@@ -758,6 +821,11 @@ export function WorkspaceList({
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
                       <span>created {formatDateTime(item.created_at)}</span>
                       <span>updated {formatDateTime(item.updated_at)}</span>
+                      {item.last_activity_at ? (
+                        <span data-testid={`workspace-last-activity-${item.workspace_id}`}>
+                          activity {formatDateTime(item.last_activity_at)}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
                       <Bot size={13} aria-hidden className="shrink-0" />
@@ -842,18 +910,532 @@ export function WorkspaceList({
                 <FileText size={12} aria-hidden />
                 Details
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenLogs(item.workspace_id)}
-                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
-              >
-                <Terminal size={12} aria-hidden />
-                Logs
-              </button>
+              {showWorkspaceLogs ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenLogs(item.workspace_id)}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
+                >
+                  <Terminal size={12} aria-hidden />
+                  Logs
+                </button>
+              ) : null}
             </div>
           </div>
-        );
-      })}
+  );
+});
+
+export function WorkspaceList({
+  items,
+  selectedId,
+  showWorkspaceLogs = true,
+  selectedWorkspaceIds,
+  onSelect,
+  onToggleWorkspaceSelection,
+  onOpenDetails,
+  onOpenLogs,
+  hasMore,
+  loadingMore,
+  historyComplete,
+  historyError,
+  loadedCount,
+  onLoadMore,
+}: {
+  items: WorkspaceOverview[];
+  selectedId: string | null;
+  showWorkspaceLogs?: boolean;
+  selectedWorkspaceIds: string[];
+  onSelect: (workspaceId: string) => void;
+  onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
+  onOpenDetails: (workspaceId: string) => void;
+  onOpenLogs: (workspaceId: string) => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  historyComplete: boolean;
+  historyError: boolean;
+  loadedCount: number;
+  onLoadMore: () => Promise<void>;
+}) {
+  const [windowStart, setWindowStart] = useState(0);
+  const [pageStart, setPageStart] = useState(0);
+  const [virtualRowHeight, setVirtualRowHeight] = useState(
+    WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX,
+  );
+  const [measuredRowHeights, setMeasuredRowHeights] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(null);
+  const [copyToastVisible, setCopyToastVisible] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const renderedWindowRef = useRef<HTMLDivElement | null>(null);
+  const measuredWindowWidthRef = useRef<number | null>(null);
+  const measuredRootFontSizeRef = useRef<number | null>(null);
+  const pendingScrollAnchorRef = useRef<{
+    workspaceId: string;
+    offsetRatio: number;
+    sourceRowOffsets: readonly number[];
+  } | null>(null);
+  const preserveScrollTopRef = useRef<number | null>(null);
+  const suppressScrollLoadRef = useRef(false);
+  const suppressScrollFrameRef = useRef<number | null>(null);
+  const historyLoadPendingRef = useRef(false);
+  const nearBottomTriggerScrollTopRef = useRef<number | null>(null);
+  const suppressNextButtonLoadRef = useRef(false);
+  const copyFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyClearTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nearBottomTriggeredRef = useRef(false);
+  const previousSelectedIdRef = useRef<string | null>(null);
+  const selectedWasLoadedRef = useRef(false);
+  const committedListGeometryRef = useRef<{
+    workspaceIds: readonly string[];
+    rowOffsets: readonly number[];
+    selectedId: string | null;
+  } | null>(null);
+  const maxPageStart = Math.max(
+    0,
+    Math.floor((items.length - 1) / WORKSPACE_RENDER_WINDOW_SIZE) *
+      WORKSPACE_RENDER_WINDOW_SIZE,
+  );
+  const maxWindowStart = maxPageStart;
+  const windowEnd = Math.min(items.length, windowStart + WORKSPACE_RENDER_WINDOW_SIZE);
+  const pageEnd = Math.min(items.length, pageStart + WORKSPACE_RENDER_WINDOW_SIZE);
+  const rowOffsets = useMemo(() => {
+    const offsets = [0];
+    for (const item of items) {
+      offsets.push(
+        offsets[offsets.length - 1] +
+          (measuredRowHeights.get(item.workspace_id) ?? virtualRowHeight),
+      );
+    }
+    return offsets;
+  }, [items, measuredRowHeights, virtualRowHeight]);
+
+  const scrollWithoutLoading = useCallback((top: number) => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    suppressScrollLoadRef.current = true;
+    if (suppressScrollFrameRef.current !== null) {
+      cancelAnimationFrame(suppressScrollFrameRef.current);
+    }
+    scrollContainer.scrollTo({ top });
+    suppressScrollFrameRef.current = requestAnimationFrame(() => {
+      suppressScrollLoadRef.current = false;
+      suppressScrollFrameRef.current = null;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    const previous = committedListGeometryRef.current;
+    const workspaceIds = items.map((item) => item.workspace_id);
+    committedListGeometryRef.current = { workspaceIds, rowOffsets, selectedId };
+    if (!previous || previous.selectedId !== selectedId) return;
+    const membershipChanged =
+      previous.workspaceIds.length !== workspaceIds.length ||
+      previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
+    const scrollContainer = scrollContainerRef.current;
+    if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
+
+    const previousAnchorIndex = workspaceRowAtOffset(
+      previous.rowOffsets,
+      scrollContainer.scrollTop,
+    );
+    const workspaceId = previous.workspaceIds[previousAnchorIndex];
+    let anchorIndex = workspaceIds.indexOf(workspaceId);
+    let fallbackViewportDelta: number | null = null;
+    if (anchorIndex < 0) {
+      const survivingWorkspaceIds = new Set(workspaceIds);
+      const fallbackWorkspaceId =
+        previous.workspaceIds
+          .slice(previousAnchorIndex + 1)
+          .find((candidate) => survivingWorkspaceIds.has(candidate)) ??
+        previous.workspaceIds
+          .slice(0, previousAnchorIndex)
+          .reverse()
+          .find((candidate) => survivingWorkspaceIds.has(candidate));
+      if (!fallbackWorkspaceId) return;
+      anchorIndex = workspaceIds.indexOf(fallbackWorkspaceId);
+      const previousFallbackIndex = previous.workspaceIds.indexOf(fallbackWorkspaceId);
+      fallbackViewportDelta =
+        previous.rowOffsets[previousFallbackIndex] - scrollContainer.scrollTop;
+    }
+    const previousAnchorHeight =
+      previous.rowOffsets[previousAnchorIndex + 1] -
+      previous.rowOffsets[previousAnchorIndex];
+    const offsetRatio = previousAnchorHeight > 0
+      ? (scrollContainer.scrollTop - previous.rowOffsets[previousAnchorIndex]) /
+        previousAnchorHeight
+      : 0;
+    const anchorHeight = rowOffsets[anchorIndex + 1] - rowOffsets[anchorIndex];
+    const anchorWindowStart = Math.min(
+      Math.floor(anchorIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
+        WORKSPACE_RENDER_WINDOW_SIZE,
+      maxWindowStart,
+    );
+    setPageStart(anchorWindowStart);
+    setWindowStart(anchorWindowStart);
+    scrollWithoutLoading(
+      fallbackViewportDelta === null
+        ? rowOffsets[anchorIndex] + offsetRatio * anchorHeight
+        : rowOffsets[anchorIndex] - fallbackViewportDelta,
+    );
+  }, [items, maxWindowStart, rowOffsets, scrollWithoutLoading, selectedId]);
+
+  useEffect(() => {
+    const selectedIndex = selectedId
+      ? items.findIndex((item) => item.workspace_id === selectedId)
+      : -1;
+    const selectedBecameLoaded =
+      selectedIndex >= 0 &&
+      selectedId === previousSelectedIdRef.current &&
+      !selectedWasLoadedRef.current;
+    const shouldFollowSelection =
+      selectedIndex >= 0 &&
+      (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
+    previousSelectedIdRef.current = selectedId;
+    selectedWasLoadedRef.current = selectedIndex >= 0;
+    const scrollContainer = scrollContainerRef.current;
+    const selectedRowStart = rowOffsets[selectedIndex] ?? 0;
+    const selectedRowEnd = rowOffsets[selectedIndex + 1] ?? selectedRowStart;
+    const selectedIsVisible = (() => {
+      if (!shouldFollowSelection || !scrollContainer) return false;
+      const controlsHeight = scrollContainer.querySelector<HTMLElement>(":scope > .sticky")
+        ?.offsetHeight ?? 0;
+      const viewportStart = scrollContainer.scrollTop;
+      const viewportEnd = viewportStart + scrollContainer.clientHeight - controlsHeight;
+      return selectedRowEnd > viewportStart && selectedRowStart < viewportEnd;
+    })();
+    const selectedWindowStart = shouldFollowSelection && !selectedIsVisible
+      ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
+        WORKSPACE_RENDER_WINDOW_SIZE
+      : null;
+    setPageStart((current) =>
+      selectedWindowStart ?? Math.min(current, maxPageStart),
+    );
+    setWindowStart((current) =>
+      selectedWindowStart !== null
+        ? Math.min(selectedWindowStart, maxWindowStart)
+        : Math.min(current, maxWindowStart),
+    );
+    if (selectedWindowStart !== null && scrollContainer) {
+      scrollWithoutLoading(selectedRowStart);
+    }
+  }, [items, maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading, selectedId]);
+
+  useLayoutEffect(() => {
+    const renderedWindow = renderedWindowRef.current;
+    const renderedCount = windowEnd - windowStart;
+    if (!renderedWindow || renderedCount <= 0) return;
+
+    const measureRows = () => {
+      const measuredWindowWidth = renderedWindow.getBoundingClientRect().width;
+      const measuredRootFontSize = Number.parseFloat(
+        getComputedStyle(document.documentElement).fontSize,
+      );
+      const layoutScaleChanged =
+        (measuredWindowWidthRef.current !== null &&
+          Math.abs(measuredWindowWidthRef.current - measuredWindowWidth) >= 0.5) ||
+        (measuredRootFontSizeRef.current !== null &&
+          Math.abs(measuredRootFontSizeRef.current - measuredRootFontSize) >= 0.5);
+      const measuredHeights = layoutScaleChanged
+        ? new Map<string, number>()
+        : new Map(measuredRowHeights);
+      let heightsChanged = layoutScaleChanged;
+      let measuredHeightTotal = 0;
+      Array.from(renderedWindow.children).forEach((child, childIndex) => {
+        const item = items[windowStart + childIndex];
+        const measuredHeight = child.getBoundingClientRect().height;
+        if (!item || measuredHeight <= 0) return;
+        measuredHeightTotal += measuredHeight;
+        if (Math.abs((measuredHeights.get(item.workspace_id) ?? 0) - measuredHeight) >= 0.5) {
+          heightsChanged = true;
+          measuredHeights.set(item.workspace_id, measuredHeight);
+        }
+      });
+      const measuredRowHeight = measuredHeightTotal / renderedCount;
+      const estimateChanged = measuredRowHeight > 0 &&
+        Math.abs(measuredRowHeight - virtualRowHeight) >= 0.5;
+      if (!heightsChanged && !estimateChanged) return;
+
+      const scrollContainer = scrollContainerRef.current;
+      if (scrollContainer && items.length > 0) {
+        const anchorIndex = workspaceRowAtOffset(rowOffsets, scrollContainer.scrollTop);
+        const anchorHeight = rowOffsets[anchorIndex + 1] - rowOffsets[anchorIndex];
+        pendingScrollAnchorRef.current = {
+          workspaceId: items[anchorIndex].workspace_id,
+          offsetRatio: anchorHeight > 0
+            ? (scrollContainer.scrollTop - rowOffsets[anchorIndex]) / anchorHeight
+            : 0,
+          sourceRowOffsets: rowOffsets,
+        };
+      }
+      measuredWindowWidthRef.current = measuredWindowWidth;
+      measuredRootFontSizeRef.current = measuredRootFontSize;
+      setMeasuredRowHeights(measuredHeights);
+      if (estimateChanged) {
+        setVirtualRowHeight(measuredRowHeight);
+      }
+    };
+
+    measureRows();
+    const resizeObserver = new ResizeObserver(measureRows);
+    Array.from(renderedWindow.children).forEach((child) => resizeObserver.observe(child));
+    return () => resizeObserver.disconnect();
+  }, [items, measuredRowHeights, rowOffsets, virtualRowHeight, windowEnd, windowStart]);
+
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingScrollAnchorRef.current;
+    if (pendingAnchor?.sourceRowOffsets === rowOffsets) return;
+    pendingScrollAnchorRef.current = null;
+    const anchorIndex = pendingAnchor
+      ? items.findIndex((item) => item.workspace_id === pendingAnchor.workspaceId)
+      : -1;
+    const anchorHeight = anchorIndex >= 0
+      ? rowOffsets[anchorIndex + 1] - rowOffsets[anchorIndex]
+      : 0;
+    const anchoredScrollTop = pendingAnchor && anchorIndex >= 0
+      ? rowOffsets[anchorIndex] + pendingAnchor.offsetRatio * anchorHeight
+      : null;
+    const scrollTop = anchoredScrollTop ??
+      preserveScrollTopRef.current;
+    preserveScrollTopRef.current = null;
+    if (scrollTop !== null) {
+      scrollWithoutLoading(scrollTop);
+    }
+  }, [items, rowOffsets, scrollWithoutLoading]);
+
+  useEffect(() => () => {
+    if (suppressScrollFrameRef.current !== null) {
+      cancelAnimationFrame(suppressScrollFrameRef.current);
+    }
+    if (copyFadeTimeoutRef.current !== null) clearTimeout(copyFadeTimeoutRef.current);
+    if (copyClearTimeoutRef.current !== null) clearTimeout(copyClearTimeoutRef.current);
+  }, []);
+
+  const copyWorkspaceId = useCallback(async (
+    event: SyntheticEvent<HTMLElement>,
+    workspaceId: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (copyFadeTimeoutRef.current !== null) clearTimeout(copyFadeTimeoutRef.current);
+    if (copyClearTimeoutRef.current !== null) clearTimeout(copyClearTimeoutRef.current);
+    const copied = await copyTextToClipboard(workspaceId);
+    if (!copied) {
+      setCopiedWorkspaceId(null);
+      setCopyToastVisible(false);
+      return;
+    }
+    setCopiedWorkspaceId(workspaceId);
+    setCopyToastVisible(true);
+    copyFadeTimeoutRef.current = setTimeout(() => setCopyToastVisible(false), 1000);
+    copyClearTimeoutRef.current = setTimeout(() => {
+      setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
+    }, 1400);
+  }, []);
+
+  const requestHistoryPage = useCallback(() => {
+    if (historyLoadPendingRef.current) return false;
+    historyLoadPendingRef.current = true;
+    void onLoadMore().finally(() => {
+      historyLoadPendingRef.current = false;
+      suppressNextButtonLoadRef.current = false;
+    });
+    return true;
+  }, [onLoadMore]);
+
+  const updateWindowAndLoadNearBottom = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    if (items.length === 0) return;
+    const controlsHeight = element.querySelector<HTMLElement>(":scope > .sticky")?.offsetHeight ?? 0;
+    const firstVisibleRow = Math.max(
+      0,
+      Math.min(items.length - 1, workspaceRowAtOffset(rowOffsets, element.scrollTop)),
+    );
+    const lastVisibleRow = Math.max(
+      firstVisibleRow + 1,
+      Math.min(
+        items.length,
+        workspaceRowsBeforeOffset(
+          rowOffsets,
+          element.scrollTop + element.clientHeight - controlsHeight,
+        ),
+      ),
+    );
+    const visiblePageStart = Math.min(
+      maxPageStart,
+      Math.floor(firstVisibleRow / WORKSPACE_RENDER_WINDOW_SIZE) *
+        WORKSPACE_RENDER_WINDOW_SIZE,
+    );
+    const overscanStart = Math.max(0, firstVisibleRow - WORKSPACE_RENDER_OVERSCAN_ROWS);
+    const overscanEnd = Math.min(
+      items.length,
+      lastVisibleRow + WORKSPACE_RENDER_OVERSCAN_ROWS,
+    );
+    let visibleWindowStart = visiblePageStart;
+    if (overscanStart < visibleWindowStart) {
+      visibleWindowStart = overscanStart;
+    }
+    if (overscanEnd > visibleWindowStart + WORKSPACE_RENDER_WINDOW_SIZE) {
+      visibleWindowStart = overscanEnd - WORKSPACE_RENDER_WINDOW_SIZE;
+    }
+    visibleWindowStart = Math.max(0, Math.min(visibleWindowStart, maxWindowStart));
+    setPageStart((current) => current === visiblePageStart ? current : visiblePageStart);
+    setWindowStart((current) =>
+      current === visibleWindowStart ? current : visibleWindowStart,
+    );
+
+    if (suppressScrollLoadRef.current) return;
+    const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
+      nearBottomTriggeredRef.current = false;
+      nearBottomTriggerScrollTopRef.current = null;
+      suppressNextButtonLoadRef.current = false;
+      return;
+    }
+    const advancedSinceTrigger =
+      nearBottomTriggerScrollTopRef.current !== null &&
+      element.scrollTop > nearBottomTriggerScrollTopRef.current + 1;
+    if (
+      hasMore &&
+      !loadingMore &&
+      !historyLoadPendingRef.current &&
+      (!nearBottomTriggeredRef.current || advancedSinceTrigger) &&
+      remaining <= WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX
+    ) {
+      preserveScrollTopRef.current = element.scrollTop;
+      if (requestHistoryPage()) {
+        nearBottomTriggeredRef.current = true;
+        nearBottomTriggerScrollTopRef.current = element.scrollTop;
+        // A locator or browser may scroll this button into view immediately
+        // before dispatching its click. That click belongs to this same load.
+        suppressNextButtonLoadRef.current = true;
+      }
+    }
+  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
+
+  const showWindow = useCallback((nextStart: number) => {
+    const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
+    setPageStart(boundedStart);
+    setWindowStart(Math.min(boundedStart, maxWindowStart));
+    scrollWithoutLoading(rowOffsets[boundedStart] ?? 0);
+  }, [maxPageStart, maxWindowStart, rowOffsets, scrollWithoutLoading]);
+
+  const loadMoreFromButton = useCallback(() => {
+    // Consume a click paired with an in-flight scroll-to-button load.
+    if (suppressNextButtonLoadRef.current && !historyError) {
+      suppressNextButtonLoadRef.current = false;
+      return;
+    }
+    suppressNextButtonLoadRef.current = false;
+    preserveScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? null;
+    if (requestHistoryPage()) {
+      nearBottomTriggeredRef.current = true;
+      nearBottomTriggerScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? null;
+    }
+  }, [historyError, requestHistoryPage]);
+
+  const historyFooter = (
+    <div
+      className="grid gap-2 border-t border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600"
+      data-testid="workspace-history-scope"
+    >
+      <span aria-live="polite">
+        {hasMore || loadingMore || historyError
+          ? `${loadedCount} loaded. More matching workspaces are available. Search and client-side filters cover loaded workspaces only.`
+          : historyComplete
+            ? `All ${loadedCount} matching workspaces loaded.`
+            : `${loadedCount} workspaces loaded; history scope is incomplete.`}
+      </span>
+      {hasMore || loadingMore || historyError ? (
+        <button
+          type="button"
+          disabled={loadingMore}
+          onClick={loadMoreFromButton}
+          className="inline-flex h-8 w-full items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:opacity-50"
+        >
+          {loadingMore
+            ? "Loading more workspaces…"
+            : historyError
+              ? "Retry loading older workspaces"
+              : "Load more workspaces"}
+        </button>
+      ) : null}
+    </div>
+  );
+
+  if (items.length === 0) {
+    return (
+      <div
+        className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
+        data-testid="workspace-list-scroll"
+        onScroll={updateWindowAndLoadNearBottom}
+        ref={scrollContainerRef}
+      >
+        <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-[var(--muted)]">
+          <ListFilter className="mx-auto mb-3 text-slate-400" size={24} aria-hidden />
+          No loaded workspaces match the current filters.
+        </div>
+        {historyFooter}
+      </div>
+    );
+  }
+
+  const selectedSet = new Set(selectedWorkspaceIds);
+  const topSpacerHeight = rowOffsets[windowStart];
+  const bottomSpacerHeight = rowOffsets[items.length] - rowOffsets[windowEnd];
+  return (
+    <div
+      className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
+      data-testid="workspace-list-scroll"
+      onScroll={updateWindowAndLoadNearBottom}
+      ref={scrollContainerRef}
+    >
+      {items.length > WORKSPACE_RENDER_WINDOW_SIZE ? (
+        <div className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-600">
+          <span>{pageStart + 1}–{pageEnd} of {items.length} loaded</span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              aria-label="Previous workspace results"
+              disabled={pageStart === 0}
+              onClick={() => showWindow(pageStart - WORKSPACE_RENDER_WINDOW_SIZE)}
+              className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              aria-label="Next workspace results"
+              disabled={pageEnd >= items.length}
+              onClick={() => showWindow(pageStart + WORKSPACE_RENDER_WINDOW_SIZE)}
+              className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {topSpacerHeight > 0 ? <div aria-hidden style={{ height: topSpacerHeight }} /> : null}
+      <div ref={renderedWindowRef}>
+        {items.slice(windowStart, windowEnd).map((item) => (
+          <WorkspaceCard
+            key={item.workspace_id}
+            item={item}
+            selected={selectedId === item.workspace_id}
+            selectedForLogs={selectedSet.has(item.workspace_id)}
+            showWorkspaceLogs={showWorkspaceLogs}
+            copied={copiedWorkspaceId === item.workspace_id}
+            copyToastVisible={copyToastVisible}
+            onSelect={onSelect}
+            onToggleWorkspaceSelection={onToggleWorkspaceSelection}
+            onOpenDetails={onOpenDetails}
+            onOpenLogs={onOpenLogs}
+            onCopy={copyWorkspaceId}
+          />
+        ))}
+      </div>
+      {bottomSpacerHeight > 0 ? <div aria-hidden style={{ height: bottomSpacerHeight }} /> : null}
+      {historyFooter}
     </div>
   );
 }

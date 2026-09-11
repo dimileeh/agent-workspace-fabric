@@ -1,0 +1,4 @@
+{
+  "error_code": "FORBIDDEN",
+  "message": "API token is not permitted for this console surface."
+}

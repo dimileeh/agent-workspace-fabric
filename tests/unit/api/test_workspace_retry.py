@@ -250,6 +250,110 @@ async def test_retry_endpoint_creates_new_requested_workspace(
 
 
 @pytest.mark.unit
+async def test_retry_endpoint_replays_same_idempotency_key_without_duplicate_workspace(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    api_auth_headers: dict[str, str],
+) -> None:
+    original_id = await _create_failed_workspace(client, engine)
+    headers = {**api_auth_headers, "Idempotency-Key": "console-retry-timeout"}
+
+    first = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=headers,
+    )
+
+    async def fail_if_replay_rechecks_source(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("idempotent replay must bypass source preflight")
+
+    monkeypatch.setattr(
+        workspace_service,
+        "_prefetch_existing_feature_pr_state",
+        fail_if_replay_rechecks_source,
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=headers,
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json() == first.json()
+
+    operations = await client.get(
+        f"/v1/workspaces/{first.json()['new_workspace_id']}/operations?type=retry",
+        headers=api_auth_headers,
+    )
+    assert operations.status_code == 200
+    assert operations.json()["items"][0]["idempotency_key"] == "console-retry-timeout"
+
+    overview = await client.get("/v1/workspaces/overview", headers=api_auth_headers)
+    assert overview.status_code == 200
+    assert {item["workspace_id"] for item in overview.json()["items"]} == {
+        original_id,
+        first.json()["new_workspace_id"],
+    }
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_rejects_idempotency_key_reused_for_different_source(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
+) -> None:
+    first_source_id = await _create_failed_workspace(client, engine)
+    second_source_id = await _create_cancelled_workspace(client, engine)
+    headers = {**api_auth_headers, "Idempotency-Key": "console-retry-conflict"}
+
+    first = await client.post(
+        f"/v1/workspaces/{first_source_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=headers,
+    )
+    conflict = await client.post(
+        f"/v1/workspaces/{second_source_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=headers,
+    )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_rejects_idempotency_key_reused_with_different_override(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    api_auth_headers: dict[str, str],
+) -> None:
+    original_id = await _create_failed_workspace(client, engine)
+    headers = {**api_auth_headers, "Idempotency-Key": "console-retry-override-conflict"}
+
+    first = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params=_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+        headers=headers,
+    )
+    conflict = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params={
+            **_RETRY_PROVIDER_READINESS_OVERRIDE_PARAMS,
+            "provider_readiness_override_reason": "a different operator reason",
+        },
+        headers=headers,
+    )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.unit
 async def test_retry_endpoint_requires_authorization_when_api_token_configured(
     client: AsyncClient,
     engine: AsyncEngine,

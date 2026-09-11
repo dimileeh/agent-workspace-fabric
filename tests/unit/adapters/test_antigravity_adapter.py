@@ -28,7 +28,7 @@ from .test_adapters import (
 )
 
 
-def _render_cli_script(*, model: str | None = "gemini-3.1-pro-preview") -> str:
+def _render_cli_script(*, model: str | None = "gemini-3.1-pro") -> str:
     """Return the shell preamble from ``_cli_args`` without docker."""
     adapter = AntigravityAdapter(
         runner=FakeCommandRunner(),
@@ -98,7 +98,7 @@ class TestAntigravityAdapter:
         """Antigravity reports its own provider — never google/gemini."""
         adapter = AntigravityAdapter(runner=FakeCommandRunner())
 
-        assert adapter.get_provider("gemini-3.1-pro-preview") == "antigravity"
+        assert adapter.get_provider("gemini-3.1-pro") == "antigravity"
 
     @pytest.mark.unit
     def test_hosted_env_passthrough_names_is_gemini_key_only(self) -> None:
@@ -115,8 +115,8 @@ class TestAntigravityAdapter:
         runner = FakeCommandRunner()
         adapter = AntigravityAdapter(
             runner=runner,
-            default_model="gemini-3.1-pro-preview",
-            default_effort="xhigh",
+            default_model="gemini-3.1-pro",
+            default_effort="high",
         )
 
         await adapter.run(
@@ -143,8 +143,8 @@ class TestAntigravityAdapter:
         assert "--dangerously-skip-permissions" in script
         assert "--output-format stream-json" in script
         assert "--print-timeout 24h" in script
-        assert "--model gemini-3.1-pro-preview" in script
-        assert "--effort" not in script
+        assert "--model gemini-3.1-pro" in script
+        assert "set -- --effort high" in script
         assert "modelProvider" in script
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
@@ -232,12 +232,64 @@ class TestAntigravityAdapter:
         assert "--dangerously-skip-permissions" in script
 
     @pytest.mark.unit
+    async def test_api_key_mode_rejects_missing_model_before_agy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """API-key mode must not invoke agy without a model and required effort."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        invocation_marker = tmp_path / "agy-invoked"
+        fake_agy = bin_dir / "agy"
+        fake_agy.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib\n"
+            "pathlib.Path(os.environ['AWF_FAKE_AGY_MARKER']).touch()\n",
+            encoding="utf-8",
+        )
+        fake_agy.chmod(0o755)
+
+        home = tmp_path / "home"
+        home.mkdir()
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "HOME": str(home),
+                "GEMINI_API_KEY": "test-key-triggers-api-key-mode",
+                "AWF_FAKE_AGY_MARKER": str(invocation_marker),
+            }
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            _render_cli_script(model=None),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _stdout, stderr = await proc.communicate(input=b"prompt\n")
+
+        assert proc.returncode == 1
+        assert not invocation_marker.exists()
+        message = stderr.decode()
+        assert "API-key mode requires an explicit or configured model" in message
+        for slug in (
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.1-pro",
+        ):
+            assert slug in message
+
+    @pytest.mark.unit
     async def test_model_override_is_passed_without_prompt_in_docker_argv(self) -> None:
         """Explicit models are passed; docker-exec argv still omits the prompt."""
         runner = FakeCommandRunner()
         adapter = AntigravityAdapter(
             runner=runner,
-            default_model="gemini-3.1-pro-preview",
+            default_model="gemini-3.1-pro",
             default_effort="xhigh",
         )
 
@@ -251,18 +303,18 @@ class TestAntigravityAdapter:
         args = runner.calls[0].args
         script = args[-1]
         assert "--model gemini-3.6-flash" in script
-        assert "--model gemini-3.1-pro-preview" not in script
+        assert "--model gemini-3.1-pro" not in script
         assert '-p "$awf_prompt"' in script
         _assert_prompt_not_in_argv(args)
         _assert_prompt_sent_on_stdin(runner)
 
     @pytest.mark.unit
-    async def test_effort_is_accepted_but_unmapped_into_cli_args(self) -> None:
-        """Effort is recorded on the adapter but never emitted; agy rejects --effort."""
+    async def test_effort_is_recorded_and_mapped_for_api_key_mode(self) -> None:
+        """Effort remains observable and is prepared for API-key-mode argv."""
         runner = FakeCommandRunner()
         adapter = AntigravityAdapter(
             runner=runner,
-            default_model="gemini-3.1-pro-preview",
+            default_model="gemini-3.1-pro",
             default_effort="high",
         )
 
@@ -274,22 +326,23 @@ class TestAntigravityAdapter:
 
         assert adapter._default_effort == "high"
         script = runner.calls[0].args[-1]
-        assert "--effort" not in script
+        assert "set -- --effort high" in script
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "model",
         [
-            "gemini-3.1-pro-preview",
-            "gemini-3.5-flash",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
             "gemini-3.6-flash",
+            "gemini-3.1-pro",
         ],
     )
     def test_api_key_mode_allowlist_accepts_exact_slugs(self, model: str) -> None:
-        """agy 1.1.13 API-key mode accepts exactly these three model slugs."""
+        """agy 1.1.27 API-key mode accepts exactly these four model slugs."""
         script = _render_cli_script(model=model)
         assert f"--model {model}" in script
-        assert "--effort" not in script
+        assert "set -- --effort high" in script
         # Allowlisted models must not embed a GEMINI_API_KEY-gated reject.
         assert "API-key mode does not accept model" not in script
 
@@ -305,7 +358,8 @@ class TestAntigravityAdapter:
     @pytest.mark.parametrize(
         "model",
         [
-            "gemini-3.7-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash",
             "not-a-real-model",
             "gemini-3.6-flash-high",
         ],
@@ -349,9 +403,10 @@ class TestAntigravityAdapter:
         assert model in message
         assert "API-key mode does not accept model" in message
         for slug in (
-            "gemini-3.1-pro-preview",
-            "gemini-3.5-flash",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
             "gemini-3.6-flash",
+            "gemini-3.1-pro",
         ):
             assert slug in message
 
@@ -404,6 +459,7 @@ class TestAntigravityAdapter:
         assert proc.returncode == 0, stderr.decode()
         captured = json.loads(argv_copy.read_text())
         assert captured[captured.index("--model") + 1] == "gemini-3.6-flash-high"
+        assert "--effort" not in captured
 
     @pytest.mark.unit
     async def test_sh_stub_receives_prompt_as_final_p_value(self, tmp_path: Path) -> None:
@@ -420,7 +476,7 @@ class TestAntigravityAdapter:
         )
         fake_agy.chmod(0o755)
 
-        script = _render_cli_script(model="gemini-3.1-pro-preview")
+        script = _render_cli_script(model="gemini-3.1-pro")
         # Skip settings seeding side effects in HOME; use an empty HOME.
         home = tmp_path / "home"
         home.mkdir()
@@ -459,7 +515,8 @@ class TestAntigravityAdapter:
         assert "--dangerously-skip-permissions" in captured
         assert captured[captured.index("--output-format") + 1] == "stream-json"
         assert captured[captured.index("--print-timeout") + 1] == "24h"
-        assert captured[captured.index("--model") + 1] == "gemini-3.1-pro-preview"
+        assert captured[captured.index("--model") + 1] == "gemini-3.1-pro"
+        assert captured[captured.index("--effort") + 1] == "high"
 
     @pytest.mark.unit
     async def test_sh_stub_rejects_empty_prompt(self, tmp_path: Path) -> None:
@@ -911,8 +968,8 @@ class TestAntigravityAdapter:
         )
         adapter = AntigravityAdapter(
             runner=runner,
-            default_model="gemini-3.1-pro-preview",
-            default_effort="xhigh",
+            default_model="gemini-3.1-pro",
+            default_effort="high",
         )
 
         with (
@@ -927,11 +984,10 @@ class TestAntigravityAdapter:
 
         assert exc.value.reason_code == "AGENT_AUTH_FAILED"
         assert exc.value.details["provider"] == "antigravity"
-        assert exc.value.details["model"] == "gemini-3.1-pro-preview"
+        assert exc.value.details["model"] == "gemini-3.1-pro"
         provider_recovery = exc.value.details["provider_recovery"]
         assert provider_recovery["provider"] == "antigravity"
         assert any(
-            event.get("event") == "agent.run.start"
-            and event.get("model") == "gemini-3.1-pro-preview"
+            event.get("event") == "agent.run.start" and event.get("model") == "gemini-3.1-pro"
             for event in captured
         )

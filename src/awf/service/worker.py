@@ -516,6 +516,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         # Provisioner owns GitManager; hosted monitor resume restores the
         # pod-local checkout before the monitor loop's first git I/O.
         ensure_hosted_monitor_checkout=_ensure_hosted_monitor_checkout,
+        worktree_activity_git_roots=git.worktree_activity_git_roots,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,

@@ -87,13 +87,13 @@ def test_agent_runtime_installs_pinned_docker_buildx_plugin() -> None:
 def test_agent_runtime_verifies_pinned_cursor_release_before_extracting() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
+    assert "ARG CURSOR_VERSION=2026.09.02-c22c1a3" in dockerfile
     assert (
-        "ARG CURSOR_X64_SHA256=6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4"
+        "ARG CURSOR_X64_SHA256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c"
         in dockerfile
     )
     assert (
-        "ARG CURSOR_ARM64_SHA256=2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb"
+        "ARG CURSOR_ARM64_SHA256=fb7bc635be6172ebcf68f907fd9217e3614da51916455c6d7fdb66690997884c"
         in dockerfile
     )
     assert "https://cursor.com/install" not in dockerfile
@@ -124,18 +124,18 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CODEX_VERSION=0.147.0" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.226" in dockerfile
-    assert "ARG OPENCODE_VERSION=1.17.18" in dockerfile
-    assert "ARG CURSOR_VERSION=2026.07.20-8cc9c0b" in dockerfile
-    assert "ARG GROK_VERSION=0.2.94" in dockerfile
-    assert "ARG ANTIGRAVITY_VERSION=1.1.13" in dockerfile
+    assert "ARG CODEX_VERSION=0.153.4" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.263" in dockerfile
+    assert "ARG OPENCODE_VERSION=1.18.29" in dockerfile
+    assert "ARG CURSOR_VERSION=2026.09.02-c22c1a3" in dockerfile
+    assert "ARG GROK_VERSION=1.0.13" in dockerfile
+    assert "ARG ANTIGRAVITY_VERSION=1.1.27" in dockerfile
     assert (
-        "ARG ANTIGRAVITY_AMD64_SHA256=edc7c32b5ab4fc2e4da03381fee83ed566dea6b56b56f9329cd13cd77947a1d9"
+        "ARG ANTIGRAVITY_AMD64_SHA256=f874d4f6b8a73c2df660f580f25fb656fcb6e64adbfd746e6692e837fd9a20be"
         in dockerfile
     )
     assert (
-        "ARG ANTIGRAVITY_ARM64_SHA256=a9fdd2a386770c27dbf784436bd4de70d4d4901c832d5ec6abf27758d5c370f8"
+        "ARG ANTIGRAVITY_ARM64_SHA256=97fc9fe5a6067406cd02cbe4ae6e362c9623a24d33bec486911246c17ceb6a94"
         in dockerfile
     )
     assert "github.com/google-antigravity/antigravity-cli/releases/download/" in dockerfile
@@ -165,7 +165,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "cursor-agent --version || true" in dockerfile
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
-    ) < dockerfile.index("ARG CURSOR_VERSION=2026.07.20-8cc9c0b")
+    ) < dockerfile.index("ARG CURSOR_VERSION=2026.09.02-c22c1a3")
     assert "npm install -g cursor-agent" not in dockerfile
     assert "@xai-official/grok@${GROK_VERSION}" in dockerfile
     assert "https://x.ai/cli/install.sh" not in dockerfile
@@ -212,6 +212,31 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
         "--output-format plain --model grok-build --help >/dev/null"
     ) in dockerfile
     assert "agy --help >/dev/null" in dockerfile
+
+
+@pytest.mark.unit
+def test_agent_runtime_checks_grok_acp_stdio_contract() -> None:
+    """Pin Grok upgrades to the ACP exchange used by the runtime adapter."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "timeout 15s env" in dockerfile
+    assert "grok --always-approve --no-auto-update -m grok-build agent stdio" in dockerfile
+    assert ('> "$grok_acp_output" || true; \\\n    jq -e -s --arg expected_version') in dockerfile
+    assert '"method":"initialize"' in dockerfile
+    assert '"method":"authenticate"' in dockerfile
+    assert '"method":"session/new"' in dockerfile
+    assert '"method":"session/prompt"' in dockerfile
+    assert '--arg expected_version "$GROK_VERSION"' in dockerfile
+    assert ".result._meta.agentVersion == $expected_version" in dockerfile
+    assert ".result.protocolVersion == 1" in dockerfile
+    assert '.result.authMethods[]?.id] | index("grok.com") != null' in dockerfile
+    assert '"method":"authenticate","params":{"methodId":"grok.com"' in dockerfile
+    assert "unsupported auth method" not in dockerfile
+    assert '.error.message == "Authentication required"' in dockerfile
+    assert '.error.data == "unknown session id"' in dockerfile
+    assert dockerfile.index("@xai-official/grok@${GROK_VERSION}") < dockerfile.index(
+        '"method":"initialize"'
+    )
 
 
 @pytest.mark.unit

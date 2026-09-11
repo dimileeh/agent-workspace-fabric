@@ -56,6 +56,11 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 
 _THREAD_ID = "PRRT_stranded"
 _PRIOR_THREAD_ID = "PRRT_stranded_by_earlier_cycle"
+# The push seam re-reads PR state once through the #910 post-action terminal guard
+# before pushing. It is not a settle poll: it fails open (the PR is still open in
+# these scenarios) and leaves ``state.settle_threads`` untouched. Counting it apart
+# from the settle polls keeps the "pass 1 succeeded, pass 2 failed" pin readable.
+_POST_ACTION_RECHECK_STATUS_CALLS = 1
 
 
 @pytest.fixture
@@ -304,7 +309,7 @@ async def test_failed_later_settle_poll_escalates_instead_of_resolving_on_stale_
         initial_threads=[entry_thread],
     )
 
-    assert gh.status_calls == 2
+    assert gh.status_calls == 2 + _POST_ACTION_RECHECK_STATUS_CALLS
     assert gh.resolved == []
     assert state.threads_addressed_ids[_THREAD_ID] == "needs_human"
     reason = state.threads_addressed_ids["__needs_human_reason__:" + _THREAD_ID]
@@ -345,7 +350,7 @@ async def test_failed_later_settle_poll_escalates_prior_cycle_orphan_from_stale_
         state=state,
     )
 
-    assert gh.status_calls == 2
+    assert gh.status_calls == 2 + _POST_ACTION_RECHECK_STATUS_CALLS
     assert gh.resolved == []
     assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "needs_human"
     reason = state.threads_addressed_ids["__needs_human_reason__:" + _PRIOR_THREAD_ID]
@@ -395,7 +400,7 @@ async def test_failed_later_settle_poll_ignores_stale_outdated_only_ownership(
         state=state,
     )
 
-    assert gh.status_calls == 2
+    assert gh.status_calls == 2 + _POST_ACTION_RECHECK_STATUS_CALLS
     assert gh.resolved == []
     assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "needs_human"
     reason = state.threads_addressed_ids["__needs_human_reason__:" + _PRIOR_THREAD_ID]

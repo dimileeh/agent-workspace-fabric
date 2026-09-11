@@ -315,7 +315,7 @@ services:
   ollama-bridge:
     profiles:
       - ollama-bridge
-    image: alpine/socat:1.8.0.3
+    image: alpine/socat:1.8.1.3
     network_mode: host
     command:
       - "TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},fork,reuseaddr"

@@ -687,6 +687,1291 @@
         "title": "ConcurrencyLaneResponse",
         "type": "object"
       },
+      "ConsoleCapabilitiesIdentityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "backend_id": {
+            "minLength": 1,
+            "title": "Backend Id",
+            "type": "string"
+          },
+          "scope": {
+            "minLength": 1,
+            "title": "Scope",
+            "type": "string"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "pattern": ".*\\S.*",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          }
+        },
+        "required": [
+          "backend_id",
+          "scope"
+        ],
+        "title": "ConsoleCapabilitiesIdentityResponse",
+        "type": "object"
+      },
+      "ConsoleCapabilitiesResponse": {
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "backend_kind": {
+              "const": "hosted"
+            }
+          },
+          "required": [
+            "backend_kind"
+          ]
+        },
+        "properties": {
+          "backend_kind": {
+            "enum": [
+              "local",
+              "hosted"
+            ],
+            "title": "Backend Kind",
+            "type": "string"
+          },
+          "controls": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "cancel"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "refresh"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "remonitor"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "retry"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "revalidate"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              }
+            ],
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "cancel",
+                        "refresh",
+                        "remonitor",
+                        "retry",
+                        "revalidate"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                },
+                {
+                  "properties": {
+                    "route": {
+                      "type": "null"
+                    }
+                  }
+                }
+              ]
+            },
+            "title": "Controls",
+            "type": "array"
+          },
+          "diagnostics": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "failures"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "merge_queue"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "reliability"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "workspace_events"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "workspace_logs"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "workspace_operations"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "workspace_runtime"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "workspace_stream"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              }
+            ],
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "failures",
+                        "merge_queue",
+                        "reliability",
+                        "workspace_events",
+                        "workspace_logs",
+                        "workspace_operations",
+                        "workspace_runtime",
+                        "workspace_stream"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      }
+                    },
+                    "required": [
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "id": {
+                        "enum": [
+                          "failures",
+                          "merge_queue",
+                          "reliability",
+                          "workspace_events",
+                          "workspace_logs",
+                          "workspace_operations",
+                          "workspace_runtime",
+                          "workspace_stream"
+                        ]
+                      },
+                      "route": {
+                        "pattern": "^/v1/(?!.*://).+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "reliability"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/metrics/workspaces/summary"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "merge_queue"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/merge-queue"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "failures"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/metrics/failures/summary"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_runtime"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/runtime"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_events"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/events"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_operations"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/operations"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_logs"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/logs"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "workspace_stream"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/stream"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                }
+              ]
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConsoleCapabilitiesIdentityResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional for backend_kind=local. Required for backend_kind=hosted with nonempty backend_id, scope, and tenant_id."
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "widgets": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "allocation"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "cloud_runtime"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "cost"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "fleet_summary"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "resource_capacity"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "id": {
+                      "const": "telemetry"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
+                },
+                "maxContains": 1,
+                "minContains": 0
+              }
+            ],
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/ConsoleCapabilityItemResponse"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "enum": [
+                        "allocation",
+                        "cloud_runtime",
+                        "cost",
+                        "fleet_summary",
+                        "resource_capacity",
+                        "telemetry"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      }
+                    },
+                    "required": [
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "id": {
+                        "enum": [
+                          "cloud_runtime",
+                          "fleet_summary",
+                          "resource_capacity"
+                        ]
+                      },
+                      "route": {
+                        "pattern": "^/v1/(?!.*://).+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "fleet_summary"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/console/dashboard-summary"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "resource_capacity"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/metrics/resources/saturation"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "cloud_runtime"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/console/cloud-runtime"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "allocation"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": false
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "cost"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": false
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
+                        "const": "telemetry"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": false
+                }
+              ]
+            },
+            "title": "Widgets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "backend_kind",
+          "generated_at",
+          "widgets",
+          "diagnostics",
+          "controls"
+        ],
+        "then": {
+          "properties": {
+            "identity": {
+              "properties": {
+                "backend_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "scope": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "tenant_id": {
+                  "pattern": ".*\\S.*",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "backend_id",
+                "scope",
+                "tenant_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "identity"
+          ]
+        },
+        "title": "ConsoleCapabilitiesResponse",
+        "type": "object"
+      },
+      "ConsoleCapabilityItemResponse": {
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "availability": {
+              "const": "unsupported"
+            }
+          },
+          "required": [
+            "availability"
+          ]
+        },
+        "properties": {
+          "availability": {
+            "enum": [
+              "available",
+              "unsupported"
+            ],
+            "title": "Availability",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "semantics": {
+            "minLength": 1,
+            "title": "Semantics",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "availability",
+          "semantics"
+        ],
+        "then": {
+          "properties": {
+            "message": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "reason_code": {
+              "enum": [
+                "backend_kind_hosted",
+                "backend_kind_local",
+                "not_implemented",
+                "policy_disabled"
+              ],
+              "type": "string"
+            },
+            "route": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "reason_code",
+            "message"
+          ]
+        },
+        "title": "ConsoleCapabilityItemResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardCountsResponse": {
+        "additionalProperties": false,
+        "description": "Nullable nonnegative fleet counts as strict ints (no string/bool coerce).",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "awaiting_human": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Human"
+          },
+          "awaiting_operator": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting Operator"
+          },
+          "cancelled_last_window": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancelled Last Window"
+          },
+          "completed_last_window": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed Last Window"
+          },
+          "executing": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executing"
+          },
+          "failed_last_window": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed Last Window"
+          },
+          "monitoring_pr": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monitoring Pr"
+          },
+          "queued": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued"
+          },
+          "retrying": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrying"
+          }
+        },
+        "required": [
+          "active",
+          "executing",
+          "monitoring_pr",
+          "awaiting_operator",
+          "awaiting_human",
+          "retrying",
+          "queued",
+          "completed_last_window",
+          "cancelled_last_window",
+          "failed_last_window"
+        ],
+        "title": "ConsoleDashboardCountsResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardCoverageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "complete",
+              "partial",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ConsoleDashboardCoverageResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardOverlapResponse": {
+        "additionalProperties": false,
+        "description": "Fixed v1 count-semantics invariants (literal true; no provider toggles).\n\nUnavailable relationship data uses nullable counts plus partial/unknown\ncoverage \u2014 never ``false`` overlap flags that skip subset checks.",
+        "properties": {
+          "awaiting_human_subset_of_monitoring_pr": {
+            "const": true,
+            "title": "Awaiting Human Subset Of Monitoring Pr",
+            "type": "boolean"
+          },
+          "awaiting_operator_in_active_not_executing": {
+            "const": true,
+            "title": "Awaiting Operator In Active Not Executing",
+            "type": "boolean"
+          },
+          "retrying_in_active_not_executing": {
+            "const": true,
+            "title": "Retrying In Active Not Executing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "awaiting_human_subset_of_monitoring_pr",
+          "awaiting_operator_in_active_not_executing",
+          "retrying_in_active_not_executing"
+        ],
+        "title": "ConsoleDashboardOverlapResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/ConsoleDashboardCountsResponse"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/ConsoleDashboardCoverageResponse"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "overlap": {
+            "$ref": "#/components/schemas/ConsoleDashboardOverlapResponse"
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "local",
+              "tenant"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/ConsoleDashboardWindowResponse"
+          }
+        },
+        "required": [
+          "schema_version",
+          "scope",
+          "generated_at",
+          "as_of",
+          "last_success_at",
+          "window",
+          "coverage",
+          "counts",
+          "overlap"
+        ],
+        "title": "ConsoleDashboardSummaryResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardWindowResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "const": "generated_at",
+            "title": "Anchor",
+            "type": "string"
+          },
+          "since_hours": {
+            "exclusiveMinimum": 0.0,
+            "title": "Since Hours",
+            "type": "integer"
+          },
+          "start": {
+            "format": "date-time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "anchor",
+          "since_hours",
+          "start"
+        ],
+        "title": "ConsoleDashboardWindowResponse",
+        "type": "object"
+      },
       "CoordinationOverlapResponse": {
         "properties": {
           "existing_path": {
@@ -9946,9 +11231,31 @@
             "title": "Task Id",
             "type": "string"
           },
+          "task_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Key"
+          },
           "task_prompt": {
             "title": "Task Prompt",
             "type": "string"
+          },
+          "task_tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Tag"
           },
           "title": {
             "title": "Title",
@@ -11323,6 +12630,17 @@
             ],
             "title": "Task External Id"
           },
+          "task_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Key"
+          },
           "task_kind": {
             "title": "Task Kind",
             "type": "string"
@@ -12488,6 +13806,116 @@
         "summary": "Register Callback",
         "tags": [
           "callbacks"
+        ]
+      }
+    },
+    "/v1/console/capabilities": {
+      "get": {
+        "description": "Advertise local console widgets/diagnostics/controls (not live health).",
+        "operationId": "get_console_capabilities_v1_console_capabilities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsoleCapabilitiesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get Console Capabilities",
+        "tags": [
+          "console"
+        ]
+      }
+    },
+    "/v1/console/dashboard-summary": {
+      "get": {
+        "description": "Authoritative fleet counters independent of Docker capacity probes.",
+        "operationId": "get_console_dashboard_summary_v1_console_dashboard_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsoleDashboardSummaryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get Console Dashboard Summary",
+        "tags": [
+          "console"
         ]
       }
     },
@@ -15935,6 +17363,23 @@
                 }
               ],
               "title": "Provider Readiness Override Reason"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
             }
           }
         ],

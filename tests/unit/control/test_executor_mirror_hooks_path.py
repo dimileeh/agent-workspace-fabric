@@ -28,6 +28,13 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCommandResult
 
 
+class _NoTrustedGitRootsExecutor:
+    def _trusted_git_roots_for_workspace(
+        self, *, workspace_id: str, repo_url: str
+    ) -> tuple[Path, Path] | None:
+        return None
+
+
 @pytest.mark.unit
 async def test_repair_mirror_hooks_path_or_mark_failed_marks_failed_on_oserror(
     tmp_path: Path,
@@ -179,7 +186,7 @@ async def test_execute_fails_before_setup_when_mirror_hooks_path_repair_fails(
         async def run_profile_phases(self, **_kwargs: Any) -> object:
             raise AssertionError("profile setup should not run after mirror repair failure")
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -344,7 +351,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
                 ]
             )
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -487,7 +494,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_cleanup_failure(
                 message="tagged process still running",
             )
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -614,7 +621,7 @@ async def test_execute_repairs_mirror_hooks_path_after_successful_setup_before_r
         async def run_profile_phases(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -747,7 +754,7 @@ async def test_execute_repairs_mirror_hooks_path_again_before_agent_launch(
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -903,7 +910,7 @@ async def test_execute_repairs_mirror_hooks_path_after_baseline_coverage_cleanup
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -1066,7 +1073,7 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_before_no_work_retu
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,

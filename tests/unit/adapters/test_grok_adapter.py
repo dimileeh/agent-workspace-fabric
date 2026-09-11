@@ -342,16 +342,27 @@ class TestGrokAdapter:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
-        ("auth_methods", "expected_method"),
+        ("auth_methods", "xai_api_key", "expected_method"),
         [
-            ([{"id": "cached_token"}], "cached_token"),
-            ([{"id": "cached_token"}, {"id": "xai.api_key"}], "xai.api_key"),
+            ([{"id": "cached_token"}], "xai-test-key", "cached_token"),
+            (
+                [{"id": "cached_token"}, {"id": "xai.api_key"}],
+                "xai-test-key",
+                "xai.api_key",
+            ),
+            (
+                [{"id": "grok.com"}, {"id": "cached_token"}],
+                None,
+                "cached_token",
+            ),
+            ([{"id": "grok.com"}], None, "grok.com"),
         ],
     )
-    async def test_launcher_respects_advertised_auth_methods_with_xai_api_key(
+    async def test_launcher_respects_advertised_auth_methods(
         self,
         tmp_path: Path,
         auth_methods: list[dict[str, str]],
+        xai_api_key: str | None,
         expected_method: str,
     ) -> None:
         bin_dir = tmp_path / "bin"
@@ -385,9 +396,12 @@ class TestGrokAdapter:
                 "PATH": f"{bin_dir}:{env['PATH']}",
                 "AWF_FAKE_GROK_AUTH_METHODS": json.dumps(auth_methods),
                 "AWF_FAKE_GROK_AUTH_METHOD": str(auth_method_copy),
-                "XAI_API_KEY": "xai-test-key",
             }
         )
+        if xai_api_key is None:
+            env.pop("XAI_API_KEY", None)
+        else:
+            env["XAI_API_KEY"] = xai_api_key
         proc = await asyncio.create_subprocess_exec(
             "sh",
             "-c",

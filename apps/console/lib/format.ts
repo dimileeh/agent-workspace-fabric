@@ -19,6 +19,20 @@ export type SelectableLogStream = {
   stream_id: string;
 };
 
+const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+const relativeTimeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const logStampFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 export const lifecycleStages: WorkspaceStatus[] = [
   "requested",
   "provisioning",
@@ -268,13 +282,7 @@ export function formatDateTime(value: string | null | undefined): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(date);
+  return dateTimeFormatter.format(date);
 }
 
 export function relativeTime(value: string | null | undefined): string {
@@ -291,10 +299,22 @@ export function relativeTime(value: string | null | undefined): string {
     ["second", 1_000],
   ];
   const [unit, size] = units.find(([, unitSize]) => abs >= unitSize) ?? ["second", 1_000];
-  return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(
+  return relativeTimeFormatter.format(
     Math.round(diff / size),
     unit,
   );
+}
+
+/**
+ * Compact label for a recorded workflow duration, or null when the overview
+ * omitted it. Zero is recorded ("0s"); null, undefined, and non-finite values
+ * are not recorded and must not render as a dash.
+ */
+export function recordedDurationLabel(seconds: number | null | undefined): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+    return null;
+  }
+  return compactDuration(seconds);
 }
 
 export function compactDuration(seconds: number | null | undefined): string {
@@ -452,11 +472,7 @@ function formatLogStamp(value: string): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(date);
+  return logStampFormatter.format(date);
 }
 
 export type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";

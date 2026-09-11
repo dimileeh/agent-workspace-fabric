@@ -36,6 +36,7 @@ class RetiredAgentAdapter(AgentAdapter):
         agent_idle_timeout_seconds: float = 3600.0,
         usage_sampler: UsageSampler | None = None,
         runtime_executor: AgentRuntimeExecutor | None = None,
+        trusted_git_roots: tuple[Path, Path] | None = None,
     ) -> None:
         super().__init__(
             runner=runner,
@@ -46,6 +47,7 @@ class RetiredAgentAdapter(AgentAdapter):
             agent_idle_timeout_seconds=agent_idle_timeout_seconds,
             usage_sampler=usage_sampler,
             runtime_executor=runtime_executor,
+            trusted_git_roots=trusted_git_roots,
         )
         self._runtime: AgentRuntime | str
         if isinstance(runtime, AgentRuntime):

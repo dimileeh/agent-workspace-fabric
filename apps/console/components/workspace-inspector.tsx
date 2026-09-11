@@ -1,16 +1,18 @@
 "use client";
 
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { useEffect } from "react";
 
 export function WorkspaceInspector({
   isOpen,
   onClose,
+  onRefresh,
   title,
   children,
 }: {
   isOpen: boolean;
   onClose: () => void;
+  onRefresh?: () => void;
   title?: string;
   children: React.ReactNode;
 }) {
@@ -44,13 +46,25 @@ export function WorkspaceInspector({
           <h2 className="min-w-0 truncate text-sm font-semibold text-fg">
             {title || "Workspace Inspector"}
           </h2>
-          <button
-            onClick={onClose}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-fg-muted hover:bg-surface-2 hover:text-fg"
-            aria-label="Close inspector"
-          >
-            <X size={18} />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {onRefresh ? (
+              <button
+                onClick={onRefresh}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] text-fg-muted hover:bg-surface-2 hover:text-fg"
+                aria-label="Reload workspace"
+                title="Reload workspace"
+              >
+                <RefreshCw size={18} />
+              </button>
+            ) : null}
+            <button
+              onClick={onClose}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-fg-muted hover:bg-surface-2 hover:text-fg"
+              aria-label="Close inspector"
+            >
+              <X size={18} />
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 sm:px-5 xl:px-6">
           {children}

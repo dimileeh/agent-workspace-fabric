@@ -115,6 +115,22 @@ function isSafeContextQueryKey(key: string): boolean {
 }
 
 /**
+ * Stable fingerprint of configured context query values from the page search.
+ * Used by the dashboard to clear authorized in-memory feeds as soon as the
+ * client-side tenant/context keys change — without waiting for capabilities.
+ * Values are JSON-encoded so delimiter characters in a value cannot collide
+ * with another key/value boundary (e.g. "&project_id=b" vs "a&project_id=").
+ */
+export function configuredContextFingerprint(pageSearch?: string): string {
+  const keys = getConsoleUrlConfig().contextQueryKeys;
+  if (keys.length === 0) {
+    return "";
+  }
+  const params = resolvePageSearchParams(pageSearch) ?? new URLSearchParams();
+  return JSON.stringify(keys.map((key) => [key, params.get(key) ?? ""]));
+}
+
+/**
  * Join the configured AWF API base with a relative path and optional query.
  * When context query keys are configured, copies missing keys from the current
  * page search (or the optional `pageSearch` seam for tests).

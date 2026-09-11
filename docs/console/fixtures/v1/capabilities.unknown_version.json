@@ -1,0 +1,12 @@
+{
+  "schema_version": 99,
+  "backend_kind": "local",
+  "generated_at": "2026-09-06T17:00:00Z",
+  "identity": {
+    "backend_id": "future-backend",
+    "scope": "local"
+  },
+  "widgets": [],
+  "diagnostics": [],
+  "controls": []
+}

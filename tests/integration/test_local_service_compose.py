@@ -464,7 +464,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
 
     bridge = services["ollama-bridge"]
     assert bridge["profiles"] == ["ollama-bridge"]
-    assert bridge["image"] == "alpine/socat:1.8.0.3"
+    assert bridge["image"] == "alpine/socat:1.8.1.3"
     assert bridge["network_mode"] == "host"
     assert bridge["command"] == [
         "TCP-LISTEN:${AWF_OLLAMA_BRIDGE_LISTEN_PORT:-11434},bind=${AWF_OLLAMA_BRIDGE_BIND_ADDRESS:-172.17.0.1},fork,reuseaddr",

@@ -437,6 +437,10 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 runtime_executor=(
                     self._agent_runtime_executor if pr_adoption_is_hosted(ws.task_policy) else None
                 ),
+                trusted_git_roots=self._trusted_git_roots_for_workspace(
+                    workspace_id=workspace_id,
+                    repo_url=ws.repo_url,
+                ),
             )
             if profile is None:
                 profile = _profile_for_workspace(
@@ -1356,6 +1360,10 @@ async def _build_handoff_pr_monitor(
                     self._agent_runtime_executor
                     if pr_adoption_is_hosted(workspace.task_policy)
                     else None
+                ),
+                trusted_git_roots=self._trusted_git_roots_for_workspace(
+                    workspace_id=workspace_id,
+                    repo_url=workspace.repo_url,
                 ),
             )
             monitor = _call_pr_monitor_factory(

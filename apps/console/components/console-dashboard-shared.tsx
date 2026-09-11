@@ -47,6 +47,13 @@ const parsedPollMs = Number.parseInt(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS
 export const pollMs = Number.isFinite(parsedPollMs) && Number.isInteger(parsedPollMs) && parsedPollMs > 0
   ? Math.max(MIN_POLL_MS, parsedPollMs)
   : DEFAULT_POLL_MS;
+export const pollRequestDeadlineMs = pollMs * 2;
+// A /stream 401/403 must not reconnect on every detail or listing poll — that
+// thrash treated a still-denied route as recovered. Wait past a couple of
+// polls so a later probe can clear the route latch after a successful
+// connection, without a selection change and without restoring revoked caches
+// from GET or listing success.
+export const streamAuthProbeDelayMs = pollMs * 4;
 export const maxLogChars = 180_000;
 export const mergeQueueLimit = 20;
 
@@ -568,8 +575,12 @@ export function formatPercent(value: number): string {
 }
 
 export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => {
+    controller.abort(new Error(`Console API request timed out after ${pollRequestDeadlineMs}ms`));
+  }, pollRequestDeadlineMs);
   try {
-    const response = await fetch(path, { cache: "no-store" });
+    const response = await fetch(path, { cache: "no-store", signal: controller.signal });
     return await parseApiResponse<T>(response);
   } catch (error) {
     return {
@@ -577,12 +588,22 @@ export async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
       status: 0,
       message: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
-export async function apiPost<T>(path: string, body?: unknown): Promise<ApiEnvelope<T>> {
+export async function apiPost<T>(
+  path: string,
+  body?: unknown,
+  options?: { signal?: AbortSignal },
+): Promise<ApiEnvelope<T>> {
   try {
-    const init: RequestInit = { method: "POST", cache: "no-store" };
+    const init: RequestInit = {
+      method: "POST",
+      cache: "no-store",
+      signal: options?.signal,
+    };
     if (body !== undefined) {
       init.headers = { "content-type": "application/json" };
       init.body = JSON.stringify(omitUndefined(body));
@@ -595,6 +616,21 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<ApiEnvel
       status: 0,
       message: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+export async function apiPostWithDeadline<T>(
+  path: string,
+  body?: unknown,
+): Promise<ApiEnvelope<T>> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => {
+    controller.abort(new Error(`Console API request timed out after ${pollRequestDeadlineMs}ms`));
+  }, pollRequestDeadlineMs);
+  try {
+    return await apiPost<T>(path, body, { signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
@@ -617,7 +653,10 @@ export function operatorActionReason(action: WorkspaceOperatorAction): string {
   }
 }
 
-export function operatorIdempotencyKey(action: WorkspaceOperatorAction, workspaceId: string): string {
+export function operatorIdempotencyKey(
+  action: WorkspaceOperatorAction | "retry",
+  workspaceId: string,
+): string {
   const suffix =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
@@ -669,38 +708,48 @@ export function parseJson(text: string): ParsedJson {
   }
 }
 
+export type LogTailReadResult =
+  | {
+      ok: true;
+      status: number;
+      message: null;
+      entry: LogEntry;
+      nextOffset: number;
+    }
+  | {
+      ok: false;
+      status: number;
+      message: string | null;
+      streamId: string;
+    };
+
 export async function readLogTailEntry(
   workspaceId: string,
   stream: WorkspaceLogStream,
   activity = logStreamFallbackActivity(stream),
-): Promise<{ entry: LogEntry; nextOffset: number }> {
-  const offset = Math.max(stream.byte_count - 65_536, 0);
+): Promise<LogTailReadResult> {
   const result = await apiGet<WorkspaceLogRead>(
     awfPath(`workspaces/${workspaceId}/logs/${encodeURIComponent(stream.stream_id)}`, {
-      offset,
+      offset: Math.max(stream.byte_count - 65_536, 0),
       limit_bytes: 65536,
     }),
   );
   if (!result.ok) {
-    const now = new Date().toISOString();
+    // Failure is not a tail entry. Callers retain the last successful snapshot
+    // and surface the warning separately; appending a synthetic error line
+    // here would replace that snapshot on a transient poll outage.
     return {
-      entry: {
-        key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
-        workspaceId,
-        streamId: stream.stream_id,
-        source: stream.source,
-        fd: null,
-        offset,
-        data: `Unable to load log stream: ${result.message}`,
-        occurredAt: now,
-        order: Date.parse(now),
-        kind: "tail",
-      },
-      nextOffset: offset,
+      ok: false,
+      status: result.status,
+      message: result.message,
+      streamId: stream.stream_id,
     };
   }
 
   return {
+    ok: true,
+    status: 200,
+    message: null,
     entry: {
       key: `tail:${workspaceId}:${stream.stream_id}:${result.data.offset}:${result.data.next_offset}`,
       workspaceId,

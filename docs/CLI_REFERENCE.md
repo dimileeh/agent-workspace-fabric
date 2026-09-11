@@ -298,7 +298,7 @@ Request workspace control actions:
 ```bash
 uv run --python 3.12 --extra dev awf workspace cancel ws_123 --reason "No longer needed"
 uv run --python 3.12 --extra dev awf workspace stop ws_123 --reason "Stack unstable"
-uv run --python 3.12 --extra dev awf workspace retry ws_123 --reason "Re-run after a transient infrastructure failure"
+uv run --python 3.12 --extra dev awf workspace retry ws_123 --idempotency-key retry-ws-123-001
 uv run --python 3.12 --extra dev awf workspace refresh ws_123 --reason "Target branch advanced"
 uv run --python 3.12 --extra dev awf workspace validate ws_123 --requested-tier 2
 uv run --python 3.12 --extra dev awf workspace rebase ws_123 --reason "Recover merge conflicts"

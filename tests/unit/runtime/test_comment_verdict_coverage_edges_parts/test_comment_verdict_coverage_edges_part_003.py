@@ -8,6 +8,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,9 +82,14 @@ class _OverwriteSameSizeAfterFirstChunk:
             total = self._path.stat().st_size
             tail = total - len(data)
             if tail > 0:
+                before = self._path.stat()
+                # Ensure this fixture creates an observable metadata change,
+                # even when fast writes share one Linux filesystem clock tick.
+                time.sleep(0.02)
                 with self._path.open("r+b") as writer:
                     writer.seek(len(data))
                     writer.write(b"B" * tail)
+                assert self._path.stat().st_ctime_ns != before.st_ctime_ns
         return data
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,15 +12,26 @@ from awf.node.git_manager import (
     mirror_path_for_worktree,
     repair_mirror_hooks_path,
 )
+from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
+    review_thread_body_state_key,
+)
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
     ready_to_merge_comment,
 )
+from awf.runtime.monitor_state_keys import (
+    _operator_decision_issued_at_key,
+    _operator_decision_key,
+)
 from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    _record_accepted_item_commit_provenance,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdict,
     AgentVerdictExecutionError,
@@ -30,6 +42,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     _owned_paths_for_prompt_or_empty,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     _TASK_TAG_UNSET,
     _TaskTagUnset,
 )
@@ -49,9 +62,92 @@ if TYPE_CHECKING:
     from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewComment, ReviewThread
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner.types import _PostActionPrTerminalState
 
 _log = get_logger(__name__)
 _GENERIC_HUMAN_BLOCKER_REASON = "human attention is required before AWF can continue"
+
+
+def _operator_decision_for_thread(
+    state: MonitorState | None,
+    thread: ReviewThread,
+) -> str | None:
+    """Return the operator ruling to quote for ``thread``, or ``None``.
+
+    A live ruling (issue #939) only speaks to the conversation the operator read.
+    When a reviewer replies afterwards — after a guide cleared the verdict but
+    before the next attempt, or after an attempt recorded ``agent_failed`` — the
+    recorded body hash diverges and the ruling is stale for the updated thread.
+    ``_drop_stale_review_thread_addressed_state`` already retires an *answered*
+    ruling on such a body change, but it skips threads whose verdict still needs
+    attention (missing / ``agent_failed``), which is exactly the state a live
+    ruling sits in. Quoting it anyway would tell the agent to follow guidance the
+    operator never gave for this feedback and not to re-escalate it.
+
+    The stale marker is dropped rather than merely skipped: left in place,
+    ``_mark_review_thread_addressed`` would park it in the retired sidecar and a
+    later verdict rollback would restore it into a subsequent repair prompt.
+    A thread with no recorded body hash cannot be compared that way, so it falls
+    back to the ruling's issue-time stamp (see
+    :func:`_operator_ruling_superseded_by_reply`) and, failing that, keeps the
+    ruling (mirroring ``_mark_review_thread_addressed``'s supersede check).
+    """
+    if state is None:
+        return None
+    decision_key = _operator_decision_key(thread.thread_id)
+    decision = state.threads_addressed_ids.get(decision_key)
+    if decision is None:
+        return None
+    recorded = state.threads_addressed_ids.get(review_thread_body_state_key(thread.thread_id))
+    if recorded is not None and not recorded_review_thread_body_matches(recorded, thread):
+        _drop_stale_operator_decision(state, thread.thread_id)
+        return None
+    if recorded is None and _operator_ruling_superseded_by_reply(state, thread):
+        _drop_stale_operator_decision(state, thread.thread_id)
+        return None
+    return decision
+
+
+def _drop_stale_operator_decision(state: MonitorState, thread_id: str) -> None:
+    """Retire a ruling the live conversation has outrun, stamp included."""
+    state.threads_addressed_ids.pop(_operator_decision_key(thread_id), None)
+    state.threads_addressed_ids.pop(_operator_decision_issued_at_key(thread_id), None)
+
+
+def _operator_ruling_superseded_by_reply(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when reviewer activity postdates an unbindable ruling's issue time.
+
+    The guide retirement path clears ``needs_human`` rows that carry no body-hash
+    snapshot — the ones outdated-thread hygiene seeds — so their ruling has nothing
+    to compare against and the hash check above cannot see a reply that arrived
+    after the operator ruled. Those rulings are stamped with their issue time
+    instead (``__operator_decision_at__:``), and any reviewer comment created or
+    edited after that moment is feedback the operator never read
+    (PRRT_kwDOSJAM6s6fxBwT).
+
+    Only non-viewer activity counts (``_latest_reviewer_comment_at``): AWF's own
+    replies are not new feedback for the agent to re-triage. A missing stamp (the
+    pre-stamp rows an in-flight monitor carries, and every hash-bound ruling), an
+    unparseable one, or a thread whose comments carry no timestamps proves nothing
+    about ordering, so the ruling is kept — the same fail-open the rest of this
+    module takes when evidence is unavailable.
+    """
+    # Imported here, not at module scope: both modules sit downstream of
+    # ``comments`` in the runner's import graph.
+    from awf.runtime.pr_monitor_runner.helpers import _as_utc
+    from awf.runtime.pr_monitor_runner.outdated_resolution import _latest_reviewer_comment_at
+
+    stamped = state.threads_addressed_ids.get(_operator_decision_issued_at_key(thread.thread_id))
+    if not stamped:
+        return False
+    try:
+        issued_at = datetime.fromisoformat(stamped)
+    except ValueError:
+        return False
+    latest_reply_at = _latest_reviewer_comment_at(thread)
+    if latest_reply_at is None:
+        return False
+    return _as_utc(latest_reply_at) > _as_utc(issued_at)
 
 
 async def _address_thread(
@@ -75,10 +171,11 @@ async def _address_thread(
     monitor_log: WorkspaceLogSink | None = None,
 ) -> Verdict:
     """Ask the monitor agent to resolve a review thread and return its verdict."""
-    del base_branch, remote_branch, operation_id, operation_type, monitor_log
+    del base_branch, remote_branch, operation_type, monitor_log
     from awf.runtime.pr_monitor import _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
+        _sync_agent_failed_reason,
         _sync_needs_human_reason,
     )
 
@@ -97,6 +194,10 @@ async def _address_thread(
         if isinstance(task_tag, _TaskTagUnset)
         else task_tag
     )
+    # An operator guide that retired this thread's ``needs_human`` stashed its
+    # directive here (issue #939). Replay it so the re-addressed thread carries
+    # the operator's ruling instead of reading like the first attempt.
+    operator_decision = _operator_decision_for_thread(state, thread)
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -104,6 +205,7 @@ async def _address_thread(
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
         task_tag=resolved_task_tag,
+        operator_decision=operator_decision,
     )
     try:
         result = await runner._invoke_cli_for_verdict_result(
@@ -121,8 +223,35 @@ async def _address_thread(
             evidence_item_line=getattr(thread, "line", None),
             evidence_anchor_head=cycle_start_head,
         )
-    except AgentVerdictExecutionError:
-        return "agent_failed"
+    except AgentVerdictExecutionError as exc:
+        # This seam can only return the bare verdict, so keep the reason code
+        # (and the #932 preserved HEAD) observable instead of dropping it.
+        _log.warning(
+            "monitor.address_thread_agent_failed",
+            workspace_id=workspace_id,
+            thread_id=thread.thread_id,
+            reason_code=exc.reason_code,
+            preserved_head_sha=exc.preserved_head_sha,
+        )
+        result = _agent_failed_result(exc)
+    # #935: an accepted item commit must leave a durable audit trail immediately —
+    # the batch's ``comment_repair`` operation row is only finalised on push, so a
+    # restart between items would otherwise strand this commit with no provenance.
+    await _record_accepted_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=thread.thread_id,
+        item_start_head=operation_start_head,
+        operation_id=operation_id,
+    )
+    # Stash the failure reason BEFORE the result is narrowed to a bare verdict:
+    # on the #932 timeout path it carries the watchdog reason code and the
+    # preserved HEAD the re-queued attempt resumes from, and nothing downstream
+    # of this seam can recover either from ``agent_failed`` alone
+    # (PRRT_kwDOSJAM6s6fz-6r).
+    if state is not None:
+        _sync_agent_failed_reason(state, thread.thread_id, result)
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -200,8 +329,11 @@ async def _address_review_comment_result(
     monitor_log: WorkspaceLogSink | None = None,
 ) -> VerdictResult | MonitorVerdictResult:
     """Resolve a review comment while retaining its full monitor result."""
-    del base_branch, remote_branch, operation_id, operation_type, monitor_log
-    from awf.runtime.pr_monitor_runner.helpers import _review_comment_body_hash
+    del base_branch, remote_branch, operation_type, monitor_log
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _review_comment_body_hash,
+        _sync_agent_failed_reason,
+    )
 
     prompt_owned_paths = (
         owned_paths
@@ -227,7 +359,7 @@ async def _address_review_comment_result(
         task_tag=resolved_task_tag,
     )
     try:
-        return await runner._invoke_cli_for_verdict_result(
+        result: VerdictResult | MonitorVerdictResult = await runner._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=prompt,
             commit_message=f"fix: address PR review comment {comment.comment_id}",
@@ -239,14 +371,45 @@ async def _address_review_comment_result(
             evidence_item_id=comment.comment_id,
             evidence_body_hash=_review_comment_body_hash(comment),
         )
-    except AgentVerdictExecutionError:
-        return MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        result = _agent_failed_result(exc)
+    # #935: record the accepted item commit before the batch ends (see _address_thread).
+    await _record_accepted_item_commit_provenance(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=str(comment.comment_id),
+        item_start_head=operation_start_head,
+        operation_id=operation_id,
+    )
+    # Same durable record as the thread path: ``_sync_needs_human_reason`` (the
+    # only reason the review-comment caller persists) keeps nothing for
+    # ``agent_failed``, and ``_address_review_comment`` narrows this result to
+    # its verdict.
+    if state is not None:
+        _sync_agent_failed_reason(state, comment.comment_id, result)
+    return result
+
+
+def _agent_failed_result(exc: AgentVerdictExecutionError) -> MonitorVerdictResult:
+    """Record ``agent_failed`` while keeping the failure's reason and code.
+
+    On the #932 timeout path ``exc.reason`` names the preserved HEAD, so the
+    re-queued item carries "your work survived, resume from here" instead of a
+    bare verdict.
+    """
+    return MonitorVerdictResult(
+        verdict="agent_failed",
+        reason=exc.reason,
+        reason_code=exc.reason_code,
+        preserved_head_sha=exc.preserved_head_sha,
+    )
 
 
 def _sync_comment_verdict_dependencies() -> None:
     """Keep legacy comment-module monkeypatch seams for verdict invocation tests."""
-    _comment_verdict.mirror_path_for_worktree = mirror_path_for_worktree  # type: ignore[attr-defined]
-    _comment_verdict.repair_agent_runtime_ownership = repair_agent_runtime_ownership  # type: ignore[attr-defined]
+    _comment_verdict.mirror_path_for_worktree = mirror_path_for_worktree
+    _comment_verdict.repair_agent_runtime_ownership = repair_agent_runtime_ownership
     _comment_verdict.repair_mirror_hooks_path = repair_mirror_hooks_path
     _comment_verdict.mirror_hooks_repair_failure_details = mirror_hooks_repair_failure_details  # type: ignore[attr-defined]
 
@@ -321,8 +484,8 @@ async def _invoke_cli_for_verdict_result(
             evidence_item_line=evidence_item_line,
             evidence_anchor_head=evidence_anchor_head,
         )
-    except AgentVerdictExecutionError:
-        return MonitorVerdictResult(verdict="agent_failed")
+    except AgentVerdictExecutionError as exc:
+        return _agent_failed_result(exc)
 
 
 async def _post_human_notification_once(
@@ -334,7 +497,9 @@ async def _post_human_notification_once(
     state: MonitorState,
     blocker_reason: str | None = None,
     preserve_full_blocker_reason: bool = False,
-) -> None:
+    workspace_id: str | None = None,
+    recheck_context: str = "human_notification",
+) -> _PostActionPrTerminalState | None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
     The dedupe key is head/reason scoped (``_notification_key``), matching the
@@ -342,6 +507,19 @@ async def _post_human_notification_once(
     pause needs different semantics (epoch-keyed dedupe, ``ForgeClientError``
     swallowing, best-effort skip on missing monitor context) and so posts via its
     own ``_post_protected_block_notification`` rather than through this helper.
+
+    ``workspace_id`` opts this boundary into the #910 post-action terminal guard:
+    the caller's ``status`` can only be checked for what it already says, and every
+    monitor caller hands over a snapshot taken before the action it is escalating
+    (a push, a merge attempt, an agent run). Passing ``workspace_id`` makes the
+    helper re-read PR state from the forge right before posting — including when
+    the comment itself is deduped away — so a PR that merged or closed mid-action
+    gets no stale needs-human comment.
+
+    That fresh read is returned (``None`` when nothing terminal was observed), so a
+    caller whose escalation ends in a terminal failure can run the moot completion
+    path on the observation instead of failing a workspace whose PR merged
+    (PRRT_kwDOSJAM6s6fvGsp). Callers that only notify may ignore it.
     """
     from awf.runtime.pr_monitor_runner.helpers import (
         _notification_key,
@@ -351,6 +529,21 @@ async def _post_human_notification_once(
     )
     from awf.runtime.pr_monitor_runner.notify_human_details import _notification_items_digest
 
+    if status.merged or status.closed:
+        # #910 defence in depth: never ping a human on a PR that already ended.
+        # Callers can hold a ``PRStatus`` captured before a long agent action, so
+        # this is checked here as well as at the action seams. The dedupe marker is
+        # deliberately left UNSET — nothing was posted, and the workspace is about
+        # to reach terminal handling anyway.
+        _log.info(
+            "monitor.notify_human_skipped_pr_terminal",
+            pr_number=pr_number,
+            head_sha=status.head_sha[:10],
+            merged=status.merged,
+            closed=status.closed,
+            reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+        )
+        return None
     bot_items, human_items = _notify_human_blocker_items(status, state)
     items = bot_items + human_items
     items_digest = _notification_items_digest(items) if items else None
@@ -371,14 +564,38 @@ async def _post_human_notification_once(
         blocker_reason=reason,
         items_digest=items_digest,
     )
-    if state.threads_addressed_ids.get(key) == "notified":
+    already_notified = state.threads_addressed_ids.get(key) == "notified"
+    # Fresh forge read at the notification boundary (#910 follow-up): the
+    # snapshot check above only catches a ``PRStatus`` that ALREADY says terminal,
+    # and callers legitimately hold one captured before a push, a merge attempt or
+    # an agent action. It fails OPEN exactly as at the other seams: an unresolvable
+    # repo or a transient forge fault posts as before. The dedupe marker stays
+    # UNSET on a skip — nothing was posted.
+    #
+    # It runs BEFORE the dedupe short-circuit, not after: an armed caller consumes
+    # the observation, and a repeat workflow-scope rejection at the same
+    # (head, reason) is exactly the case where the earlier attempt already left the
+    # marker. Returning ``None`` there would send the CI / sync-base / comment-repair
+    # failure arm into ``_terminate_failed`` on a PR that merged since, instead of
+    # completing it as moot (PRRT_kwDOSJAM6s6fwG6W). The extra round-trip buys the
+    # armed callers' correctness; unarmed callers still pay none.
+    if workspace_id is not None:
+        terminal = await runner._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=recheck_context,
+            repo=repo,
+        )
+        if terminal is not None:
+            return terminal
+    if already_notified:
         _log.info(
             "monitor.notify_human_already_posted",
             pr_number=pr_number,
             head_sha=status.head_sha[:10],
             reason=reason,
         )
-        return
+        return None
     await runner._deps.gh.post_comment(
         repo=repo,
         pr_number=pr_number,
@@ -391,3 +608,4 @@ async def _post_human_notification_once(
         ),
     )
     state.mark_addressed(key, "notified")
+    return None

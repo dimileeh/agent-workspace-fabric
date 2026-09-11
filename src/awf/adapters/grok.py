@@ -201,6 +201,8 @@ def main():
             method_id = "xai.api_key"
         elif "cached_token" in auth_ids:
             method_id = "cached_token"
+        elif "grok.com" in auth_ids:
+            method_id = "grok.com"
         else:
             raise RuntimeError("Run `grok login` first, or set XAI_API_KEY.")
         _request(

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from awf.service import worker as worker_mod
-from tests.unit.service.test_worker import _settings
+from tests.unit.service.test_worker import _settings, _stub_worktree_activity_git_roots
 from tests.unit.service.test_worker_runtime_wiring import _stub_worker_runtime_dependencies
 
 
@@ -41,6 +41,8 @@ def test_build_worker_runtime_falls_back_to_live_gitconfig_when_snapshot_fails(
     )
 
     class _RecordingGitManager:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, _work_dir: Path, *, env: object, **_kwargs: object) -> None:
             created["git_env"] = env
 
@@ -92,6 +94,8 @@ def test_build_worker_runtime_warns_when_snapshot_fails_without_host_gitconfig(
     )
 
     class _RecordingGitManager:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, _work_dir: Path, *, env: object, **_kwargs: object) -> None:
             created["git_env"] = env
 
@@ -140,6 +144,8 @@ def test_build_worker_runtime_warns_when_snapshot_is_absent(
     )
 
     class _RecordingGitManager:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, _work_dir: Path, *, env: object, **_kwargs: object) -> None:
             created["git_env"] = env
 
@@ -192,6 +198,8 @@ def test_build_worker_runtime_preserves_gitconfig_consumers_when_refresh_fails(
     )
 
     class _RecordingGitManager:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, _work_dir: Path, *, env: dict[str, str], **_kwargs: object) -> None:
             self.envs = [env]
             self.task_envs: dict[asyncio.Task[Any], dict[str, str]] = {}

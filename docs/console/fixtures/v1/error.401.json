@@ -1,0 +1,4 @@
+{
+  "error_code": "UNAUTHORIZED",
+  "message": "Invalid or missing API token."
+}

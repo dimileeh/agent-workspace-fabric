@@ -815,12 +815,16 @@ def untrusted_nested_probe_config_snapshot_git_dir(
             return
         # Git rejects a git-dir whose HEAD is a symlink ("not a git repository").
         (staging / "HEAD").write_bytes(head_text.encode("utf-8", errors="surrogateescape"))
+        # Keep the live index mtime: Git's racily-clean re-check keys off it, and a
+        # staging-time stamp makes same-size same-second overwrites invisible to
+        # snapshot-scoped ``diff-files`` (issue #942).
         if not _own()._symlink_git_dir_child_via_fd(
             primary_fd,
             "index",
             staging / "index",
             metadata_leaf_fds,
             expect_directory=False,
+            preserve_source_times=True,
         ):
             yield None
             return

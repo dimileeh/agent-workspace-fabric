@@ -79,6 +79,13 @@ class _SyncBaseHarness:
     async def _protected_scope_push_block(self, **_kwargs: object) -> None:
         return None
 
+    async def _post_action_pr_terminal_push_result_if_moot(
+        self,
+        **_kwargs: object,
+    ) -> _GitPushResult | None:
+        """#910 post-action re-check; this harness always models an OPEN PR."""
+        return None
+
     async def _validated_git_push_result(self, **_kwargs: object) -> _GitPushResult:
         return self._push_result
 

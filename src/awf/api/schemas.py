@@ -864,6 +864,9 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     task_kind: str
     task_external_id: str | None
     task_tag: str | None = None
+    # Same console presentation key as overview ``task_key``, projected from
+    # the persisted ``task_tag`` so Core cards and details share one field.
+    task_key: str | None = None
     task_class: TaskClass | None
     owned_paths: list[str]
     task_policy: dict[str, Any] = Field(default_factory=dict)
@@ -1116,6 +1119,13 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
 
     workspace_id: str
     task_id: str
+    # Console presentation key. Local Core projects the persisted Jira-style
+    # ``task_tag``; hosted payloads may supply this field directly. Absent
+    # when the workspace has no task tag (do not substitute ``task_id``).
+    task_key: str | None = None
+    # Same persisted identifier as detail ``task_tag``, emitted so console
+    # cards can fall back when a payload only carries the Core field name.
+    task_tag: str | None = None
     title: str
     task_prompt: str
     repo_url: str
