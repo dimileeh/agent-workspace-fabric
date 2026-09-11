@@ -291,10 +291,13 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       return null;
     }
     if (
-      stage.started_at == null &&
-      (stage.ended_at != null ||
-        stage.duration_seconds != null ||
-        (stage.status !== "pending" && stage.status !== "terminal_skipped"))
+      ((stage.status === "pending" || stage.status === "terminal_skipped") &&
+        stage.started_at != null) ||
+      (stage.status === "active" && stage.ended_at != null) ||
+      (stage.started_at == null &&
+        (stage.ended_at != null ||
+          stage.duration_seconds != null ||
+          (stage.status !== "pending" && stage.status !== "terminal_skipped")))
     ) {
       return null;
     }

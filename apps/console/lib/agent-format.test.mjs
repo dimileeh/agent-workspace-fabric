@@ -706,6 +706,55 @@ test("resolveWorkflowTiming rejects lifecycle stages that end before they start"
   );
 });
 
+test("resolveWorkflowTiming rejects lifecycle timing that contradicts stage status", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const completedStage = {
+    stage: "completed",
+    started_at: "2026-09-06T12:10:00Z",
+    ended_at: "2026-09-06T12:10:00Z",
+    duration_seconds: 0,
+    status: "completed",
+  };
+  const contradictoryStages = [
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:10:00Z",
+      duration_seconds: 600,
+      status: "pending",
+    },
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:10:00Z",
+      duration_seconds: 600,
+      status: "terminal_skipped",
+    },
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:10:00Z",
+      duration_seconds: 600,
+      status: "active",
+    },
+  ];
+
+  for (const contradictoryStage of contradictoryStages) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        status: "completed",
+        recovery: null,
+        workflow_finished_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        lifecycle: [contradictoryStage, completedStage],
+      }),
+      { finishedAt: null, durationSeconds: null },
+      `${contradictoryStage.status} timing must invalidate lifecycle fallback`,
+    );
+  }
+});
+
 test("resolveWorkflowTiming rejects stage durations that contradict their timestamps", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const item = {
