@@ -1317,7 +1317,7 @@ export function WorkspaceList({
 
   const historyFooter = (
     <div
-      className="sticky bottom-0 z-10 grid gap-2 border-t border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600"
+      className="grid gap-2 border-t border-slate-200 bg-slate-50 px-3 py-3 text-[11px] text-slate-600"
       data-testid="workspace-history-scope"
     >
       <span aria-live="polite">

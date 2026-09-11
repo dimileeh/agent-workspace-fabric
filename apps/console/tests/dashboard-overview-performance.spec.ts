@@ -841,8 +841,12 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
 
   await page.goto("/");
   await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   for (const [index, loaded] of [PAGE_SIZE * 2, PAGE_SIZE * 3].entries()) {
-    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    // This test measures row geometry rather than pointer behavior. Dispatch
+    // directly so Playwright does not scroll the moving footer and trigger the
+    // separately covered near-bottom loader before activating the button.
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
     await expect(page.getByTestId("workspace-history-scope").locator("span")).toHaveText(
       `${loaded} loaded. More matching workspaces are available. Search and client-side filters cover loaded workspaces only.`,
     );
