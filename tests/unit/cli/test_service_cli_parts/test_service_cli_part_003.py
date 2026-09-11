@@ -461,6 +461,16 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["disposed"] = True
 
     class _GitManager:
+        def worktree_activity_git_roots(
+            self,
+            *,
+            workspace_id: str,
+            repo_url: str,
+        ) -> tuple[Path, Path]:
+            del repo_url
+            common_dir = tmp_path / "mirrors" / "repo.git"
+            return common_dir / "worktrees" / workspace_id, common_dir
+
         def __init__(
             self,
             work_dir: Path,

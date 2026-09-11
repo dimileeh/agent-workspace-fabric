@@ -22,7 +22,11 @@ from awf.runtime.driver import LocalRuntimeDriver
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
 from awf.service import worker as worker_mod
 from awf.service.config import resolve_service_settings
-from tests.unit.service.test_worker import _in_process_merge_coordinator, _settings
+from tests.unit.service.test_worker import (
+    _in_process_merge_coordinator,
+    _settings,
+    _stub_worktree_activity_git_roots,
+)
 
 
 @pytest.mark.unit
@@ -80,6 +84,8 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
 
     class _GitManager:
         """Test helper for GitManager."""
+
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
 
         def __init__(self, work_dir: Path, **kwargs: object) -> None:
             """Test helper for  init  ."""
@@ -351,7 +357,16 @@ def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
         worker_mod, "PullRequestCreator", type("_AnyInit", (), {"__init__": lambda _s, _r: None})
     )  # type: ignore[type-var]
     monkeypatch.setattr(
-        worker_mod, "GitManager", type("_AnyInit", (), {"__init__": lambda _s, _p, **_kw: None})
+        worker_mod,
+        "GitManager",
+        type(
+            "_AnyInit",
+            (),
+            {
+                "__init__": lambda _s, _p, **_kw: None,
+                "worktree_activity_git_roots": _stub_worktree_activity_git_roots,
+            },
+        ),
     )  # type: ignore[type-var]
     monkeypatch.setattr(
         worker_mod, "ComposeManager", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None})
@@ -429,6 +444,8 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
         pass
 
     class _AnyInit:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -510,6 +527,8 @@ def test_build_worker_runtime_wires_orphan_dir_reconciler_execute_flag(
         pass
 
     class _AnyInit:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -648,6 +667,8 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
         pass
 
     class _AnyInit:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -741,6 +762,8 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
         pass
 
     class _AnyInit:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -967,6 +990,8 @@ def _stub_worker_runtime_dependencies(
     class _GitManager:
         """Test helper for GitManager."""
 
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(
             self,
             work_dir: Path,
@@ -1042,10 +1067,12 @@ def _stub_worker_runtime_dependencies(
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
+            worktree_activity_git_roots: object = None,
         ) -> None:
             """Test helper for  init  ."""
             del hosted_validation
             del ensure_hosted_monitor_checkout
+            del worktree_activity_git_roots
             created["executor_monitor_factory"] = pr_monitor_factory
 
     class _ControlWorker:

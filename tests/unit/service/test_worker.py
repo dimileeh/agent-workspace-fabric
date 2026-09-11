@@ -65,6 +65,18 @@ def _in_process_merge_coordinator(
     return InProcessMergeCoordinator()
 
 
+def _stub_worktree_activity_git_roots(
+    _git: object,
+    *,
+    workspace_id: str,
+    repo_url: str,
+) -> tuple[Path, Path]:
+    """Model the managed Git-root resolver exposed by ``GitManager`` fakes."""
+    del repo_url
+    common_dir = Path("/managed-mirrors/repo.git")
+    return common_dir / "worktrees" / workspace_id, common_dir
+
+
 @pytest.mark.unit
 def test_companion_image_builder_enabled_by_default(tmp_path: Path) -> None:
     """The worker constructs a companion image builder by default."""
@@ -113,6 +125,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["open_pr_resolver_runner"] = runner
 
     class _GitManager:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(
             self,
             work_dir: Path,
@@ -194,6 +208,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             agent_runtime_executor: object = None,
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
+            worktree_activity_git_roots: object = None,
         ) -> None:
             del hosted_validation
             del ensure_hosted_monitor_checkout
@@ -207,6 +222,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["executor_monitor_factory"] = pr_monitor_factory
             created["executor_log_store"] = log_store
             created["executor_usage_sampler"] = usage_sampler
+            created["executor_worktree_activity_git_roots"] = worktree_activity_git_roots
 
     class _ControlWorker:
         def __init__(
@@ -315,6 +331,12 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["executor_usage_sampler"].__class__ is worker_mod.CcusageCollector
     assert created["executor_usage_sampler"]._runner is created["executor_runner"]
     assert created["executor_usage_sampler"]._work_dir == work_dir
+    resolver = created["executor_worktree_activity_git_roots"]
+    assert resolver.__self__.__class__ is _GitManager
+    assert resolver(workspace_id="ws-1", repo_url="https://example.test/repo.git") == (
+        Path("/managed-mirrors/repo.git/worktrees/ws-1"),
+        Path("/managed-mirrors/repo.git"),
+    )
     assert created["log_root"] == work_dir / "logs"
     assert created["validation_artifacts_dir"] == work_dir / "artifacts"
     assert created["executor_config"].worktrees_root == work_dir / "git" / "worktrees"

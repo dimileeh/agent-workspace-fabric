@@ -18,7 +18,7 @@ from awf.service.gitconfig_source import (
     GitconfigSourceServer,
     request_gitconfig_source_refresh,
 )
-from tests.unit.service.test_worker import _settings
+from tests.unit.service.test_worker import _settings, _stub_worktree_activity_git_roots
 from tests.unit.service.test_worker_runtime_wiring import _stub_worker_runtime_dependencies
 
 
@@ -440,6 +440,8 @@ def test_worker_requests_replaceable_source_and_preserves_it_on_helper_failure(
     )
 
     class _GitManager:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, _work_dir: Path, *, env: dict[str, str], **_kwargs: object) -> None:
             pass
 

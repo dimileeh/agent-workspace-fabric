@@ -18,6 +18,7 @@ from awf.service import worker as worker_mod
 from tests.unit.service.test_worker import (
     _in_process_merge_coordinator,
     _settings,
+    _stub_worktree_activity_git_roots,
 )
 
 
@@ -42,6 +43,8 @@ def test_build_worker_runtime_wires_claude_base_reaper(
         pass
 
     class _AnyInit:
+        worktree_activity_git_roots = _stub_worktree_activity_git_roots
+
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
