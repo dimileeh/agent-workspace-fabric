@@ -740,6 +740,26 @@ test("resolveWorkflowTiming rejects lifecycle stages that end before they start"
       lifecycle: [
         {
           ...item.lifecycle[0],
+          started_at: "2026-09-06T12:00:00.000900Z",
+          ended_at: "2026-09-06T12:00:00.000800Z",
+          duration_seconds: 0,
+        },
+      ],
+      last_event: {
+        ...item.last_event,
+        old_state: "requested",
+        occurred_at: "2026-09-06T12:00:00.000800Z",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a reversed sub-millisecond stage must not become the terminal finish",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [
+        {
+          ...item.lifecycle[0],
           started_at: "2026-09-06T12:02:00Z",
           ended_at: "2026-09-06T12:01:00Z",
         },

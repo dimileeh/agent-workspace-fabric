@@ -347,7 +347,9 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     if (
       (stage.started_at != null && startedMs == null) ||
       (stage.ended_at != null && endedMs == null) ||
-      (startedMs != null && endedMs != null && endedMs < startedMs)
+      (stage.started_at != null &&
+        stage.ended_at != null &&
+        compareRecordedInstants(stage.ended_at, stage.started_at) === -1)
     ) {
       return null;
     }
