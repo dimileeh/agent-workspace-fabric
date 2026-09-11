@@ -353,6 +353,36 @@ test("a newer user scroll supersedes a pending history restore", async ({ page }
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 });
 
+test("a same-window user scroll supersedes a pending history fallback", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, {
+    delayContinuation: true,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: 1_000 }));
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(1_000);
+
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  const requestScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollTop + 400 }));
+  await expect.poll(() => list.evaluate((element) => element.scrollTop))
+    .toBe(requestScrollTop + 400);
+  const newerScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await releaseHistory();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(newerScrollTop);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hMh1_: when a full
 // page of newer workspaces makes page one disjoint, the old keyset cursor skips
 // the pages inserted ahead of its boundary.

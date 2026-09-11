@@ -1330,6 +1330,13 @@ export function WorkspaceList({
     );
 
     if (suppressScrollLoadRef.current) return;
+    if (
+      preserveScrollTopRef.current !== null &&
+      Math.abs(element.scrollTop - preserveScrollTopRef.current) >
+        WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
+    ) {
+      preserveScrollTopRef.current = null;
+    }
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;
