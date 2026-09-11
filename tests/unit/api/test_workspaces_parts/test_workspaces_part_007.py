@@ -775,16 +775,31 @@ class TestWorkspaceDirectRoutes:
             new_state=WorkspaceStatus.requested.value,
             reason_code="CREATED",
             payload=None,
+            event_order=1,
             occurred_at=base,
         )
-        state_changed_event = SimpleNamespace(
-            id="evt_state_changed",
+        # The same-tick IDs deliberately sort opposite to append order so the
+        # overview must use persisted event_order to select the latest state.
+        older_state_changed_event = SimpleNamespace(
+            id="evt_state_changed_z",
             workspace_id=workspace_id,
             event_type="workspace.state_changed",
             old_state=WorkspaceStatus.requested.value,
+            new_state=WorkspaceStatus.ready.value,
+            reason_code="READY",
+            payload=None,
+            event_order=2,
+            occurred_at=base + timedelta(seconds=4),
+        )
+        state_changed_event = SimpleNamespace(
+            id="evt_state_changed_a",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.ready.value,
             new_state=WorkspaceStatus.running.value,
             reason_code="STARTED",
             payload=None,
+            event_order=3,
             occurred_at=base + timedelta(seconds=4),
         )
         latest_event = SimpleNamespace(
@@ -795,9 +810,12 @@ class TestWorkspaceDirectRoutes:
             new_state=None,
             reason_code="TEST",
             payload={"source": "unit"},
+            event_order=4,
             occurred_at=base + timedelta(seconds=5),
         )
-        events = SinglePassEvents([latest_event, created_event, state_changed_event])
+        events = SinglePassEvents(
+            [latest_event, state_changed_event, created_event, older_state_changed_event]
+        )
         workspace = SimpleNamespace(
             id=workspace_id,
             task_external_id=None,

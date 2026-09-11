@@ -1444,9 +1444,18 @@ def _created_at(workspace: Workspace) -> datetime:
     return _ensure_utc(workspace.created_at)
 
 
-def _event_sort_key(event: WorkspaceEvent) -> tuple[datetime, str]:
+def _event_sort_key(event: WorkspaceEvent) -> tuple[datetime, int, int, str]:
     event_id = getattr(event, "id", "")
-    return _ensure_utc(event.occurred_at), event_id if isinstance(event_id, str) else ""
+    raw_event_order = getattr(event, "event_order", None)
+    event_order = raw_event_order if isinstance(raw_event_order, int) else None
+    # Null-first ascending order makes reverse scans match the authoritative
+    # SQL ordering: event_order DESC NULLS LAST, then ID as a final fallback.
+    return (
+        _ensure_utc(event.occurred_at),
+        int(event_order is not None),
+        event_order if event_order is not None else 0,
+        event_id if isinstance(event_id, str) else "",
+    )
 
 
 def _latest_started_stage(
