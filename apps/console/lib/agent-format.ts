@@ -321,6 +321,12 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
         entry.startedMs <= finishedMs,
     )
     .sort((left, right) => left.startedMs - right.startedMs);
+  // A contiguous tail can corroborate the finish without representing the
+  // whole workflow. Only `requested` supplies the authoritative start needed
+  // to report the summed stages as workflow duration.
+  if (durationStages[0]?.stage.stage !== "requested") {
+    return { finishedAt, finishedMs, durationSeconds: null };
+  }
   let durationSeconds = 0;
   let previousEndMs: number | null = null;
   for (const entry of durationStages) {

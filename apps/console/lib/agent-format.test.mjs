@@ -545,6 +545,13 @@ test("resolveWorkflowTiming skips malformed explicit finish candidates", async (
       duration_seconds: null,
       lifecycle: [
         {
+          stage: "requested",
+          started_at: "2026-09-06T12:00:00Z",
+          ended_at: "2026-09-06T12:00:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+        {
           stage: "running",
           started_at: "2026-09-06T12:00:00Z",
           ended_at: "2026-09-06T12:10:00Z",
@@ -699,5 +706,51 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       ],
     }),
     { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+});
+
+test("resolveWorkflowTiming requires the initial requested stage before inferring duration", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const running = {
+    stage: "running",
+    started_at: "2026-09-06T12:01:00Z",
+    ended_at: "2026-09-06T12:05:00Z",
+    duration_seconds: 240,
+    status: "completed",
+  };
+  const item = {
+    status: "failed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    last_event: {
+      event_type: "workspace.state_changed",
+      old_state: "running",
+      new_state: "failed",
+      occurred_at: "2026-09-06T12:05:00Z",
+    },
+  };
+  const expected = {
+    finishedAt: "2026-09-06T12:05:00Z",
+    durationSeconds: null,
+  };
+
+  assert.deepEqual(resolveWorkflowTiming({ ...item, lifecycle: [running] }), expected);
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [
+        {
+          stage: "requested",
+          started_at: null,
+          ended_at: null,
+          duration_seconds: null,
+          status: "pending",
+        },
+        running,
+      ],
+    }),
+    expected,
   );
 });
