@@ -1135,7 +1135,12 @@ test("repository filtering drops a selected off-page workspace excluded by the n
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // This scenario covers query-driven selection removal, while scroll-to-footer
+  // autoload coordination has dedicated coverage below. Dispatch directly so
+  // Playwright does not scroll the footer and race that separate load path.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect
     .poll(() => overviewRequests, { timeout: 10_000 })
     .toContain(String(PAGE_SIZE));
