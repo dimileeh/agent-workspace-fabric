@@ -211,6 +211,24 @@ const TERMINAL_WORKFLOW_STATUSES = new Set<WorkspaceOverview["status"]>([
   "destroyed",
 ]);
 
+/**
+ * True when workflow timing should be presented as terminal. Destroy cleanup
+ * is post-terminal only when the overview retained the preceding workflow
+ * terminal transition; direct pre-terminal destroys remain conservative.
+ */
+export function hasTerminalWorkflowTiming(
+  item: Pick<
+    WorkspaceOverview,
+    "status" | "latest_workflow_terminal_state_change"
+  >,
+): boolean {
+  return (
+    TERMINAL_WORKFLOW_STATUSES.has(item.status) ||
+    (item.status === "destroying" &&
+      item.latest_workflow_terminal_state_change != null)
+  );
+}
+
 export type ResolvedWorkflowTiming = {
   finishedAt: string | null;
   durationSeconds: number | null;
@@ -329,7 +347,9 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     if (
       (stage.started_at != null && startedMs == null) ||
       (stage.ended_at != null && endedMs == null) ||
-      (startedMs != null && endedMs != null && endedMs < startedMs)
+      (stage.started_at != null &&
+        stage.ended_at != null &&
+        compareRecordedInstants(stage.ended_at, stage.started_at) === -1)
     ) {
       return null;
     }
@@ -401,8 +421,9 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       item.latest_state_change.new_state === "failed";
     const eventMatchesTerminalStatus =
       terminalEvent?.new_state === item.status ||
-      (item.status === "destroyed" &&
-        (terminalEvent?.new_state === "failed" ||
+      ((item.status === "destroying" || item.status === "destroyed") &&
+        (terminalEvent?.new_state === "completed" ||
+          terminalEvent?.new_state === "failed" ||
           terminalEvent?.new_state === "cancelled")) ||
       cleanupFailureConfirmsCancelledBoundary;
     // Pauses such as blocked/recovering are absent from lifecycle summaries.
@@ -473,12 +494,13 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
 
 /**
  * Resolve the workflow timing displayed by console surfaces. Terminal local
- * overviews may derive timing from one complete lifecycle interval; active
- * workspaces retain their explicit timing fields and never infer a finish.
+ * overviews and evidenced post-terminal cleanup may derive timing from one
+ * complete lifecycle interval; active workspaces retain their explicit timing
+ * fields and never infer a finish.
  */
 export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflowTiming {
   const resolvedFinishedAt = resolveWorkflowFinishedAt(item);
-  if (!TERMINAL_WORKFLOW_STATUSES.has(item.status)) {
+  if (!hasTerminalWorkflowTiming(item)) {
     return {
       finishedAt: resolvedFinishedAt,
       durationSeconds: item.duration_seconds ?? null,

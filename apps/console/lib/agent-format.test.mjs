@@ -740,6 +740,26 @@ test("resolveWorkflowTiming rejects lifecycle stages that end before they start"
       lifecycle: [
         {
           ...item.lifecycle[0],
+          started_at: "2026-09-06T12:00:00.000900Z",
+          ended_at: "2026-09-06T12:00:00.000800Z",
+          duration_seconds: 0,
+        },
+      ],
+      last_event: {
+        ...item.last_event,
+        old_state: "requested",
+        occurred_at: "2026-09-06T12:00:00.000800Z",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a reversed sub-millisecond stage must not become the terminal finish",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [
+        {
+          ...item.lifecycle[0],
           started_at: "2026-09-06T12:02:00Z",
           ended_at: "2026-09-06T12:01:00Z",
         },
@@ -1138,6 +1158,73 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       last_event: stateChanged("running", "failed", "2026-09-06T12:05:00Z"),
     }),
     { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroying",
+      last_event: stateChanged("running", "destroying", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a direct pre-terminal destroy must not infer workflow timing",
+  );
+  for (const terminalStatus of ["failed", "cancelled"]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        status: "destroying",
+        latest_workflow_terminal_state_change: stateChanged(
+          "running",
+          terminalStatus,
+          "2026-09-06T12:05:00Z",
+        ),
+        latest_state_change: stateChanged(
+          terminalStatus,
+          "destroying",
+          "2026-09-06T12:20:00Z",
+        ),
+        last_event: stateChanged(
+          terminalStatus,
+          "destroying",
+          "2026-09-06T12:20:00Z",
+        ),
+      }),
+      { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+      `destroying cleanup must preserve the earlier ${terminalStatus} transition`,
+    );
+  }
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroying",
+      lifecycle: [
+        ...item.lifecycle,
+        {
+          stage: "completed",
+          started_at: "2026-09-06T12:05:00Z",
+          ended_at: "2026-09-06T12:20:00Z",
+          duration_seconds: 900,
+          status: "completed",
+        },
+      ],
+      latest_workflow_terminal_state_change: stateChanged(
+        "running",
+        "completed",
+        "2026-09-06T12:05:00Z",
+      ),
+      latest_state_change: stateChanged(
+        "completed",
+        "destroying",
+        "2026-09-06T12:20:00Z",
+      ),
+      last_event: stateChanged(
+        "completed",
+        "destroying",
+        "2026-09-06T12:20:00Z",
+      ),
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+    "destroying cleanup must preserve an earlier completed transition",
   );
   for (const terminalStatus of ["failed", "cancelled"]) {
     assert.deepEqual(

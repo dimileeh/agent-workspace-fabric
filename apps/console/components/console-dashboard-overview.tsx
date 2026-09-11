@@ -42,6 +42,7 @@ useState
 import {
 formatAgentLabel,
 formatAgentTitle,
+hasTerminalWorkflowTiming,
 resolveWorkflowTiming
 } from "@/lib/agent-format";
 import {
@@ -747,13 +748,6 @@ type WorkspaceCardProps = {
   onCopy: (event: SyntheticEvent<HTMLElement>, workspaceId: string) => void;
 };
 
-const TERMINAL_WORKSPACE_CARD_STATUSES = new Set<WorkspaceOverview["status"]>([
-  "completed",
-  "failed",
-  "cancelled",
-  "destroyed",
-]);
-
 const WorkspaceCard = memo(function WorkspaceCard({
   item,
   selected,
@@ -774,7 +768,7 @@ const WorkspaceCard = memo(function WorkspaceCard({
     ? attentionAgeSeconds(attentionSince(item))
     : null;
   const taskKey = displayedTaskKey(item);
-  const terminal = TERMINAL_WORKSPACE_CARD_STATUSES.has(item.status);
+  const terminal = hasTerminalWorkflowTiming(item);
   const terminalTiming = terminal ? resolveWorkflowTiming(item) : null;
   return (
     <div
