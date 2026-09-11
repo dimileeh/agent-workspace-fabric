@@ -180,13 +180,7 @@ function sameRecordedInstant(left: string, right: string): boolean {
   if (left === right) {
     return true;
   }
-  const leftMs = recordedMilliseconds(left);
-  const rightMs = recordedMilliseconds(right);
-  return (
-    leftMs != null &&
-    leftMs === rightMs &&
-    submillisecondFraction(left) === submillisecondFraction(right)
-  );
+  return compareRecordedInstants(left, right) === 0;
 }
 
 /**
@@ -235,6 +229,27 @@ const RFC3339_DATE_TIME =
 function submillisecondFraction(value: string): string {
   const fractionalSeconds = RFC3339_DATE_TIME.exec(value)?.[7] ?? "";
   return fractionalSeconds.slice(4).replace(/0+$/, "");
+}
+
+function compareRecordedInstants(left: string, right: string): number | null {
+  const leftMs = recordedMilliseconds(left);
+  const rightMs = recordedMilliseconds(right);
+  if (leftMs == null || rightMs == null) {
+    return null;
+  }
+  if (leftMs !== rightMs) {
+    return leftMs < rightMs ? -1 : 1;
+  }
+  const leftFraction = submillisecondFraction(left);
+  const rightFraction = submillisecondFraction(right);
+  const precision = Math.max(leftFraction.length, rightFraction.length);
+  const normalizedLeft = leftFraction.padEnd(precision, "0");
+  const normalizedRight = rightFraction.padEnd(precision, "0");
+  return normalizedLeft === normalizedRight
+    ? 0
+    : normalizedLeft < normalizedRight
+      ? -1
+      : 1;
 }
 
 function recordedMilliseconds(value: string | null | undefined): number | null {
@@ -333,14 +348,20 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       entered.push({ stage, startedAt: stage.started_at, startedMs, endedMs });
     }
   }
-  const latestStartedMs = Math.max(...entered.map((entry) => entry.startedMs));
-  const latestCandidates = entered.filter(
-    (entry) => entry.startedMs === latestStartedMs,
+  const latestEntered = entered.reduce<TimedLifecycleStage | null>(
+    (latest, entry) =>
+      latest == null || compareRecordedInstants(entry.startedAt, latest.startedAt) === 1
+        ? entry
+        : latest,
+    null,
   );
-  if (latestCandidates.length !== 1) {
+  if (
+    latestEntered == null ||
+    entered.filter((entry) => sameRecordedInstant(entry.startedAt, latestEntered.startedAt))
+      .length !== 1
+  ) {
     return null;
   }
-  const [latestEntered] = latestCandidates;
 
   let finishedAt = latestEntered.stage.ended_at;
   let finishedMs = latestEntered.endedMs;
@@ -410,11 +431,11 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     .sort((left, right) => left.startedMs - right.startedMs);
   // A contiguous tail can corroborate the finish without representing the
   // whole workflow. Only `requested` supplies the authoritative start needed
-  // to report the summed stages as workflow duration.
-  if (durationStages[0]?.stage.stage !== "requested") {
+  // to calculate workflow duration.
+  const [workflowStart] = durationStages;
+  if (workflowStart?.stage.stage !== "requested") {
     return { finishedAt, finishedMs, durationSeconds: null };
   }
-  let durationSeconds = 0;
   let previousEndMs: number | null = null;
   for (const entry of durationStages) {
     const stageDuration = recordedDurationSeconds(entry.stage.duration_seconds);
@@ -436,12 +457,17 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     ) {
       return { finishedAt, finishedMs, durationSeconds: null };
     }
-    durationSeconds += stageDuration;
     previousEndMs = entry.endedMs;
   }
   if (previousEndMs !== finishedMs) {
     return { finishedAt, finishedMs, durationSeconds: null };
   }
+  const durationSeconds = recordedIntervalDurationSeconds(
+    workflowStart.startedAt,
+    workflowStart.startedMs,
+    finishedAt,
+    finishedMs,
+  );
   return { finishedAt, finishedMs, durationSeconds };
 }
 
