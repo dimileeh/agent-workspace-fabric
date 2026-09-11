@@ -181,6 +181,104 @@ test("fullscreen applies a slow successful tail while advancing metadata starts 
   await expect(output).toContainText(secondSlowMarker, { timeout: 4_000 });
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hb-HG: a newer
+// multi-stream reload can succeed for one stream while another fails. Its
+// global generation must not suppress an older success for the failed stream.
+test("fullscreen logs apply an older per-stream success after a newer sibling-only success", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await mockAwfApi(page);
+
+  const olderQuiet = createDeferred();
+  const hangingQuietRetries: Array<() => void> = [];
+  let overlapPhase = false;
+  let quietReads = 0;
+  let activeReads = 0;
+  const baselineQuiet = "baseline-quiet-before-overlap";
+  const baselineActive = "baseline-active-before-overlap";
+  const olderQuietSuccess = "older-quiet-success-after-newer-failure";
+  const olderActiveSuccess = "older-active-success-must-not-rewind";
+  const newerActiveSuccess = "newer-active-success-must-remain";
+
+  await page.route("**/api/awf/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/workspaces/ws_logs/logs") {
+      await fulfillJson(route, listEnvelope([
+        logStream("quiet.stdout", 2_400, 120, quietOpenedAt),
+        logStream("active.stdout", 2_880, 120, activeOpenedAt),
+      ]));
+      return;
+    }
+    if (path === "/api/awf/workspaces/ws_logs/logs/quiet.stdout") {
+      if (!overlapPhase) {
+        await fulfillJson(route, logRead("quiet.stdout", baselineQuiet));
+        return;
+      }
+      quietReads += 1;
+      if (quietReads === 1) {
+        await olderQuiet.promise;
+        await fulfillJson(route, logRead("quiet.stdout", olderQuietSuccess));
+        return;
+      }
+      if (quietReads === 2) {
+        await fulfillJson(
+          route,
+          { detail: { error_code: "UPSTREAM_UNAVAILABLE", message: "newer quiet tail failed" } },
+          503,
+        );
+        return;
+      }
+      await new Promise<void>((resolve) => hangingQuietRetries.push(resolve));
+      await fulfillJson(route, logRead("quiet.stdout", olderQuietSuccess));
+      return;
+    }
+    if (path === "/api/awf/workspaces/ws_logs/logs/active.stdout") {
+      if (!overlapPhase) {
+        await fulfillJson(route, logRead("active.stdout", baselineActive));
+        return;
+      }
+      activeReads += 1;
+      await fulfillJson(
+        route,
+        logRead("active.stdout", activeReads === 1 ? olderActiveSuccess : newerActiveSuccess),
+      );
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  const output = modal.getByTestId("log-output");
+  await expect(output).toContainText(baselineQuiet);
+  await expect(output).toContainText(baselineActive);
+
+  overlapPhase = true;
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect.poll(() => quietReads).toBe(1);
+  await expect.poll(() => activeReads).toBe(1);
+
+  await modal.getByRole("button", { name: "Tail all" }).click();
+  await expect.poll(() => quietReads).toBe(2);
+  await expect.poll(() => activeReads).toBe(2);
+  await expect(output).toContainText(newerActiveSuccess);
+  await expect(modal.getByRole("alert")).toContainText("newer quiet tail failed");
+
+  olderQuiet.resolve();
+  await expect(output).toContainText(olderQuietSuccess);
+  await expect(output).toContainText(newerActiveSuccess);
+  await expect(output).not.toContainText(olderActiveSuccess);
+  await expect(modal.getByRole("alert")).toContainText("newer quiet tail failed");
+
+  for (const resolve of hangingQuietRetries) {
+    resolve();
+  }
+});
+
 test("fullscreen logs keep selected stream history when unselected stream tails are oversized", async ({ page }) => {
   const modalSelector = ".fixed.inset-0.z-50";
   const streamName = "quiet.stdout";

@@ -324,9 +324,6 @@ export function WorkspaceLogColumn({
   // started so an older or in-flight 200 cannot restore cleared caches. A
   // request that starts after that watermark may recover.
   const tailRequestGenerationRef = useRef(0);
-  // Highest tail generation that applied a successful snapshot. An older
-  // 401/403 must not clear caches that this newer success already owns.
-  const appliedTailGenerationRef = useRef(0);
   // Per-stream generation of that applied success. Overlapping waves can
   // apply a newer 200 for stream A while B fails transiently; only a newer
   // success for that stream may suppress its 401/403 or network/5xx warning.
@@ -561,29 +558,23 @@ export function WorkspaceLogColumn({
     ) {
       return;
     }
-    if (
-      generation !== tailRequestGenerationRef.current ||
-      generation < appliedTailGenerationRef.current
-    ) {
-      // A newer start marks this wave as superseded, but only a newer applied
-      // success owns the snapshot. Merely starting a newer request is not
-      // recovery and must not starve successful tails that take longer than
-      // the metadata poll.
-      if (generation < appliedTailGenerationRef.current) {
-        for (const result of results) {
-          if (!result.ok) {
-            applyTailRefreshFailure(result);
-          }
-        }
-        return;
-      }
-    }
     // Transient network/5xx (and other non-auth) failures: keep the last
     // successful fullscreen snapshot. Stream-metadata polling retriggers these
     // reads, so replacing diagnostics with an error line would hide the
     // snapshot the feed-outage contract requires.
-    const successes = results.filter((result): result is Extract<LogTailReadResult, { ok: true }> => result.ok);
-    const failures = results.filter((result) => !result.ok);
+    // Compare applied success generations per stream: a newer success for B
+    // must not suppress an older success for A when the newer A read failed.
+    const successes = results.filter(
+      (result): result is Extract<LogTailReadResult, { ok: true }> =>
+        result.ok &&
+        generation >= (appliedTailSuccessGenerationRef.current[result.entry.streamId] ?? 0),
+    );
+    const failures = results.filter(
+      (result): result is Extract<LogTailReadResult, { ok: false }> =>
+        !result.ok &&
+        generation >= (appliedTailSuccessGenerationRef.current[result.streamId] ?? 0) &&
+        appliedTailFailureGenerationRef.current[result.streamId] === generation,
+    );
     for (const success of successes) {
       tailDeniedStreamIdsRef.current.delete(success.entry.streamId);
     }
@@ -615,7 +606,6 @@ export function WorkspaceLogColumn({
           if (
             epoch !== columnEpochRef.current ||
             selectionGeneration !== tailSelectionGenerationRef.current ||
-            generation < appliedTailGenerationRef.current ||
             listingDeniedRef.current ||
             tailAuthDeniedRef.current ||
             streamAuthDeniedRef.current
@@ -624,7 +614,12 @@ export function WorkspaceLogColumn({
           }
           const next = { ...current };
           for (const failure of failures) {
-            next[failure.streamId] = fullscreenTailRefreshMessage(failure.message);
+            if (
+              generation >= (appliedTailSuccessGenerationRef.current[failure.streamId] ?? 0) &&
+              appliedTailFailureGenerationRef.current[failure.streamId] === generation
+            ) {
+              next[failure.streamId] = fullscreenTailRefreshMessage(failure.message);
+            }
           }
           return next;
         });
@@ -642,7 +637,6 @@ export function WorkspaceLogColumn({
     // clear the snapshot this success just established. Stamp only the
     // streams this wave actually applied — a sibling 200 must not count as
     // recovery for a stream that failed in this same wave.
-    appliedTailGenerationRef.current = Math.max(appliedTailGenerationRef.current, generation);
     for (const success of successes) {
       const streamId = success.entry.streamId;
       const prior = appliedTailSuccessGenerationRef.current[streamId] ?? 0;
@@ -680,7 +674,6 @@ export function WorkspaceLogColumn({
       if (
         epoch !== columnEpochRef.current ||
         selectionGeneration !== tailSelectionGenerationRef.current ||
-        generation < appliedTailGenerationRef.current ||
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
         streamAuthDeniedRef.current
@@ -689,29 +682,46 @@ export function WorkspaceLogColumn({
       }
       const next = { ...current };
       for (const failure of failures) {
-        next[failure.streamId] = fullscreenTailRefreshMessage(failure.message);
+        if (
+          generation >= (appliedTailSuccessGenerationRef.current[failure.streamId] ?? 0) &&
+          appliedTailFailureGenerationRef.current[failure.streamId] === generation
+        ) {
+          next[failure.streamId] = fullscreenTailRefreshMessage(failure.message);
+        }
       }
       for (const success of successes) {
-        if ((appliedTailFailureGenerationRef.current[success.entry.streamId] ?? 0) <= generation) {
+        if (
+          appliedTailSuccessGenerationRef.current[success.entry.streamId] === generation &&
+          (appliedTailFailureGenerationRef.current[success.entry.streamId] ?? 0) <= generation
+        ) {
           delete next[success.entry.streamId];
         }
       }
       return next;
     });
-    const byStream = new Map(successes.map((result) => [result.entry.streamId, result]));
     setEntries((current) => {
       // Functional updaters can flush after a denial clear; drop the write so
-      // previously authorized tails cannot reappear.
+      // previously authorized tails cannot reappear. Re-check ownership per
+      // stream so a newer sibling success cannot discard this stream's write.
       if (
         epoch !== columnEpochRef.current ||
         selectionGeneration !== tailSelectionGenerationRef.current ||
-        generation < appliedTailGenerationRef.current ||
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
         streamAuthDeniedRef.current
       ) {
         return current;
       }
+      const appliedSuccesses = successes.filter(
+        (result) =>
+          appliedTailSuccessGenerationRef.current[result.entry.streamId] === generation,
+      );
+      if (appliedSuccesses.length === 0) {
+        return current;
+      }
+      const byStream = new Map(
+        appliedSuccesses.map((result) => [result.entry.streamId, result]),
+      );
       return trimLogEntries([
         ...current.filter((entry) => {
           const result = byStream.get(entry.streamId);
@@ -720,14 +730,13 @@ export function WorkspaceLogColumn({
           }
           return entry.kind === "live" && entry.offset >= result.nextOffset;
         }),
-        ...successes.map((result) => result.entry),
+        ...appliedSuccesses.map((result) => result.entry),
       ], selectedStreams);
     });
     setOffsets((current) => {
       if (
         epoch !== columnEpochRef.current ||
         selectionGeneration !== tailSelectionGenerationRef.current ||
-        generation < appliedTailGenerationRef.current ||
         listingDeniedRef.current ||
         tailAuthDeniedRef.current ||
         streamAuthDeniedRef.current
@@ -736,7 +745,9 @@ export function WorkspaceLogColumn({
       }
       const next = { ...current };
       for (const result of successes) {
-        next[result.entry.streamId] = result.nextOffset;
+        if (appliedTailSuccessGenerationRef.current[result.entry.streamId] === generation) {
+          next[result.entry.streamId] = result.nextOffset;
+        }
       }
       return next;
     });
