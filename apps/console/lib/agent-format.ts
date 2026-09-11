@@ -412,7 +412,6 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       item.latest_workflow_terminal_state_change ??
       item.latest_state_change ??
       item.last_event;
-    const terminalEventMs = recordedMilliseconds(terminalEvent?.occurred_at);
     const cleanupFailureConfirmsCancelledBoundary =
       item.status === "failed" &&
       terminalEvent?.new_state === "cancelled" &&
@@ -437,7 +436,7 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       terminalEvent?.event_type !== "workspace.state_changed" ||
       terminalEvent.old_state !== latestEntered.stage.stage ||
       !eventMatchesTerminalStatus ||
-      terminalEventMs !== finishedMs
+      compareRecordedInstants(terminalEvent.occurred_at, finishedAt) !== 0
     ) {
       return null;
     }
