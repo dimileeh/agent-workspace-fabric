@@ -909,6 +909,14 @@ test("keeps the visible row anchored when a refresh changes row heights", async 
 test("refresh preserves the visible workspace when membership shifts", async ({ page }) => {
   let firstPageRequests = 0;
   let prependWorkspace = false;
+  let removeVisibleAnchor = false;
+  const withTallAnchor = (item: ReturnType<typeof workspaceOverview>) =>
+    item.workspace_id === "ws_perf_0150"
+      ? {
+          ...item,
+          title: `Tall visible anchor ${"with wrapped content ".repeat(20)}`,
+        }
+      : item;
   await page.setViewportSize({ width: 1_000, height: 720 });
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
@@ -919,6 +927,11 @@ test("refresh preserves the visible workspace when membership shifts", async ({ 
       cursor === null && prependWorkspace
         ? [workspaceOverview(0), ...items.slice(0, -1)]
         : items,
+    resolvePageItem: withTallAnchor,
+    resolveBatchItem: (item) =>
+      removeVisibleAnchor && item.workspace_id === "ws_perf_0150"
+        ? null
+        : withTallAnchor(item),
   });
 
   await page.goto("/");
@@ -938,7 +951,7 @@ test("refresh preserves the visible workspace when membership shifts", async ({ 
       ?.offsetHeight ?? 0;
     const listTop = listElement.getBoundingClientRect().top + controlsHeight;
     return listElement.scrollTop + element.getBoundingClientRect().top - listTop +
-      element.getBoundingClientRect().height * 0.35;
+      element.getBoundingClientRect().height * 0.75;
   });
   await list.evaluate((element, top) => element.scrollTo({ top }), anchorScrollTop);
   await expect(anchor).toBeVisible();
@@ -975,6 +988,17 @@ test("refresh preserves the visible workspace when membership shifts", async ({ 
   const afterRemoval = await visibleAnchor();
   expect(afterRemoval.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+
+  removeVisibleAnchor = true;
+  const requestsBeforeAnchorRemoval = firstPageRequests;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(() => firstPageRequests).toBeGreaterThan(requestsBeforeAnchorRemoval);
+  await expect(page.getByTestId("workspace-card-ws_perf_0150")).toHaveCount(0);
+  await expect.poll(async () => (await visibleAnchor()).id)
+    .toBe("workspace-card-ws_perf_0151");
+  const afterAnchorRemoval = await visibleAnchor();
+  expect(afterAnchorRemoval.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE - 1);
 });
 
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hIfD1: a

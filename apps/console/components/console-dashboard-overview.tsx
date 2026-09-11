@@ -1040,8 +1040,20 @@ export function WorkspaceList({
       scrollContainer.scrollTop,
     );
     const workspaceId = previous.workspaceIds[previousAnchorIndex];
-    const anchorIndex = workspaceIds.indexOf(workspaceId);
-    if (anchorIndex < 0) return;
+    let anchorIndex = workspaceIds.indexOf(workspaceId);
+    if (anchorIndex < 0) {
+      const survivingWorkspaceIds = new Set(workspaceIds);
+      const fallbackWorkspaceId =
+        previous.workspaceIds
+          .slice(previousAnchorIndex + 1)
+          .find((candidate) => survivingWorkspaceIds.has(candidate)) ??
+        previous.workspaceIds
+          .slice(0, previousAnchorIndex)
+          .reverse()
+          .find((candidate) => survivingWorkspaceIds.has(candidate));
+      if (!fallbackWorkspaceId) return;
+      anchorIndex = workspaceIds.indexOf(fallbackWorkspaceId);
+    }
     const previousAnchorHeight =
       previous.rowOffsets[previousAnchorIndex + 1] -
       previous.rowOffsets[previousAnchorIndex];
