@@ -264,6 +264,98 @@ async def test_new_probe_rejects_git_target_rewritten_by_an_earlier_invocation(
 
 
 @pytest.mark.unit
+async def test_new_probe_rejects_commondir_rewritten_by_an_earlier_invocation(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """GitManager's common dir must still be the one Git actually uses."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    commondir = git_dir / "commondir"
+    commondir.write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    trusted_git_roots = (git_dir, common_dir)
+
+    first = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=trusted_git_roots,
+    )
+    assert first is not None
+    assert await first() is False
+
+    agent_selected_common = tmp_path / "agent-selected-common"
+    branch_ref = agent_selected_common / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("0" * 40 + "\n", encoding="utf-8")
+    commondir.write_text(f"{agent_selected_common}\n", encoding="utf-8")
+
+    second = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=trusted_git_roots,
+    )
+    assert second is not None
+    branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await second() is None
+
+
+@pytest.mark.unit
+async def test_trusted_probe_fails_open_after_commondir_is_rewritten(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A post-prime rewrite cannot leave the managed branch watch stale."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    commondir = git_dir / "commondir"
+    commondir.write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    probe = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=(git_dir, common_dir),
+    )
+    assert probe is not None
+    assert await probe() is False
+
+    agent_selected_common = tmp_path / "agent-selected-common"
+    branch_ref = agent_selected_common / "refs" / "heads" / "awf" / "ws"
+    branch_ref.parent.mkdir(parents=True)
+    branch_ref.write_text("0" * 40 + "\n", encoding="utf-8")
+    commondir.write_text(f"{agent_selected_common}\n", encoding="utf-8")
+
+    assert await probe() is None
+    branch_ref.write_text("1" * 40 + "\n", encoding="utf-8")
+    assert await probe() is None
+
+
+@pytest.mark.unit
+async def test_trusted_git_root_rejects_symlinked_commondir(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """The trusted check reads ``commondir`` without following a replacement."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    agent_selected_common = tmp_path / "agent-selected-common"
+    agent_selected_common.mkdir()
+    (git_dir / "commondir").symlink_to(agent_selected_common, target_is_directory=True)
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    probe = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=(git_dir, common_dir),
+    )
+
+    assert probe is not None
+    assert await probe() is None
+
+
+@pytest.mark.unit
 async def test_trusted_git_root_rejects_symlinked_managed_path_component(
     tmp_path: Path,
     worktree: Path,
@@ -323,6 +415,7 @@ async def test_primed_probe_never_walks_replaced_git_admin_directory(
     git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
     git_dir.mkdir(parents=True)
     (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
     (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
     _age_tree(worktree)
     _age_tree(tmp_path / "mirror.git")

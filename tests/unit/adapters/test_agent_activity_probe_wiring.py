@@ -77,6 +77,7 @@ async def test_adapter_passes_git_manager_roots_to_each_activity_probe(tmp_path:
     git_dir = common_dir / "worktrees" / "ws_probe"
     worktree.mkdir(parents=True)
     git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
     (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
     adapter = _ProbeAdapter(
         runner=runner,

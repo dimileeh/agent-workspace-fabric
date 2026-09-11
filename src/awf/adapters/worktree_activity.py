@@ -116,8 +116,10 @@ Design notes:
   workspace id and repository URL rather than from the agent-writable ``.git``
   marker, so a later adapter invocation cannot adopt a pointer or symlink an
   earlier invocation redirected elsewhere. The marker is checked without
-  following it; a mismatch leaves the probe in fail-open degraded mode and no
-  agent-selected external root is pinned or walked.
+  following it, and the private admin directory's ``commondir`` file must still
+  select GitManager's common directory during priming and every later scan. A
+  mismatch leaves the probe in fail-open degraded mode and no agent-selected
+  external root is pinned or walked.
 * The walk is bounded by an entry budget, and running out fails **open**: the
   probe reports ``None`` ("could not tell"), which the watchdog counts as
   activity. A truncated walk has no opinion about liveness, and any worktree
@@ -898,6 +900,12 @@ class WorktreeActivityProbe:
         git_dir = git_root.path
         common_root = layout.common_dir
         common_dir = common_root.path
+        if self._trusted_git_roots is not None:
+            # Git consults this agent-writable file for every ref operation. A
+            # rewrite after priming must make the scan indeterminate instead of
+            # leaving the branch-ref watch pinned to a common dir Git no longer
+            # uses.
+            _require_trusted_git_common_dir(git_root, common_dir)
         git_dir_watch = _WatchedPath(git_root, Path())
         git_dir_stat = _metadata_stat_at(git_dir_watch)
         if git_dir_stat is None:
@@ -1091,24 +1099,29 @@ def _metadata_stat_at(watched: _WatchedPath) -> os.stat_result | None:
             os.close(descriptor)
 
 
-def _read_head_at(git_root: _PinnedDirectory) -> str | None:
-    """Read HEAD directly beneath its pinned Git root without following it."""
+def _read_git_file_at(git_root: _PinnedDirectory, name: str) -> str:
+    """Read one file directly beneath a pinned Git root without following it."""
     descriptor = _open_pinned_directory(git_root)
     try:
+        file_descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=descriptor,
+        )
         try:
-            head_descriptor = os.open(
-                "HEAD",
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
-                dir_fd=descriptor,
-            )
-        except FileNotFoundError:
-            return None
-        try:
-            return os.read(head_descriptor, 4096).decode("utf-8", errors="replace")
+            return os.read(file_descriptor, 4096).decode("utf-8", errors="replace")
         finally:
-            os.close(head_descriptor)
+            os.close(file_descriptor)
     finally:
         os.close(descriptor)
+
+
+def _read_head_at(git_root: _PinnedDirectory) -> str | None:
+    """Read HEAD beneath its pinned root, preserving absence as complete."""
+    try:
+        return _read_git_file_at(git_root, "HEAD")
+    except FileNotFoundError:
+        return None
 
 
 def _matches_directory_identity(
@@ -1340,6 +1353,28 @@ def _require_trusted_git_marker(worktree_path: Path, expected_git_dir: Path) -> 
         )
 
 
+def _require_trusted_git_common_dir(
+    git_root: _PinnedDirectory,
+    expected_common_dir: Path,
+) -> None:
+    """Require the pinned admin dir's ``commondir`` to select GitManager's root."""
+    content = _read_git_file_at(git_root, _GIT_COMMON_DIR_FILE)
+    candidate = Path(content.partition("\n")[0].strip() or ".")
+    normalized_expected = _lexical_absolute(expected_common_dir)
+    matches_expected = (
+        candidate == normalized_expected
+        if candidate.is_absolute()
+        else all(part == os.pardir for part in candidate.parts)
+        and _lexical_absolute(git_root.path / candidate) == normalized_expected
+    )
+    if not matches_expected:
+        raise OSError(
+            errno.ESTALE,
+            "managed worktree commondir does not match GitManager metadata",
+            git_root.path / _GIT_COMMON_DIR_FILE,
+        )
+
+
 def _resolve_git_layout(
     worktree_path: Path,
     *,
@@ -1366,8 +1401,10 @@ def _resolve_git_layout(
             )
         _require_trusted_git_marker(worktree_path, trusted_git_dir)
         common_root = _pin_directory(trusted_common_dir)
+        git_root = _pin_directory_beneath(common_root, git_dir_relative)
+        _require_trusted_git_common_dir(git_root, trusted_common_dir)
         return _GitLayout(
-            git_dir=_pin_directory_beneath(common_root, git_dir_relative),
+            git_dir=git_root,
             common_dir=common_root,
         )
     git_dir = _resolve_linked_git_dir(worktree_path)
