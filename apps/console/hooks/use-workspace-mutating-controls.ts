@@ -69,6 +69,7 @@ export function useWorkspaceMutatingControls({
   reloadAvailableFeeds,
 }: UseWorkspaceMutatingControlsArgs) {
   const retryIdempotencyKeysRef = useRef(new Map<string, string>());
+  const operatorActionIdempotencyKeysRef = useRef(new Map<string, string>());
 
   const retrySelectedWorkspace = useCallback(async () => {
     const workspaceId = selectedId;
@@ -179,10 +180,18 @@ export function useWorkspaceMutatingControls({
       }
       setOperatorActionState({ status: "submitting", action });
       const epoch = authorizedFeedEpochRef.current;
+      const operatorActionIdentityScope = `${epoch}:${workspaceId}:${action}`;
+      const idempotencyKey =
+        operatorActionIdempotencyKeysRef.current.get(operatorActionIdentityScope) ??
+        operatorIdempotencyKey(action, workspaceId);
+      operatorActionIdempotencyKeysRef.current.set(
+        operatorActionIdentityScope,
+        idempotencyKey,
+      );
       const payload: WorkspaceOperatorRequest = {
         reason: operatorActionReason(action),
         workspace_version: workspaceVersion,
-        idempotency_key: operatorIdempotencyKey(action, workspaceId),
+        idempotency_key: idempotencyKey,
       };
       if (action === "revalidate") {
         payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
@@ -192,6 +201,17 @@ export function useWorkspaceMutatingControls({
         operatorActionPath(action, workspaceId),
         payload,
       );
+      if (
+        result.ok ||
+        (result.status !== 0 && result.status !== 502 && result.status !== 504)
+      ) {
+        if (
+          operatorActionIdempotencyKeysRef.current.get(operatorActionIdentityScope) ===
+          idempotencyKey
+        ) {
+          operatorActionIdempotencyKeysRef.current.delete(operatorActionIdentityScope);
+        }
+      }
       if (
         epoch === authorizedFeedEpochRef.current &&
         !result.ok &&

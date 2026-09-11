@@ -3284,6 +3284,34 @@ test("workspace retry reuses its identity after ambiguous client and gateway fai
   );
 });
 
+test("operator actions reuse their identity after ambiguous client and gateway failures", () => {
+  const mutating = dashboardSource.mutatingControls;
+  const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
+  assert.ok(operatorStart >= 0, "Expected runWorkspaceOperatorAction callback");
+  const operatorSource = mutating.slice(operatorStart);
+
+  assert.match(
+    mutating,
+    /const operatorActionIdempotencyKeysRef = useRef\(new Map<string, string>\(\)\);/,
+    "Expected operator-action identities to survive state updates and workspace selection changes",
+  );
+  assert.match(
+    operatorSource,
+    /const operatorActionIdentityScope = `\$\{epoch\}:\$\{workspaceId\}:\$\{action\}`;[\s\S]*?operatorActionIdempotencyKeysRef\.current\.get\(operatorActionIdentityScope\)[\s\S]*?operatorIdempotencyKey\(action, workspaceId\)[\s\S]*?operatorActionIdempotencyKeysRef\.current\.set\([\s\S]*?operatorActionIdentityScope,[\s\S]*?idempotencyKey,[\s\S]*?\)/,
+    "Expected an operator-action click to reuse an outstanding identity for the same auth epoch, workspace, and action",
+  );
+  assert.match(
+    operatorSource,
+    /idempotency_key: idempotencyKey/,
+    "Expected the retained operator-action identity in the BFF request",
+  );
+  assert.match(
+    operatorSource,
+    /result\.ok \|\|[\s\S]*?result\.status !== 0 &&[\s\S]*?result\.status !== 502 &&[\s\S]*?result\.status !== 504[\s\S]*?operatorActionIdempotencyKeysRef\.current\.delete\(operatorActionIdentityScope\)/,
+    "Expected client deadlines and gateway failures to retain the operator-action identity",
+  );
+});
+
 test("workspace retry is guarded by authorized feed epoch", () => {
   const mutating = dashboardSource.mutatingControls;
   const retryStart = mutating.indexOf("const retrySelectedWorkspace = useCallback");
