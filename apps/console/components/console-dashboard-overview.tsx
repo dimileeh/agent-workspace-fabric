@@ -1066,7 +1066,7 @@ export function WorkspaceList({
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
     if (
-      selectedId === null &&
+      selectedId !== previous.workspaceIds[0] &&
       Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
     ) {
       setPageStart(0);

@@ -1179,8 +1179,8 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
   );
 });
 
-for (const inspectorOpen of [false, true]) {
-test(`workspace list stays at the top during refresh reorders (inspectorOpen=${inspectorOpen})`, async ({
+for (const inspectorWorkspaceId of [null, "ws_perf_0001", "ws_perf_0002"] as const) {
+test(`workspace list stays at the top during refresh reorders (inspectorWorkspaceId=${inspectorWorkspaceId})`, async ({
   page,
 }) => {
   let firstPageRequests = 0;
@@ -1210,7 +1210,11 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
     resolvePageItems: (items, cursor) => {
       if (cursor !== null || revision === 0) return items;
       const updatedItems = items.map((item) => {
-        if (revision === 1 && inspectorOpen && item.workspace_id === "ws_perf_0001") {
+        if (
+          revision === 1 &&
+          inspectorWorkspaceId === "ws_perf_0001" &&
+          item.workspace_id === "ws_perf_0001"
+        ) {
           return { ...item, updated_at: "2026-09-10T11:59:30.500Z" };
         }
         if (revision === 1 && item.workspace_id === "ws_perf_0002") {
@@ -1243,8 +1247,8 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  if (inspectorOpen) {
-    await page.getByTestId("workspace-card-ws_perf_0001").click();
+  if (inspectorWorkspaceId) {
+    await page.getByTestId(`workspace-card-${inspectorWorkspaceId}`).click();
     await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
   }
   const list = page.getByTestId("workspace-list-scroll");
@@ -1269,8 +1273,11 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
   };
 
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0001");
+  await list.evaluate((element) => element.scrollTo({ top: 0 }));
   await expectTop();
-  const selectedOffsetBeforeRefresh = inspectorOpen ? await selectedViewportOffset() : null;
+  const selectedOffsetBeforeRefresh = inspectorWorkspaceId === "ws_perf_0001"
+    ? await selectedViewportOffset()
+    : null;
 
   revision = 1;
   const requestsBeforeBackgroundPoll = firstPageRequests;
@@ -1278,7 +1285,7 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
     .poll(() => firstPageRequests, { timeout: 7_000 })
     .toBeGreaterThan(requestsBeforeBackgroundPoll);
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0002");
-  if (inspectorOpen) {
+  if (inspectorWorkspaceId === "ws_perf_0001") {
     await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
     await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
     await expect.poll(selectedViewportOffset).toBeCloseTo(selectedOffsetBeforeRefresh ?? 0, 0);
@@ -1286,6 +1293,7 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
     return;
   }
   await expectTop();
+  if (inspectorWorkspaceId === "ws_perf_0002") return;
 
   await publishRefresh(2, "workspace-card-ws_perf_0001");
   await expectTop();
