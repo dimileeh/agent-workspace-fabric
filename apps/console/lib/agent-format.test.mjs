@@ -666,6 +666,28 @@ test("resolveWorkflowTiming rejects lifecycle stages that end before they start"
     finishedAt: null,
     durationSeconds: null,
   });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [
+        {
+          ...item.lifecycle[0],
+          started_at: "2026-09-06T12:02:00Z",
+          ended_at: "2026-09-06T12:01:00Z",
+        },
+        {
+          ...item.lifecycle[1],
+          ended_at: "2026-09-06T12:06:00Z",
+        },
+      ],
+      last_event: {
+        ...item.last_event,
+        occurred_at: "2026-09-06T12:06:00Z",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an inverted earlier stage must invalidate an otherwise trustworthy terminal boundary",
+  );
 });
 
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
