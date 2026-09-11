@@ -175,6 +175,7 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
     lifecycle: [
       stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
       stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
+      stage("validating", null, null, null),
     ],
   });
   const destroyed = overview("ws_local_destroyed", "destroyed", {
@@ -237,6 +238,18 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
       stage("running", "2026-09-06T12:02:00Z", "2026-09-06T12:05:00Z", 180),
     ],
   });
+  const completedStageWithoutStart = overview("ws_timing_missing_stage_start", "failed", {
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      {
+        stage: "running",
+        started_at: null,
+        ended_at: null,
+        duration_seconds: null,
+        status: "completed",
+      },
+    ],
+  });
   const retryAmbiguous = overview("ws_timing_retry", "destroyed", {
     recovery: {
       from_state: "failed",
@@ -268,6 +281,7 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
       missingDuration,
       mismatchedDuration,
       lifecycleGap,
+      completedStageWithoutStart,
       retryAmbiguous,
       zero,
     ],
@@ -276,7 +290,7 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
   await page.goto("/");
   await waitForConsoleReady(page);
 
-  for (const item of [missing, invalid, retryAmbiguous]) {
+  for (const item of [missing, invalid, completedStageWithoutStart, retryAmbiguous]) {
     const card = page.getByTestId(`workspace-card-${item.workspace_id}`);
     await expect(card.getByTestId(`workspace-card-finished-${item.workspace_id}`)).toContainText(
       "not recorded",
