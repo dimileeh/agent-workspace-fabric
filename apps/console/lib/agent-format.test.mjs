@@ -1041,6 +1041,45 @@ test("resolveWorkflowTiming orders latest lifecycle stages at full recorded prec
   });
 });
 
+test("resolveWorkflowTiming rejects sub-millisecond gaps between lifecycle stages", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "completed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00.000000Z",
+        ended_at: "2026-09-06T12:00:01.000100Z",
+        duration_seconds: 1,
+        status: "completed",
+      },
+      {
+        stage: "running",
+        started_at: "2026-09-06T12:00:01.000800Z",
+        ended_at: "2026-09-06T12:00:02.000800Z",
+        duration_seconds: 1,
+        status: "completed",
+      },
+      {
+        stage: "completed",
+        started_at: "2026-09-06T12:00:02.000800Z",
+        ended_at: "2026-09-06T12:00:02.000800Z",
+        duration_seconds: 0,
+        status: "completed",
+      },
+    ],
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: "2026-09-06T12:00:02.000800Z",
+    durationSeconds: null,
+  });
+});
+
 test("resolveWorkflowTiming truncates aggregate lifecycle duration once", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const item = {

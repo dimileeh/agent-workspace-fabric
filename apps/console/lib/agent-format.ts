@@ -469,7 +469,7 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   if (workflowStart?.stage.stage !== "requested") {
     return { finishedAt, finishedMs, durationSeconds: null };
   }
-  let previousEndMs: number | null = null;
+  let previousEndAt: string | null = null;
   for (const entry of durationStages) {
     const stageDuration = recordedDurationSeconds(entry.stage.duration_seconds);
     const intervalDurationSeconds =
@@ -486,13 +486,17 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       entry.endedMs > finishedMs ||
       stageDuration == null ||
       stageDuration !== intervalDurationSeconds ||
-      (previousEndMs != null && previousEndMs !== entry.startedMs)
+      (previousEndAt != null &&
+        compareRecordedInstants(previousEndAt, entry.startedAt) !== 0)
     ) {
       return { finishedAt, finishedMs, durationSeconds: null };
     }
-    previousEndMs = entry.endedMs;
+    previousEndAt = entry.stage.ended_at;
   }
-  if (previousEndMs !== finishedMs) {
+  if (
+    previousEndAt == null ||
+    compareRecordedInstants(previousEndAt, finishedAt) !== 0
+  ) {
     return { finishedAt, finishedMs, durationSeconds: null };
   }
   const durationSeconds = recordedIntervalDurationSeconds(
