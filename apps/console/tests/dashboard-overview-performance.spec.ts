@@ -261,11 +261,17 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // The remaining assertions cover bounded-window refresh behavior. Dispatch
+  // setup clicks directly so Playwright does not scroll a boundary target and
+  // change the current virtual page before the next explicit navigation.
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
   await expect.poll(() => overviewRequests).toEqual([null, "100", "200"]);
   await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3} loaded`, { exact: true })).toBeVisible();
-  await page.getByTestId("workspace-card-ws_perf_0101").click();
-  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await page.getByRole("button", { name: "Open workspace details for Performance workspace 101" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector).toHaveClass(/translate-x-0/);
   await page.getByRole("button", { name: "Next workspace results" }).click();
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
   const scrollTopBeforeRefresh = await list.evaluate((element) => element.scrollTop);
@@ -278,6 +284,7 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
   expect(await list.evaluate((element) => element.scrollTop)).toBe(scrollTopBeforeRefresh);
   await page.getByRole("button", { name: "Close inspector" }).click();
+  await expect(inspector).toHaveClass(/translate-x-full/);
 
   const filters = page.getByRole("button", { name: "Filters" });
   await filters.click();
@@ -1124,7 +1131,10 @@ test("refresh preserves the visible workspace when membership shifts", async ({ 
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // This regression covers refresh anchoring, not near-bottom loading. Avoid
+  // letting Playwright's actionability scroll move the virtual page as setup.
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
     .toBeVisible();
   await page.getByRole("button", { name: "Next workspace results" }).click();
