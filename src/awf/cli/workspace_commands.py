@@ -408,19 +408,18 @@ def workspace_retry(
         "--provider-readiness-override-reason",
         help="Audit reason for --provider-readiness-override.",
     ),
-    idempotency_key: str | None = typer.Option(
-        None,
-        "--idempotency-key",
-        help="Optional replay key for safely repeating the same retry request.",
-    ),
+    idempotency_key: str | None = _control_idempotency_key_option(),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Retry a failed or cancelled workspace as a fresh attempt."""
-    headers = _api_token_headers(api_token)
-    if idempotency_key:
-        headers["Idempotency-Key"] = idempotency_key
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=None,
+        action="retry",
+    )
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/retry",

@@ -812,6 +812,45 @@ class TestWorkspaceRetry:
             "POST",
             "http://localhost:8000/v1/workspaces/ws_old/retry",
         )
+        generated_key = mock.call_args.kwargs["headers"]["Idempotency-Key"]
+        assert re.fullmatch(r"awf-cli-retry-[0-9a-f]{32}", generated_key)
+        assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
+
+    @pytest.mark.unit
+    def test_retry_preserves_explicit_idempotency_key_and_api_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Send explicit retry keys and API tokens without replacement."""
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "source_workspace_id": "ws_old",
+                "new_workspace_id": "ws_new",
+                "operation_id": "op_retry",
+                "status": "requested",
+                "attempt_number": 2,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "retry",
+                    "ws_old",
+                    "--idempotency-key",
+                    "retry-cli-key",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer env-secret",
+            "Idempotency-Key": "retry-cli-key",
+        }
+        assert "Generated Idempotency-Key" not in result.stderr
 
     @pytest.mark.unit
     def test_retry_provider_readiness_override_flag_is_sent(self) -> None:
