@@ -441,3 +441,47 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
   );
   assert.equal(distinctFinishedAt({}), null);
 });
+
+test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const requested = {
+    stage: "requested",
+    started_at: "2026-09-06T12:00:00Z",
+    ended_at: "2026-09-06T12:10:00Z",
+    duration_seconds: 600,
+    status: "completed",
+  };
+  const running = {
+    stage: "running",
+    started_at: "2026-09-06T12:10:00Z",
+    ended_at: "2026-09-06T12:20:00Z",
+    duration_seconds: 600,
+    status: "completed",
+  };
+  const validating = {
+    stage: "validating",
+    started_at: "2026-09-06T12:10:00Z",
+    ended_at: "2026-09-06T12:30:00Z",
+    duration_seconds: 1200,
+    status: "completed",
+  };
+  const timingFor = (latestStages) =>
+    resolveWorkflowTiming({
+      status: "failed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle: [requested, ...latestStages],
+    });
+
+  const runningFirst = timingFor([running, validating]);
+  const validatingFirst = timingFor([validating, running]);
+
+  assert.deepEqual(
+    runningFirst,
+    validatingFirst,
+    "ambiguous fallback timing must not depend on lifecycle array order",
+  );
+  assert.deepEqual(runningFirst, { finishedAt: null, durationSeconds: null });
+});

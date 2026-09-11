@@ -260,13 +260,14 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       entered.push({ stage, startedAt: stage.started_at, startedMs, endedMs });
     }
   }
-  const latestEntered = entered.reduce<TimedLifecycleStage | null>(
-    (latest, entry) => (latest == null || entry.startedMs > latest.startedMs ? entry : latest),
-    null,
+  const latestStartedMs = Math.max(...entered.map((entry) => entry.startedMs));
+  const latestCandidates = entered.filter(
+    (entry) => entry.startedMs === latestStartedMs,
   );
-  if (latestEntered == null) {
+  if (latestCandidates.length !== 1) {
     return null;
   }
+  const [latestEntered] = latestCandidates;
 
   let finishedAt = latestEntered.stage.ended_at;
   let finishedMs = latestEntered.endedMs;
