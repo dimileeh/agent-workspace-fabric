@@ -441,6 +441,22 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
   );
   assert.equal(
     distinctFinishedAt({
+      workflow_finished_at: null,
+      finished_at: "not-a-timestamp",
+    }),
+    null,
+    "malformed finished_at must not bypass a missing workflow finish",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "also-not-a-timestamp",
+      finished_at: "not-a-timestamp",
+    }),
+    null,
+    "malformed finished_at must not bypass a rejected workflow finish",
+  );
+  assert.equal(
+    distinctFinishedAt({
       workflow_finished_at: "2026-09-06T17:00:00Z",
       finished_at: "2026-09-06T16:00:00Z",
     }),

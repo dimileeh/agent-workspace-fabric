@@ -189,6 +189,7 @@ function sameRecordedInstant(left: string, right: string): boolean {
  * Separate "Finished" timestamp. `finished_at` is already the documented
  * fallback for Workflow finished, so omit it when that fact would repeat the
  * same instant (cloud rows that only send `finished_at`, or equivalent ISO forms).
+ * Also omit malformed values when no valid workflow finish exists.
  */
 export function distinctFinishedAt(workspace: WorkflowTimingFields): string | null {
   const finishedAt = workspace.finished_at;
@@ -196,7 +197,10 @@ export function distinctFinishedAt(workspace: WorkflowTimingFields): string | nu
     return null;
   }
   const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);
-  if (workflowFinishedAt && sameRecordedInstant(finishedAt, workflowFinishedAt)) {
+  if (!workflowFinishedAt) {
+    return null;
+  }
+  if (sameRecordedInstant(finishedAt, workflowFinishedAt)) {
     return null;
   }
   return finishedAt;
