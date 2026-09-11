@@ -193,7 +193,7 @@ function sameRecordedInstant(left: string, right: string): boolean {
  */
 export function distinctFinishedAt(workspace: WorkflowTimingFields): string | null {
   const finishedAt = workspace.finished_at;
-  if (!finishedAt) {
+  if (recordedMilliseconds(finishedAt) == null) {
     return null;
   }
   const workflowFinishedAt = resolveWorkflowFinishedAt(workspace);

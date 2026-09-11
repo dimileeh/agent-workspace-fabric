@@ -437,7 +437,8 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
       workflow_finished_at: "2026-09-06T17:00:00Z",
       finished_at: "not-a-timestamp",
     }),
-    "not-a-timestamp",
+    null,
+    "malformed finished_at must not render beside a valid workflow finish",
   );
   assert.equal(
     distinctFinishedAt({
