@@ -379,6 +379,20 @@ test("resolveWorkflowFinishedAt falls back to finished_at", async () => {
   );
   assert.equal(
     resolveWorkflowFinishedAt({
+      workflow_finished_at: "not-a-timestamp",
+      finished_at: "2026-09-06T16:30:00Z",
+    }),
+    "2026-09-06T16:30:00Z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: "not-a-timestamp",
+      finished_at: "also-not-a-timestamp",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
       workflow_finished_at: null,
       finished_at: null,
     }),
@@ -431,6 +445,14 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
       finished_at: "2026-09-06T16:00:00Z",
     }),
     "2026-09-06T16:00:00Z",
+  );
+  assert.equal(
+    distinctFinishedAt({
+      workflow_finished_at: "not-a-timestamp",
+      finished_at: "2026-09-06T16:00:00Z",
+    }),
+    null,
+    "a valid finished_at fallback must not render under both finish labels",
   );
   assert.equal(
     distinctFinishedAt({
@@ -495,6 +517,51 @@ test("resolveWorkflowTiming preserves duration when an unused finished_at differ
   assert.deepEqual(
     resolveWorkflowTiming({ ...item, finished_at: "not-a-timestamp" }),
     { finishedAt: "2026-09-06T12:12:00Z", durationSeconds: 600 },
+  );
+});
+
+test("resolveWorkflowTiming skips malformed explicit finish candidates", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: "not-a-timestamp",
+      finished_at: "2026-09-06T12:12:00Z",
+      duration_seconds: 600,
+      lifecycle: [],
+    }),
+    { finishedAt: "2026-09-06T12:12:00Z", durationSeconds: 600 },
+    "a malformed workflow_finished_at must not hide a valid finished_at",
+  );
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: "not-a-timestamp",
+      finished_at: "also-not-a-timestamp",
+      duration_seconds: null,
+      lifecycle: [
+        {
+          stage: "running",
+          started_at: "2026-09-06T12:00:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 600,
+          status: "completed",
+        },
+        {
+          stage: "completed",
+          started_at: "2026-09-06T12:10:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+      ],
+    }),
+    { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: 600 },
+    "malformed explicit fields must not hide trustworthy lifecycle timing",
   );
 });
 

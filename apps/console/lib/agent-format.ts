@@ -157,14 +157,19 @@ type WorkflowTimingFields = {
 };
 
 /**
- * Workflow completion timestamp: prefer explicit workflow_finished_at, then the
- * documented workflow timing field finished_at. Native runtime finish stays
- * separate via native_runtime_finished_at.
+ * Valid workflow completion timestamp: prefer explicit workflow_finished_at,
+ * then the documented workflow timing field finished_at. Native runtime finish
+ * stays separate via native_runtime_finished_at.
  */
 export function resolveWorkflowFinishedAt(
   workspace: WorkflowTimingFields,
 ): string | null {
-  return workspace.workflow_finished_at ?? workspace.finished_at ?? null;
+  for (const candidate of [workspace.workflow_finished_at, workspace.finished_at]) {
+    if (candidate != null && recordedMilliseconds(candidate) != null) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 /**
@@ -352,12 +357,6 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
   }
 
   const explicitFinishedMs = recordedMilliseconds(resolvedFinishedAt);
-  if (resolvedFinishedAt != null && explicitFinishedMs == null) {
-    return {
-      finishedAt: null,
-      durationSeconds: recordedDurationSeconds(item.duration_seconds),
-    };
-  }
 
   const lifecycleTiming = lifecycleWorkflowTiming(item);
   const finishedAt = resolvedFinishedAt ?? lifecycleTiming?.finishedAt ?? null;
