@@ -711,6 +711,7 @@ class TestWorkspaceDirectRoutes:
         assert item.title == "overview direct"
         assert item.active_operation is None
         assert item.last_event is not None
+        assert item.latest_state_change is None
         assert response.next_cursor is None
         assert response.has_more is False
         assert response.limit == 50
@@ -746,6 +747,16 @@ class TestWorkspaceDirectRoutes:
             payload=None,
             occurred_at=base,
         )
+        state_changed_event = SimpleNamespace(
+            id="evt_state_changed",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.requested.value,
+            new_state=WorkspaceStatus.running.value,
+            reason_code="STARTED",
+            payload=None,
+            occurred_at=base + timedelta(seconds=4),
+        )
         latest_event = SimpleNamespace(
             id="evt_latest",
             workspace_id=workspace_id,
@@ -756,7 +767,7 @@ class TestWorkspaceDirectRoutes:
             payload={"source": "unit"},
             occurred_at=base + timedelta(seconds=5),
         )
-        events = SinglePassEvents([latest_event, created_event])
+        events = SinglePassEvents([latest_event, created_event, state_changed_event])
         workspace = SimpleNamespace(
             id=workspace_id,
             task_external_id=None,
@@ -771,7 +782,7 @@ class TestWorkspaceDirectRoutes:
             task_policy={},
             events=events,
             operations=[],
-            status=WorkspaceStatus.requested.value,
+            status=WorkspaceStatus.running.value,
             pr_url="https://github.com/example/app/pull/7",
             pr_number=7,
             failure_reason=None,
@@ -801,6 +812,9 @@ class TestWorkspaceDirectRoutes:
         item = response.items[0]
         assert item.last_event is not None
         assert item.last_event.event_type == "workspace.test_marker"
+        assert item.latest_state_change is not None
+        assert item.latest_state_change.event_type == "workspace.state_changed"
+        assert item.latest_state_change.new_state == WorkspaceStatus.running.value
         assert events.iterations == 1
         assert item.pr_number == 7
         assert item.pr_url == "https://github.com/example/app/pull/7"

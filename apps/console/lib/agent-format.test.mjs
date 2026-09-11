@@ -705,6 +705,12 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
     new_state: newState,
     occurred_at: occurredAt,
   });
+  const terminalRuntimeReleased = {
+    event_type: "workspace.terminal_runtime_released",
+    old_state: null,
+    new_state: null,
+    occurred_at: "2026-09-06T12:06:00Z",
+  };
 
   assert.deepEqual(resolveWorkflowTiming({ ...item, last_event: null }), {
     finishedAt: null,
@@ -746,6 +752,45 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       last_event: stateChanged("running", "failed", "2026-09-06T12:05:00Z"),
     }),
     { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      latest_state_change: stateChanged(
+        "running",
+        "failed",
+        "2026-09-06T12:05:00Z",
+      ),
+      last_event: terminalRuntimeReleased,
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+    "terminal cleanup must not hide an earlier direct terminal transition",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "cancelled",
+      latest_state_change: stateChanged(
+        "running",
+        "cancelled",
+        "2026-09-06T12:05:00Z",
+      ),
+      last_event: terminalRuntimeReleased,
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      latest_state_change: stateChanged(
+        "blocked",
+        "failed",
+        "2026-09-06T12:05:00Z",
+      ),
+      last_event: terminalRuntimeReleased,
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a cleanup event must not bypass the direct-transition requirement",
   );
   assert.deepEqual(
     resolveWorkflowTiming({

@@ -387,6 +387,14 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ordered_events=ordered_events,
     )
     latest_event = ordered_events[-1] if ordered_events else None
+    latest_state_change = next(
+        (
+            event
+            for event in reversed(ordered_events)
+            if event.event_type == "workspace.state_changed"
+        ),
+        None,
+    )
     active_operation = next(
         (
             op
@@ -435,6 +443,11 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         last_event=(
             WorkspaceEventResponse.model_validate(latest_event)
             if latest_event is not None
+            else None
+        ),
+        latest_state_change=(
+            WorkspaceEventResponse.model_validate(latest_state_change)
+            if latest_state_change is not None
             else None
         ),
         pr_url=ws.pr_url,
