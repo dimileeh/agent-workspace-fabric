@@ -562,6 +562,26 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     finishedAt: "2026-09-06T12:20:00Z",
     durationSeconds: null,
   });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      recovery: { started_at: "2026-09-06T12:21:00Z" },
+      latest_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "destroying",
+        new_state: "destroyed",
+        occurred_at: "2026-09-06T12:30:00Z",
+      },
+      latest_workflow_terminal_state_change: {
+        ...terminalEvent,
+        old_state: "running",
+        new_state: "failed",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "destroy after remonitor must not reuse the pre-remonitor failed event",
+  );
 
   for (const [label, overrides] of [
     [

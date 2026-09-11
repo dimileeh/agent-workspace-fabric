@@ -519,6 +519,60 @@ def test_recovery_summary_is_none_without_reverse_transition() -> None:
 
 
 @pytest.mark.unit
+def test_recovery_summary_uses_failed_remonitor_reset_as_latest_boundary() -> None:
+    base = datetime(2026, 4, 27, 20, 15, tzinfo=UTC)
+    failed_at = base + timedelta(seconds=30)
+    remonitor_at = base + timedelta(seconds=60)
+    remonitor_payload: dict[str, object] = {
+        "reason": "resume the PR monitor",
+        "state_reset": {
+            "from": WorkspaceStatus.failed.value,
+            "to": WorkspaceStatus.monitoring_pr.value,
+        },
+    }
+    workspace = _workspace_for_recovery(
+        status=WorkspaceStatus.destroyed,
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_earlier_recovery",
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="STALE_TARGET_ADVANCED",
+            ),
+            _recovery_event(
+                event_id="evt_failed",
+                event_type="workspace.state_changed",
+                occurred_at=failed_at,
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.failed.value,
+                reason_code="AGENT_FAILED",
+            ),
+            _recovery_event(
+                event_id="evt_remonitor",
+                event_type="workspace.remonitor_requested",
+                occurred_at=remonitor_at,
+                old_state=WorkspaceStatus.failed.value,
+                new_state=WorkspaceStatus.monitoring_pr.value,
+                reason_code="OPERATOR_REMONITOR",
+                payload=remonitor_payload,
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.from_state == WorkspaceStatus.failed.value
+    assert summary.to_state == WorkspaceStatus.monitoring_pr.value
+    assert summary.started_at == remonitor_at
+    assert summary.reason_code == "resume the PR monitor"
+    assert summary.payload == remonitor_payload
+
+
+@pytest.mark.unit
 def test_recovery_summary_pairs_reverse_transition_with_monitor_event_payload() -> None:
     base = datetime(2026, 4, 27, 20, 30, tzinfo=UTC)
     reverse_at = base + timedelta(seconds=40)
