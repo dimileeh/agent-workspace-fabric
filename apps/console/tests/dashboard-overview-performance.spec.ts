@@ -1090,15 +1090,23 @@ test("refresh preserves the visible workspace when membership shifts", async ({ 
   expect(afterRemoval.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 
+  // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hWaKU: if the
+  // visible row disappears, keep the fallback where it was on screen.
+  const fallback = page.getByTestId("workspace-card-ws_perf_0151");
+  const fallbackViewportDelta = () => fallback.evaluate((element) => {
+    const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
+    if (!listElement) throw new Error("workspace list is missing");
+    const viewportTop = listElement.querySelector<HTMLElement>(":scope > .sticky")
+      ?.getBoundingClientRect().bottom ?? listElement.getBoundingClientRect().top;
+    return element.getBoundingClientRect().top - viewportTop;
+  });
+  const fallbackDeltaBeforeAnchorRemoval = await fallbackViewportDelta();
   removeVisibleAnchor = true;
   const requestsBeforeAnchorRemoval = firstPageRequests;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect.poll(() => firstPageRequests).toBeGreaterThan(requestsBeforeAnchorRemoval);
   await expect(page.getByTestId("workspace-card-ws_perf_0150")).toHaveCount(0);
-  await expect.poll(async () => (await visibleAnchor()).id)
-    .toBe("workspace-card-ws_perf_0151");
-  const afterAnchorRemoval = await visibleAnchor();
-  expect(afterAnchorRemoval.offsetRatio).toBeCloseTo(beforeRefresh.offsetRatio ?? 0, 1);
+  await expect.poll(fallbackViewportDelta).toBeCloseTo(fallbackDeltaBeforeAnchorRemoval, 1);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE - 1);
 });
 

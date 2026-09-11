@@ -1041,6 +1041,7 @@ export function WorkspaceList({
     );
     const workspaceId = previous.workspaceIds[previousAnchorIndex];
     let anchorIndex = workspaceIds.indexOf(workspaceId);
+    let fallbackViewportDelta: number | null = null;
     if (anchorIndex < 0) {
       const survivingWorkspaceIds = new Set(workspaceIds);
       const fallbackWorkspaceId =
@@ -1053,6 +1054,9 @@ export function WorkspaceList({
           .find((candidate) => survivingWorkspaceIds.has(candidate));
       if (!fallbackWorkspaceId) return;
       anchorIndex = workspaceIds.indexOf(fallbackWorkspaceId);
+      const previousFallbackIndex = previous.workspaceIds.indexOf(fallbackWorkspaceId);
+      fallbackViewportDelta =
+        previous.rowOffsets[previousFallbackIndex] - scrollContainer.scrollTop;
     }
     const previousAnchorHeight =
       previous.rowOffsets[previousAnchorIndex + 1] -
@@ -1069,7 +1073,11 @@ export function WorkspaceList({
     );
     setPageStart(anchorWindowStart);
     setWindowStart(anchorWindowStart);
-    scrollWithoutLoading(rowOffsets[anchorIndex] + offsetRatio * anchorHeight);
+    scrollWithoutLoading(
+      fallbackViewportDelta === null
+        ? rowOffsets[anchorIndex] + offsetRatio * anchorHeight
+        : rowOffsets[anchorIndex] - fallbackViewportDelta,
+    );
   }, [items, maxWindowStart, rowOffsets, scrollWithoutLoading, selectedId]);
 
   useEffect(() => {
