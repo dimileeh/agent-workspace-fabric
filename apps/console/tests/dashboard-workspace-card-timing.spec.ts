@@ -233,6 +233,85 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
   }
 });
 
+test("destroying cards preserve terminal timing only after a workflow terminal boundary", async ({
+  page,
+}) => {
+  const postTerminal = overview("ws_destroying_post_terminal", "destroying", {
+    latest_workflow_terminal_state_change: stateChangedEvent(
+      "ws_destroying_post_terminal",
+      "running",
+      "failed",
+      "2026-09-06T12:08:00Z",
+    ),
+    latest_state_change: stateChangedEvent(
+      "ws_destroying_post_terminal",
+      "failed",
+      "destroying",
+      "2026-09-06T12:20:00Z",
+    ),
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
+    ],
+  });
+  const directDestroy = overview("ws_destroying_direct", "destroying", {
+    latest_state_change: stateChangedEvent(
+      "ws_destroying_direct",
+      "ready",
+      "destroying",
+      "2026-09-06T12:02:00Z",
+    ),
+    last_activity_at: "2026-09-06T12:02:00Z",
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
+    ],
+  });
+  await mockAwfConsoleApi(page, { overviewItems: [postTerminal, directDestroy] });
+  await page.route(
+    `**/api/awf/workspaces/${postTerminal.workspace_id}`,
+    async (route) => {
+      await fulfillJson(route, {
+        ...postTerminal,
+        id: postTerminal.workspace_id,
+        version: 1,
+      });
+    },
+  );
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const terminalCard = page.getByTestId(`workspace-card-${postTerminal.workspace_id}`);
+  const terminalTiming = terminalCard.getByTestId(
+    `workspace-timing-${postTerminal.workspace_id}`,
+  );
+  await expect(terminalTiming).toContainText("Finished");
+  await expect(terminalTiming).toContainText("Duration");
+  await expect(terminalTiming).not.toContainText("Last activity");
+  await expect(
+    terminalCard.getByTestId(`workspace-finished-${postTerminal.workspace_id}`),
+  ).toContainText(formatDateTime("2026-09-06T12:08:00Z"));
+  await expect(
+    terminalCard.getByTestId(`workspace-duration-${postTerminal.workspace_id}`),
+  ).toContainText("8m 0s");
+
+  const directTiming = page.getByTestId(`workspace-timing-${directDestroy.workspace_id}`);
+  await expect(directTiming).toContainText("Last activity");
+  await expect(directTiming).not.toContainText("Finished");
+  await expect(directTiming).not.toContainText("Duration");
+
+  await terminalCard.click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await expect(
+    inspector.getByText("Workflow finished", { exact: true }).locator(".."),
+  ).toContainText(formatDateTime("2026-09-06T12:08:00Z"));
+  await expect(inspector.getByText("Duration", { exact: true }).locator("..")).toContainText(
+    "8m 0s",
+  );
+});
+
 test("local terminal inspector uses the card lifecycle timing", async ({ page }) => {
   const completed = overview("ws_local_inspector_timing", "completed", {
     lifecycle: [
