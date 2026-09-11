@@ -535,7 +535,9 @@ export function useConsoleOverviewLoader({
         // immutable keyset cursor. Before advancing the retained continuation,
         // replay the already-loaded range until its prior boundary row appears.
         // Routine polling stays bounded; this catch-up runs only when the
-        // operator next requests history after a filtered refresh.
+        // operator next requests history. Advanced filtered continuations
+        // remain armed so a change after the latest poll cannot reuse a stale
+        // cursor before another poll observes page one.
         const existingWorkspaceIds = new Set(
           overviewItemsRef.current.map((item) => item.workspace_id),
         );
@@ -700,17 +702,24 @@ export function useConsoleOverviewLoader({
           page.has_more &&
           nextCursor !== null &&
           (nextCursor === requestedCursor || fetchedCursors.has(nextCursor));
+        const firstCursor =
+          paginationForContinuation?.firstCursor ?? capturedPagination?.firstCursor ?? null;
+        const continuationCursor = page.has_more && !repeatedCursor ? nextCursor : null;
+        const boundaryWorkspaceId =
+          pageItems.at(-1)?.workspace_id ??
+          paginationForContinuation?.boundaryWorkspaceId ??
+          capturedPagination?.boundaryWorkspaceId ??
+          null;
         overviewPaginationRef.current = {
           query: capturedQuery,
-          firstCursor:
-            paginationForContinuation?.firstCursor ?? capturedPagination?.firstCursor ?? null,
-          nextCursor: page.has_more && !repeatedCursor ? nextCursor : null,
-          boundaryWorkspaceId:
-            pageItems.at(-1)?.workspace_id ??
-            paginationForContinuation?.boundaryWorkspaceId ??
-            capturedPagination?.boundaryWorkspaceId ??
-            null,
-          needsMembershipBackfill: false,
+          firstCursor,
+          nextCursor: continuationCursor,
+          boundaryWorkspaceId,
+          needsMembershipBackfill:
+            filters.status !== undefined &&
+            continuationCursor !== null &&
+            continuationCursor !== firstCursor &&
+            boundaryWorkspaceId !== null,
           complete: !page.has_more,
           fetchedCursors,
         };

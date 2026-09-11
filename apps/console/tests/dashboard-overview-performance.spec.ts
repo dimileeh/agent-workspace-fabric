@@ -554,15 +554,15 @@ test("filtered continuation backfills unchanged first-page membership", async ({
   await page.getByRole("button", { name: "Load more workspaces" }).click();
   await expect.poll(() => completedRequests).toContain("completed-page-2");
 
+  // Membership can change after the latest page-one poll. The continuation
+  // itself must be armed to replay the loaded range; waiting for another poll
+  // would leave a window where the stale page-three cursor skips this row.
   membershipGrew = true;
   const firstPageRequests = completedRequests.filter((cursor) => cursor === null).length;
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect.poll(
-    () => completedRequests.filter((cursor) => cursor === null).length,
-  ).toBeGreaterThan(firstPageRequests);
   await page.getByRole("button", { name: "Load more workspaces" }).click();
 
   await expect.poll(() => completedRequests).toContain("shifted-completed-page-3");
+  expect(completedRequests.filter((cursor) => cursor === null)).toHaveLength(firstPageRequests);
   await expect(page.getByText(new RegExp(`of ${PAGE_SIZE * 3} loaded$`))).toBeVisible();
   await page.getByPlaceholder("Search workspaces").fill("Newly matching off-page workspace");
   await expect(page.getByTestId("workspace-card-ws_perf_0777")).toBeVisible();
