@@ -572,6 +572,64 @@ test("resolveWorkflowTiming skips malformed explicit finish candidates", async (
   );
 });
 
+test("resolveWorkflowTiming rejects non-RFC and impossible recorded timestamps", async () => {
+  const { resolveWorkflowFinishedAt, resolveWorkflowTiming } =
+    await import("./agent-format.ts");
+
+  for (const invalidTimestamp of [
+    "09/07/2026",
+    "2026-02-30T12:00:00Z",
+    "2026-09-07T12:00:00+24:00",
+    "2026-09-07T12:00:00+00:60",
+  ]) {
+    assert.equal(
+      resolveWorkflowFinishedAt({ workflow_finished_at: invalidTimestamp }),
+      null,
+      `${invalidTimestamp} must not be accepted as an explicit finish`,
+    );
+  }
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: "2026-09-07t12:00:00z",
+    }),
+    "2026-09-07t12:00:00z",
+  );
+  assert.equal(
+    resolveWorkflowFinishedAt({
+      workflow_finished_at: "2026-09-07T12:00:00+02:30",
+    }),
+    "2026-09-07T12:00:00+02:30",
+  );
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle: [
+        {
+          stage: "requested",
+          started_at: "2026-02-30T11:00:00Z",
+          ended_at: "2026-02-30T12:00:00Z",
+          duration_seconds: 3600,
+          status: "completed",
+        },
+        {
+          stage: "completed",
+          started_at: "2026-02-30T12:00:00Z",
+          ended_at: "2026-02-30T12:00:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+      ],
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an impossible lifecycle boundary must not fabricate a finish or duration",
+  );
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {

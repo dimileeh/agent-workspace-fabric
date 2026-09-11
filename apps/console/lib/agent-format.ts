@@ -221,8 +221,40 @@ type TimedLifecycleStage = {
   endedMs: number | null;
 };
 
+const RFC3339_DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
+
 function recordedMilliseconds(value: string | null | undefined): number | null {
   if (!value) {
+    return null;
+  }
+  const match = RFC3339_DATE_TIME.exec(value);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const dateTime = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    dateTime.getUTCFullYear() !== year ||
+    dateTime.getUTCMonth() !== month - 1 ||
+    dateTime.getUTCDate() !== day ||
+    dateTime.getUTCHours() !== hour ||
+    dateTime.getUTCMinutes() !== minute ||
+    dateTime.getUTCSeconds() !== second
+  ) {
+    return null;
+  }
+  const timezone = match[8];
+  if (
+    timezone !== "Z" &&
+    timezone !== "z" &&
+    (Number(match[9]) > 23 || Number(match[10]) > 59)
+  ) {
     return null;
   }
   const milliseconds = Date.parse(value);
