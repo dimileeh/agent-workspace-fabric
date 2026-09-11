@@ -853,6 +853,51 @@ test("selecting a visible workspace keeps its rail position", async ({ page }) =
     .toBe(scrollTopBeforeSelection);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hYbpe: a visible row
+// from the next page must not replace preceding viewport rows with a spacer.
+test("selecting a visible workspace keeps a boundary viewport covered", async ({ page }) => {
+  await page.setViewportSize({ width: 1_000, height: 720 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+
+  const list = page.getByTestId("workspace-list-scroll");
+  const firstWindowHeight = await list.locator('[data-testid^="workspace-card-"]').evaluateAll(
+    (cards) => cards.reduce((height, card) => height + card.getBoundingClientRect().height, 0),
+  );
+  await list.evaluate((element, top) => element.scrollTo({ top }), firstWindowHeight - 200);
+
+  const preceding = page.getByTestId("workspace-card-ws_perf_0100");
+  const selected = page.getByTestId("workspace-card-ws_perf_0101");
+  await expect(preceding).toBeVisible();
+  await expect(selected).toBeVisible();
+
+  await selected.click();
+
+  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  const geometry = await list.evaluate((element) => {
+    const rows = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    );
+    const header = element.querySelector<HTMLElement>(":scope > .sticky");
+    const viewport = element.getBoundingClientRect();
+    return {
+      firstRowTop: rows.at(0)?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY,
+      lastRowBottom: rows.at(-1)?.getBoundingClientRect().bottom ?? Number.NEGATIVE_INFINITY,
+      viewportTop: header?.getBoundingClientRect().bottom ?? viewport.top,
+      viewportBottom: viewport.bottom,
+    };
+  });
+  expect(geometry.firstRowTop).toBeLessThanOrEqual(geometry.viewportTop + 1);
+  expect(geometry.lastRowBottom).toBeGreaterThanOrEqual(geometry.viewportBottom - 1);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+});
+
 test("virtualization remeasures variable rows after filtering and viewport resize", async ({
   page,
 }) => {
