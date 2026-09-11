@@ -3304,7 +3304,7 @@ test("workspace retry reuses its identity after ambiguous client and gateway fai
   );
 });
 
-test("operator actions reuse their identity after ambiguous client and gateway failures", () => {
+test("operator actions reuse their original request after ambiguous client and gateway failures", () => {
   const mutating = dashboardSource.mutatingControls;
   const operatorStart = mutating.indexOf("const runWorkspaceOperatorAction = useCallback");
   assert.ok(operatorStart >= 0, "Expected runWorkspaceOperatorAction callback");
@@ -3312,23 +3312,23 @@ test("operator actions reuse their identity after ambiguous client and gateway f
 
   assert.match(
     mutating,
-    /const operatorActionIdempotencyKeysRef = useRef\(new Map<string, string>\(\)\);/,
-    "Expected operator-action identities to survive state updates and workspace selection changes",
+    /const operatorActionRequestsRef = useRef\(\s*new Map<string, WorkspaceOperatorRequest>\(\),?\s*\);/,
+    "Expected complete operator-action requests to survive state updates and workspace selection changes",
   );
   assert.match(
     operatorSource,
-    /const operatorActionIdentityScope = `\$\{epoch\}:\$\{workspaceId\}:\$\{action\}`;[\s\S]*?operatorActionIdempotencyKeysRef\.current\.get\(operatorActionIdentityScope\)[\s\S]*?operatorIdempotencyKey\(action, workspaceId\)[\s\S]*?operatorActionIdempotencyKeysRef\.current\.set\([\s\S]*?operatorActionIdentityScope,[\s\S]*?idempotencyKey,[\s\S]*?\)/,
-    "Expected an operator-action click to reuse an outstanding identity for the same auth epoch, workspace, and action",
+    /const operatorActionIdentityScope = `\$\{epoch\}:\$\{workspaceId\}:\$\{action\}`;[\s\S]*?const retainedPayload = operatorActionRequestsRef\.current\.get\([\s\S]*?operatorActionIdentityScope,[\s\S]*?\);[\s\S]*?const payload: WorkspaceOperatorRequest = retainedPayload \?\? \{[\s\S]*?workspace_version: workspaceVersion,[\s\S]*?idempotency_key: operatorIdempotencyKey\(action, workspaceId\),[\s\S]*?\};/,
+    "Expected an operator-action click to reuse the complete outstanding request for the same auth epoch, workspace, and action",
   );
   assert.match(
     operatorSource,
-    /idempotency_key: idempotencyKey/,
-    "Expected the retained operator-action identity in the BFF request",
+    /if \(!retainedPayload && action === "revalidate"\)[\s\S]*?payload\.requested_tier = requestedTier[\s\S]*?operatorActionRequestsRef\.current\.set\(\s*operatorActionIdentityScope,\s*payload\s*\);[\s\S]*?apiPostWithDeadline<WorkspaceControlResponse \| Operation>\([\s\S]*?payload,[\s\S]*?\);/,
+    "Expected requested tier to be fixed only on the original payload before that payload is retained and posted",
   );
   assert.match(
     operatorSource,
-    /result\.ok \|\|[\s\S]*?result\.status !== 0 &&[\s\S]*?result\.status !== 502 &&[\s\S]*?result\.status !== 504[\s\S]*?operatorActionIdempotencyKeysRef\.current\.delete\(operatorActionIdentityScope\)/,
-    "Expected client deadlines and gateway failures to retain the operator-action identity",
+    /result\.ok \|\|[\s\S]*?result\.status !== 0 &&[\s\S]*?result\.status !== 502 &&[\s\S]*?result\.status !== 504[\s\S]*?operatorActionRequestsRef\.current\.get\(operatorActionIdentityScope\) ===[\s\S]*?payload[\s\S]*?operatorActionRequestsRef\.current\.delete\(operatorActionIdentityScope\)/,
+    "Expected ambiguous failures to retain the original request and settled outcomes to clear only that request",
   );
 });
 

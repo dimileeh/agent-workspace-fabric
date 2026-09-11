@@ -69,7 +69,9 @@ export function useWorkspaceMutatingControls({
   reloadAvailableFeeds,
 }: UseWorkspaceMutatingControlsArgs) {
   const retryIdempotencyKeysRef = useRef(new Map<string, string>());
-  const operatorActionIdempotencyKeysRef = useRef(new Map<string, string>());
+  const operatorActionRequestsRef = useRef(
+    new Map<string, WorkspaceOperatorRequest>(),
+  );
 
   const retrySelectedWorkspace = useCallback(async () => {
     const workspaceId = selectedId;
@@ -181,21 +183,18 @@ export function useWorkspaceMutatingControls({
       setOperatorActionState({ status: "submitting", action });
       const epoch = authorizedFeedEpochRef.current;
       const operatorActionIdentityScope = `${epoch}:${workspaceId}:${action}`;
-      const idempotencyKey =
-        operatorActionIdempotencyKeysRef.current.get(operatorActionIdentityScope) ??
-        operatorIdempotencyKey(action, workspaceId);
-      operatorActionIdempotencyKeysRef.current.set(
+      const retainedPayload = operatorActionRequestsRef.current.get(
         operatorActionIdentityScope,
-        idempotencyKey,
       );
-      const payload: WorkspaceOperatorRequest = {
+      const payload: WorkspaceOperatorRequest = retainedPayload ?? {
         reason: operatorActionReason(action),
         workspace_version: workspaceVersion,
-        idempotency_key: idempotencyKey,
+        idempotency_key: operatorIdempotencyKey(action, workspaceId),
       };
-      if (action === "revalidate") {
+      if (!retainedPayload && action === "revalidate") {
         payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
       }
+      operatorActionRequestsRef.current.set(operatorActionIdentityScope, payload);
 
       const result = await apiPostWithDeadline<WorkspaceControlResponse | Operation>(
         operatorActionPath(action, workspaceId),
@@ -206,10 +205,10 @@ export function useWorkspaceMutatingControls({
         (result.status !== 0 && result.status !== 502 && result.status !== 504)
       ) {
         if (
-          operatorActionIdempotencyKeysRef.current.get(operatorActionIdentityScope) ===
-          idempotencyKey
+          operatorActionRequestsRef.current.get(operatorActionIdentityScope) ===
+          payload
         ) {
-          operatorActionIdempotencyKeysRef.current.delete(operatorActionIdentityScope);
+          operatorActionRequestsRef.current.delete(operatorActionIdentityScope);
         }
       }
       if (
