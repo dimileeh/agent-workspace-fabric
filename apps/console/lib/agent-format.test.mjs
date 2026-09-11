@@ -753,6 +753,47 @@ test("resolveWorkflowTiming rejects lifecycle timing that contradicts stage stat
       `${contradictoryStage.status} timing must invalidate lifecycle fallback`,
     );
   }
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "failed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle: [
+        {
+          stage: "requested",
+          started_at: "2026-09-06T12:00:00Z",
+          ended_at: "2026-09-06T12:01:00Z",
+          duration_seconds: 60,
+          status: "completed",
+        },
+        {
+          stage: "running",
+          started_at: "2026-09-06T12:01:00Z",
+          ended_at: null,
+          duration_seconds: null,
+          status: "active",
+        },
+        {
+          stage: "validating",
+          started_at: "2026-09-06T12:05:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 300,
+          status: "completed",
+        },
+      ],
+      last_event: {
+        event_type: "workspace.state_changed",
+        old_state: "validating",
+        new_state: "failed",
+        occurred_at: "2026-09-06T12:10:00Z",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an unended active stage must invalidate a later corroborated terminal boundary",
+  );
 });
 
 test("resolveWorkflowTiming rejects stage durations that contradict their timestamps", async () => {
