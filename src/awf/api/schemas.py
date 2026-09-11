@@ -1156,6 +1156,8 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     current_phase: str
     active_operation: str | None
     last_event: WorkspaceEventResponse | None
+    # Latest state transition, even when a newer cleanup/audit event is last.
+    latest_state_change: WorkspaceEventResponse | None = None
     pr_url: str | None
     pr_number: int | None = None
     failure_reason: str | None

@@ -230,6 +230,8 @@ export interface WorkspaceOverview {
   current_phase: string;
   active_operation: string | null;
   last_event: WorkspaceEvent | null;
+  /** Latest state transition, retained when a newer non-state audit event exists. */
+  latest_state_change?: WorkspaceEvent | null;
   pr_url: string | null;
   pr_number?: number | null;
   failure_reason: string | null;

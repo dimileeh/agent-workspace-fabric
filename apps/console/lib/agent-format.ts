@@ -331,11 +331,13 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     return null;
   }
   if (latestEntered.stage.stage !== "completed") {
-    const terminalEvent = item.last_event;
+    const terminalEvent = item.latest_state_change ?? item.last_event;
     const terminalEventMs = recordedMilliseconds(terminalEvent?.occurred_at);
     // Pauses such as blocked/recovering are absent from lifecycle summaries.
     // For terminal paths without a completed stage, only trust that boundary
     // when the latest state-change corroborates the actual terminal transition.
+    // `last_event` remains a compatibility fallback because cleanup can append
+    // a newer non-state audit event after that transition.
     if (
       terminalEvent?.event_type !== "workspace.state_changed" ||
       terminalEvent.old_state !== latestEntered.stage.stage ||

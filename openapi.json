@@ -11227,6 +11227,16 @@
             ],
             "title": "Last Log At"
           },
+          "latest_state_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "lifecycle": {
             "items": {
               "$ref": "#/components/schemas/WorkspaceLifecycleStageResponse"
