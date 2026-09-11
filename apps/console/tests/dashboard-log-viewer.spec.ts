@@ -87,6 +87,100 @@ test("fullscreen logs refresh selected tails when stream metadata advances", asy
   await expect.poll(async () => output.textContent() ?? "", { timeout: 8_000 }).toContain("active line 139 poll 2");
 });
 
+// Release-audit regression for PR #958: in polling-only mode, each advancing
+// metadata poll can start a newer tail before the prior successful tail lands.
+// A newer request start is not a newer applied result; the completed last-good
+// tail must paint while that newer request is still pending.
+test("fullscreen applies a slow successful tail while advancing metadata starts a newer reload", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await mockAwfApi(page);
+
+  const caps = localCapabilities() as {
+    diagnostics: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const pollingOnlyCapabilities = {
+    ...caps,
+    diagnostics: caps.diagnostics.map((item) =>
+      item.id === "workspace_stream"
+        ? {
+            id: item.id,
+            availability: "unsupported",
+            reason_code: "not_implemented",
+            message: "workspace_stream unavailable",
+            semantics: "Optional workspace live event/log stream.",
+          }
+        : item,
+    ),
+  };
+  let advanceMetadata = false;
+  let metadataRevision = 0;
+  let slowTailStarts = 0;
+  let streamRequests = 0;
+  const heldTails: Array<{ promise: Promise<void>; resolve: () => void }> = [];
+  const baselineMarker = "baseline-before-slow-polling-tail";
+  const firstSlowMarker = "first-slow-success-must-apply";
+  const secondSlowMarker = "second-slow-success";
+
+  await page.route("**/api/awf/console/capabilities", async (route) => {
+    await fulfillJson(route, pollingOnlyCapabilities);
+  });
+  await page.route("**/api/awf/workspaces/ws_logs/logs", async (route) => {
+    if (advanceMetadata && slowTailStarts >= metadataRevision) {
+      metadataRevision += 1;
+    }
+    await fulfillJson(
+      route,
+      listEnvelope([
+        logStream(
+          "active.stdout",
+          2_880 + metadataRevision,
+          120 + metadataRevision,
+          activeOpenedAt,
+        ),
+      ]),
+    );
+  });
+  await page.route("**/api/awf/workspaces/ws_logs/logs/active.stdout", async (route) => {
+    if (!advanceMetadata) {
+      await fulfillJson(route, logRead("active.stdout", baselineMarker));
+      return;
+    }
+    const gate = createDeferred();
+    heldTails.push(gate);
+    slowTailStarts += 1;
+    const tailNumber = slowTailStarts;
+    if (slowTailStarts === 2) {
+      advanceMetadata = false;
+      heldTails[0]?.resolve();
+    }
+    await gate.promise;
+    const marker = tailNumber === 1 ? firstSlowMarker : secondSlowMarker;
+    await fulfillJson(route, logRead("active.stdout", marker));
+  });
+  await page.route("**/api/awf/workspaces/ws_logs/stream", async (route) => {
+    streamRequests += 1;
+    await fulfillJson(route, { detail: { message: "workspace_stream unsupported" } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_logs").getByRole("button", { name: "Logs", exact: true }).click();
+
+  const output = page.locator(".fixed.inset-0.z-50").getByTestId("log-output");
+  await expect(output).toContainText(baselineMarker);
+  advanceMetadata = true;
+
+  await expect.poll(() => slowTailStarts, { timeout: 15_000 }).toBe(2);
+  await expect(output).toContainText(firstSlowMarker, { timeout: 4_000 });
+  expect(streamRequests).toBe(0);
+
+  heldTails[1]?.resolve();
+  await expect(output).toContainText(secondSlowMarker, { timeout: 4_000 });
+});
+
 test("fullscreen logs keep selected stream history when unselected stream tails are oversized", async ({ page }) => {
   const modalSelector = ".fixed.inset-0.z-50";
   const streamName = "quiet.stdout";
