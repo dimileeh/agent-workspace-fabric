@@ -471,7 +471,22 @@ async def _run_pre_push_validation_fix_pass(
     _cleanup_committed_fix_pass = _ppv._cleanup_committed_pre_push_validation_fix_pass  # type: ignore[attr-defined]
     _head_descends_from_impl = _ppv._head_descends_from  # type: ignore[attr-defined]
     _reparent_fix_pass_commit_impl = _ppv._reparent_fix_pass_commit  # type: ignore[attr-defined]
-    _rollback_failed_fix_pass = _ppv._rollback_failed_pre_push_validation_fix_pass  # type: ignore[attr-defined]
+    _rollback_failed_fix_pass_impl = _ppv._rollback_failed_pre_push_validation_fix_pass  # type: ignore[attr-defined]
+    timeout_cleanup_error: ComposeExecCleanupError | None = None
+
+    def _raise_unproven_timeout_cleanup() -> None:
+        """Keep cleanup failure authoritative after its timeout work is preserved."""
+        if timeout_cleanup_error is not None:
+            raise timeout_cleanup_error
+
+    def _finish_fix_pass(committed: bool, reason: str | None) -> tuple[bool, str | None]:
+        _raise_unproven_timeout_cleanup()
+        return committed, reason
+
+    async def _rollback_failed_fix_pass(*args: Any, **kwargs: Any) -> str | None:
+        if timeout_cleanup_error is not None:
+            return None
+        return await _rollback_failed_fix_pass_impl(*args, **kwargs)
 
     first_fail = validation_result.first_failure
     if first_fail is None:
@@ -609,9 +624,12 @@ async def _run_pre_push_validation_fix_pass(
                 return False, rollback_failure_reason
             return False, None
         # Recovery refused an unsafe rerun so this timeout could reach us with
-        # its work intact. Continue exactly like the AgentRunError timeout path;
-        # the post-agent sink below captures its commits and edits without first
-        # resetting through them (PRRT_kwDOSJAM6s6hDEjX).
+        # its work intact. Continue through the post-agent sink below to capture
+        # its commits and edits without first resetting through them, but retain
+        # the cleanup failure: a timeout tag does not prove that the process is
+        # dead. Once preservation finishes, re-raise it so validation and push
+        # cannot continue while termination remains unproven.
+        timeout_cleanup_error = exc
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_failed",
@@ -838,6 +856,7 @@ async def _run_pre_push_validation_fix_pass(
         # handlers still run, and a stranded residue surfaces as the next
         # attempt's pre-existing-dirty guard rather than being silently
         # swallowed here.
+        _raise_unproven_timeout_cleanup()
         post_agent_head = await self._rev_parse_head(worktree_path)
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
@@ -885,6 +904,7 @@ async def _run_pre_push_validation_fix_pass(
         # / ``PRRT_kwDOSJAM6s6KnWkn``). ``None`` means HEAD could not be
         # resolved; the rollback helper skips the reset. A rollback failure is
         # logged but never clobbers the policy exception.
+        _raise_unproven_timeout_cleanup()
         post_agent_head = await self._rev_parse_head(worktree_path)
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
@@ -922,6 +942,7 @@ async def _run_pre_push_validation_fix_pass(
         # terminates instead of retrying — no residue rollback is needed (the
         # stranded dirt surfaces only on a later operator resume, matching every
         # other commit-sink caller's treatment of these two).
+        _raise_unproven_timeout_cleanup()
         raise
     except Exception as exc:
         _log.warning(
@@ -943,6 +964,7 @@ async def _run_pre_push_validation_fix_pass(
         # provider-recovery and policy-blocked handlers above and the
         # CI-repair / dirty-finalize rollbacks). ``None`` means HEAD could not
         # be resolved; the rollback helper skips the reset.
+        _raise_unproven_timeout_cleanup()
         post_agent_head = await self._rev_parse_head(worktree_path)
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
@@ -984,7 +1006,7 @@ async def _run_pre_push_validation_fix_pass(
                     committed_head=current_head,
                     pass_number=pass_number,
                 )
-                return True, cleanup_failure_reason
+                return _finish_fix_pass(True, cleanup_failure_reason)
             # Non-descendant rewrite (plain amend / content-modifying amend /
             # reset+recommit). These are topologically and tree-content
             # indistinguishable, so we STOP DISCRIMINATING and ALWAYS re-parent the
@@ -1002,7 +1024,7 @@ async def _run_pre_push_validation_fix_pass(
                 task_tag=task_tag,
             )
             if reparent_failure_reason is not None:
-                return True, reparent_failure_reason
+                return _finish_fix_pass(True, reparent_failure_reason)
             if not no_net_change and new_head is not None:
                 _log.info(
                     "monitor.pre_push_validation_fix_reparented",
@@ -1019,7 +1041,7 @@ async def _run_pre_push_validation_fix_pass(
                     committed_head=new_head,
                     pass_number=pass_number,
                 )
-                return True, cleanup_failure_reason
+                return _finish_fix_pass(True, cleanup_failure_reason)
             # no_net_change: the agent's tree equals ``fix_start_head``'s tree, so there
             # is nothing to preserve. Fall through to the existing rollback below.
         rollback_failure_reason = await _rollback_failed_fix_pass(
@@ -1032,7 +1054,7 @@ async def _run_pre_push_validation_fix_pass(
         )
         if rollback_failure_reason is not None:
             return False, rollback_failure_reason
-        return False, None
+        return _finish_fix_pass(False, None)
 
     committed_head = await self._rev_parse_head(worktree_path)
     if committed_head is None:
@@ -1041,7 +1063,7 @@ async def _run_pre_push_validation_fix_pass(
             workspace_id=workspace_id,
             pass_number=pass_number,
         )
-        return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+        return _finish_fix_pass(True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON)
     # ``_commit_dirty_worktree`` commits onto whatever the agent left as HEAD. If the
     # fix-pass agent rewrote the tip (``commit --amend`` / ``reset`` to a non-descendant
     # of ``fix_start_head``) AND also left dirty or untracked work, that commit lands as a
@@ -1066,7 +1088,7 @@ async def _run_pre_push_validation_fix_pass(
             task_tag=task_tag,
         )
         if reparent_failure_reason is not None:
-            return True, reparent_failure_reason
+            return _finish_fix_pass(True, reparent_failure_reason)
         if not no_net_change and new_head is not None:
             _log.info(
                 "monitor.pre_push_validation_fix_reparented",
@@ -1091,7 +1113,7 @@ async def _run_pre_push_validation_fix_pass(
             )
             if rollback_failure_reason is not None:
                 return False, rollback_failure_reason
-            return False, None
+            return _finish_fix_pass(False, None)
     cleanup_failure_reason = await _cleanup_committed_fix_pass(
         self,
         workspace_id=workspace_id,
@@ -1099,4 +1121,4 @@ async def _run_pre_push_validation_fix_pass(
         committed_head=committed_head,
         pass_number=pass_number,
     )
-    return True, cleanup_failure_reason
+    return _finish_fix_pass(True, cleanup_failure_reason)
