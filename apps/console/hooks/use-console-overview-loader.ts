@@ -617,10 +617,8 @@ export function useConsoleOverviewLoader({
               complete: true,
               fetchedCursors: new Set<string>(),
             }
-          : refreshedPageOverlapsRetained && capturedPagination?.complete
-            ? capturedPagination
-            : refreshedPageOverlapsRetained &&
-                usableContinuationCursor(capturedPagination?.nextCursor)
+          : refreshedPageOverlapsRetained &&
+              usableContinuationCursor(capturedPagination?.nextCursor)
               ? capturedPagination
               : {
                   query: capturedQuery,

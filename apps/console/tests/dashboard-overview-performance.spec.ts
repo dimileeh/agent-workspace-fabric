@@ -23,7 +23,7 @@ type OverviewRouteOptions = {
     items: ReturnType<typeof workspaceOverview>[],
     cursor: string | null,
   ) => ReturnType<typeof workspaceOverview>[];
-  resolvePage?: (cursor: string | null) => {
+  resolvePage?: (cursor: string | null, status: string | null) => {
     items: ReturnType<typeof workspaceOverview>[];
     has_more: boolean;
     next_cursor: string | null;
@@ -100,7 +100,8 @@ async function installLargeFleetOverview(
     await fulfillOverviewBatch(route, false);
   };
   const fulfillPage = async (route: Route, cursor: string | null) => {
-    const resolvedPage = options.resolvePage?.(cursor);
+    const status = new URL(route.request().url()).searchParams.get("status");
+    const resolvedPage = options.resolvePage?.(cursor, status);
     if (resolvedPage) {
       await fulfillJson(route, resolvedPage);
       return;
@@ -357,6 +358,54 @@ test("disjoint first-page refresh reopens completed overview history", async ({ 
 
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
   await expect(page.getByRole("button", { name: "Load more workspaces" })).toBeVisible();
+});
+
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hTOC5: a completed
+// filtered query can gain an older matching workspace without making its
+// refreshed first page disjoint from the retained rows.
+test("overlapping first-page refresh reopens completed filtered history", async ({ page }) => {
+  let membershipGrew = false;
+  let continuationRequests = 0;
+  const completedPage = Array.from({ length: PAGE_SIZE }, (_, index) => ({
+    ...workspaceOverview(index + 1),
+    status: "completed",
+  }));
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePage: (cursor, status) => {
+      if (status !== "completed") {
+        return null;
+      }
+      if (cursor === "completed-page-2") {
+        continuationRequests += 1;
+        return {
+          items: [{ ...workspaceOverview(PAGE_SIZE + 1), status: "completed" }],
+          has_more: false,
+          next_cursor: null,
+        };
+      }
+      return {
+        items: completedPage,
+        has_more: membershipGrew,
+        next_cursor: membershipGrew ? "completed-page-2" : null,
+      };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Filters" }).click();
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: /Status all/ }).click();
+  await statusGroup.getByLabel("completed").check();
+  await expect(page.getByText(`All ${PAGE_SIZE} matching workspaces loaded.`)).toBeVisible();
+
+  membershipGrew = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect(page.getByRole("button", { name: "Load more workspaces" })).toBeVisible();
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => continuationRequests).toBe(1);
 });
 
 // Regression for PR #958 operator acceptance: appended history must extend the
