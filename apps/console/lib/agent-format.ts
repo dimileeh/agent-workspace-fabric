@@ -260,13 +260,14 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       entered.push({ stage, startedAt: stage.started_at, startedMs, endedMs });
     }
   }
-  const latestEntered = entered.reduce<TimedLifecycleStage | null>(
-    (latest, entry) => (latest == null || entry.startedMs > latest.startedMs ? entry : latest),
-    null,
+  const latestStartedMs = Math.max(...entered.map((entry) => entry.startedMs));
+  const latestCandidates = entered.filter(
+    (entry) => entry.startedMs === latestStartedMs,
   );
-  if (latestEntered == null) {
+  if (latestCandidates.length !== 1) {
     return null;
   }
+  const [latestEntered] = latestCandidates;
 
   let finishedAt = latestEntered.stage.ended_at;
   let finishedMs = latestEntered.endedMs;
@@ -291,6 +292,21 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   }
   if (finishedAt == null || finishedMs == null) {
     return null;
+  }
+  if (latestEntered.stage.stage !== "completed") {
+    const terminalEvent = item.last_event;
+    const terminalEventMs = recordedMilliseconds(terminalEvent?.occurred_at);
+    // Pauses such as blocked/recovering are absent from lifecycle summaries.
+    // For terminal paths without a completed stage, only trust that boundary
+    // when the latest state-change corroborates the actual terminal transition.
+    if (
+      terminalEvent?.event_type !== "workspace.state_changed" ||
+      terminalEvent.old_state !== latestEntered.stage.stage ||
+      terminalEvent.new_state !== item.status ||
+      terminalEventMs !== finishedMs
+    ) {
+      return null;
+    }
   }
 
   const durationStages = entered
@@ -337,14 +353,20 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
 
   const explicitFinishedMs = recordedMilliseconds(resolvedFinishedAt);
   if (resolvedFinishedAt != null && explicitFinishedMs == null) {
-    return { finishedAt: null, durationSeconds: null };
+    return {
+      finishedAt: null,
+      durationSeconds: recordedDurationSeconds(item.duration_seconds),
+    };
   }
 
   const lifecycleTiming = lifecycleWorkflowTiming(item);
   const finishedAt = resolvedFinishedAt ?? lifecycleTiming?.finishedAt ?? null;
   const finishedMs = explicitFinishedMs ?? lifecycleTiming?.finishedMs ?? null;
   if (finishedAt == null || finishedMs == null) {
-    return { finishedAt: null, durationSeconds: null };
+    return {
+      finishedAt: null,
+      durationSeconds: recordedDurationSeconds(item.duration_seconds),
+    };
   }
 
   const explicitDurationPresent = item.duration_seconds != null;

@@ -441,3 +441,176 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
   );
   assert.equal(distinctFinishedAt({}), null);
 });
+
+test("resolveWorkflowTiming preserves explicit duration without a terminal finish", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "completed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    lifecycle: [],
+  };
+
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: 125 }), {
+    finishedAt: null,
+    durationSeconds: 125,
+  });
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: -1 }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      workflow_finished_at: "not-a-timestamp",
+      duration_seconds: 125,
+    }),
+    { finishedAt: null, durationSeconds: 125 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      workflow_finished_at: "not-a-timestamp",
+      duration_seconds: -1,
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+});
+
+test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const requested = {
+    stage: "requested",
+    started_at: "2026-09-06T12:00:00Z",
+    ended_at: "2026-09-06T12:10:00Z",
+    duration_seconds: 600,
+    status: "completed",
+  };
+  const running = {
+    stage: "running",
+    started_at: "2026-09-06T12:10:00Z",
+    ended_at: "2026-09-06T12:20:00Z",
+    duration_seconds: 600,
+    status: "completed",
+  };
+  const validating = {
+    stage: "validating",
+    started_at: "2026-09-06T12:10:00Z",
+    ended_at: "2026-09-06T12:30:00Z",
+    duration_seconds: 1200,
+    status: "completed",
+  };
+  const timingFor = (latestStages) =>
+    resolveWorkflowTiming({
+      status: "failed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle: [requested, ...latestStages],
+    });
+
+  const runningFirst = timingFor([running, validating]);
+  const validatingFirst = timingFor([validating, running]);
+
+  assert.deepEqual(
+    runningFirst,
+    validatingFirst,
+    "ambiguous fallback timing must not depend on lifecycle array order",
+  );
+  assert.deepEqual(runningFirst, { finishedAt: null, durationSeconds: null });
+});
+
+test("resolveWorkflowTiming requires terminal evidence after the latest represented stage", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "failed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00Z",
+        ended_at: "2026-09-06T12:01:00Z",
+        duration_seconds: 60,
+        status: "completed",
+      },
+      {
+        stage: "running",
+        started_at: "2026-09-06T12:01:00Z",
+        ended_at: "2026-09-06T12:05:00Z",
+        duration_seconds: 240,
+        status: "completed",
+      },
+    ],
+  };
+  const stateChanged = (oldState, newState, occurredAt) => ({
+    event_type: "workspace.state_changed",
+    old_state: oldState,
+    new_state: newState,
+    occurred_at: occurredAt,
+  });
+
+  assert.deepEqual(resolveWorkflowTiming({ ...item, last_event: null }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "cancelled",
+      last_event: stateChanged("blocked", "cancelled", "2026-09-06T12:10:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("recovering", "failed", "2026-09-06T12:10:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("blocked", "failed", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an omitted pause must not be accepted when timestamps happen to coincide",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("running", "cancelled", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("running", "failed", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "completed",
+      last_event: null,
+      lifecycle: [
+        ...item.lifecycle,
+        {
+          stage: "completed",
+          started_at: "2026-09-06T12:05:00Z",
+          ended_at: "2026-09-06T12:05:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+      ],
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+});
