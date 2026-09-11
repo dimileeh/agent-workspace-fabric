@@ -703,6 +703,7 @@ export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
 export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;
 export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
 const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
+const WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX = 0.5;
 
 function workspaceRowAtOffset(rowOffsets: readonly number[], offset: number): number {
   let low = 0;
@@ -1070,6 +1071,13 @@ export function WorkspaceList({
       previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
+    if (
+      selectedId === null &&
+      Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
+    ) {
+      scrollWithoutLoading(0);
+      return;
+    }
 
     const previousAnchorIndex = workspaceRowAtOffset(
       previous.rowOffsets,
@@ -1235,7 +1243,12 @@ export function WorkspaceList({
       preserveScrollTopRef.current;
     preserveScrollTopRef.current = null;
     if (scrollTop !== null) {
-      scrollWithoutLoading(scrollTop);
+      const scrollContainer = scrollContainerRef.current;
+      const unselectedAtTop =
+        committedListGeometryRef.current?.selectedId === null &&
+        scrollContainer !== null &&
+        Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+      scrollWithoutLoading(unselectedAtTop ? 0 : scrollTop);
     }
   }, [items, rowOffsets, scrollWithoutLoading]);
 
