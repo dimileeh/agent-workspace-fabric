@@ -403,6 +403,72 @@ test("local terminal task details use the card lifecycle timing", async ({ page 
   await expect(duration).toContainText("10m 0s");
 });
 
+test("recovered terminal surfaces use the retained terminal event without a duration", async ({
+  page,
+}) => {
+  const completed = overview("ws_recovered_terminal_timing", "completed", {
+    recovery: {
+      from_state: "monitoring_pr",
+      to_state: "ready",
+      reason_code: "STALE_TARGET_ADVANCED",
+      action: "rebase",
+      recovery_mode: "rebase_only",
+      started_at: "2026-09-06T12:10:00Z",
+      current_operation: null,
+      summary: "Workflow recovered and completed.",
+      payload: null,
+    },
+    latest_workflow_terminal_state_change: stateChangedEvent(
+      "ws_recovered_terminal_timing",
+      "monitoring_pr",
+      "completed",
+      "2026-09-06T12:20:00Z",
+    ),
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("completed", "2026-09-06T12:20:00Z", "2026-09-06T12:20:00Z", 0),
+    ],
+  });
+  await mockAwfConsoleApi(page, { overviewItems: [completed] });
+  await page.route(
+    `**/api/awf/workspaces/${completed.workspace_id}`,
+    async (route) => {
+      await fulfillJson(route, {
+        ...completed,
+        id: completed.workspace_id,
+        version: 1,
+      });
+    },
+  );
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const card = page.getByTestId(`workspace-card-${completed.workspace_id}`);
+  await expect(card.getByTestId(`workspace-finished-${completed.workspace_id}`)).toContainText(
+    formatDateTime("2026-09-06T12:20:00Z"),
+  );
+  await expect(card.getByTestId(`workspace-duration-${completed.workspace_id}`)).toContainText(
+    "not recorded",
+  );
+
+  await card.click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await expect(
+    inspector.getByText("Workflow finished", { exact: true }).locator(".."),
+  ).toContainText(formatDateTime("2026-09-06T12:20:00Z"));
+  await expect(inspector.getByText("Duration", { exact: true })).toHaveCount(0);
+  await inspector.getByRole("button", { name: "Close inspector" }).click();
+
+  await card.getByRole("button", { name: "Details", exact: true }).click();
+  const details = page.getByRole("dialog", { name: /Task details/i });
+  await expect(
+    details.getByText("Workflow finished", { exact: true }).locator(".."),
+  ).toContainText(formatDateTime("2026-09-06T12:20:00Z"));
+  await expect(details.getByText("Duration", { exact: true })).toHaveCount(0);
+});
+
 test("terminal cards call missing or ambiguous timing not recorded while preserving zero", async ({
   page,
 }) => {

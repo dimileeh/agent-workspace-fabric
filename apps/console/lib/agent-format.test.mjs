@@ -537,6 +537,90 @@ test("resolveWorkflowTiming preserves duration when an unused finished_at differ
   );
 });
 
+test("resolveWorkflowTiming uses the retained terminal event after recovery", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const recovery = {
+    started_at: "2026-09-06T12:10:00Z",
+  };
+  const terminalEvent = {
+    event_type: "workspace.state_changed",
+    old_state: "validating",
+    new_state: "completed",
+    occurred_at: "2026-09-06T12:20:00Z",
+  };
+  const item = {
+    status: "completed",
+    recovery,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [],
+    latest_workflow_terminal_state_change: terminalEvent,
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: "2026-09-06T12:20:00Z",
+    durationSeconds: null,
+  });
+
+  for (const [label, overrides] of [
+    [
+      "non-state event",
+      {
+        latest_workflow_terminal_state_change: {
+          ...terminalEvent,
+          event_type: "workspace.test_marker",
+        },
+      },
+    ],
+    [
+      "mismatched terminal status",
+      {
+        latest_workflow_terminal_state_change: {
+          ...terminalEvent,
+          new_state: "failed",
+        },
+      },
+    ],
+    [
+      "destroy transition instead of workflow terminal event",
+      {
+        status: "destroyed",
+        latest_workflow_terminal_state_change: {
+          ...terminalEvent,
+          old_state: "destroying",
+          new_state: "destroyed",
+        },
+      },
+    ],
+    [
+      "malformed event timestamp",
+      {
+        latest_workflow_terminal_state_change: {
+          ...terminalEvent,
+          occurred_at: "not-a-timestamp",
+        },
+      },
+    ],
+    [
+      "event predating recovery",
+      {
+        latest_workflow_terminal_state_change: {
+          ...terminalEvent,
+          occurred_at: "2026-09-06T12:09:59Z",
+        },
+      },
+    ],
+    ["malformed recovery timestamp", { recovery: { started_at: "not-a-timestamp" } }],
+  ]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({ ...item, ...overrides }),
+      { finishedAt: null, durationSeconds: null },
+      label,
+    );
+  }
+});
+
 test("resolveWorkflowTiming compares explicit and lifecycle finishes at full recorded precision", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const lifecycle = [
