@@ -468,15 +468,24 @@ test("filtered refresh reopens partial history from the first-page cursor", asyn
   const statusGroup = page.getByRole("group", { name: "Status" });
   await statusGroup.getByRole("button", { name: /Status all/ }).click();
   await statusGroup.getByLabel("completed").check();
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
-  await expect.poll(() => completedRequests).toContain("old-completed-page-2");
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  // This regression covers cursor replacement, while near-bottom loading has
+  // dedicated coverage. Avoid Playwright scrolling the footer into view and
+  // racing that scroll loader with the button action.
+  const requestHistoryWithoutScrolling = async (expectedCursor: string) => {
+    await expect(async () => {
+      if (!completedRequests.includes(expectedCursor)) {
+        await loadMore.evaluate((button: HTMLButtonElement) => button.click());
+      }
+      expect(completedRequests).toContain(expectedCursor);
+    }).toPass({ intervals: [100, 250, 500], timeout: 5_000 });
+  };
+  await requestHistoryWithoutScrolling("old-completed-page-2");
 
   membershipGrew = true;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByTestId("workspace-title-ws_perf_0001")).toContainText("refreshed");
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
-
-  await expect.poll(() => completedRequests).toContain("fresh-completed-page-2");
+  await requestHistoryWithoutScrolling("fresh-completed-page-2");
   expect(completedRequests).not.toContain("stale-completed-page-3");
 });
 
