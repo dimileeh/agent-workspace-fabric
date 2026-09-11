@@ -35,10 +35,10 @@ from awf.service.operations import build_operation_list_response
 from awf.service.workspace_observability import (
     InvalidWorkspaceOverviewCursorError,
     _decode_overview_cursor,
-    _json_safe_value,
     workspace_pricing_metadata,
     workspace_usage_summary,
 )
+from awf.service.workspace_observability_values import json_safe_value
 from awf.service.workspaces import (
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
@@ -115,7 +115,7 @@ def test_workspace_overview_cursor_rejects_empty_workspace_id() -> None:
 
 @pytest.mark.unit
 def test_json_safe_value_truncates_long_sequences() -> None:
-    value = _json_safe_value(tuple(range(25)))
+    value = json_safe_value(tuple(range(25)))
 
     assert value[-1] == "__truncated__"
     assert value[:3] == [0, 1, 2]
@@ -123,7 +123,7 @@ def test_json_safe_value_truncates_long_sequences() -> None:
 
 @pytest.mark.unit
 def test_json_safe_value_keeps_short_sequences_unmarked() -> None:
-    assert _json_safe_value([1, 2, 3]) == [1, 2, 3]
+    assert json_safe_value([1, 2, 3]) == [1, 2, 3]
 
 
 @pytest.mark.unit

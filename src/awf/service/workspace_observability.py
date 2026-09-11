@@ -52,6 +52,12 @@ from awf.service.usage_store import (
     read_latest_usage_snapshot,
     read_latest_usage_snapshots,
 )
+from awf.service.workspace_observability_values import (
+    bounded_payload as _bounded_payload,
+)
+from awf.service.workspace_observability_values import (
+    ensure_utc as _ensure_utc,
+)
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -125,9 +131,6 @@ _GENERIC_RECOVERY_REASON_CODES = frozenset(
         "OPERATOR_VALIDATE_REQUESTED",
     }
 )
-_MAX_RECOVERY_PAYLOAD_KEYS = 32
-_MAX_RECOVERY_PAYLOAD_DEPTH = 4
-_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS = 20
 
 
 @dataclass(frozen=True)
@@ -1338,44 +1341,6 @@ def _payload_string(payload: Mapping[str, object] | None, key: str) -> str | Non
     return stripped or None
 
 
-def _bounded_payload(payload: Mapping[str, object] | None) -> dict[str, Any] | None:
-    if payload is None:
-        return None
-    bounded: dict[str, Any] = {}
-    for index, (key, value) in enumerate(payload.items()):
-        if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
-            bounded["__truncated__"] = True
-            break
-        bounded[str(key)] = _json_safe_value(value)
-    return bounded
-
-
-def _json_safe_value(value: object, *, depth: int = 0) -> Any:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if isinstance(value, datetime):
-        return _ensure_utc(value).isoformat()
-    if depth >= _MAX_RECOVERY_PAYLOAD_DEPTH:
-        return str(value)
-    if isinstance(value, Mapping):
-        safe: dict[str, Any] = {}
-        for index, (key, nested_value) in enumerate(value.items()):
-            if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
-                safe["__truncated__"] = True
-                break
-            safe[str(key)] = _json_safe_value(nested_value, depth=depth + 1)
-        return safe
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        items = [
-            _json_safe_value(item, depth=depth + 1)
-            for item in list(value)[:_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS]
-        ]
-        if len(value) > _MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS:
-            items.append("__truncated__")
-        return items
-    return str(value)
-
-
 def _recovery_summary_text(
     *,
     workspace: Workspace,
@@ -1524,9 +1489,3 @@ def _stage_summary(
 
 def _duration_seconds(started_at: datetime, ended_at: datetime) -> int:
     return max(0, int((_ensure_utc(ended_at) - _ensure_utc(started_at)).total_seconds()))
-
-
-def _ensure_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
