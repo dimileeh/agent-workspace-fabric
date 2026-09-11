@@ -1392,7 +1392,7 @@ test("loadOverview retains last-good snapshot on transient page failure; clears 
   );
   assert.match(
     dashboard,
-    /const page = await fetchOverviewPage\(requestedCursor\);\s*if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(pageOutage\) \{\s*applyOverviewOutage\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(page === null\) \{\s*return;/,
+    /if \(page === null && !pageAuthDenied && !pageOutage\) \{\s*page = await fetchOverviewPage\(requestedCursor\);\s*\}\s*if \(pageAuthDenied\) \{\s*applyOverviewAuthDenial\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(pageOutage\) \{\s*applyOverviewOutage\(generation, pageError \?\? ""\);\s*return;[\s\S]*?if \(page === null\) \{\s*return;/,
     "Expected page auth denial to apply before the transient last-good path",
   );
   assert.match(
