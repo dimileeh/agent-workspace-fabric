@@ -1126,15 +1126,22 @@ test("repository filtering drops a selected off-page workspace excluded by the n
   page,
 }) => {
   const batchRequests: string[][] = [];
+  const overviewRequests: Array<string | null> = [];
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
     onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
+    onRequest: (cursor) => overviewRequests.push(cursor),
   });
 
   await page.goto("/");
   await waitForConsoleReady(page);
   await page.getByRole("button", { name: "Load more workspaces" }).click();
-  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  await expect
+    .poll(() => overviewRequests, { timeout: 10_000 })
+    .toContain(String(PAGE_SIZE));
+  await expect(
+    page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
   await page.getByRole("button", { name: "Next workspace results" }).click();
   await page.getByTestId("workspace-card-ws_perf_0101").click();
   await expect(page).toHaveURL(/workspaceId=ws_perf_0101/);
