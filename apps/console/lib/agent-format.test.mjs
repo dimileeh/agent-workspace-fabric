@@ -537,6 +537,57 @@ test("resolveWorkflowTiming preserves duration when an unused finished_at differ
   );
 });
 
+test("resolveWorkflowTiming compares explicit and lifecycle finishes at full recorded precision", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const lifecycle = [
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00.500600Z",
+      ended_at: "2026-09-06T12:00:01.500600Z",
+      duration_seconds: 1,
+      status: "completed",
+    },
+    {
+      stage: "completed",
+      started_at: "2026-09-06T12:00:01.500600Z",
+      ended_at: "2026-09-06T12:00:01.500600Z",
+      duration_seconds: 0,
+      status: "completed",
+    },
+  ];
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: "2026-09-06T12:00:01.500400Z",
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle,
+    }),
+    {
+      finishedAt: "2026-09-06T12:00:01.500400Z",
+      durationSeconds: null,
+    },
+    "a millisecond-truncated match must not attach a contradictory lifecycle duration",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: "2026-09-06T12:00:01.5006000+00:00",
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle,
+    }),
+    {
+      finishedAt: "2026-09-06T12:00:01.5006000+00:00",
+      durationSeconds: 1,
+    },
+    "equivalent timezone and fractional forms must retain lifecycle duration",
+  );
+});
+
 test("resolveWorkflowTiming skips malformed explicit finish candidates", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
 

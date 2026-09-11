@@ -180,9 +180,13 @@ function sameRecordedInstant(left: string, right: string): boolean {
   if (left === right) {
     return true;
   }
-  const leftMs = Date.parse(left);
-  const rightMs = Date.parse(right);
-  return Number.isFinite(leftMs) && leftMs === rightMs;
+  const leftMs = recordedMilliseconds(left);
+  const rightMs = recordedMilliseconds(right);
+  return (
+    leftMs != null &&
+    leftMs === rightMs &&
+    submillisecondFraction(left) === submillisecondFraction(right)
+  );
 }
 
 /**
@@ -227,6 +231,11 @@ type TimedLifecycleStage = {
 
 const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
+
+function submillisecondFraction(value: string): string {
+  const fractionalSeconds = RFC3339_DATE_TIME.exec(value)?.[7] ?? "";
+  return fractionalSeconds.slice(4).replace(/0+$/, "");
+}
 
 function recordedMilliseconds(value: string | null | undefined): number | null {
   if (!value) {
@@ -467,7 +476,10 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
   let durationSeconds: number | null = null;
   if (explicitDurationPresent) {
     durationSeconds = explicitDuration;
-  } else if (lifecycleTiming?.finishedMs === finishedMs) {
+  } else if (
+    lifecycleTiming != null &&
+    sameRecordedInstant(lifecycleTiming.finishedAt, finishedAt)
+  ) {
     durationSeconds = lifecycleTiming.durationSeconds;
   }
 
