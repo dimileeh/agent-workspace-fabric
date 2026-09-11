@@ -6640,6 +6640,52 @@ test("Finished stays visible when it differs from workflow_finished_at", async (
   await expect(dialog.getByText("Workflow finished", { exact: true })).toBeVisible();
 });
 
+test("malformed finished_at stays hidden when workflow_finished_at is valid", async ({ page }) => {
+  const overview = {
+    ...presentationOverview(),
+    workflow_finished_at: "2026-09-06T17:10:00Z",
+    finished_at: "not-a-timestamp",
+  };
+  await mockAwfConsoleApi(page, { overviewItems: [overview] });
+  await page.route("**/api/awf/workspaces/ws_presentation_sample**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/awf/workspaces/ws_presentation_sample") {
+      await fulfillJson(route, {
+        ...overview,
+        id: "ws_presentation_sample",
+        version: 1,
+      });
+      return;
+    }
+    if (path.endsWith("/runtime")) {
+      await fulfillJson(route, { status: "monitoring_pr" });
+      return;
+    }
+    if (path.includes("/events") || path.includes("/operations") || path.includes("/logs")) {
+      await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      return;
+    }
+    await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_presentation_sample").click();
+  await expect(page.getByText("Workflow finished", { exact: true })).toBeVisible();
+  await expect(page.getByText("Finished", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("not-a-timestamp", { exact: true })).toHaveCount(0);
+
+  await page
+    .getByTestId("workspace-card-ws_presentation_sample")
+    .getByRole("button", { name: "Details", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: /Task details/i });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Workflow finished", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Finished", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText("not-a-timestamp", { exact: true })).toHaveCount(0);
+});
+
 test("capability 403 clears stale summary KPIs", async ({ page }) => {
   let authDenied = false;
   const summary = localDashboardSummary({
