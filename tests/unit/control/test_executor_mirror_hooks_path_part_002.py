@@ -16,6 +16,13 @@ from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
 
 
+class _NoTrustedGitRootsExecutor:
+    def _trusted_git_roots_for_workspace(
+        self, *, workspace_id: str, repo_url: str
+    ) -> tuple[Path, Path] | None:
+        return None
+
+
 @pytest.mark.unit
 async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -49,7 +56,7 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,
@@ -208,7 +215,7 @@ async def test_execute_repairs_mirror_hooks_path_after_unexpected_agent_failure(
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
             return execution_flow.ValidationResult()
 
-    class _Executor:
+    class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
             agent_idle_timeout_seconds=30,
             agent_wall_timeout_seconds=60,

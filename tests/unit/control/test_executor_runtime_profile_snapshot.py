@@ -482,6 +482,11 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         _usage_sampler = None
         _agent_runtime_executor = None
 
+        def _trusted_git_roots_for_workspace(
+            self, *, workspace_id: str, repo_url: str
+        ) -> tuple[Path, Path] | None:
+            return None
+
         async def _begin_execution(
             self,
             *args: object,
