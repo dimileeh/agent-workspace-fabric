@@ -991,6 +991,26 @@ export interface ConsoleDashboardCounts {
   failed_last_window: number | null;
 }
 
+export interface ConsoleDashboardConfirmedCounts {
+  active: number;
+  executing: number;
+  monitoring_pr: number;
+  awaiting_operator: number;
+  awaiting_human: number;
+  retrying: number;
+  queued: number;
+  completed_last_window: number;
+  cancelled_last_window: number;
+  failed_last_window: number;
+}
+
+export interface ConsoleDashboardCountEvidence {
+  total_workspaces: number;
+  status_known_workspaces: number;
+  status_unknown_workspaces: number;
+  confirmed_counts: ConsoleDashboardConfirmedCounts;
+}
+
 export interface ConsoleDashboardSummary {
   schema_version: number;
   scope: ConsoleSummaryScope;
@@ -1008,6 +1028,7 @@ export interface ConsoleDashboardSummary {
     notes: string[];
   };
   counts: ConsoleDashboardCounts;
+  count_evidence?: ConsoleDashboardCountEvidence | null;
   overlap: {
     awaiting_human_subset_of_monitoring_pr: true;
     awaiting_operator_in_active_not_executing: true;

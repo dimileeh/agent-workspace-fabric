@@ -78,7 +78,61 @@ Never guess mode from hostname, browser location, query strings, or failed metri
 | `*_last_window` | Terminal statuses in the rolling window by `updated_at` |
 
 **Null ≠ zero.** Incomplete fields stay `null` with `coverage.status=partial|unknown`.
-UI renders `—` and never coerces null to `0`.
+UI renders `—` and never coerces null to `0`. When the optional
+`count_evidence` object is present and valid, the UI may render a confirmed
+lower bound for a null exact count, but it visibly qualifies the value as
+`N confirmed`; it never replaces the null exact value or presents the lower
+bound as an exact total. A non-null exact count always takes precedence.
+
+### Optional count evidence
+
+`count_evidence` is an optional, nullable schema-version-1 extension. When
+non-null it has four required fields and permits no unknown fields:
+
+| Field | Contract |
+| --- | --- |
+| `total_workspaces` | Strict nonnegative integer population in the authorized project-wide snapshot |
+| `status_known_workspaces` | Strict nonnegative integer count with authoritative workflow status |
+| `status_unknown_workspaces` | Strict nonnegative integer count without authoritative workflow status |
+| `confirmed_counts` | Object containing the same ten required names as `counts`, each a strict nonnegative integer lower bound |
+
+All evidence comes from the same authorized project-wide snapshot as the
+summary. The following invariants are required:
+
+- `status_known_workspaces + status_unknown_workspaces = total_workspaces`.
+- Every confirmed counter is at most `status_known_workspaces`.
+- The documented subset, overlap, and disjoint-active constraints apply to
+  `confirmed_counts` exactly as they apply to non-null exact counts.
+- Every non-null exact counter equals its confirmed counterpart when evidence
+  is present. Null exact counters remain null.
+- `coverage.status=complete` cannot coexist with a nonzero unknown-status
+  population.
+- Missing, invalid, or stale current-attempt status is status-unknown and
+  contributes to no confirmed counter.
+- A known authoritative workflow status can still lack attention evidence or
+  the authoritative original terminal timestamp. Those counters remain
+  incomplete, and `coverage.status` plus notes continue to name the attention
+  or terminal-window gap independently of status coverage.
+- Terminal-window confirmation requires the authoritative original terminal
+  timestamp. A later observation, collection, or unrelated update timestamp
+  must not be substituted.
+- `status_unknown_workspaces=0` does not by itself upgrade overall coverage to
+  `complete`; attention, terminal-time, and other required evidence may still
+  be partial.
+
+For example, a snapshot of 29 workspaces with 24 known statuses and five
+unknown statuses may publish all ten confirmed counters as zero. The UI shows
+`0 confirmed` for null exact counters and reports
+`24 of 29 workflow statuses known; 5 unknown`. If the next same-scope snapshot
+adds one authoritative running workflow, the evidence is total 30, known 25,
+unknown five, with `active=1` and `executing=1` in `confirmed_counts`; those
+null exact counters render as `1 confirmed`.
+
+Omission and explicit null are accepted for reader compatibility. Core's local
+exact-summary producer omits the field when unused, so its existing serialized
+payload shape does not gain a null key. Shared readers that predate this
+extension continue to receive the old shape; compatible shared readers must be
+deployed before a hosted producer begins emitting evidence.
 
 A stopped **native** execution is **not** a completed overall workflow. Native
 runtime finish and workflow finish remain distinct presentation concepts.
@@ -203,9 +257,13 @@ feeds.
 ### Dashboard summary (required)
 `schema_version`, `scope`, `generated_at`, `as_of`, `last_success_at`, `window`, `coverage`, `counts`, `overlap`
 
+Optional: `count_evidence` (object or `null`, as defined above).
+
 `last_success_at` must be present. The value is an RFC 3339 timestamp or `null`
 when no fully successful summary exists yet. `coverage.status=complete` requires
 a timestamp.
 
 ### Counts
-Each count key is required on the object; values may be `number | null`.
+Each count key is required on the object; values are strict nonnegative
+`integer | null`. The ten exact fields and their meanings are unchanged by the
+optional evidence extension.

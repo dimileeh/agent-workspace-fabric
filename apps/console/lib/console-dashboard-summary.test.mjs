@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  fleetKpisFromDashboardSummary,
   formatDashboardCoverageNotice,
   parseDashboardSummary,
 } from "./console-dashboard-summary.ts";
@@ -16,6 +17,30 @@ const fixture = JSON.parse(
 
 function validSummary(overrides = {}) {
   return structuredClone({ ...fixture, ...overrides });
+}
+
+const countKeys = Object.keys(fixture.counts);
+
+function zeroConfirmedCounts() {
+  return Object.fromEntries(countKeys.map((key) => [key, 0]));
+}
+
+function summaryWithCountEvidence({
+  total = 29,
+  known = 24,
+  unknown = 5,
+  confirmed = {},
+} = {}) {
+  return validSummary({
+    coverage: { status: "partial", notes: ["workflow_status_incomplete"] },
+    counts: Object.fromEntries(countKeys.map((key) => [key, null])),
+    count_evidence: {
+      total_workspaces: total,
+      status_known_workspaces: known,
+      status_unknown_workspaces: unknown,
+      confirmed_counts: { ...zeroConfirmedCounts(), ...confirmed },
+    },
+  });
 }
 
 for (const level of [null, "window", "coverage", "counts", "overlap"]) {
@@ -164,6 +189,223 @@ test("formatDashboardCoverageNotice surfaces partial and unknown notes", () => {
   assert.equal(formatDashboardCoverageNotice({ status: "complete", notes: [] }), null);
   assert.equal(formatDashboardCoverageNotice(null), null);
   assert.equal(formatDashboardCoverageNotice(undefined), null);
+});
+
+test("parseDashboardSummary accepts absent, null, and valid count evidence", () => {
+  const legacy = parseDashboardSummary(validSummary());
+  assert.ok(legacy);
+  assert.equal("count_evidence" in legacy, false);
+
+  const explicitNull = parseDashboardSummary(validSummary({ count_evidence: null }));
+  assert.ok(explicitNull);
+  assert.equal(explicitNull.count_evidence, null);
+
+  const allZero = parseDashboardSummary(summaryWithCountEvidence());
+  assert.ok(allZero);
+  assert.equal(allZero.count_evidence.total_workspaces, 29);
+  assert.equal(allZero.count_evidence.status_known_workspaces, 24);
+  assert.equal(allZero.count_evidence.status_unknown_workspaces, 5);
+  assert.equal(allZero.count_evidence.confirmed_counts.active, 0);
+
+  const oneRunning = parseDashboardSummary(
+    summaryWithCountEvidence({
+      total: 30,
+      known: 25,
+      unknown: 5,
+      confirmed: { active: 1, executing: 1 },
+    }),
+  );
+  assert.ok(oneRunning);
+  assert.equal(oneRunning.counts.active, null);
+  assert.equal(oneRunning.count_evidence.confirmed_counts.active, 1);
+  assert.equal(oneRunning.count_evidence.confirmed_counts.executing, 1);
+});
+
+test("parseDashboardSummary rejects malformed count evidence objects", () => {
+  for (const level of ["count_evidence", "confirmed_counts"]) {
+    const payload = summaryWithCountEvidence();
+    const target = level === "count_evidence"
+      ? payload.count_evidence
+      : payload.count_evidence.confirmed_counts;
+    target.unpublished_field = 0;
+    assert.equal(parseDashboardSummary(payload), null, `unknown key at ${level}`);
+  }
+
+  for (const [level, key] of [
+    ["count_evidence", "total_workspaces"],
+    ["count_evidence", "status_known_workspaces"],
+    ["count_evidence", "status_unknown_workspaces"],
+    ["count_evidence", "confirmed_counts"],
+    ...countKeys.map((key) => ["confirmed_counts", key]),
+  ]) {
+    const payload = summaryWithCountEvidence();
+    const target = level === "count_evidence"
+      ? payload.count_evidence
+      : payload.count_evidence.confirmed_counts;
+    delete target[key];
+    assert.equal(parseDashboardSummary(payload), null, `missing ${level}.${key}`);
+  }
+});
+
+test("parseDashboardSummary rejects non-strict count evidence integers", () => {
+  for (const path of [
+    ["total_workspaces"],
+    ["status_known_workspaces"],
+    ["status_unknown_workspaces"],
+    ["confirmed_counts", "active"],
+  ]) {
+    for (const invalid of ["1", true, -1, 1.5]) {
+      const payload = summaryWithCountEvidence();
+      const target = path.length === 1
+        ? payload.count_evidence
+        : payload.count_evidence.confirmed_counts;
+      target[path.at(-1)] = invalid;
+      assert.equal(parseDashboardSummary(payload), null, `${path.join(".")}=${invalid}`);
+    }
+  }
+});
+
+test("parseDashboardSummary rejects count evidence contradictions", () => {
+  assert.equal(
+    parseDashboardSummary(summaryWithCountEvidence({ total: 30, known: 24, unknown: 5 })),
+    null,
+  );
+  assert.equal(
+    parseDashboardSummary(summaryWithCountEvidence({ confirmed: { active: 25 } })),
+    null,
+  );
+  const completeWithUnknownStatus = summaryWithCountEvidence({ total: 1, known: 0, unknown: 1 });
+  completeWithUnknownStatus.coverage = { status: "complete", notes: [] };
+  completeWithUnknownStatus.counts = zeroConfirmedCounts();
+  assert.equal(parseDashboardSummary(completeWithUnknownStatus), null);
+  for (const confirmed of [
+    { active: 1, executing: 2 },
+    { active: 1, monitoring_pr: 2, awaiting_human: 0 },
+    { active: 1, queued: 2 },
+    { active: 2, monitoring_pr: 1, awaiting_human: 2 },
+    { active: 2, executing: 2, awaiting_operator: 1 },
+    { active: 2, executing: 2, retrying: 1 },
+    { active: 3, executing: 1, monitoring_pr: 1, awaiting_operator: 1, retrying: 1 },
+    { active: 1, executing: 1, queued: 1 },
+  ]) {
+    assert.equal(
+      parseDashboardSummary(summaryWithCountEvidence({ confirmed })),
+      null,
+      `relationship contradiction ${JSON.stringify(confirmed)}`,
+    );
+  }
+});
+
+test("parseDashboardSummary rejects every exact and confirmed count mismatch", () => {
+  for (const key of countKeys) {
+    const payload = summaryWithCountEvidence();
+    payload.counts[key] = 1;
+    assert.equal(parseDashboardSummary(payload), null, `mismatch at ${key}`);
+  }
+});
+
+test("confirmed KPI lower bounds stay qualified while exact values win", () => {
+  const lowerBounds = parseDashboardSummary(
+    summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } }),
+  );
+  assert.ok(lowerBounds);
+  const lowerBoundKpis = fleetKpisFromDashboardSummary({
+    summary: lowerBounds,
+    summaryStale: true,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: false,
+    includeSummary: true,
+  });
+  const active = lowerBoundKpis.find((item) => item.id === "active");
+  const monitoring = lowerBoundKpis.find((item) => item.id === "monitoring_pr");
+  const completed = lowerBoundKpis.find((item) => item.id === "completed");
+  assert.deepEqual(
+    { value: active.value, suffix: active.suffix, stale: active.stale },
+    { value: 1, suffix: " confirmed", stale: true },
+  );
+  assert.deepEqual(
+    { value: monitoring.value, suffix: monitoring.suffix },
+    { value: 0, suffix: " confirmed" },
+  );
+  assert.match(active.hint, /project total is incomplete/);
+  assert.match(completed.hint, /last 24h/);
+  assert.match(completed.hint, /project total is incomplete/);
+  assert.equal(lowerBounds.counts.active, null);
+
+  const exactPayload = summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } });
+  exactPayload.counts.active = 1;
+  exactPayload.counts.monitoring_pr = 0;
+  const exactSummary = parseDashboardSummary(exactPayload);
+  assert.ok(exactSummary);
+  const exactKpis = fleetKpisFromDashboardSummary({
+    summary: exactSummary,
+    summaryStale: false,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: false,
+    includeSummary: true,
+  });
+  assert.deepEqual(
+    {
+      value: exactKpis.find((item) => item.id === "active").value,
+      suffix: exactKpis.find((item) => item.id === "active").suffix,
+    },
+    { value: 1, suffix: undefined },
+  );
+  assert.deepEqual(
+    {
+      value: exactKpis.find((item) => item.id === "monitoring_pr").value,
+      suffix: exactKpis.find((item) => item.id === "monitoring_pr").suffix,
+    },
+    { value: 0, suffix: undefined },
+  );
+});
+
+test("missing count evidence keeps null KPIs as honest dashes", () => {
+  const summary = parseDashboardSummary(
+    validSummary({
+      coverage: { status: "partial", notes: ["queued_count_unavailable"] },
+      counts: { ...fixture.counts, queued: null },
+    }),
+  );
+  assert.ok(summary);
+  const queued = fleetKpisFromDashboardSummary({
+    summary,
+    summaryStale: false,
+    saturation: null,
+    saturationStale: false,
+    showCapacity: false,
+    includeSummary: true,
+  }).find((item) => item.id === "queued");
+  assert.deepEqual(
+    { value: queued.value, suffix: queued.suffix, hint: queued.hint },
+    { value: "—", suffix: undefined, hint: undefined },
+  );
+});
+
+test("coverage notice quantifies statuses without hiding other evidence gaps", () => {
+  const parsed = parseDashboardSummary(
+    summaryWithCountEvidence({ total: 1, known: 1, unknown: 0 }),
+  );
+  assert.ok(parsed);
+  parsed.coverage.notes = ["terminal_timestamp_unavailable", "attention_evidence_unavailable"];
+  assert.equal(
+    formatDashboardCoverageNotice(parsed.coverage, parsed.count_evidence),
+    "partial coverage — 1 of 1 workflow statuses known; 0 unknown; terminal timestamp unavailable; attention evidence unavailable",
+  );
+  assert.equal(
+    formatDashboardCoverageNotice(
+      { status: "unknown", notes: ["provider_lag"] },
+      {
+        total_workspaces: 29,
+        status_known_workspaces: 24,
+        status_unknown_workspaces: 5,
+        confirmed_counts: zeroConfirmedCounts(),
+      },
+    ),
+    "coverage unknown — 24 of 29 workflow statuses known; 5 unknown; provider lag",
+  );
 });
 
 test("parseDashboardSummary rejects impossible calendar timestamps", () => {

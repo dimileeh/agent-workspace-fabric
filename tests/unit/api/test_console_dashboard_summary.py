@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
+from referencing import Registry, Resource
+from referencing.jsonschema import DRAFT202012
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.routes.console import ConsoleDashboardSummaryResponse
@@ -21,10 +24,77 @@ from awf.db.session import make_session_factory
 from tests.unit.helpers import create_workspace
 
 _FIXTURES = Path(__file__).resolve().parents[3] / "docs" / "console" / "fixtures" / "v1"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_OPENAPI_JSON = _REPO_ROOT / "openapi.json"
+_COUNT_KEYS = (
+    "active",
+    "executing",
+    "monitoring_pr",
+    "awaiting_operator",
+    "awaiting_human",
+    "retrying",
+    "queued",
+    "completed_last_window",
+    "cancelled_last_window",
+    "failed_last_window",
+)
 
 
 def _dashboard_summary_payload() -> dict[str, Any]:
     return json.loads((_FIXTURES / "dashboard-summary.local.json").read_text(encoding="utf-8"))
+
+
+def _zero_confirmed_counts() -> dict[str, int]:
+    return dict.fromkeys(_COUNT_KEYS, 0)
+
+
+def _summary_with_count_evidence(
+    *,
+    total: int = 29,
+    known: int = 24,
+    unknown: int = 5,
+    confirmed_patch: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    payload = _dashboard_summary_payload()
+    payload["coverage"] = {"status": "partial", "notes": ["workflow_status_incomplete"]}
+    payload["counts"] = dict.fromkeys(_COUNT_KEYS, None)
+    confirmed = _zero_confirmed_counts()
+    confirmed.update(confirmed_patch or {})
+    payload["count_evidence"] = {
+        "total_workspaces": total,
+        "status_known_workspaces": known,
+        "status_unknown_workspaces": unknown,
+        "confirmed_counts": confirmed,
+    }
+    return payload
+
+
+def _rewrite_component_refs(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        if "$ref" in obj:
+            ref = obj["$ref"]
+            assert isinstance(ref, str)
+            assert ref.startswith("#/components/schemas/")
+            return {"$ref": f"urn:awf:schemas/{ref.rsplit('/', 1)[-1]}"}
+        return {key: _rewrite_component_refs(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_rewrite_component_refs(item) for item in obj]
+    return obj
+
+
+def _dashboard_summary_openapi_validator() -> Draft202012Validator:
+    spec = json.loads(_OPENAPI_JSON.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+    rewritten = {
+        f"urn:awf:schemas/{name}": Resource(
+            contents=_rewrite_component_refs(schema),
+            specification=DRAFT202012,
+        )
+        for name, schema in schemas.items()
+    }
+    registry = Registry().with_resources(rewritten.items())
+    root = _rewrite_component_refs(copy.deepcopy(schemas["ConsoleDashboardSummaryResponse"]))
+    return Draft202012Validator(root, registry=registry)
 
 
 @pytest.mark.unit
@@ -113,6 +183,7 @@ async def test_dashboard_summary_independent_of_capacity(
     assert body["overlap"]["awaiting_operator_in_active_not_executing"] is True
     assert body["window"]["anchor"] == "generated_at"
     assert body["window"]["since_hours"] == 24
+    assert "count_evidence" not in body
     docker_probe.assert_not_called()
 
 
@@ -178,6 +249,215 @@ async def test_dashboard_summary_null_not_zero_on_partial(
     assert body["counts"]["cancelled_last_window"] is None
     assert "queued" in body["counts"]
     assert body["counts"]["failed_last_window"] == 0
+
+
+@pytest.mark.unit
+def test_dashboard_summary_count_evidence_is_optional_nullable_and_omitted_when_unused() -> None:
+    payload = _dashboard_summary_payload()
+    absent = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert absent.count_evidence is None
+    assert "count_evidence" not in absent.model_dump(mode="json")
+
+    payload["count_evidence"] = None
+    explicit_null = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert explicit_null.count_evidence is None
+    assert "count_evidence" not in explicit_null.model_dump(mode="json")
+
+
+@pytest.mark.unit
+def test_dashboard_summary_accepts_confirmed_lower_bound_examples() -> None:
+    all_zero = ConsoleDashboardSummaryResponse.model_validate(_summary_with_count_evidence())
+    assert all_zero.count_evidence is not None
+    assert all_zero.count_evidence.total_workspaces == 29
+    assert all_zero.count_evidence.status_known_workspaces == 24
+    assert all_zero.count_evidence.status_unknown_workspaces == 5
+    assert all_zero.count_evidence.confirmed_counts.active == 0
+
+    running_payload = _summary_with_count_evidence(
+        total=30,
+        known=25,
+        unknown=5,
+        confirmed_patch={"active": 1, "executing": 1},
+    )
+    running = ConsoleDashboardSummaryResponse.model_validate(running_payload)
+    assert running.count_evidence is not None
+    assert running.count_evidence.confirmed_counts.active == 1
+    assert running.count_evidence.confirmed_counts.executing == 1
+    assert running.counts.active is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("object_name", ["count_evidence", "confirmed_counts"])
+def test_dashboard_summary_count_evidence_rejects_unknown_object_keys(object_name: str) -> None:
+    payload = _summary_with_count_evidence()
+    target = payload["count_evidence"]
+    if object_name == "confirmed_counts":
+        target = target["confirmed_counts"]
+    target["unpublished_field"] = 0
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("object_name", "required_key"),
+    [
+        ("count_evidence", "total_workspaces"),
+        ("count_evidence", "status_known_workspaces"),
+        ("count_evidence", "status_unknown_workspaces"),
+        ("count_evidence", "confirmed_counts"),
+        *(("confirmed_counts", key) for key in _COUNT_KEYS),
+    ],
+)
+def test_dashboard_summary_count_evidence_rejects_missing_required_fields(
+    object_name: str,
+    required_key: str,
+) -> None:
+    payload = _summary_with_count_evidence()
+    target = payload["count_evidence"]
+    if object_name == "confirmed_counts":
+        target = target["confirmed_counts"]
+    del target[required_key]
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid", ["1", True, -1, 1.5])
+@pytest.mark.parametrize(
+    "field_path",
+    [
+        ("total_workspaces",),
+        ("status_known_workspaces",),
+        ("status_unknown_workspaces",),
+        ("confirmed_counts", "active"),
+    ],
+)
+def test_dashboard_summary_count_evidence_rejects_non_strict_nonnegative_integers(
+    field_path: tuple[str, ...],
+    invalid: object,
+) -> None:
+    payload = _summary_with_count_evidence()
+    target = payload["count_evidence"]
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = invalid
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_count_evidence_rejects_population_contradictions() -> None:
+    bad_sum = _summary_with_count_evidence(total=30, known=24, unknown=5)
+    with pytest.raises(ValidationError, match="known.*unknown.*total"):
+        ConsoleDashboardSummaryResponse.model_validate(bad_sum)
+
+    above_known = _summary_with_count_evidence(confirmed_patch={"active": 25})
+    with pytest.raises(ValidationError, match="confirmed.*known"):
+        ConsoleDashboardSummaryResponse.model_validate(above_known)
+
+    complete_with_unknown_status = _summary_with_count_evidence(total=1, known=0, unknown=1)
+    complete_with_unknown_status["coverage"] = {"status": "complete", "notes": []}
+    complete_with_unknown_status["counts"] = _zero_confirmed_counts()
+    with pytest.raises(ValidationError, match="complete.*unknown"):
+        ConsoleDashboardSummaryResponse.model_validate(complete_with_unknown_status)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "confirmed_patch",
+    [
+        {"active": 1, "executing": 2},
+        {"active": 1, "monitoring_pr": 2, "awaiting_human": 0},
+        {"active": 1, "queued": 2},
+        {"active": 2, "monitoring_pr": 1, "awaiting_human": 2},
+        {"active": 2, "executing": 2, "awaiting_operator": 1},
+        {"active": 2, "executing": 2, "retrying": 1},
+        {
+            "active": 3,
+            "executing": 1,
+            "monitoring_pr": 1,
+            "awaiting_operator": 1,
+            "retrying": 1,
+        },
+        {"active": 1, "executing": 1, "queued": 1},
+    ],
+)
+def test_dashboard_summary_count_evidence_rejects_relationship_contradictions(
+    confirmed_patch: dict[str, int],
+) -> None:
+    payload = _summary_with_count_evidence(confirmed_patch=confirmed_patch)
+    with pytest.raises(ValidationError):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("count_key", _COUNT_KEYS)
+def test_dashboard_summary_count_evidence_rejects_exact_count_mismatch(count_key: str) -> None:
+    payload = _summary_with_count_evidence()
+    payload["counts"][count_key] = 1
+    with pytest.raises(ValidationError, match="exact.*confirmed"):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_dashboard_summary_count_evidence_keeps_coverage_reasons_independent() -> None:
+    payload = _summary_with_count_evidence(total=1, known=1, unknown=0)
+    payload["coverage"]["notes"] = [
+        "terminal_timestamp_unavailable",
+        "attention_evidence_unavailable",
+    ]
+    payload["counts"].update(_zero_confirmed_counts())
+    payload["counts"]["completed_last_window"] = None
+    payload["counts"]["awaiting_human"] = None
+    model = ConsoleDashboardSummaryResponse.model_validate(payload)
+    assert model.coverage.status == "partial"
+    assert model.count_evidence is not None
+    assert model.count_evidence.status_unknown_workspaces == 0
+    assert model.counts.completed_last_window is None
+    assert model.counts.awaiting_human is None
+    assert model.coverage.notes == [
+        "terminal_timestamp_unavailable",
+        "attention_evidence_unavailable",
+    ]
+
+
+@pytest.mark.unit
+def test_dashboard_summary_openapi_exposes_strict_optional_count_evidence() -> None:
+    validator = _dashboard_summary_openapi_validator()
+    legacy = _dashboard_summary_payload()
+    assert not list(validator.iter_errors(legacy))
+
+    explicit_null = copy.deepcopy(legacy)
+    explicit_null["count_evidence"] = None
+    assert not list(validator.iter_errors(explicit_null))
+
+    valid = _summary_with_count_evidence()
+    assert not list(validator.iter_errors(valid))
+
+    malformed_payloads: list[dict[str, Any]] = []
+    for field_path, invalid in (
+        (("total_workspaces",), "29"),
+        (("status_known_workspaces",), True),
+        (("status_unknown_workspaces",), -1),
+        (("confirmed_counts", "active"), 0.5),
+    ):
+        payload = _summary_with_count_evidence()
+        target = payload["count_evidence"]
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = invalid
+        malformed_payloads.append(payload)
+
+    missing = _summary_with_count_evidence()
+    del missing["count_evidence"]["confirmed_counts"]["queued"]
+    malformed_payloads.append(missing)
+    extra = _summary_with_count_evidence()
+    extra["count_evidence"]["extra"] = 0
+    malformed_payloads.append(extra)
+
+    for malformed in malformed_payloads:
+        assert list(validator.iter_errors(malformed))
 
 
 @pytest.mark.unit

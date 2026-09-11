@@ -1182,6 +1182,9 @@ export function ConsoleDashboard() {
           coverageNotes={
             fleetSummaryAvailable ? (dashboardSummary?.coverage.notes ?? null) : null
           }
+          countEvidence={
+            fleetSummaryAvailable ? (dashboardSummary?.count_evidence ?? null) : null
+          }
         />
       ) : null}
       <SectionNav

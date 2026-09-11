@@ -68,6 +68,7 @@ import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
 import type {
+ConsoleDashboardCountEvidence,
 WorkspaceOverview
 } from "@/lib/types";
 import {
@@ -258,12 +259,14 @@ export function FleetHealthStrip({
   lastSuccessAt,
   coverageStatus,
   coverageNotes,
+  countEvidence,
 }: {
   kpis: FleetKpi[];
   error?: string | null;
   lastSuccessAt?: string | null;
   coverageStatus?: "complete" | "partial" | "unknown" | null;
   coverageNotes?: readonly string[] | null;
+  countEvidence?: ConsoleDashboardCountEvidence | null;
 }) {
   const anyStale = kpis.some((kpi) => kpi.stale);
   // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
@@ -271,6 +274,7 @@ export function FleetHealthStrip({
   // look fully current either.
   const coverageNotice = formatDashboardCoverageNotice(
     coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
+    countEvidence,
   );
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
