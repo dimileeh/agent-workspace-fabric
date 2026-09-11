@@ -538,6 +538,25 @@ class GitManager:
         """Return the managed worktree path for ``workspace_id``."""
         return self._worktree_path_for(workspace_id)
 
+    def worktree_activity_git_roots(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+    ) -> tuple[Path, Path]:
+        """Return immutable-layout Git roots for a managed activity probe.
+
+        Derive both paths from the same workspace/repository metadata used by
+        provisioning, never from the agent-writable checkout ``.git`` marker.
+        ``git worktree add`` names its per-worktree admin directory after the
+        managed checkout basename; AWF workspace ids are unique within a
+        mirror. A checkout that no longer matches this layout is indeterminate
+        to the idle watchdog and must fail open instead of selecting a new root.
+        """
+        worktree_path = self._worktree_path_for(workspace_id)
+        common_dir = self._mirror_path(repo_url)
+        return common_dir / "worktrees" / worktree_path.name, common_dir
+
     def _worktree_path_for(self, workspace_id: str) -> Path:
         """Validate a caller-supplied workspace id and return its worktree path.
 

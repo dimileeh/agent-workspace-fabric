@@ -82,11 +82,17 @@ class TestExecutorCoverageEdgesPart011:
             tmp_path,
             pr_monitor_factory=lambda *_args: _Monitor(),
         )
+        trusted_git_roots = (
+            tmp_path / "mirror.git" / "worktrees" / ws_id,
+            tmp_path / "mirror.git",
+        )
+        executor._worktree_activity_git_roots = lambda **_kwargs: trusted_git_roots
         await executor.resume_pr_monitor(ws_id)
 
         assert monitor_calls == [ws_id]
         assert captured["agent_wall_timeout_seconds"] == executor._config.agent_wall_timeout_seconds
         assert captured["agent_idle_timeout_seconds"] == executor._config.agent_idle_timeout_seconds
+        assert captured["trusted_git_roots"] == trusted_git_roots
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_preserves_companion_compose_timeout(

@@ -213,6 +213,107 @@ async def test_primed_probe_never_walks_replaced_git_target(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("replacement", ["pointer", "symlink"])
+async def test_new_probe_rejects_git_target_rewritten_by_an_earlier_invocation(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    """GitManager roots, not a prior agent's marker, anchor each new probe."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    gitfile = worktree / ".git"
+    gitfile.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    trusted_git_roots = (git_dir, common_dir)
+
+    first = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=trusted_git_roots,
+    )
+    assert first is not None
+    assert await first() is False
+
+    untrusted = tmp_path / "agent-selected-between-invocations"
+    untrusted.mkdir()
+    (untrusted / "sentinel").write_text("outside\n", encoding="utf-8")
+    if replacement == "pointer":
+        gitfile.write_text(f"gitdir: {untrusted}\n", encoding="utf-8")
+    else:
+        gitfile.unlink()
+        gitfile.symlink_to(untrusted, target_is_directory=True)
+
+    real_pin_directory = worktree_activity._pin_directory
+
+    def _reject_untrusted_pin(path: Path) -> object:
+        if path == untrusted:
+            raise AssertionError(f"probe trusted agent-selected Git root: {path}")
+        return real_pin_directory(path)
+
+    monkeypatch.setattr(worktree_activity, "_pin_directory", _reject_untrusted_pin)
+
+    second = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=trusted_git_roots,
+    )
+    assert second is not None
+    assert await second() is None
+
+
+@pytest.mark.unit
+async def test_trusted_git_root_rejects_symlinked_managed_path_component(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """A lexical match cannot escape through a replaced mirror/worktrees dir."""
+    common_dir = tmp_path / "mirror.git"
+    common_dir.mkdir()
+    untrusted = tmp_path / "agent-selected"
+    git_dir_target = untrusted / "ws_probe"
+    git_dir_target.mkdir(parents=True)
+    (common_dir / "worktrees").symlink_to(untrusted, target_is_directory=True)
+    expected_git_dir = common_dir / "worktrees" / "ws_probe"
+    (worktree / ".git").write_text(
+        f"gitdir: {expected_git_dir}\n",
+        encoding="utf-8",
+    )
+
+    probe = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=(expected_git_dir, common_dir),
+    )
+
+    assert probe is not None
+    assert await probe() is None
+
+
+@pytest.mark.unit
+def test_trusted_git_marker_rejects_lstat_open_replacement(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker replaced between lstat and open cannot authorize the Git root."""
+    git_dir = tmp_path / "mirror.git" / "worktrees" / "ws_probe"
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    real_fstat = os.fstat
+
+    def _changed_inode(descriptor: int) -> os.stat_result:
+        opened = real_fstat(descriptor)
+        fields = list(opened)
+        fields[1] = opened.st_ino + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", _changed_inode)
+
+    with pytest.raises(OSError, match="marker replaced"):
+        worktree_activity._require_trusted_git_marker(worktree, git_dir)
+
+
+@pytest.mark.unit
 async def test_primed_probe_never_walks_replaced_git_admin_directory(
     tmp_path: Path,
     worktree: Path,
@@ -226,7 +327,10 @@ async def test_primed_probe_never_walks_replaced_git_admin_directory(
     _age_tree(worktree)
     _age_tree(tmp_path / "mirror.git")
 
-    probe = WorktreeActivityProbe(worktree)
+    probe = WorktreeActivityProbe(
+        worktree,
+        trusted_git_roots=(git_dir, tmp_path / "mirror.git"),
+    )
     await probe.prime()
     assert await probe() is False
 

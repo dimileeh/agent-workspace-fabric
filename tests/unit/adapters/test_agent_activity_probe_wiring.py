@@ -70,6 +70,33 @@ async def test_worktree_path_produces_an_activity_probe(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_adapter_passes_git_manager_roots_to_each_activity_probe(tmp_path: Path) -> None:
+    runner = _RecordingStreamingRunner()
+    worktree = tmp_path / "worktrees" / "ws_probe"
+    common_dir = tmp_path / "mirrors" / "repo.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    worktree.mkdir(parents=True)
+    git_dir.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    adapter = _ProbeAdapter(
+        runner=runner,
+        trusted_git_roots=(git_dir, common_dir),
+    )
+
+    await adapter.run(
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=tmp_path / "compose.yml",
+        prompt="do the work",
+        workspace_id="ws_probe",
+        worktree_path=worktree,
+    )
+
+    probe = runner.streaming_kwargs[0]["activity_probe"]
+    assert probe._git_layout.git_dir.path == git_dir
+    assert probe._git_layout.common_dir.path == common_dir
+
+
+@pytest.mark.unit
 async def test_no_worktree_path_leaves_the_watchdog_output_only(tmp_path: Path) -> None:
     runner = _RecordingStreamingRunner()
     adapter = _ProbeAdapter(runner=runner)

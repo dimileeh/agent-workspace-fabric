@@ -111,6 +111,13 @@ Design notes:
   could pin external Git roots, later scans resolve nothing agent-controlled:
   an absent or real-directory ``.git`` remains covered by the worktree walk,
   while a pointer or symlink fails open for the rest of the run.
+* Managed local worktrees additionally receive their expected Git admin and
+  common directories from ``GitManager``. Those paths are derived from the
+  workspace id and repository URL rather than from the agent-writable ``.git``
+  marker, so a later adapter invocation cannot adopt a pointer or symlink an
+  earlier invocation redirected elsewhere. The marker is checked without
+  following it; a mismatch leaves the probe in fail-open degraded mode and no
+  agent-selected external root is pinned or walked.
 * The walk is bounded by an entry budget, and running out fails **open**: the
   probe reports ``None`` ("could not tell"), which the watchdog counts as
   activity. A truncated walk has no opinion about liveness, and any worktree
@@ -449,6 +456,8 @@ class _PinnedDirectory(NamedTuple):
 
     path: Path
     identity: _DirectoryIdentity | None
+    anchor: _PinnedDirectory | None = None
+    relative_to_anchor: Path | None = None
 
 
 class _WatchedPath(NamedTuple):
@@ -492,10 +501,12 @@ class WorktreeActivityProbe:
         *,
         max_entries: int = DEFAULT_MAX_ENTRIES,
         prime_timeout_seconds: float = DEFAULT_PRIME_TIMEOUT_SECONDS,
+        trusted_git_roots: tuple[Path, Path] | None = None,
     ) -> None:
         self._worktree_path = worktree_path
         self._max_entries = max_entries
         self._prime_timeout_seconds = prime_timeout_seconds
+        self._trusted_git_roots = trusted_git_roots
         self._previous: _Scan | None = None
         # One live scan thread per worktree: an abandoned scan cannot be
         # reclaimed, so probing again while it runs would leak another.
@@ -595,7 +606,14 @@ class WorktreeActivityProbe:
                 return True
             if self._git_layout_sealed:
                 return False
-        layout = _resolve_git_layout(self._worktree_path)
+        layout = (
+            _resolve_git_layout(self._worktree_path)
+            if self._trusted_git_roots is None
+            else _resolve_git_layout(
+                self._worktree_path,
+                trusted_git_roots=self._trusted_git_roots,
+            )
+        )
         return self._commit_git_layout(layout)
 
     def _commit_git_layout(self, layout: _GitLayout | None) -> bool:
@@ -933,7 +951,11 @@ class WorktreeActivityProbe:
         return _GitPaths(tuple(watched), walk_roots)
 
 
-async def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityProbe | None:
+async def make_worktree_activity_probe(
+    worktree_path: Path | None,
+    *,
+    trusted_git_roots: tuple[Path, Path] | None = None,
+) -> ActivityProbe | None:
     """Build a primed probe for ``worktree_path``, or ``None`` with nothing to watch.
 
     Priming walks the tree once, so this must be awaited before the agent is
@@ -945,7 +967,10 @@ async def make_worktree_activity_probe(worktree_path: Path | None) -> ActivityPr
     """
     if worktree_path is None:
         return None
-    probe = WorktreeActivityProbe(worktree_path)
+    probe = WorktreeActivityProbe(
+        worktree_path,
+        trusted_git_roots=trusted_git_roots,
+    )
     if not await probe.prime():
         return None
     return probe
@@ -1028,6 +1053,21 @@ def _metadata_stat_at(watched: _WatchedPath) -> os.stat_result | None:
     """
     root = watched.root
     if root.identity is None:
+        if root.anchor is not None and root.relative_to_anchor is not None:
+            try:
+                appeared_descriptor = _open_directory_beneath(
+                    root.anchor,
+                    root.relative_to_anchor,
+                )
+            except FileNotFoundError:
+                return None
+            else:
+                os.close(appeared_descriptor)
+                raise OSError(
+                    errno.ESTALE,
+                    "pinned directory appeared after priming",
+                    root.path,
+                )
         root_stat = _metadata_stat(root.path)
         if root_stat is None:
             return None
@@ -1097,6 +1137,28 @@ def _pin_directory(path: Path) -> _PinnedDirectory:
     )
 
 
+def _pin_directory_beneath(
+    anchor: _PinnedDirectory,
+    relative: Path,
+) -> _PinnedDirectory:
+    """Pin a directory reached beneath ``anchor`` without following symlinks."""
+    path = anchor.path / relative
+    try:
+        descriptor = _open_directory_beneath(anchor, relative)
+    except FileNotFoundError:
+        return _PinnedDirectory(path, None, anchor, relative)
+    try:
+        stat_result = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    return _PinnedDirectory(
+        path,
+        _DirectoryIdentity(stat_result.st_dev, stat_result.st_ino),
+        anchor,
+        relative,
+    )
+
+
 def _open_checked_directory(
     path: str | Path,
     expected: _DirectoryIdentity,
@@ -1124,7 +1186,50 @@ def _open_pinned_directory(directory: _PinnedDirectory) -> int:
     """Open a pre-agent directory, rejecting absence or replacement."""
     if directory.identity is None:
         raise OSError(errno.ESTALE, "directory was absent when pinned", directory.path)
+    if directory.anchor is not None and directory.relative_to_anchor is not None:
+        return _open_directory_beneath(
+            directory.anchor,
+            directory.relative_to_anchor,
+            expected=directory.identity,
+        )
     return _open_checked_directory(directory.path, directory.identity)
+
+
+def _open_directory_beneath(
+    anchor: _PinnedDirectory,
+    relative: Path,
+    *,
+    expected: _DirectoryIdentity | None = None,
+) -> int:
+    """Open a relative directory chain beneath a pinned root without symlinks."""
+    parts = relative.parts
+    if not parts or relative.is_absolute():
+        raise OSError(errno.EINVAL, "invalid anchored directory path", relative)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptors = [_open_pinned_directory(anchor)]
+    try:
+        for component in parts:
+            descriptors.append(os.open(component, flags, dir_fd=descriptors[-1]))
+        result = descriptors.pop()
+        try:
+            matches_expected = expected is None or _matches_directory_identity(
+                os.fstat(result),
+                expected,
+            )
+        except BaseException:
+            os.close(result)
+            raise
+        if not matches_expected:
+            os.close(result)
+            raise OSError(
+                errno.ESTALE,
+                "directory identity changed",
+                anchor.path / relative,
+            )
+        return result
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _open_observed_directory(
@@ -1182,8 +1287,89 @@ def _resolve_linked_git_dir(worktree_path: Path) -> Path | None:
     return None
 
 
-def _resolve_git_layout(worktree_path: Path) -> _GitLayout | None:
+def _lexical_absolute(path: Path) -> Path:
+    """Make ``path`` absolute without following agent-controlled symlinks."""
+    return Path(os.path.abspath(path))  # noqa: PTH100 - Path.resolve() follows symlinks.
+
+
+def _require_trusted_git_marker(worktree_path: Path, expected_git_dir: Path) -> None:
+    """Require ``.git`` to name GitManager's admin dir without following it.
+
+    A later agent invocation inherits an agent-writable checkout, so resolving
+    the marker's target and trusting whatever it names would let the prior
+    invocation redirect this process into an unrelated tree. Read the marker
+    itself with ``O_NOFOLLOW`` and compare its normalized pathname to the
+    control-plane-derived path; neither operation resolves target symlinks.
+    """
+    git_path = worktree_path / ".git"
+    observed = git_path.lstat()
+    if not stat_module.S_ISREG(observed.st_mode):
+        raise OSError(errno.ESTALE, "managed worktree .git marker changed type", git_path)
+    descriptor = os.open(
+        git_path,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat_module.S_ISREG(opened.st_mode)
+            or opened.st_dev != observed.st_dev
+            or opened.st_ino != observed.st_ino
+        ):
+            raise OSError(errno.ESTALE, "managed worktree .git marker replaced", git_path)
+        content = os.read(descriptor, 4096).decode("utf-8", errors="replace")
+    finally:
+        os.close(descriptor)
+
+    target: Path | None = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_GITDIR_PREFIX):
+            raw = stripped[len(_GITDIR_PREFIX) :].strip()
+            if raw:
+                candidate = Path(raw)
+                target = candidate if candidate.is_absolute() else worktree_path / candidate
+            break
+    normalized_target = _lexical_absolute(target) if target is not None else None
+    normalized_expected = _lexical_absolute(expected_git_dir)
+    if normalized_target != normalized_expected:
+        raise OSError(
+            errno.ESTALE,
+            "managed worktree .git marker does not match GitManager metadata",
+            git_path,
+        )
+
+
+def _resolve_git_layout(
+    worktree_path: Path,
+    *,
+    trusted_git_roots: tuple[Path, Path] | None = None,
+) -> _GitLayout | None:
     """Resolve and canonicalize the external Git roots captured before execution."""
+    if trusted_git_roots is not None:
+        expected_git_dir, expected_common_dir = trusted_git_roots
+        trusted_git_dir = _lexical_absolute(expected_git_dir)
+        trusted_common_dir = _lexical_absolute(expected_common_dir)
+        try:
+            git_dir_relative = trusted_git_dir.relative_to(trusted_common_dir)
+        except ValueError as exc:
+            raise OSError(
+                errno.ESTALE,
+                "GitManager activity admin dir escapes its common dir",
+                trusted_git_dir,
+            ) from exc
+        if len(git_dir_relative.parts) != 2 or git_dir_relative.parts[0] != "worktrees":
+            raise OSError(
+                errno.ESTALE,
+                "GitManager activity admin dir has an invalid managed layout",
+                trusted_git_dir,
+            )
+        _require_trusted_git_marker(worktree_path, trusted_git_dir)
+        common_root = _pin_directory(trusted_common_dir)
+        return _GitLayout(
+            git_dir=_pin_directory_beneath(common_root, git_dir_relative),
+            common_dir=common_root,
+        )
     git_dir = _resolve_linked_git_dir(worktree_path)
     if git_dir is None:
         return None

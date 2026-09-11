@@ -179,6 +179,7 @@ class AgentAdapter(ABC):
         agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
         usage_sampler: UsageSampler | None = None,
         runtime_executor: AgentRuntimeExecutor | None = None,
+        trusted_git_roots: tuple[Path, Path] | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
@@ -193,6 +194,7 @@ class AgentAdapter(ABC):
         self._agent_idle_timeout_seconds = agent_idle_timeout_seconds
         self._usage_sampler = usage_sampler
         self._runtime_executor = runtime_executor
+        self._trusted_git_roots = trusted_git_roots
 
     @property
     @abstractmethod
@@ -1085,7 +1087,10 @@ class AgentAdapter(ABC):
             # watchdog must also count worktree writes as liveness (#932). Only
             # pass the kwarg when a probe exists so runners that predate it
             # (and the non-worktree call sites) keep the old signature.
-            activity_probe = await make_worktree_activity_probe(worktree_path)
+            activity_probe = await make_worktree_activity_probe(
+                worktree_path,
+                trusted_git_roots=self._trusted_git_roots,
+            )
             probe_kwargs: dict[str, Any] = (
                 {"activity_probe": activity_probe} if activity_probe is not None else {}
             )

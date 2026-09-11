@@ -689,6 +689,15 @@ class TestAgentWatchdogConfig:
     ) -> None:
         ws_id = await _seed_ready(factory)
         captured: dict[str, Any] = {}
+        trusted_git_roots = (
+            tmp_path / "work" / "mirrors" / "repo.git" / "worktrees" / ws_id,
+            tmp_path / "work" / "mirrors" / "repo.git",
+        )
+        root_requests: list[tuple[str, str]] = []
+
+        def _trusted_git_roots(workspace_id: str, repo_url: str) -> tuple[Path, Path]:
+            root_requests.append((workspace_id, repo_url))
+            return trusted_git_roots
 
         class _Adapter:
             def get_provider(self, model: str | None) -> str:
@@ -731,12 +740,15 @@ class TestAgentWatchdogConfig:
                 agent_wall_timeout_seconds=12,
                 agent_idle_timeout_seconds=3,
             ),
+            worktree_activity_git_roots=_trusted_git_roots,
         )
 
         await executor.execute(ws_id)
 
         assert captured["agent_wall_timeout_seconds"] == 12
         assert captured["agent_idle_timeout_seconds"] == 3
+        assert captured["trusted_git_roots"] == trusted_git_roots
+        assert root_requests == [(ws_id, "git@github.com:x/y.git")]
 
 
 class TestBranchDriftRecovery:
