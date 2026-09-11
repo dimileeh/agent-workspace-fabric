@@ -208,6 +208,35 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
   }
 });
 
+test("local terminal task details use the card lifecycle timing", async ({ page }) => {
+  const completed = overview("ws_local_details_timing", "completed", {
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:02:00Z", 120),
+      stage("running", "2026-09-06T12:02:00Z", "2026-09-06T12:10:00Z", 480),
+      stage("completed", "2026-09-06T12:10:00Z", "2026-09-06T12:20:00Z", 600),
+    ],
+  });
+  await mockAwfConsoleApi(page, { overviewItems: [completed] });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const card = page.getByTestId(`workspace-card-${completed.workspace_id}`);
+  await expect(card.getByTestId(`workspace-card-finished-${completed.workspace_id}`)).toContainText(
+    formatDateTime("2026-09-06T12:10:00Z"),
+  );
+  await expect(card.getByTestId(`workspace-card-duration-${completed.workspace_id}`)).toContainText(
+    "10m 0s",
+  );
+
+  await card.getByRole("button", { name: "Details", exact: true }).click();
+  const details = page.getByRole("dialog", { name: /Task details/i });
+  const workflowFinished = details.getByText("Workflow finished", { exact: true }).locator("..");
+  await expect(workflowFinished).toContainText(formatDateTime("2026-09-06T12:10:00Z"));
+  const duration = details.getByText("Duration", { exact: true }).locator("..");
+  await expect(duration).toContainText("10m 0s");
+});
+
 test("terminal cards call missing or ambiguous timing not recorded while preserving zero", async ({
   page,
 }) => {

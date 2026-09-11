@@ -42,7 +42,7 @@ useState
 import {
 formatAgentLabel,
 formatAgentTitle,
-resolveWorkflowFinishedAt
+resolveWorkflowTiming
 } from "@/lib/agent-format";
 import {
   displayedTaskKey,
@@ -753,155 +753,6 @@ const TERMINAL_WORKSPACE_CARD_STATUSES = new Set<WorkspaceOverview["status"]>([
   "destroyed",
 ]);
 
-type WorkflowCardTiming = {
-  finishedAt: string | null;
-  durationLabel: string | null;
-};
-
-type TimedLifecycleStage = {
-  stage: WorkspaceOverview["lifecycle"][number];
-  startedAt: string;
-  startedMs: number;
-  endedMs: number | null;
-};
-
-function recordedMilliseconds(value: string | null | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? milliseconds : null;
-}
-
-function recordedDurationSeconds(value: number | null | undefined): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function lifecycleWorkflowTiming(item: WorkspaceOverview): {
-  finishedAt: string;
-  finishedMs: number;
-  durationSeconds: number | null;
-} | null {
-  // Lifecycle summaries collapse repeated visits to a stage. Once a retry or
-  // reverse transition exists, they cannot identify the current workflow end.
-  if (item.recovery != null) {
-    return null;
-  }
-  const entered: TimedLifecycleStage[] = [];
-  for (const stage of item.lifecycle) {
-    const startedMs = recordedMilliseconds(stage.started_at);
-    const endedMs = recordedMilliseconds(stage.ended_at);
-    if (
-      (stage.started_at != null && startedMs == null) ||
-      (stage.ended_at != null && endedMs == null)
-    ) {
-      return null;
-    }
-    if (
-      stage.started_at == null &&
-      (stage.ended_at != null ||
-        stage.duration_seconds != null ||
-        (stage.status !== "pending" && stage.status !== "terminal_skipped"))
-    ) {
-      return null;
-    }
-    if (stage.started_at != null && startedMs != null) {
-      entered.push({ stage, startedAt: stage.started_at, startedMs, endedMs });
-    }
-  }
-  const latestEntered = entered.reduce<TimedLifecycleStage | null>(
-    (latest, entry) => (latest == null || entry.startedMs > latest.startedMs ? entry : latest),
-    null,
-  );
-  if (latestEntered == null) {
-    return null;
-  }
-
-  let finishedAt = latestEntered.stage.ended_at;
-  let finishedMs = latestEntered.endedMs;
-  if (latestEntered.stage.stage === "completed") {
-    const previousEndMs = entered.reduce<number | null>(
-      (latest, entry) =>
-        entry.stage.stage !== "completed" &&
-        entry.endedMs != null &&
-        (latest == null || entry.endedMs > latest)
-          ? entry.endedMs
-          : latest,
-      null,
-    );
-    // The completed stage starts at workflow end but may itself end much later
-    // during cleanup. Require the preceding lifecycle boundary to corroborate
-    // that start so a collapsed retry history cannot invent a fresh finish.
-    if (previousEndMs !== latestEntered.startedMs) {
-      return null;
-    }
-    finishedAt = latestEntered.startedAt;
-    finishedMs = latestEntered.startedMs;
-  }
-  if (finishedAt == null || finishedMs == null) {
-    return null;
-  }
-
-  const durationStages = entered
-    .filter(
-      (entry) =>
-        entry.stage.stage !== "completed" &&
-        entry.startedMs <= finishedMs,
-    )
-    .sort((left, right) => left.startedMs - right.startedMs);
-  let durationSeconds = 0;
-  let previousEndMs: number | null = null;
-  for (const entry of durationStages) {
-    const stageDuration = recordedDurationSeconds(entry.stage.duration_seconds);
-    if (
-      entry.endedMs == null ||
-      entry.endedMs > finishedMs ||
-      stageDuration == null ||
-      (previousEndMs != null && previousEndMs !== entry.startedMs)
-    ) {
-      return { finishedAt, finishedMs, durationSeconds: null };
-    }
-    durationSeconds += stageDuration;
-    previousEndMs = entry.endedMs;
-  }
-  if (previousEndMs !== finishedMs) {
-    return { finishedAt, finishedMs, durationSeconds: null };
-  }
-  return { finishedAt, finishedMs, durationSeconds };
-}
-
-function workflowCardTiming(item: WorkspaceOverview): WorkflowCardTiming {
-  const resolvedFinishedAt = resolveWorkflowFinishedAt(item);
-  const explicitFinishedMs = recordedMilliseconds(resolvedFinishedAt);
-  if (resolvedFinishedAt != null && explicitFinishedMs == null) {
-    return { finishedAt: null, durationLabel: null };
-  }
-
-  const lifecycleTiming = lifecycleWorkflowTiming(item);
-  const finishedAt = resolvedFinishedAt ?? lifecycleTiming?.finishedAt ?? null;
-  const finishedMs = explicitFinishedMs ?? lifecycleTiming?.finishedMs ?? null;
-  if (finishedAt == null || finishedMs == null) {
-    return { finishedAt: null, durationLabel: null };
-  }
-
-  const explicitDurationPresent = item.duration_seconds != null;
-  const explicitDuration = recordedDurationSeconds(item.duration_seconds);
-  let durationSeconds: number | null = null;
-  if (explicitDurationPresent) {
-    const fallbackFinishedMs = recordedMilliseconds(item.finished_at);
-    const durationMatchesFinish =
-      item.finished_at == null || fallbackFinishedMs === finishedMs;
-    durationSeconds = explicitDuration != null && durationMatchesFinish ? explicitDuration : null;
-  } else if (lifecycleTiming?.finishedMs === finishedMs) {
-    durationSeconds = lifecycleTiming.durationSeconds;
-  }
-
-  return {
-    finishedAt,
-    durationLabel: recordedDurationLabel(durationSeconds),
-  };
-}
-
 const WorkspaceCard = memo(function WorkspaceCard({
   item,
   selected,
@@ -923,7 +774,7 @@ const WorkspaceCard = memo(function WorkspaceCard({
     : null;
   const taskKey = displayedTaskKey(item);
   const terminal = TERMINAL_WORKSPACE_CARD_STATUSES.has(item.status);
-  const terminalTiming = terminal ? workflowCardTiming(item) : null;
+  const terminalTiming = terminal ? resolveWorkflowTiming(item) : null;
   return (
     <div
       data-testid={`workspace-card-${item.workspace_id}`}
@@ -999,7 +850,8 @@ const WorkspaceCard = memo(function WorkspaceCard({
                               : "not recorded"}
                           </span>
                           <span data-testid={`workspace-card-duration-${item.workspace_id}`}>
-                            Duration {terminalTiming?.durationLabel ?? "not recorded"}
+                            Duration{" "}
+                            {recordedDurationLabel(terminalTiming?.durationSeconds) ?? "not recorded"}
                           </span>
                         </>
                       ) : (

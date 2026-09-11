@@ -117,13 +117,18 @@ test("workspace summary does not embed effort in the Agent fact", () => {
   assert.doesNotMatch(summarySource, /formatAgentLabel\(/);
 });
 
-test("task details modal shows duration when duration_seconds is recorded", () => {
+test("task details modal uses resolved workflow timing", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
 
   assert.match(
     modalSource,
-    /recordedDurationLabel\(workspace\.duration_seconds\)/,
-    "Expected TaskDetailsModal to read duration_seconds from the hosted overview",
+    /resolveWorkflowTiming\(workspace\)/,
+    "Expected TaskDetailsModal to share the card workflow timing resolver",
+  );
+  assert.match(
+    modalSource,
+    /recordedDurationLabel\(workflowTiming\.durationSeconds\)/,
+    "Expected TaskDetailsModal to format resolved explicit or lifecycle duration",
   );
   assert.match(
     modalSource,
