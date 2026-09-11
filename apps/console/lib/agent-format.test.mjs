@@ -630,6 +630,44 @@ test("resolveWorkflowTiming rejects non-RFC and impossible recorded timestamps",
   );
 });
 
+test("resolveWorkflowTiming rejects lifecycle stages that end before they start", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "failed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00Z",
+        ended_at: "2026-09-06T12:01:00Z",
+        duration_seconds: 60,
+        status: "completed",
+      },
+      {
+        stage: "running",
+        started_at: "2026-09-06T12:05:00Z",
+        ended_at: "2026-09-06T12:04:00Z",
+        duration_seconds: 60,
+        status: "completed",
+      },
+    ],
+    last_event: {
+      event_type: "workspace.state_changed",
+      old_state: "running",
+      new_state: "failed",
+      occurred_at: "2026-09-06T12:04:00Z",
+    },
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {

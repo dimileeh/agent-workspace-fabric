@@ -281,7 +281,8 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     const endedMs = recordedMilliseconds(stage.ended_at);
     if (
       (stage.started_at != null && startedMs == null) ||
-      (stage.ended_at != null && endedMs == null)
+      (stage.ended_at != null && endedMs == null) ||
+      (startedMs != null && endedMs != null && endedMs < startedMs)
     ) {
       return null;
     }
