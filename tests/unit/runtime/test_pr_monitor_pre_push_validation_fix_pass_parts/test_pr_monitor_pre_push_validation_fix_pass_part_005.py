@@ -407,12 +407,28 @@ async def test_pre_push_validation_fix_pass_timeout_head_probe_is_bounded_best_e
             validation_commands=("pytest -q",),
         )
     )
+    probe_started_task = asyncio.create_task(probe_started.wait())
     # Give unrelated setup and database scheduling their own generous guard.
     # The tight bound below begins only when the preservation probe actually
     # starts, which keeps this assertion meaningful under loaded CI shards.
-    await asyncio.wait_for(probe_started.wait(), timeout=5.0)
-    with pytest.raises(expected_exception) as raised:
-        await asyncio.wait_for(fix_pass_task, timeout=0.5)
+    try:
+        started, _pending = await asyncio.wait(
+            {probe_started_task, fix_pass_task},
+            timeout=5.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if probe_started_task not in started:
+            if fix_pass_task in started:
+                await fix_pass_task
+            pytest.fail("preservation probe did not start within 5 seconds")
+
+        with pytest.raises(expected_exception) as raised:
+            await asyncio.wait_for(fix_pass_task, timeout=0.5)
+    finally:
+        for task in (probe_started_task, fix_pass_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(probe_started_task, fix_pass_task, return_exceptions=True)
 
     if probe_failure != "cancels":
         assert raised.value is cleanup_error
