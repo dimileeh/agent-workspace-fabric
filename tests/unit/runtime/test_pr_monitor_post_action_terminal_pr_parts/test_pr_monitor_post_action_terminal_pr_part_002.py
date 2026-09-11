@@ -321,6 +321,59 @@ async def test_terminal_recheck_head_probe_is_bounded_and_best_effort(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "sink_error",
+    [SQLAlchemyError("event sink down"), OSError("event sink unavailable")],
+    ids=["database", "io"],
+)
+async def test_terminal_audit_failure_preserves_confirmed_observation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sink_error: Exception,
+) -> None:
+    """A terminal audit sink fault cannot mask the fresh forge observation."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    _respond_to_git_probes(cmd, head_sha="preserved-head")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_ScriptedGh(_status(merged=True, merge_commit_sha="mergesha0000")),
+    )
+
+    async def _boom(**_kwargs: object) -> None:
+        raise sink_error
+
+    monkeypatch.setattr(runner, "_append_workspace_events", _boom)
+
+    with structlog.testing.capture_logs() as captured:
+        observation = await runner._post_action_pr_terminal_state(
+            workspace_id=workspace_id,
+            pr_number=42,
+            operation_id="op-terminal-audit",
+            operation_type="comment_repair",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            context="unit_test",
+            worktree_path=worktree,
+        )
+
+    assert observation is not None
+    assert observation.merged is True
+    assert observation.local_head_sha == "preserved-head"
+    assert any(
+        entry.get("event") == "monitor.post_action_pr_terminal_event_failed"
+        and entry.get("reason_code") == _MONITOR_ACTION_MOOT_PR_TERMINAL_REASON
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
 async def test_recheck_forge_error_records_a_diagnostic_event(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

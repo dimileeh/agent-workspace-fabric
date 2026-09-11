@@ -126,9 +126,9 @@ async def _post_action_pr_terminal_state(
     could not be resolved, or the re-fetch hit a transient forge fault. A
     non-``None`` result means the caller must NOT push, must NOT pause into
     ``blocked``, and must NOT post a PR comment; one
-    ``workspace.monitor_action_moot`` event has already been appended recording
-    the operation, the local unpushed HEAD when available, and the observed PR
-    state.
+    ``workspace.monitor_action_moot`` event is appended on a best-effort basis
+    recording the operation, the local unpushed HEAD when available, and the
+    observed PR state.
     """
     resolved_repo = repo if repo is not None else await _post_action_repo_ref(self, workspace_id)
     if resolved_repo is None:
@@ -218,30 +218,43 @@ async def _post_action_pr_terminal_state(
         merge_commit_sha=observation.merge_commit_sha,
         reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
     )
-    await self._append_workspace_events(
-        workspace_id=workspace_id,
-        events=[
-            WorkspaceEventCreate(
-                event_type=MONITOR_ACTION_MOOT_EVENT,
-                reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
-                payload={
-                    "context": context,
-                    "operation_id": operation_id,
-                    "operation_type": operation_type,
-                    "pr_number": pr_number,
-                    "pr_state": observation.pr_state,
-                    "merged": observation.merged,
-                    "closed": observation.closed,
-                    "merge_commit_sha": observation.merge_commit_sha,
-                    "pr_head_sha": status.head_sha,
-                    # The repair commit the action produced is NOT pushed and NOT
-                    # rolled back; record its sha so an operator can recover it.
-                    "local_head_sha": observation.local_head_sha,
-                    "pushed": False,
-                },
-            )
-        ],
-    )
+    try:
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=MONITOR_ACTION_MOOT_EVENT,
+                    reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+                    payload={
+                        "context": context,
+                        "operation_id": operation_id,
+                        "operation_type": operation_type,
+                        "pr_number": pr_number,
+                        "pr_state": observation.pr_state,
+                        "merged": observation.merged,
+                        "closed": observation.closed,
+                        "merge_commit_sha": observation.merge_commit_sha,
+                        "pr_head_sha": status.head_sha,
+                        # The action's repair commit is NOT pushed or rolled back;
+                        # record its sha so an operator can recover it.
+                        "local_head_sha": observation.local_head_sha,
+                        "pushed": False,
+                    },
+                )
+            ],
+        )
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.post_action_pr_terminal_event_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            pr_state=observation.pr_state,
+            error=repr(exc)[:400],
+            reason_code=_MONITOR_ACTION_MOOT_PR_TERMINAL_REASON,
+        )
     return observation
 
 
