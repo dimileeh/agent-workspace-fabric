@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import type {
+  WorkspaceEvent,
   WorkspaceLifecycleStage,
   WorkspaceOverview,
   WorkspaceStatus,
@@ -62,6 +63,24 @@ function overview(
     created_at: "2026-09-06T12:00:00Z",
     updated_at: "2026-09-06T12:45:00Z",
     ...overrides,
+  };
+}
+
+function stateChangedEvent(
+  workspaceId: string,
+  oldState: string,
+  newState: WorkspaceStatus,
+  occurredAt: string,
+): WorkspaceEvent {
+  return {
+    id: `event_${workspaceId}_${newState}`,
+    workspace_id: workspaceId,
+    event_type: "workspace.state_changed",
+    old_state: oldState,
+    new_state: newState,
+    reason_code: null,
+    payload: null,
+    occurred_at: occurredAt,
   };
 }
 
@@ -172,6 +191,12 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
     ],
   });
   const failed = overview("ws_local_failed", "failed", {
+    last_event: stateChangedEvent(
+      "ws_local_failed",
+      "running",
+      "failed",
+      "2026-09-06T12:08:00Z",
+    ),
     lifecycle: [
       stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
       stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
@@ -296,6 +321,12 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
     duration_seconds: 600,
   });
   const lifecycleGap = overview("ws_duration_gap", "failed", {
+    last_event: stateChangedEvent(
+      "ws_duration_gap",
+      "running",
+      "failed",
+      "2026-09-06T12:05:00Z",
+    ),
     lifecycle: [
       stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
       stage("running", "2026-09-06T12:02:00Z", "2026-09-06T12:05:00Z", 180),

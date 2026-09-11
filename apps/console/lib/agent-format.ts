@@ -293,6 +293,20 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   if (finishedAt == null || finishedMs == null) {
     return null;
   }
+  if (latestEntered.stage.stage !== "completed") {
+    const terminalEvent = item.last_event;
+    const terminalEventMs = recordedMilliseconds(terminalEvent?.occurred_at);
+    // Pauses such as blocked/recovering are absent from lifecycle summaries.
+    // For terminal paths without a completed stage, only trust that boundary
+    // when the latest state-change corroborates the actual terminal transition.
+    if (
+      terminalEvent?.event_type !== "workspace.state_changed" ||
+      terminalEvent.new_state !== item.status ||
+      terminalEventMs !== finishedMs
+    ) {
+      return null;
+    }
+  }
 
   const durationStages = entered
     .filter(

@@ -485,3 +485,88 @@ test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array
   );
   assert.deepEqual(runningFirst, { finishedAt: null, durationSeconds: null });
 });
+
+test("resolveWorkflowTiming requires terminal evidence after the latest represented stage", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "failed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00Z",
+        ended_at: "2026-09-06T12:01:00Z",
+        duration_seconds: 60,
+        status: "completed",
+      },
+      {
+        stage: "running",
+        started_at: "2026-09-06T12:01:00Z",
+        ended_at: "2026-09-06T12:05:00Z",
+        duration_seconds: 240,
+        status: "completed",
+      },
+    ],
+  };
+  const stateChanged = (oldState, newState, occurredAt) => ({
+    event_type: "workspace.state_changed",
+    old_state: oldState,
+    new_state: newState,
+    occurred_at: occurredAt,
+  });
+
+  assert.deepEqual(resolveWorkflowTiming({ ...item, last_event: null }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "cancelled",
+      last_event: stateChanged("blocked", "cancelled", "2026-09-06T12:10:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("recovering", "failed", "2026-09-06T12:10:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("running", "cancelled", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      last_event: stateChanged("running", "failed", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "completed",
+      last_event: null,
+      lifecycle: [
+        ...item.lifecycle,
+        {
+          stage: "completed",
+          started_at: "2026-09-06T12:05:00Z",
+          ended_at: "2026-09-06T12:05:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+      ],
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+  );
+});
