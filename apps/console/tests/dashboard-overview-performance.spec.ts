@@ -1169,6 +1169,9 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
     resolvePageItems: (items, cursor) => {
       if (cursor !== null || revision === 0) return items;
       const updatedItems = items.map((item) => {
+        if (revision === 1 && inspectorOpen && item.workspace_id === "ws_perf_0001") {
+          return { ...item, updated_at: "2026-09-10T11:59:30.500Z" };
+        }
         if (revision === 1 && item.workspace_id === "ws_perf_0002") {
           return { ...item, updated_at: "2026-09-11T12:02:00.000Z" };
         }
@@ -1207,6 +1210,12 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
   const firstCardId = () =>
     list.locator('[data-testid^="workspace-card-"]').first().getAttribute("data-testid");
   const scrollTop = () => list.evaluate((element) => element.scrollTop);
+  const selectedViewportOffset = () =>
+    page.getByTestId("workspace-card-ws_perf_0001").evaluate((element) => {
+      const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
+      if (!listElement) throw new Error("workspace list is missing");
+      return element.getBoundingClientRect().top - listElement.getBoundingClientRect().top;
+    });
   const expectTop = async () => {
     await expect.poll(scrollTop).toBe(0);
   };
@@ -1220,6 +1229,7 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
 
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0001");
   await expectTop();
+  const selectedOffsetBeforeRefresh = inspectorOpen ? await selectedViewportOffset() : null;
 
   revision = 1;
   const requestsBeforeBackgroundPoll = firstPageRequests;
@@ -1227,11 +1237,14 @@ test(`workspace list stays at the top during refresh reorders (inspectorOpen=${i
     .poll(() => firstPageRequests, { timeout: 7_000 })
     .toBeGreaterThan(requestsBeforeBackgroundPoll);
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0002");
-  await expectTop();
   if (inspectorOpen) {
     await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+    await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+    await expect.poll(selectedViewportOffset).toBeCloseTo(selectedOffsetBeforeRefresh ?? 0, 0);
+    expect(await scrollTop()).toBeGreaterThan(240);
     return;
   }
+  await expectTop();
 
   await publishRefresh(2, "workspace-card-ws_perf_0001");
   await expectTop();
