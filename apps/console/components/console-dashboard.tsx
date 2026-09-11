@@ -443,6 +443,18 @@ export function ConsoleDashboard() {
     }
   }, [setSelectedId, setCapabilityError]);
 
+  const releaseUnavailableWorkspaceStreamDenial = useCallback(() => {
+    if (!workspaceStreamAuthDeniedRef.current) {
+      return;
+    }
+    workspaceStreamAuthDeniedRef.current = false;
+    if (!workspaceBaseDetailAuthDeniedRef.current) {
+      workspaceDetailAuthDeniedRef.current = false;
+      setWorkspaceDetailAuthDenied(false);
+      setWorkspaceDetailError(null);
+    }
+  }, []);
+
   // Missing/rolled-back negotiation (capabilities 404): drop optional inventories so
   // gated polls stop, but keep overview/selection/basic detail. Do not bump
   // authorizedFeedEpochRef — a five-second 404 poll would otherwise invalidate
@@ -479,8 +491,12 @@ export function ConsoleDashboard() {
       clearEvents: false,
       clearOperations: false,
       clearLogs: false,
-      clearStream: false,
+      clearStream: true,
     });
+    // Missing/malformed negotiation removes the stream route, so no delayed
+    // probe can recover a route-scoped denial. Release only that denial; a
+    // base-detail 401/403 remains authoritative for the inspector.
+    releaseUnavailableWorkspaceStreamDenial();
     // Already-cleared negotiation: another 404/malformed poll has no optional
     // snapshot left to invalidate. Repeating this bump is what starves the
     // basic workspace GET.
@@ -533,7 +549,7 @@ export function ConsoleDashboard() {
     setFullscreenWorkspaceIds([]);
     appliedCapabilitiesRef.current = null;
     setCapabilities(null);
-  }, []);
+  }, [releaseUnavailableWorkspaceStreamDenial]);
 
   // Same-identity inventory can withdraw a feed without changing the epoch key.
   // Clear that feed's cache and bump gated/read generations so in-flight responses
@@ -575,13 +591,8 @@ export function ConsoleDashboard() {
         setFailureSummaryStatus("loading");
         setFailureSummaryError(null);
       }
-      if (plan.clearStream && workspaceStreamAuthDeniedRef.current) {
-        workspaceStreamAuthDeniedRef.current = false;
-        if (!workspaceBaseDetailAuthDeniedRef.current) {
-          workspaceDetailAuthDeniedRef.current = false;
-          setWorkspaceDetailAuthDenied(false);
-          setWorkspaceDetailError(null);
-        }
+      if (plan.clearStream) {
+        releaseUnavailableWorkspaceStreamDenial();
       }
       // Inspector detail feeds: same-identity withdrawal must clear caches and
       // bump gated-detail generation so in-flight optional feeds cannot restore
@@ -638,7 +649,7 @@ export function ConsoleDashboard() {
       // Stamp revoked so an in-flight 503 cannot restore the cleared error.
       noteFleetFeedCapabilityWithdrawalRef.current(plan);
     },
-    [],
+    [releaseUnavailableWorkspaceStreamDenial],
   );
 
   const invalidateAuthorizedFeedsIfContextChanged = useCallback(

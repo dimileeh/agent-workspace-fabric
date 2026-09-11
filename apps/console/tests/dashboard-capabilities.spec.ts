@@ -403,27 +403,28 @@ test("same-identity capability refresh clears inspector when workspace_runtime b
   await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toHaveCount(0);
 });
 
-// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hOD-o: a route-level
-// stream denial cannot recover through a basic workspace GET. If the same
-// capability identity then withdraws workspace_stream, release that obsolete
-// latch so polling can render the still-authorized basic workspace detail.
-test("same-identity workspace_stream withdrawal releases inspector stream denial", async ({
+// Regression for PR #958 review threads PRRT_kwDOSJAM6s6hOD-o and
+// PRRT_kwDOSJAM6s6hUwEf: a route-level stream denial cannot recover through a
+// basic workspace GET. Release that obsolete latch if workspace_stream is
+// withdrawn or the capability contract disappears altogether.
+for (const capabilityLoss of ["withdrawn", "missing"] as const) {
+test(`${capabilityLoss === "withdrawn" ? "same-identity workspace_stream withdrawal" : "missing capability contract"} releases inspector stream denial`, async ({
   page,
 }) => {
   test.setTimeout(45_000);
-  let withdrawStream = false;
+  let capabilityLost = false;
   let streamOpens = 0;
   let detailRequests = 0;
   let releaseDeniedStream: () => void = () => undefined;
   const deniedStream = new Promise<void>((resolve) => {
     releaseDeniedStream = resolve;
   });
-  let releaseWithdrawnCapabilities: () => void = () => undefined;
-  const withdrawnCapabilities = new Promise<void>((resolve) => {
-    releaseWithdrawnCapabilities = resolve;
+  let releaseLostCapabilities: () => void = () => undefined;
+  const lostCapabilities = new Promise<void>((resolve) => {
+    releaseLostCapabilities = resolve;
   });
-  const workspaceId = "ws_stream_withdraw";
-  const detailBranch = "authorized-basic-detail-after-stream-withdrawal";
+  const workspaceId = `ws_stream_${capabilityLoss}`;
+  const detailBranch = `authorized-basic-detail-after-stream-${capabilityLoss}`;
   const denialMessage = "Workspace stream authorization denied.";
   const baseCaps = localCapabilities() as {
     diagnostics: Array<Record<string, unknown>>;
@@ -445,8 +446,8 @@ test("same-identity workspace_stream withdrawal releases inspector stream denial
   };
   const overviewItem = {
     workspace_id: workspaceId,
-    title: "Stream withdrawal workspace",
-    repo_url: "https://github.com/example/stream-withdrawal",
+    title: "Stream capability loss workspace",
+    repo_url: "https://github.com/example/stream-capability-loss",
     base_branch: "main",
     branch_name: "overview-branch",
     agent: "codex",
@@ -454,7 +455,7 @@ test("same-identity workspace_stream withdrawal releases inspector stream denial
     status: "running",
     created_at: "2026-09-06T17:00:00Z",
     updated_at: "2026-09-06T17:00:00Z",
-    task_prompt: "Release stream denial after capability withdrawal",
+    task_prompt: "Release stream denial after capability loss",
     lifecycle: [],
     llm_usage: null,
     recovery: null,
@@ -464,9 +465,22 @@ test("same-identity workspace_stream withdrawal releases inspector stream denial
   await page.route("**/api/awf/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/awf/console/capabilities") {
-      if (withdrawStream) {
-        await withdrawnCapabilities;
-        await fulfillJson(route, withdrawnCaps);
+      if (capabilityLost) {
+        await lostCapabilities;
+        if (capabilityLoss === "missing") {
+          await fulfillJson(
+            route,
+            {
+              detail: {
+                error_code: "NOT_FOUND",
+                message: "Capability negotiation is unavailable on this backend.",
+              },
+            },
+            404,
+          );
+        } else {
+          await fulfillJson(route, withdrawnCaps);
+        }
         return;
       }
       await fulfillJson(route, baseCaps);
@@ -530,18 +544,19 @@ test("same-identity workspace_stream withdrawal releases inspector stream denial
   await expect(inspector.getByText(detailBranch, { exact: true })).toHaveCount(0);
   const streamOpensAtDenial = streamOpens;
 
-  withdrawStream = true;
+  capabilityLost = true;
   const detailRequestsAtDenial = detailRequests;
   await page.getByRole("button", { name: /refresh/i }).click({ force: true });
   await expect.poll(() => detailRequests, { timeout: 10_000 }).toBeGreaterThan(detailRequestsAtDenial);
   await expect(inspector.getByText(detailBranch, { exact: true })).toHaveCount(0);
-  releaseWithdrawnCapabilities();
+  releaseLostCapabilities();
 
   await expect(inspector.getByText(denialMessage)).toHaveCount(0, { timeout: 10_000 });
   await expect(inspector.getByText(detailBranch, { exact: true })).toBeVisible({ timeout: 12_000 });
   await expect(page.getByText("Stream: idle")).toBeVisible();
   await expect.poll(() => streamOpens, { timeout: 4_000 }).toBe(streamOpensAtDenial);
 });
+}
 
 test("capability 401 clears retained agent and model filter options", async ({ page }) => {
   let authDenied = false;
