@@ -529,6 +529,15 @@ export function parseDashboardSummary(
       return null;
     }
     const confirmedCounts = confirmed as Record<DashboardCountKey, number>;
+    if (
+      confirmedCounts.active +
+        confirmedCounts.completed_last_window +
+        confirmedCounts.cancelled_last_window +
+        confirmedCounts.failed_last_window >
+      evidence.status_known_workspaces
+    ) {
+      return null;
+    }
     if (!countRelationshipsAreValid(confirmedCounts)) {
       return null;
     }

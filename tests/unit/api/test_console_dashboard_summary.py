@@ -356,6 +356,17 @@ def test_dashboard_summary_count_evidence_rejects_population_contradictions() ->
     with pytest.raises(ValidationError, match="confirmed.*known"):
         ConsoleDashboardSummaryResponse.model_validate(above_known)
 
+    disjoint_statuses_above_known = _summary_with_count_evidence(
+        confirmed_patch={
+            "active": 20,
+            "completed_last_window": 10,
+            "cancelled_last_window": 10,
+            "failed_last_window": 10,
+        }
+    )
+    with pytest.raises(ValidationError, match="status categories.*known"):
+        ConsoleDashboardSummaryResponse.model_validate(disjoint_statuses_above_known)
+
     complete_with_unknown_status = _summary_with_count_evidence(total=1, known=0, unknown=1)
     complete_with_unknown_status["coverage"] = {"status": "complete", "notes": []}
     complete_with_unknown_status["counts"] = _zero_confirmed_counts()

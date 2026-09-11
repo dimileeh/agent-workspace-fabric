@@ -274,6 +274,18 @@ test("parseDashboardSummary rejects count evidence contradictions", () => {
     parseDashboardSummary(summaryWithCountEvidence({ confirmed: { active: 25 } })),
     null,
   );
+  assert.equal(
+    parseDashboardSummary(summaryWithCountEvidence({
+      confirmed: {
+        active: 20,
+        completed_last_window: 10,
+        cancelled_last_window: 10,
+        failed_last_window: 10,
+      },
+    })),
+    null,
+    "disjoint active and terminal statuses cannot exceed the known population",
+  );
   const completeWithUnknownStatus = summaryWithCountEvidence({ total: 1, known: 0, unknown: 1 });
   completeWithUnknownStatus.coverage = { status: "complete", notes: [] };
   completeWithUnknownStatus.counts = zeroConfirmedCounts();

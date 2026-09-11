@@ -642,6 +642,17 @@ class ConsoleDashboardCountEvidenceResponse(BaseModel):
         confirmed = self.confirmed_counts.model_dump()
         if any(value > self.status_known_workspaces for value in confirmed.values()):
             raise ValueError("every confirmed count must be <= status_known_workspaces")
+        confirmed_status_categories = (
+            confirmed["active"]
+            + confirmed["completed_last_window"]
+            + confirmed["cancelled_last_window"]
+            + confirmed["failed_last_window"]
+        )
+        if confirmed_status_categories > self.status_known_workspaces:
+            raise ValueError(
+                "sum of confirmed active and terminal status categories must be "
+                "<= status_known_workspaces"
+            )
         _validate_dashboard_count_relationships(confirmed, label="confirmed_counts")
         return self
 
