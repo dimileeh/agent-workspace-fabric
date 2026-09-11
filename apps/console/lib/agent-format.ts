@@ -301,6 +301,7 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     // when the latest state-change corroborates the actual terminal transition.
     if (
       terminalEvent?.event_type !== "workspace.state_changed" ||
+      terminalEvent.old_state !== latestEntered.stage.stage ||
       terminalEvent.new_state !== item.status ||
       terminalEventMs !== finishedMs
     ) {

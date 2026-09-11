@@ -540,6 +540,14 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
+      last_event: stateChanged("blocked", "failed", "2026-09-06T12:05:00Z"),
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an omitted pause must not be accepted when timestamps happen to coincide",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
       last_event: stateChanged("running", "cancelled", "2026-09-06T12:05:00Z"),
     }),
     { finishedAt: null, durationSeconds: null },
