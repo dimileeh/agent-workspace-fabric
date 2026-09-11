@@ -301,6 +301,31 @@ async def test_new_probe_rejects_commondir_rewritten_by_an_earlier_invocation(
 
 
 @pytest.mark.unit
+async def test_trusted_probe_rejects_trailing_commondir_path_data(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6hUc12: validate Git's complete commondir path value."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text(
+        "../..\n../../../../evil.git\n",
+        encoding="utf-8",
+    )
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    probe = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=(git_dir, common_dir),
+    )
+
+    assert probe is not None
+    assert await probe() is None
+
+
+@pytest.mark.unit
 async def test_trusted_probe_fails_open_after_commondir_is_rewritten(
     tmp_path: Path,
     worktree: Path,

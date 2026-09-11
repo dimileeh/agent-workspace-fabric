@@ -1359,7 +1359,7 @@ def _require_trusted_git_common_dir(
 ) -> None:
     """Require the pinned admin dir's ``commondir`` to select GitManager's root."""
     content = _read_git_file_at(git_root, _GIT_COMMON_DIR_FILE)
-    candidate = Path(content.partition("\n")[0].strip() or ".")
+    candidate = Path(content.strip() or ".")
     normalized_expected = _lexical_absolute(expected_common_dir)
     matches_expected = (
         candidate == normalized_expected
