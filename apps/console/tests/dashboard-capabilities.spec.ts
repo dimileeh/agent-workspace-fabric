@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Route, test } from "@playwright/test";
 
 import {
   fulfillJson,
@@ -3279,6 +3279,144 @@ test.describe("hosted context query carry", () => {
     expect(afterSwitch.every((u) => !u.includes("org_id=org_a"))).toBe(true);
     await expect(page.getByTestId("workspace-card-ws_tenant_b")).toBeVisible();
     await expect(page.getByTestId("workspace-card-ws_tenant_a")).toHaveCount(0);
+  });
+
+  test("manual refresh does not reuse prior-tenant capabilities after a context switch", async ({
+    page,
+  }) => {
+    const apiPrefix = "/api/core-console";
+    const heldTenantAOverviewRoutes: Route[] = [];
+    let holdNextTenantAOverview = false;
+    let tenantBCapabilityRequests = 0;
+    let tenantBOverviewRequests = 0;
+    let tenantBCloudRuntimeRequests = 0;
+    const baseCaps = hostedCapabilities() as {
+      identity: Record<string, unknown>;
+      widgets: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+    const tenantACaps = {
+      ...baseCaps,
+      identity: {
+        backend_id: "awf-cloud-tenant-a",
+        scope: "tenant",
+        tenant_id: "tenant_a",
+      },
+    };
+    const tenantBCaps = {
+      ...baseCaps,
+      identity: {
+        backend_id: "awf-cloud-tenant-b",
+        scope: "tenant",
+        tenant_id: "tenant_b",
+      },
+      widgets: baseCaps.widgets.map((widget) =>
+        widget.id === "cloud_runtime"
+          ? {
+              id: "cloud_runtime",
+              availability: "unsupported",
+              reason_code: "not_implemented",
+              message: "Cloud runtime is unavailable for tenant B.",
+              semantics: widget.semantics,
+            }
+          : widget,
+      ),
+    };
+
+    await page.route("**/api/core-console/**", async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      const tenantB = url.searchParams.get("org_id") === "org_b";
+      if (path === `${apiPrefix}/health`) {
+        await fulfillJson(route, { status: "ok" });
+        return;
+      }
+      if (path === `${apiPrefix}/console/capabilities`) {
+        if (tenantB) tenantBCapabilityRequests += 1;
+        await fulfillJson(route, tenantB ? tenantBCaps : tenantACaps);
+        return;
+      }
+      if (path === `${apiPrefix}/workspaces/overview`) {
+        if (tenantB) {
+          tenantBOverviewRequests += 1;
+        } else if (holdNextTenantAOverview) {
+          holdNextTenantAOverview = false;
+          heldTenantAOverviewRoutes.push(route);
+          return;
+        }
+        await fulfillJson(route, listEnvelope([]));
+        return;
+      }
+      if (path === `${apiPrefix}/console/cloud-runtime`) {
+        if (tenantB) tenantBCloudRuntimeRequests += 1;
+        await fulfillJson(route, loadConsoleFixture("cloud-runtime.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/console/dashboard-summary`) {
+        await fulfillJson(route, loadConsoleFixture("dashboard-summary.hosted.json"));
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/workspaces/summary`) {
+        await fulfillJson(route, {
+          generated_at: "2026-09-06T17:00:00Z",
+          since_hours: 24,
+          completed_count: 0,
+          failed_count: 0,
+          cancelled_count: 0,
+          stuck_count: 0,
+          actionable_reason_count: 0,
+          unactionable_reason_count: 0,
+          active_count: 0,
+          destroying_count: 0,
+          destroyed_count: 0,
+          cleanup_failure_count: 0,
+          status_counts: {},
+          failure_reason_counts: {},
+          window_start: "2026-09-05T17:00:00Z",
+        });
+        return;
+      }
+      if (path === `${apiPrefix}/merge-queue`) {
+        await fulfillJson(route, listEnvelope([]));
+        return;
+      }
+      if (path === `${apiPrefix}/metrics/failures/summary`) {
+        await fulfillJson(route, {
+          total_failures: 0,
+          window_hours: 24,
+          taxonomy: [],
+          latest_examples: [],
+        });
+        return;
+      }
+      await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
+    });
+
+    await page.goto("/workspaces?org_id=org_a&project_id=proj_a");
+    await waitForConsoleReady(page);
+    await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toBeVisible();
+
+    holdNextTenantAOverview = true;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => heldTenantAOverviewRoutes.length).toBe(1);
+
+    await page.evaluate(() => {
+      const next = new URL(window.location.href);
+      next.searchParams.set("org_id", "org_b");
+      next.searchParams.set("project_id", "proj_b");
+      window.history.replaceState(null, "", `${next.pathname}?${next.searchParams.toString()}`);
+    });
+    await expect.poll(() => tenantBCapabilityRequests).toBeGreaterThan(0);
+    await expect.poll(() => tenantBOverviewRequests).toBeGreaterThan(0);
+    await expect(page.getByRole("heading", { name: "Cloud Runtime" })).toHaveCount(0);
+
+    const cloudRuntimeRequestsBeforeRelease = tenantBCloudRuntimeRequests;
+    await Promise.all(
+      heldTenantAOverviewRoutes.splice(0).map((route) => fulfillJson(route, listEnvelope([]))),
+    );
+    await page.waitForTimeout(500);
+
+    expect(tenantBCloudRuntimeRequests).toBe(cloudRuntimeRequestsBeforeRelease);
   });
 
   test("soft context switch clears prior tenant rows before capabilities return", async ({ page }) => {

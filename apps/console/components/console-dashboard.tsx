@@ -1133,14 +1133,21 @@ export function ConsoleDashboard() {
   const refreshDashboard = () => {
     startTransition(() => {
       void (async () => {
+        const epoch = authorizedFeedEpochRef.current;
         const selectedWorkspaceId = selectedIdRef.current;
         // Supersede periodic detail loads before waiting for capabilities.
         const detailReload = selectedWorkspaceId
           ? loadWorkspace(selectedWorkspaceId)
           : Promise.resolve();
         const caps = await loadCapabilities();
+        if (epoch !== authorizedFeedEpochRef.current) {
+          return;
+        }
         // Capability failures must not skip the list refresh.
         await Promise.all([loadOverview(), detailReload]);
+        if (epoch !== authorizedFeedEpochRef.current) {
+          return;
+        }
         if (caps) {
           await reloadAvailableFeeds(caps);
         }

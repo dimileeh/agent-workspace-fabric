@@ -3174,6 +3174,21 @@ test("configured context query changes clear authorized state before capability 
   );
 });
 
+test("manual refresh stops when the authorized feed epoch changes", () => {
+  const dashboard = dashboardSource.dashboard;
+  const refreshStart = dashboard.indexOf("const refreshDashboard = () => {");
+  const refreshEnd = dashboard.indexOf("\n\n  return (", refreshStart);
+  assert.ok(refreshStart >= 0, "Expected the manual dashboard refresh callback");
+  assert.ok(refreshEnd > refreshStart, "Expected the manual refresh callback boundary");
+  const refresh = dashboard.slice(refreshStart, refreshEnd);
+
+  assert.match(
+    refresh,
+    /const epoch = authorizedFeedEpochRef\.current;[\s\S]*?const caps = await loadCapabilities\(\);\s*if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}[\s\S]*?await Promise\.all\(\[loadOverview\(\), detailReload\]\);\s*if \(epoch !== authorizedFeedEpochRef\.current\) \{\s*return;\s*\}[\s\S]*?reloadAvailableFeeds\(caps\)/,
+    "Expected manual Refresh to discard prior-context capabilities after every await boundary",
+  );
+});
+
 test("operator controls block renders success warnings", () => {
   const blockSource = extractFunctionSource("OperatorControlsBlock");
 
