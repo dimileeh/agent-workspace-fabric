@@ -213,19 +213,32 @@ const TERMINAL_WORKFLOW_STATUSES = new Set<WorkspaceOverview["status"]>([
 
 /**
  * True when workflow timing should be presented as terminal. Destroy cleanup
- * is post-terminal only when the overview retained the preceding workflow
- * terminal transition; direct pre-terminal destroys remain conservative.
+ * is post-terminal only when its latest state transition entered cleanup from
+ * the retained workflow terminal transition. Retry history can retain an older
+ * terminal event, so its presence alone does not prove the current attempt
+ * finished before a direct destroy.
  */
 export function hasTerminalWorkflowTiming(
   item: Pick<
     WorkspaceOverview,
-    "status" | "latest_workflow_terminal_state_change"
+    | "status"
+    | "latest_state_change"
+    | "latest_workflow_terminal_state_change"
   >,
 ): boolean {
+  const terminalTransition = item.latest_workflow_terminal_state_change;
+  const cleanupTransition = item.latest_state_change;
   return (
     TERMINAL_WORKFLOW_STATUSES.has(item.status) ||
     (item.status === "destroying" &&
-      item.latest_workflow_terminal_state_change != null)
+      terminalTransition?.event_type === "workspace.state_changed" &&
+      cleanupTransition?.event_type === "workspace.state_changed" &&
+      cleanupTransition.new_state === "destroying" &&
+      cleanupTransition.old_state === terminalTransition.new_state &&
+      terminalTransition.new_state !== "destroyed" &&
+      TERMINAL_WORKFLOW_STATUSES.has(
+        terminalTransition.new_state as WorkspaceOverview["status"],
+      ))
   );
 }
 
