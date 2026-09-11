@@ -902,10 +902,10 @@ class WorktreeActivityProbe:
         common_root = layout.common_dir
         common_dir = common_root.path
         if self._trusted_git_roots is not None:
-            # Git consults this agent-writable file for every ref operation. A
-            # rewrite after priming must make the scan indeterminate instead of
-            # leaving the branch-ref watch pinned to a common dir Git no longer
-            # uses.
+            # Git consults these agent-writable files for every ref operation.
+            # A rewrite after priming must make the scan indeterminate instead
+            # of leaving the watches pinned to roots Git no longer uses.
+            _require_trusted_git_marker(self._worktree_path, git_dir)
             _require_trusted_git_common_dir(git_root, common_dir)
         git_dir_watch = _WatchedPath(git_root, Path())
         git_dir_stat = _metadata_stat_at(git_dir_watch)

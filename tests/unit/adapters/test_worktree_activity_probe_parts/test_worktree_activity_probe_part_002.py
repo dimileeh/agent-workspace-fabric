@@ -264,6 +264,38 @@ async def test_new_probe_rejects_git_target_rewritten_by_an_earlier_invocation(
 
 
 @pytest.mark.unit
+async def test_trusted_probe_fails_open_when_marker_rewritten_after_priming(
+    tmp_path: Path,
+    worktree: Path,
+) -> None:
+    """Every managed scan must revalidate the agent-writable `.git` marker."""
+    common_dir = tmp_path / "mirror.git"
+    git_dir = common_dir / "worktrees" / "ws_probe"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/awf/ws\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    gitfile = worktree / ".git"
+    gitfile.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    probe = await make_worktree_activity_probe(
+        worktree,
+        trusted_git_roots=(git_dir, common_dir),
+    )
+    assert probe is not None
+    assert await probe() is False
+
+    alternate_git_dir = tmp_path / "agent-selected"
+    alternate_git_dir.mkdir()
+    alternate_head = alternate_git_dir / "HEAD"
+    alternate_head.write_text("ref: refs/heads/other\n", encoding="utf-8")
+    gitfile.write_text(f"gitdir: {alternate_git_dir}\n", encoding="utf-8")
+
+    assert await probe() is None
+    alternate_head.write_text("ref: refs/heads/changed\n", encoding="utf-8")
+    assert await probe() is None
+
+
+@pytest.mark.unit
 async def test_new_probe_rejects_commondir_rewritten_by_an_earlier_invocation(
     tmp_path: Path,
     worktree: Path,
