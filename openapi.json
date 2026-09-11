@@ -11237,6 +11237,16 @@
               }
             ]
           },
+          "latest_workflow_terminal_state_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "lifecycle": {
             "items": {
               "$ref": "#/components/schemas/WorkspaceLifecycleStageResponse"

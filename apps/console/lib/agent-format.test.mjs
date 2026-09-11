@@ -753,6 +753,31 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
     }),
     { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
   );
+  for (const terminalStatus of ["failed", "cancelled"]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        status: "destroyed",
+        latest_workflow_terminal_state_change: stateChanged(
+          "running",
+          terminalStatus,
+          "2026-09-06T12:05:00Z",
+        ),
+        latest_state_change: stateChanged(
+          "destroying",
+          "destroyed",
+          "2026-09-06T12:20:00Z",
+        ),
+        last_event: stateChanged(
+          "destroying",
+          "destroyed",
+          "2026-09-06T12:20:00Z",
+        ),
+      }),
+      { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
+      `destroy cleanup must not hide the earlier ${terminalStatus} transition`,
+    );
+  }
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,

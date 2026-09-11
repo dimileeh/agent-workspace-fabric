@@ -96,6 +96,13 @@ _TERMINAL_SKIP_STATUSES = frozenset(
         WorkspaceStatus.cancelled,
     }
 )
+_WORKFLOW_TERMINAL_STATUSES = frozenset(
+    {
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+    }
+)
 _RECOVERY_EVENT_TYPES = frozenset(
     {
         "monitor.recovery_dispatched",
@@ -395,6 +402,16 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
+    latest_workflow_terminal_state_change = next(
+        (
+            event
+            for event in reversed(ordered_events)
+            if event.event_type == "workspace.state_changed"
+            and _coerce_workspace_status(event.new_state) in _WORKFLOW_TERMINAL_STATUSES
+            and _coerce_workspace_status(event.old_state) != WorkspaceStatus.destroying
+        ),
+        None,
+    )
     active_operation = next(
         (
             op
@@ -448,6 +465,11 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         latest_state_change=(
             WorkspaceEventResponse.model_validate(latest_state_change)
             if latest_state_change is not None
+            else None
+        ),
+        latest_workflow_terminal_state_change=(
+            WorkspaceEventResponse.model_validate(latest_workflow_terminal_state_change)
+            if latest_workflow_terminal_state_change is not None
             else None
         ),
         pr_url=ws.pr_url,

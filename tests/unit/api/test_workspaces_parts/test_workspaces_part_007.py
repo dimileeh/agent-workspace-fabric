@@ -718,6 +718,36 @@ class TestWorkspaceDirectRoutes:
         assert response.cursor is None
 
     @pytest.mark.unit
+    async def test_overview_retains_workflow_terminal_transition_after_destroy(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="destroyed failure")
+        await _transition_workspace(
+            engine,
+            workspace_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.destroying,
+            WorkspaceStatus.destroyed,
+        )
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            response = await workspaces_route.list_workspace_overview(session=session)
+
+        item = next(item for item in response.items if item.workspace_id == workspace_id)
+        assert item.latest_state_change is not None
+        assert item.latest_state_change.old_state == WorkspaceStatus.destroying.value
+        assert item.latest_state_change.new_state == WorkspaceStatus.destroyed.value
+        assert item.latest_workflow_terminal_state_change is not None
+        assert item.latest_workflow_terminal_state_change.old_state == WorkspaceStatus.running.value
+        assert item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.failed.value
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("task_tag", [None, "AIRA-T109"])
     async def test_overview_route_reuses_ordered_events_for_last_event(
         self,
