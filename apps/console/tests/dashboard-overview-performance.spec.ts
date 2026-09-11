@@ -1108,7 +1108,10 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
   );
 });
 
-test("unselected workspace list stays at the top during refresh reorders", async ({ page }) => {
+for (const inspectorOpen of [false, true]) {
+test(`workspace list stays at the top during refresh reorders (inspectorOpen=${inspectorOpen})`, async ({
+  page,
+}) => {
   let firstPageRequests = 0;
   let revision = 0;
   const expandedTitle = "Updated workspace title that wraps after a passive refresh ".repeat(8);
@@ -1166,6 +1169,10 @@ test("unselected workspace list stays at the top during refresh reorders", async
 
   await page.goto("/");
   await waitForConsoleReady(page);
+  if (inspectorOpen) {
+    await page.getByTestId("workspace-card-ws_perf_0001").click();
+    await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  }
   const list = page.getByTestId("workspace-list-scroll");
   const firstCardId = () =>
     list.locator('[data-testid^="workspace-card-"]').first().getAttribute("data-testid");
@@ -1191,6 +1198,10 @@ test("unselected workspace list stays at the top during refresh reorders", async
     .toBeGreaterThan(requestsBeforeBackgroundPoll);
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0002");
   await expectTop();
+  if (inspectorOpen) {
+    await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+    return;
+  }
 
   await publishRefresh(2, "workspace-card-ws_perf_0001");
   await expectTop();
@@ -1252,6 +1263,7 @@ test("unselected workspace list stays at the top during refresh reorders", async
   await expectTop();
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 });
+}
 
 test("keeps the visible row anchored when a refresh changes row heights", async ({ page }) => {
   const expandedTitle =

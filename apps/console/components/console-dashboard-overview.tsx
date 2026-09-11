@@ -1071,10 +1071,7 @@ export function WorkspaceList({
       previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
-    if (
-      selectedId === null &&
-      Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
-    ) {
+    if (Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX) {
       scrollWithoutLoading(0);
       return;
     }
@@ -1244,11 +1241,10 @@ export function WorkspaceList({
     preserveScrollTopRef.current = null;
     if (scrollTop !== null) {
       const scrollContainer = scrollContainerRef.current;
-      const unselectedAtTop =
-        committedListGeometryRef.current?.selectedId === null &&
+      const atTop =
         scrollContainer !== null &&
         Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
-      scrollWithoutLoading(unselectedAtTop ? 0 : scrollTop);
+      scrollWithoutLoading(atTop ? 0 : scrollTop);
     }
   }, [items, rowOffsets, scrollWithoutLoading]);
 
