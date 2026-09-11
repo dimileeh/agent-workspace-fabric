@@ -610,6 +610,8 @@ export function useConsoleOverviewLoader({
         const refreshedPageOverlapsRetained = sameQuery && pageItems.some(
           (item) => retainedWorkspaceIds.has(item.workspace_id),
         );
+        // A status transition can add an unseen matching row ahead of a retained
+        // cursor, so filtered refreshes must reopen from the first-page boundary.
         const pagination = !page.has_more
           ? {
               query: capturedQuery,
@@ -617,7 +619,8 @@ export function useConsoleOverviewLoader({
               complete: true,
               fetchedCursors: new Set<string>(),
             }
-          : refreshedPageOverlapsRetained &&
+          : filters.status === undefined &&
+              refreshedPageOverlapsRetained &&
               usableContinuationCursor(capturedPagination?.nextCursor)
               ? capturedPagination
               : {

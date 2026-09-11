@@ -408,6 +408,78 @@ test("overlapping first-page refresh reopens completed filtered history", async 
   await expect.poll(() => continuationRequests).toBe(1);
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hUDfA: a filtered
+// query can gain a matching row between the refreshed first page and the
+// retained continuation boundary while partially loaded history stays open.
+test("filtered refresh reopens partial history from the first-page cursor", async ({ page }) => {
+  const completedRequests: Array<string | null> = [];
+  let membershipGrew = false;
+  const completedItems = (start: number, end: number) =>
+    Array.from({ length: end - start + 1 }, (_, index) => ({
+      ...workspaceOverview(start + index),
+      status: "completed",
+    }));
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => completedRequests.push(cursor),
+    resolveBatchItem: (item) => ({ ...item, status: "completed" }),
+    resolvePage: (cursor, status) => {
+      if (status !== "completed") {
+        return null;
+      }
+      if (cursor === "old-completed-page-2") {
+        return {
+          items: completedItems(PAGE_SIZE + 2, PAGE_SIZE * 2 + 1),
+          has_more: true,
+          next_cursor: "stale-completed-page-3",
+        };
+      }
+      if (cursor === "fresh-completed-page-2") {
+        return {
+          items: completedItems(PAGE_SIZE + 1, PAGE_SIZE * 2),
+          has_more: true,
+          next_cursor: "fresh-completed-page-3",
+        };
+      }
+      if (cursor === "stale-completed-page-3") {
+        return {
+          items: completedItems(PAGE_SIZE * 2 + 2, PAGE_SIZE * 2 + 2),
+          has_more: false,
+          next_cursor: null,
+        };
+      }
+      return {
+        items: completedItems(1, PAGE_SIZE).map((item, index) =>
+          membershipGrew && index === 0
+            ? { ...item, title: `${item.title} refreshed` }
+            : item
+        ),
+        has_more: true,
+        next_cursor: membershipGrew
+          ? "fresh-completed-page-2"
+          : "old-completed-page-2",
+      };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Filters" }).click();
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: /Status all/ }).click();
+  await statusGroup.getByLabel("completed").check();
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => completedRequests).toContain("old-completed-page-2");
+
+  membershipGrew = true;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByTestId("workspace-title-ws_perf_0001")).toContainText("refreshed");
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+
+  await expect.poll(() => completedRequests).toContain("fresh-completed-page-2");
+  expect(completedRequests).not.toContain("stale-completed-page-3");
+});
+
 // Regression for PR #958 operator acceptance: appended history must extend the
 // virtual scroll range instead of requiring the explicit paging controls.
 test("scroll traverses bounded history windows in both directions", async ({ page }) => {
