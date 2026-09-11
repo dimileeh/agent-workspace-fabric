@@ -567,17 +567,30 @@ test("filtered continuation backfills unchanged first-page membership", async ({
   const statusGroup = page.getByRole("group", { name: "Status" });
   await statusGroup.getByRole("button", { name: /Status all/ }).click();
   await statusGroup.getByLabel("completed").check();
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
-  await expect.poll(() => completedRequests).toContain("completed-page-2");
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  // This regression exercises filtered cursor backfill. Dispatch setup loads
+  // without Playwright scrolling the footer into the independent near-bottom
+  // loader, which can otherwise advance the stale cursor before membership
+  // changes and leave an extra retained row in the test fixture.
+  const requestHistoryWithoutScrolling = async (expectedCursor: string) => {
+    await expect(async () => {
+      if (!completedRequests.includes(expectedCursor)) {
+        await loadMore.evaluate((button: HTMLButtonElement) => button.click());
+      }
+      expect(completedRequests).toContain(expectedCursor);
+    }).toPass({ intervals: [100, 250, 500], timeout: 5_000 });
+  };
+  await requestHistoryWithoutScrolling("completed-page-2");
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
 
   // Membership can change after the latest page-one poll. The continuation
   // itself must be armed to replay the loaded range; waiting for another poll
   // would leave a window where the stale page-three cursor skips this row.
   membershipGrew = true;
   const firstPageRequests = completedRequests.filter((cursor) => cursor === null).length;
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await requestHistoryWithoutScrolling("shifted-completed-page-3");
 
-  await expect.poll(() => completedRequests).toContain("shifted-completed-page-3");
   expect(completedRequests.filter((cursor) => cursor === null)).toHaveLength(firstPageRequests);
   await expect(page.getByText(new RegExp(`of ${PAGE_SIZE * 3} loaded$`))).toBeVisible();
   await page.getByPlaceholder("Search workspaces").fill("Newly matching off-page workspace");
