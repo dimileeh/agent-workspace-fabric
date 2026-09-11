@@ -569,6 +569,96 @@ test("filtered continuation backfills unchanged first-page membership", async ({
   expect(completedRequests).not.toContain("old-completed-page-3");
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hVeoS: the prior
+// boundary row can leave the filtered result. Replaying must stop once it has
+// crossed that row's stable sort position instead of exhausting the page cap.
+test("filtered continuation survives a missing backfill boundary row", async ({ page }) => {
+  const completedRequests: Array<string | null> = [];
+  let boundaryRemoved = false;
+  const completedItems = (start: number, end: number) =>
+    Array.from({ length: end - start + 1 }, (_, index) => ({
+      ...workspaceOverview(start + index),
+      status: "completed",
+    }));
+  const laterMatching = {
+    ...workspaceOverview(202),
+    title: "Matching workspace after removed boundary",
+    status: "completed",
+  };
+  const crossedBoundary = {
+    ...workspaceOverview(201),
+    workspace_id: "ws_perf_0199a",
+    title: "Workspace after removed tied boundary",
+    created_at: workspaceOverview(200).created_at,
+    status: "completed",
+  };
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => completedRequests.push(cursor),
+    resolveBatchItem: (item) => ({ ...item, status: "completed" }),
+    resolvePage: (cursor, status) => {
+      if (status !== "completed") {
+        return null;
+      }
+      if (cursor === "completed-page-2") {
+        return boundaryRemoved
+          ? {
+              items: completedItems(PAGE_SIZE + 1, PAGE_SIZE * 2 - 1).concat(
+                crossedBoundary,
+              ),
+              has_more: true,
+              next_cursor: "shifted-completed-page-3",
+            }
+          : {
+              items: completedItems(PAGE_SIZE + 1, PAGE_SIZE * 2),
+              has_more: true,
+              next_cursor: "old-completed-page-3",
+            };
+      }
+      if (cursor === "shifted-completed-page-3") {
+        return {
+          items: [laterMatching],
+          has_more: true,
+          next_cursor: "shifted-completed-page-4",
+        };
+      }
+      if (cursor?.startsWith("shifted-completed-page-")) {
+        const pageNumber = Number.parseInt(cursor.slice("shifted-completed-page-".length), 10);
+        return {
+          items: completedItems(PAGE_SIZE * 2 + pageNumber - 1, PAGE_SIZE * 2 + pageNumber - 1),
+          has_more: true,
+          next_cursor: `shifted-completed-page-${pageNumber + 1}`,
+        };
+      }
+      return {
+        items: completedItems(1, PAGE_SIZE),
+        has_more: true,
+        next_cursor: "completed-page-2",
+      };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Filters" }).click();
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: /Status all/ }).click();
+  await statusGroup.getByLabel("completed").check();
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => completedRequests).toContain("completed-page-2");
+
+  boundaryRemoved = true;
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(new RegExp(`of ${PAGE_SIZE * 2 + 1} loaded$`))).toBeVisible();
+  expect(completedRequests).not.toContain("shifted-completed-page-3");
+
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => completedRequests).toContain("shifted-completed-page-3");
+  await page.getByPlaceholder("Search workspaces").fill(laterMatching.title);
+  await expect(page.getByTestId("workspace-card-ws_perf_0202")).toBeVisible();
+  await expect(page.getByText(/page safety limit/)).toHaveCount(0);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hU_13: routine
 // first-page polls must not move a filtered continuation back to page 2.
 test("filtered routine poll preserves pagination progress", async ({ page }) => {

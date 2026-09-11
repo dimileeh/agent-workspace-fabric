@@ -47,6 +47,7 @@ type OverviewPagination = {
   query: unknown;
   firstCursor: string | null;
   nextCursor: string | null;
+  boundaryCreatedAt: string | null;
   boundaryWorkspaceId: string | null;
   needsMembershipBackfill: boolean;
   complete: boolean;
@@ -529,11 +530,12 @@ export function useConsoleOverviewLoader({
         filters.status !== undefined &&
         capturedPagination?.needsMembershipBackfill &&
         usableContinuationCursor(capturedPagination.firstCursor) &&
+        capturedPagination.boundaryCreatedAt !== null &&
         capturedPagination.boundaryWorkspaceId !== null
       ) {
         // A filtered membership change below page one does not move its
         // immutable keyset cursor. Before advancing the retained continuation,
-        // replay the already-loaded range until its prior boundary row appears.
+        // replay the already-loaded range until its prior stable sort boundary.
         // Routine polling stays bounded; this catch-up runs only when the
         // operator next requests history. Advanced filtered continuations
         // remain armed so a change after the latest poll cannot reuse a stale
@@ -541,6 +543,8 @@ export function useConsoleOverviewLoader({
         const existingWorkspaceIds = new Set(
           overviewItemsRef.current.map((item) => item.workspace_id),
         );
+        const capturedBoundaryCreatedAt = capturedPagination.boundaryCreatedAt;
+        const capturedBoundaryWorkspaceId = capturedPagination.boundaryWorkspaceId;
         const backfillItems: WorkspaceOverview[] = [];
         const backfillCursors = new Set<string>();
         // The current keyset chain may legitimately cross a cursor requested
@@ -574,21 +578,26 @@ export function useConsoleOverviewLoader({
             backfillPage.has_more &&
             nextBackfillCursor !== null &&
             (nextBackfillCursor === backfillCursor || backfillCursors.has(nextBackfillCursor));
-          const boundarySeen = normalizedBackfillItems.some(
-            (item) => item.workspace_id === capturedPagination.boundaryWorkspaceId,
-          );
+          const backfillBoundary = normalizedBackfillItems.at(-1);
+          const boundaryReached =
+            backfillBoundary !== undefined &&
+            (backfillBoundary.workspace_id === capturedBoundaryWorkspaceId ||
+              backfillBoundary.created_at < capturedBoundaryCreatedAt ||
+              (backfillBoundary.created_at === capturedBoundaryCreatedAt &&
+                backfillBoundary.workspace_id < capturedBoundaryWorkspaceId));
           paginationForContinuation = {
             ...capturedPagination,
             nextCursor:
               backfillPage.has_more && !repeatedBackfillCursor ? nextBackfillCursor : null,
+            boundaryCreatedAt:
+              backfillBoundary?.created_at ?? capturedPagination.boundaryCreatedAt,
             boundaryWorkspaceId:
-              normalizedBackfillItems.at(-1)?.workspace_id ??
-              capturedPagination.boundaryWorkspaceId,
+              backfillBoundary?.workspace_id ?? capturedPagination.boundaryWorkspaceId,
             needsMembershipBackfill: false,
             complete: !backfillPage.has_more,
             fetchedCursors,
           };
-          if (!backfillPage.has_more || boundarySeen) {
+          if (!backfillPage.has_more || boundaryReached) {
             break;
           }
           if (nextBackfillCursor === null) {
@@ -705,8 +714,14 @@ export function useConsoleOverviewLoader({
         const firstCursor =
           paginationForContinuation?.firstCursor ?? capturedPagination?.firstCursor ?? null;
         const continuationCursor = page.has_more && !repeatedCursor ? nextCursor : null;
+        const boundaryWorkspace = pageItems.at(-1);
+        const boundaryCreatedAt =
+          boundaryWorkspace?.created_at ??
+          paginationForContinuation?.boundaryCreatedAt ??
+          capturedPagination?.boundaryCreatedAt ??
+          null;
         const boundaryWorkspaceId =
-          pageItems.at(-1)?.workspace_id ??
+          boundaryWorkspace?.workspace_id ??
           paginationForContinuation?.boundaryWorkspaceId ??
           capturedPagination?.boundaryWorkspaceId ??
           null;
@@ -714,11 +729,13 @@ export function useConsoleOverviewLoader({
           query: capturedQuery,
           firstCursor,
           nextCursor: continuationCursor,
+          boundaryCreatedAt,
           boundaryWorkspaceId,
           needsMembershipBackfill:
             filters.status !== undefined &&
             continuationCursor !== null &&
             continuationCursor !== firstCursor &&
+            boundaryCreatedAt !== null &&
             boundaryWorkspaceId !== null,
           complete: !page.has_more,
           fetchedCursors,
@@ -759,6 +776,7 @@ export function useConsoleOverviewLoader({
                   filters.status !== undefined &&
                   capturedPagination.firstCursor === firstCursor &&
                   capturedPagination.nextCursor !== firstCursor &&
+                  capturedPagination.boundaryCreatedAt !== null &&
                   capturedPagination.boundaryWorkspaceId !== null,
               }
             : null;
@@ -767,6 +785,7 @@ export function useConsoleOverviewLoader({
               query: capturedQuery,
               firstCursor: null,
               nextCursor: null,
+              boundaryCreatedAt: null,
               boundaryWorkspaceId: null,
               needsMembershipBackfill: false,
               complete: true,
@@ -776,6 +795,7 @@ export function useConsoleOverviewLoader({
               query: capturedQuery,
               firstCursor,
               nextCursor: firstCursor,
+              boundaryCreatedAt: pageItems.at(-1)?.created_at ?? null,
               boundaryWorkspaceId: pageItems.at(-1)?.workspace_id ?? null,
               needsMembershipBackfill: false,
               complete: false,

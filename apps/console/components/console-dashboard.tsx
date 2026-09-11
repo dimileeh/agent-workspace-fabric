@@ -75,6 +75,7 @@ type OverviewPagination = {
   query: unknown;
   firstCursor: string | null;
   nextCursor: string | null;
+  boundaryCreatedAt: string | null;
   boundaryWorkspaceId: string | null;
   needsMembershipBackfill: boolean;
   complete: boolean;

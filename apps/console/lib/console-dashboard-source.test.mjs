@@ -570,8 +570,8 @@ test("loadOverview refreshes one retained-ID batch and backfills filtered contin
   );
   assert.match(
     dashboard,
-    /capturedPagination\?\.needsMembershipBackfill[\s\S]*?for \(let pageIndex = 0; pageIndex < OVERVIEW_LIST_MAX_PAGES; pageIndex \+= 1\)[\s\S]*?boundarySeen[\s\S]*?capturedPagination\.boundaryWorkspaceId/,
-    "Expected filtered continuation to replay a bounded range through its prior workspace boundary",
+    /capturedPagination\?\.needsMembershipBackfill[\s\S]*?for \(let pageIndex = 0; pageIndex < OVERVIEW_LIST_MAX_PAGES; pageIndex \+= 1\)[\s\S]*?boundaryReached[\s\S]*?capturedPagination\.boundaryCreatedAt[\s\S]*?capturedPagination\.boundaryWorkspaceId/,
+    "Expected filtered continuation to replay a bounded range through its prior stable sort boundary",
   );
   assert.match(
     dashboard,
