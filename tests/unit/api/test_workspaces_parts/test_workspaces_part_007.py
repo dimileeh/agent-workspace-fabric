@@ -748,6 +748,53 @@ class TestWorkspaceDirectRoutes:
         assert item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.failed.value
 
     @pytest.mark.unit
+    async def test_overview_reports_remonitor_reset_as_latest_state_change(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="remonitored failure")
+        await _transition_workspace(
+            engine,
+            workspace_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.failed,
+        )
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            await repo.add_event_with_states(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                old_state=WorkspaceStatus.failed,
+                new_state=WorkspaceStatus.monitoring_pr,
+                reason_code="OPERATOR_REMONITOR",
+                payload={"state_reset": {"from": "failed", "to": "monitoring_pr"}},
+            )
+            await repo.add_event(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                reason_code="OPERATOR_REMONITOR",
+                payload={"reason": "refresh the active monitor"},
+            )
+            await session.commit()
+
+        async with factory() as session:
+            response = await workspaces_route.list_workspace_overview(session=session)
+
+        item = next(item for item in response.items if item.workspace_id == workspace_id)
+        assert item.latest_state_change is not None
+        assert item.latest_state_change.event_type == "workspace.remonitor_requested"
+        assert item.latest_state_change.old_state == WorkspaceStatus.failed.value
+        assert item.latest_state_change.new_state == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("task_tag", [None, "AIRA-T109"])
     async def test_overview_route_reuses_ordered_events_for_last_event(
         self,
