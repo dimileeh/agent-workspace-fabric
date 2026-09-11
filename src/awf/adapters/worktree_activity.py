@@ -189,6 +189,7 @@ _COARSE_CLOCK_TOLERANCE_SECONDS = 0.05
 _FINGERPRINT_MASK = (1 << 64) - 1
 
 _GITDIR_PREFIX = "gitdir:"
+_GITFILE_MAX_BYTES = 4096
 _HEAD_REF_PREFIX = "ref:"
 _GIT_COMMON_DIR_FILE = "commondir"
 # Per-worktree files that move when only Git state changed in a linked worktree.
@@ -1330,19 +1331,24 @@ def _require_trusted_git_marker(worktree_path: Path, expected_git_dir: Path) -> 
             or opened.st_ino != observed.st_ino
         ):
             raise OSError(errno.ESTALE, "managed worktree .git marker replaced", git_path)
-        content = os.read(descriptor, 4096).decode("utf-8", errors="replace")
+        payload = os.read(descriptor, _GITFILE_MAX_BYTES + 1)
+        if len(payload) > _GITFILE_MAX_BYTES:
+            raise OSError(
+                errno.ESTALE,
+                "managed worktree .git marker exceeds read limit",
+                git_path,
+            )
+        content = payload.decode("utf-8", errors="replace")
     finally:
         os.close(descriptor)
 
     target: Path | None = None
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(_GITDIR_PREFIX):
-            raw = stripped[len(_GITDIR_PREFIX) :].strip()
-            if raw:
-                candidate = Path(raw)
-                target = candidate if candidate.is_absolute() else worktree_path / candidate
-            break
+    stripped = content.strip()
+    if stripped.startswith(_GITDIR_PREFIX):
+        raw = stripped[len(_GITDIR_PREFIX) :].strip()
+        if raw:
+            candidate = Path(raw)
+            target = candidate if candidate.is_absolute() else worktree_path / candidate
     normalized_target = _lexical_absolute(target) if target is not None else None
     normalized_expected = _lexical_absolute(expected_git_dir)
     if normalized_target != normalized_expected:
