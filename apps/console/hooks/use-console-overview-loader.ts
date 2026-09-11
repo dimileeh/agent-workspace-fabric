@@ -16,6 +16,7 @@ import { awfPath } from "@/lib/console-urls";
 import { fallbackLlmUsage } from "@/lib/format";
 import {
   appendUniqueOverviewItems,
+  OVERVIEW_LIST_MAX_PAGES,
   overviewItemMatchesQuery,
   overviewListPath,
   reconcileOverviewRetainedItems,
@@ -46,6 +47,8 @@ type OverviewPagination = {
   query: unknown;
   firstCursor: string | null;
   nextCursor: string | null;
+  boundaryWorkspaceId: string | null;
+  needsMembershipBackfill: boolean;
   complete: boolean;
   fetchedCursors: Set<string>;
 };
@@ -223,7 +226,7 @@ export function useConsoleOverviewLoader({
     ) {
       return;
     }
-    const requestedCursor = continuation ? capturedPagination?.nextCursor ?? null : null;
+    let requestedCursor = continuation ? capturedPagination?.nextCursor ?? null : null;
     // Stamp the captured query after the denial/no-continuation early returns so
     // filter races stay pinned without cancelling useful work for a no-op scroll.
     const generation = ++overviewRequestGenerationRef.current;
@@ -518,7 +521,118 @@ export function useConsoleOverviewLoader({
         await fetchSelectedOverview(selectedLookupId, true);
         return;
       }
-      const page = await fetchOverviewPage(requestedCursor);
+      let paginationForContinuation = capturedPagination;
+      let continuationWarning: string | null = null;
+      let page: ListEnvelope<WorkspaceOverview> | null = null;
+      if (
+        continuation &&
+        filters.status !== undefined &&
+        capturedPagination?.needsMembershipBackfill &&
+        usableContinuationCursor(capturedPagination.firstCursor) &&
+        capturedPagination.boundaryWorkspaceId !== null
+      ) {
+        // A filtered membership change below page one does not move its
+        // immutable keyset cursor. Before advancing the retained continuation,
+        // replay the already-loaded range until its prior boundary row appears.
+        // Routine polling stays bounded; this catch-up runs only when the
+        // operator next requests history after a filtered refresh.
+        const existingWorkspaceIds = new Set(
+          overviewItemsRef.current.map((item) => item.workspace_id),
+        );
+        const backfillItems: WorkspaceOverview[] = [];
+        const backfillCursors = new Set<string>();
+        // The current keyset chain may legitimately cross a cursor requested
+        // by the pre-change chain, so only retain cursors from this replay.
+        const fetchedCursors = new Set<string>();
+        let backfillCursor = capturedPagination.firstCursor;
+        for (let pageIndex = 0; pageIndex < OVERVIEW_LIST_MAX_PAGES; pageIndex += 1) {
+          if (backfillCursors.has(backfillCursor)) {
+            continuationWarning =
+              "Workspace list truncated: the overview feed repeated a continuation cursor while backfilling filtered history, so later workspaces cannot be loaded safely.";
+            paginationForContinuation = {
+              ...capturedPagination,
+              nextCursor: null,
+              needsMembershipBackfill: false,
+              fetchedCursors,
+            };
+            break;
+          }
+          backfillCursors.add(backfillCursor);
+          fetchedCursors.add(backfillCursor);
+          const backfillPage = await fetchOverviewPage(backfillCursor);
+          if (backfillPage === null) {
+            break;
+          }
+          const normalizedBackfillItems = normalizeOverview(backfillPage.items);
+          backfillItems.push(...normalizedBackfillItems);
+          const nextBackfillCursor = usableContinuationCursor(backfillPage.next_cursor)
+            ? backfillPage.next_cursor
+            : null;
+          const repeatedBackfillCursor =
+            backfillPage.has_more &&
+            nextBackfillCursor !== null &&
+            (nextBackfillCursor === backfillCursor || backfillCursors.has(nextBackfillCursor));
+          const boundarySeen = normalizedBackfillItems.some(
+            (item) => item.workspace_id === capturedPagination.boundaryWorkspaceId,
+          );
+          paginationForContinuation = {
+            ...capturedPagination,
+            nextCursor:
+              backfillPage.has_more && !repeatedBackfillCursor ? nextBackfillCursor : null,
+            boundaryWorkspaceId:
+              normalizedBackfillItems.at(-1)?.workspace_id ??
+              capturedPagination.boundaryWorkspaceId,
+            needsMembershipBackfill: false,
+            complete: !backfillPage.has_more,
+            fetchedCursors,
+          };
+          if (!backfillPage.has_more || boundarySeen) {
+            break;
+          }
+          if (nextBackfillCursor === null) {
+            continuationWarning =
+              "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor while backfilling filtered history.";
+            break;
+          }
+          if (repeatedBackfillCursor) {
+            continuationWarning =
+              "Workspace list truncated: the overview feed repeated a continuation cursor while backfilling filtered history, so later workspaces cannot be loaded safely.";
+            break;
+          }
+          backfillCursor = nextBackfillCursor;
+          if (pageIndex === OVERVIEW_LIST_MAX_PAGES - 1) {
+            continuationWarning =
+              "Workspace list truncated: filtered history backfill reached the page safety limit before its prior boundary.";
+            paginationForContinuation = {
+              ...paginationForContinuation,
+              nextCursor: null,
+            };
+          }
+        }
+        const backfillAddedMembership = backfillItems.some(
+          (item) => !existingWorkspaceIds.has(item.workspace_id),
+        );
+        if (
+          paginationForContinuation !== null &&
+          (backfillAddedMembership ||
+            !usableContinuationCursor(paginationForContinuation.nextCursor))
+        ) {
+          // The catch-up itself fulfilled this Load More request when it found
+          // new membership (or the end/truncation boundary). Publish it without
+          // fetching another page past the newly established cursor.
+          page = {
+            items: backfillItems,
+            has_more: !paginationForContinuation.complete,
+            next_cursor: paginationForContinuation.nextCursor,
+          };
+          requestedCursor = null;
+        } else {
+          requestedCursor = paginationForContinuation?.nextCursor ?? null;
+        }
+      }
+      if (page === null && !pageAuthDenied && !pageOutage) {
+        page = await fetchOverviewPage(requestedCursor);
+      }
       if (pageAuthDenied) {
         applyOverviewAuthDenial(generation, pageError ?? "");
         return;
@@ -575,7 +689,9 @@ export function useConsoleOverviewLoader({
         };
       }
       if (continuation) {
-        const fetchedCursors = new Set(capturedPagination?.fetchedCursors ?? []);
+        const fetchedCursors = new Set(
+          paginationForContinuation?.fetchedCursors ?? capturedPagination?.fetchedCursors ?? [],
+        );
         if (usableContinuationCursor(requestedCursor)) {
           fetchedCursors.add(requestedCursor);
         }
@@ -586,8 +702,15 @@ export function useConsoleOverviewLoader({
           (nextCursor === requestedCursor || fetchedCursors.has(nextCursor));
         overviewPaginationRef.current = {
           query: capturedQuery,
-          firstCursor: capturedPagination?.firstCursor ?? null,
+          firstCursor:
+            paginationForContinuation?.firstCursor ?? capturedPagination?.firstCursor ?? null,
           nextCursor: page.has_more && !repeatedCursor ? nextCursor : null,
+          boundaryWorkspaceId:
+            pageItems.at(-1)?.workspace_id ??
+            paginationForContinuation?.boundaryWorkspaceId ??
+            capturedPagination?.boundaryWorkspaceId ??
+            null,
+          needsMembershipBackfill: false,
           complete: !page.has_more,
           fetchedCursors,
         };
@@ -598,11 +721,11 @@ export function useConsoleOverviewLoader({
         setOverviewHistoryComplete(!page.has_more);
         setOverviewHistoryError(false);
         setOverviewTruncationWarning(
-          page.has_more && !usableContinuationCursor(page.next_cursor)
+          continuationWarning ?? (page.has_more && !usableContinuationCursor(page.next_cursor)
             ? "Workspace list truncated: the overview feed reported more workspaces but omitted a continuation cursor, so later workspaces cannot be loaded."
             : repeatedCursor
               ? "Workspace list truncated: the overview feed repeated a continuation cursor, so later workspaces cannot be loaded safely."
-              : null,
+              : null),
         );
       } else {
         const firstCursor = usableContinuationCursor(page.next_cursor) ? page.next_cursor : null;
@@ -612,21 +735,31 @@ export function useConsoleOverviewLoader({
         const refreshedPageOverlapsRetained = sameQuery && pageItems.some(
           (item) => retainedWorkspaceIds.has(item.workspace_id),
         );
-        // A status transition can add an unseen matching row ahead of a retained
-        // cursor. Reopen filtered history when that boundary changes, but keep
-        // the active continuation progress across routine polls of the same page.
+        // Reset immediately when page one's boundary moves. When it stays put,
+        // preserve the active continuation but require an on-demand replay of
+        // the loaded range: an off-page status transition is otherwise invisible
+        // to this immutable cursor.
         const retainedPagination =
           refreshedPageOverlapsRetained &&
           capturedPagination !== null &&
           usableContinuationCursor(capturedPagination.nextCursor) &&
           (filters.status === undefined || capturedPagination.firstCursor === firstCursor)
-            ? capturedPagination
+            ? {
+                ...capturedPagination,
+                needsMembershipBackfill:
+                  filters.status !== undefined &&
+                  capturedPagination.firstCursor === firstCursor &&
+                  capturedPagination.nextCursor !== firstCursor &&
+                  capturedPagination.boundaryWorkspaceId !== null,
+              }
             : null;
         const pagination = !page.has_more
           ? {
               query: capturedQuery,
               firstCursor: null,
               nextCursor: null,
+              boundaryWorkspaceId: null,
+              needsMembershipBackfill: false,
               complete: true,
               fetchedCursors: new Set<string>(),
             }
@@ -634,6 +767,8 @@ export function useConsoleOverviewLoader({
               query: capturedQuery,
               firstCursor,
               nextCursor: firstCursor,
+              boundaryWorkspaceId: pageItems.at(-1)?.workspace_id ?? null,
+              needsMembershipBackfill: false,
               complete: false,
               fetchedCursors: new Set<string>(),
             };

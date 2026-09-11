@@ -556,7 +556,7 @@ test("loadOverview reads filters via ref so capability polling stays filter-inde
   );
 });
 
-test("loadOverview refreshes one rotating retained-ID batch and fetches one continuation page on demand", () => {
+test("loadOverview refreshes one retained-ID batch and backfills filtered continuation on demand", () => {
   const dashboard = dashboardSource.dashboard;
   assert.match(
     dashboard,
@@ -565,8 +565,13 @@ test("loadOverview refreshes one rotating retained-ID batch and fetches one cont
   );
   assert.match(
     dashboard,
-    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?const requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?retainedOverviewIdBatch\([\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?setOverview\(refreshed\)[\s\S]*?void refreshRetainedOverview\(/,
-    "Expected loadOverview to publish one requested page before refreshing retained rows",
+    /const loadOverview = useCallback\(async \(\s*continuation = false,[\s\S]*?\) =>[\s\S]*?let requestedCursor = continuation[\s\S]*?await fetchOverviewPage\(requestedCursor\)[\s\S]*?retainedOverviewIdBatch\([\s\S]*?if \(continuation\) \{[\s\S]*?appendUniqueOverviewItems\(overviewItemsRef\.current, pageItems\)[\s\S]*?\} else \{[\s\S]*?setOverview\(refreshed\)[\s\S]*?void refreshRetainedOverview\(/,
+    "Expected loadOverview to publish requested history before refreshing retained rows",
+  );
+  assert.match(
+    dashboard,
+    /capturedPagination\?\.needsMembershipBackfill[\s\S]*?for \(let pageIndex = 0; pageIndex < OVERVIEW_LIST_MAX_PAGES; pageIndex \+= 1\)[\s\S]*?boundarySeen[\s\S]*?capturedPagination\.boundaryWorkspaceId/,
+    "Expected filtered continuation to replay a bounded range through its prior workspace boundary",
   );
   assert.match(
     dashboard,

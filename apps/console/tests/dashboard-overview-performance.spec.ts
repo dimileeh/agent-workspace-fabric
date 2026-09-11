@@ -480,6 +480,95 @@ test("filtered refresh reopens partial history from the first-page cursor", asyn
   expect(completedRequests).not.toContain("stale-completed-page-3");
 });
 
+// Regression for PR #958 review thread PRRT_kwDOSJAM6s6hVJ_b: an off-page
+// workspace can enter a single-status result without changing page one or its
+// immutable keyset cursor. The next continuation must backfill the loaded range
+// before it advances beyond the newly matching row.
+test("filtered continuation backfills unchanged first-page membership", async ({ page }) => {
+  const completedRequests: Array<string | null> = [];
+  let membershipGrew = false;
+  const completedItems = (start: number, end: number) =>
+    Array.from({ length: end - start + 1 }, (_, index) => ({
+      ...workspaceOverview(start + index),
+      status: "completed",
+    }));
+  const newlyMatching = {
+    ...workspaceOverview(777),
+    title: "Newly matching off-page workspace",
+    status: "completed",
+  };
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => completedRequests.push(cursor),
+    resolveBatchItem: (item) => ({ ...item, status: "completed" }),
+    resolvePage: (cursor, status) => {
+      if (status !== "completed") {
+        return null;
+      }
+      if (cursor === "completed-page-2") {
+        return membershipGrew
+          ? {
+              items: [
+                ...completedItems(PAGE_SIZE + 1, PAGE_SIZE + 49),
+                newlyMatching,
+                ...completedItems(PAGE_SIZE + 50, PAGE_SIZE * 2 - 1),
+              ],
+              has_more: true,
+              next_cursor: "shifted-completed-page-3",
+            }
+          : {
+              items: completedItems(PAGE_SIZE + 1, PAGE_SIZE * 2),
+              has_more: true,
+              next_cursor: "old-completed-page-3",
+            };
+      }
+      if (cursor === "shifted-completed-page-3") {
+        return {
+          items: completedItems(PAGE_SIZE * 2, PAGE_SIZE * 3 - 1),
+          has_more: true,
+          next_cursor: "shifted-completed-page-4",
+        };
+      }
+      if (cursor === "old-completed-page-3") {
+        return {
+          items: completedItems(PAGE_SIZE * 2 + 1, PAGE_SIZE * 3),
+          has_more: true,
+          next_cursor: "old-completed-page-4",
+        };
+      }
+      return {
+        items: completedItems(1, PAGE_SIZE),
+        has_more: true,
+        // Membership changed below page one, so this boundary is unchanged.
+        next_cursor: "completed-page-2",
+      };
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Filters" }).click();
+  const statusGroup = page.getByRole("group", { name: "Status" });
+  await statusGroup.getByRole("button", { name: /Status all/ }).click();
+  await statusGroup.getByLabel("completed").check();
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect.poll(() => completedRequests).toContain("completed-page-2");
+
+  membershipGrew = true;
+  const firstPageRequests = completedRequests.filter((cursor) => cursor === null).length;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(
+    () => completedRequests.filter((cursor) => cursor === null).length,
+  ).toBeGreaterThan(firstPageRequests);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+
+  await expect.poll(() => completedRequests).toContain("shifted-completed-page-3");
+  await expect(page.getByText(new RegExp(`of ${PAGE_SIZE * 3} loaded$`))).toBeVisible();
+  await page.getByPlaceholder("Search workspaces").fill("Newly matching off-page workspace");
+  await expect(page.getByTestId("workspace-card-ws_perf_0777")).toBeVisible();
+  expect(completedRequests).not.toContain("old-completed-page-3");
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hU_13: routine
 // first-page polls must not move a filtered continuation back to page 2.
 test("filtered routine poll preserves pagination progress", async ({ page }) => {
