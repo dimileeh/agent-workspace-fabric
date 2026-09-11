@@ -1067,7 +1067,7 @@ export function WorkspaceList({
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
     if (
       selectedId !== previous.workspaceIds[0] &&
-      Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
+      scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
     ) {
       setPageStart(0);
       setWindowStart(0);
@@ -1242,7 +1242,7 @@ export function WorkspaceList({
       const scrollContainer = scrollContainerRef.current;
       const atTop =
         scrollContainer !== null &&
-        Math.abs(scrollContainer.scrollTop) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+        scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
       scrollWithoutLoading(atTop ? 0 : scrollTop);
     }
   }, [items, rowOffsets, scrollWithoutLoading]);

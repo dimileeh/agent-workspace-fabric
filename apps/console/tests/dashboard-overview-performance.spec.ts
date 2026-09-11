@@ -1346,6 +1346,24 @@ test(`workspace list stays at the top during refresh reorders (inspectorWorkspac
   });
   expect(Math.abs(fractionalTop)).toBeLessThanOrEqual(0.5);
 
+  // Chromium clamps native scrollTop at zero, so simulate Safari's elastic
+  // overscroll while retaining the component's observable scrollTo behavior.
+  await list.evaluate((element) => {
+    let simulatedScrollTop = -20;
+    Object.defineProperty(element, "scrollTop", {
+      configurable: true,
+      get: () => simulatedScrollTop,
+    });
+    element.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
+      if (typeof options === "number") {
+        simulatedScrollTop = y ?? simulatedScrollTop;
+      } else if (options?.top !== undefined) {
+        simulatedScrollTop = options.top;
+      }
+    };
+  });
+  expect(await scrollTop()).toBe(-20);
+
   revision = 6;
   const requestsBeforeFinalPoll = firstPageRequests;
   await expect
