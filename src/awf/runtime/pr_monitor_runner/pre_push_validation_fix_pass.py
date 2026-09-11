@@ -7,6 +7,7 @@ parent module re-exports these symbols to preserve its existing public surface.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -118,6 +119,8 @@ if TYPE_CHECKING:
     from awf.runtime.pr_monitor_runner.pre_push_validation import _PrePushValidationResult
 
 _log = get_logger(__name__)
+
+_TIMEOUT_CLEANUP_HEAD_PROBE_TIMEOUT_SECONDS = 5.0
 
 PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
 PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
@@ -461,6 +464,50 @@ async def _run_pre_push_validation_fix_pass(
     total_passes: int,
     validation_commands: tuple[str, ...],
 ) -> tuple[bool, str | None]:
+    """Attempt a validation fix pass without masking retained cleanup errors."""
+    retained_cleanup_errors: list[ComposeExecCleanupError] = []
+    cancelled = False
+    try:
+        return await _run_pre_push_validation_fix_pass_impl(
+            self,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            remote_branch=remote_branch,
+            remote_url=remote_url,
+            state=state,
+            validation_result=validation_result,
+            pass_number=pass_number,
+            total_passes=total_passes,
+            validation_commands=validation_commands,
+            retained_cleanup_errors=retained_cleanup_errors,
+        )
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        # Once Compose cleanup says timeout termination is unproven, every
+        # ordinary preservation result/failure is subordinate to that error.
+        # Cancellation remains process-control flow and is not replaced.
+        if retained_cleanup_errors and not cancelled:
+            raise retained_cleanup_errors[0]
+
+
+async def _run_pre_push_validation_fix_pass_impl(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    remote_branch: str,
+    remote_url: str | None,
+    state: object | None,
+    validation_result: _PrePushValidationResult,
+    pass_number: int,
+    total_passes: int,
+    validation_commands: tuple[str, ...],
+    retained_cleanup_errors: list[ComposeExecCleanupError],
+) -> tuple[bool, str | None]:
     """Attempt a validation fix pass and return commit status plus terminal failure reason."""
     # Resolve sibling helpers through the parent module namespace so test
     # monkeypatches on ``pre_push_validation._<helper>`` intercept these calls.
@@ -487,6 +534,26 @@ async def _run_pre_push_validation_fix_pass(
         if timeout_cleanup_error is not None:
             return None
         return await _rollback_failed_fix_pass_impl(*args, **kwargs)
+
+    async def _verify_post_agent_head_object_exists(worktree_path: Path) -> bool:
+        if timeout_cleanup_error is None:
+            return await verify_head_object_exists(worktree_path)
+
+        try:
+            return await asyncio.wait_for(
+                verify_head_object_exists(worktree_path),
+                timeout=_TIMEOUT_CLEANUP_HEAD_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as probe_exc:
+            # This is preservation-only evidence after cleanup already failed.
+            # A spawn/filesystem failure or timeout cannot supersede the
+            # authoritative error that says agent termination is unproven.
+            _log.warning(
+                "monitor.pre_push_validation_fix_timeout_head_probe_failed",
+                worktree_path=str(worktree_path),
+                exc_type=type(probe_exc).__name__,
+            )
+            raise
 
     first_fail = validation_result.first_failure
     if first_fail is None:
@@ -630,6 +697,7 @@ async def _run_pre_push_validation_fix_pass(
         # dead. Once preservation finishes, re-raise it so validation and push
         # cannot continue while termination remains unproven.
         timeout_cleanup_error = exc
+        retained_cleanup_errors.append(exc)
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_failed",
@@ -664,7 +732,7 @@ async def _run_pre_push_validation_fix_pass(
     if mirror_repair_failure_reason is not None:
         return _finish_fix_pass(False, mirror_repair_failure_reason)
 
-    head_object_exists = await verify_head_object_exists(worktree_path)
+    head_object_exists = await _verify_post_agent_head_object_exists(worktree_path)
     recovered_head_for_protected_scope: str | None = None
     recovered_base_for_protected_scope: str | None = None
     if not head_object_exists:

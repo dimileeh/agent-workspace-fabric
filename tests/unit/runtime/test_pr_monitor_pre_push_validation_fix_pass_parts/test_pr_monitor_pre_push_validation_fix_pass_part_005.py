@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -325,6 +326,90 @@ async def test_pre_push_validation_fix_pass_timeout_cleanup_failure_preserves_th
     assert len(commit_calls) == 1
     assert commit_calls[0]["operation_start_head"] == fix_start_head
     assert cleanup_calls == ([committed_head] if dirty_changes_committed else [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("probe_failure", ("raises", "stalls", "cancels"))
+async def test_pre_push_validation_fix_pass_timeout_head_probe_is_bounded_best_effort(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_failure: str,
+) -> None:
+    """A preservation-only HEAD probe cannot mask an unproven cleanup failure."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    import awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass as fix_pass
+
+    fix_start_head = "8" * 40
+    workspace_id, runner, _cmd, _adapter = await _make_fix_pass_runner(factory, tmp_path)
+    cleanup_error = ComposeExecCleanupError(
+        invocation_id="awf_timeout_cleanup_head_probe",
+        source="agent",
+        label="monitor-pre-push-validation-fix",
+        message="tagged process still running",
+    )
+    cleanup_error.agent_reason_code = "AGENT_TIMEOUT"
+
+    async def _run_agent_with_recovery(**_kwargs: object) -> None:
+        raise cleanup_error
+
+    async def _rev_parse_head(_worktree_path: Path) -> str:
+        return fix_start_head
+
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        if probe_failure == "raises":
+            raise OSError("cannot spawn git")
+        if probe_failure == "cancels":
+            raise asyncio.CancelledError
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        raise AssertionError("commit should not run when the HEAD probe cannot answer")
+
+    monkeypatch.setattr(
+        runner,
+        "_run_monitor_agent_with_service_recovery",
+        _run_agent_with_recovery,
+    )
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(fix_pass, "mirror_path_for_worktree", lambda _path: None)
+    monkeypatch.setattr(fix_pass, "verify_head_object_exists", _verify_head_object_exists)
+    monkeypatch.setattr(
+        fix_pass,
+        "_TIMEOUT_CLEANUP_HEAD_PROBE_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+
+    expected_exception = (
+        asyncio.CancelledError if probe_failure == "cancels" else ComposeExecCleanupError
+    )
+    with pytest.raises(expected_exception) as raised:
+        await asyncio.wait_for(
+            pre_push_validation._run_pre_push_validation_fix_pass(
+                runner,
+                workspace_id=workspace_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+                remote_branch="codex/pr",
+                remote_url=None,
+                state=None,
+                validation_result=_failed_validation_result(
+                    pre_push_validation,
+                    tmp_path,
+                    workspace_head_sha=fix_start_head,
+                ),
+                pass_number=1,
+                total_passes=1,
+                validation_commands=("pytest -q",),
+            ),
+            timeout=0.5,
+        )
+
+    if probe_failure != "cancels":
+        assert raised.value is cleanup_error
 
 
 @pytest.mark.unit

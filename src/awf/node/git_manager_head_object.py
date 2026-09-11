@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
+from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.node.git_manager_ownership import git_env_without_object_lookup_overrides
@@ -23,21 +23,19 @@ async def verify_head_object_exists(worktree_path: Path) -> bool:
     if not _clear_repository_object_alternates(worktree_path):
         return False
 
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        *git_safe_directory_config_args(worktree_path),
-        "-C",
-        str(worktree_path),
-        "cat-file",
-        "-e",
-        "HEAD^{commit}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    result = await AsyncioSubprocessRunner().run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "cat-file",
+            "-e",
+            "HEAD^{commit}",
+        ],
         env=git_env_without_object_lookup_overrides(),
     )
-    await proc.communicate()
-    assert proc.returncode is not None
-    return proc.returncode == 0
+    return result.ok
 
 
 def _clear_repository_object_alternates(worktree_path: Path) -> bool:
