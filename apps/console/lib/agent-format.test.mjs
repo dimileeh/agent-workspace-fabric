@@ -826,6 +826,47 @@ test("resolveWorkflowTiming rejects stage durations that contradict their timest
     finishedAt: "2026-09-06T12:10:00.999Z",
     durationSeconds: 600,
   });
+  const submillisecondItem = {
+    ...item,
+    lifecycle: [
+      {
+        ...item.lifecycle[0],
+        started_at: "2026-09-06T12:00:00.000900Z",
+        ended_at: "2026-09-06T12:00:01.000800Z",
+        duration_seconds: 0,
+      },
+      {
+        ...item.lifecycle[1],
+        started_at: "2026-09-06T12:00:01.000800Z",
+        ended_at: "2026-09-06T12:00:01.000800Z",
+      },
+    ],
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming(submillisecondItem),
+    {
+      finishedAt: "2026-09-06T12:00:01.000800Z",
+      durationSeconds: 0,
+    },
+    "duration validation must retain Core's microsecond precision",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...submillisecondItem,
+      lifecycle: [
+        {
+          ...submillisecondItem.lifecycle[0],
+          duration_seconds: 1,
+        },
+        submillisecondItem.lifecycle[1],
+      ],
+    }),
+    {
+      finishedAt: "2026-09-06T12:00:01.000800Z",
+      durationSeconds: null,
+    },
+    "microsecond precision must not accept the millisecond-truncated interval",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
