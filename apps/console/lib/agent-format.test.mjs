@@ -442,6 +442,26 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
   assert.equal(distinctFinishedAt({}), null);
 });
 
+test("resolveWorkflowTiming preserves explicit duration without a terminal finish", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "completed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    lifecycle: [],
+  };
+
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: 125 }), {
+    finishedAt: null,
+    durationSeconds: 125,
+  });
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: -1 }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {

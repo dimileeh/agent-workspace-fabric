@@ -360,7 +360,10 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
   const finishedAt = resolvedFinishedAt ?? lifecycleTiming?.finishedAt ?? null;
   const finishedMs = explicitFinishedMs ?? lifecycleTiming?.finishedMs ?? null;
   if (finishedAt == null || finishedMs == null) {
-    return { finishedAt: null, durationSeconds: null };
+    return {
+      finishedAt: null,
+      durationSeconds: recordedDurationSeconds(item.duration_seconds),
+    };
   }
 
   const explicitDurationPresent = item.duration_seconds != null;
