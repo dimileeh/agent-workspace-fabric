@@ -1303,6 +1303,44 @@ test("resolveWorkflowTiming rejects chronologically backward lifecycle stages", 
   );
 });
 
+test("resolveWorkflowTiming requires the immediately preceding stage to reach completed", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle: [
+        {
+          stage: "requested",
+          started_at: "2026-09-06T12:00:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 600,
+          status: "completed",
+        },
+        {
+          stage: "running",
+          started_at: "2026-09-06T12:01:00Z",
+          ended_at: "2026-09-06T12:05:00Z",
+          duration_seconds: 240,
+          status: "completed",
+        },
+        {
+          stage: "completed",
+          started_at: "2026-09-06T12:10:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+      ],
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {
