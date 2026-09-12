@@ -218,6 +218,21 @@ type RetainedTerminalEvent = NonNullable<
 
 type RetainedStateChangeEvent = NonNullable<WorkspaceOverview["latest_state_change"]>;
 
+// Core omits destroying -> failed cleanup failures from the retained workflow
+// terminal field. With a retained completed/cancelled terminal, a later cleanup
+// entry from failed can therefore only be a destroy retry of that workflow.
+function cleanupEntryMatchesRetainedTerminal(
+  cleanupEvent: RetainedStateChangeEvent,
+  terminalEvent: RetainedTerminalEvent,
+): boolean {
+  return (
+    cleanupEvent.old_state === terminalEvent.new_state ||
+    (cleanupEvent.old_state === "failed" &&
+      (terminalEvent.new_state === "completed" ||
+        terminalEvent.new_state === "cancelled"))
+  );
+}
+
 function terminalEventMatchesWorkflowStatus(
   item: WorkspaceOverview,
   terminalEvent: RetainedTerminalEvent,
@@ -262,7 +277,7 @@ export function hasTerminalWorkflowTiming(
       terminalTransition?.event_type === "workspace.state_changed" &&
       cleanupTransition?.event_type === "workspace.state_changed" &&
       cleanupTransition.new_state === "destroying" &&
-      cleanupTransition.old_state === terminalTransition.new_state &&
+      cleanupEntryMatchesRetainedTerminal(cleanupTransition, terminalTransition) &&
       terminalTransition.new_state !== "destroyed" &&
       TERMINAL_WORKFLOW_STATUSES.has(
         terminalTransition.new_state as WorkspaceOverview["status"],
@@ -425,7 +440,7 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   const cleanupEnteredFromTerminal =
     terminalEvent != null &&
     destroyingStateChange?.event_type === "workspace.state_changed" &&
-    destroyingStateChange.old_state === terminalEvent.new_state &&
+    cleanupEntryMatchesRetainedTerminal(destroyingStateChange, terminalEvent) &&
     destroyingStateChange.new_state === "destroying" &&
     eventStrictlyFollows(destroyingStateChange, terminalEvent);
   const subsequentCleanupCorroboratesTerminal =

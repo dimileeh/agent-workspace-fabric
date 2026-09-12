@@ -522,18 +522,9 @@ export function WorkspaceSummary({
   const coordinationWarnings =
     workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
   const presentationFields = mergeWorkspacePresentationFields(overview, workspace);
-  const workflowTimingInput = {
-    ...overview,
-    status: workspace?.status ?? overview.status,
-    lifecycle: workspace?.lifecycle ?? overview.lifecycle,
-    recovery,
-    workflow_finished_at: workspace?.workflow_finished_at ?? overview.workflow_finished_at,
-    finished_at: workspace?.finished_at ?? overview.finished_at,
-    duration_seconds: workspace?.duration_seconds ?? overview.duration_seconds,
-  };
-  const workflowTiming = resolveWorkflowTiming(workflowTimingInput);
+  const workflowTiming = resolveWorkflowTiming(overview);
   const workflowFinishedAt = workflowTiming.finishedAt;
-  const finishedAt = distinctFinishedAt(workflowTimingInput);
+  const finishedAt = distinctFinishedAt(overview);
   const taskKey = displayedTaskKey(workspace) ?? displayedTaskKey(overview);
 
   return (
