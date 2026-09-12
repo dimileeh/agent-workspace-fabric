@@ -206,6 +206,36 @@ test("hosted terminal cards use workflow finish and recorded duration for every 
   }
 });
 
+test("destroyed hosted or legacy cards honor explicit workflow timing", async ({ page }) => {
+  const items = [
+    overview("ws_hosted_destroyed_explicit", "destroyed", {
+      workflow_finished_at: "2026-09-06T12:20:00Z",
+      duration_seconds: 1200,
+    }),
+    overview("ws_legacy_destroyed_explicit", "destroyed", {
+      finished_at: "2026-09-06T12:21:00Z",
+      duration_seconds: 1260,
+    }),
+  ];
+  await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: items });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  for (const [index, item] of items.entries()) {
+    const timing = page.getByTestId(`workspace-timing-${item.workspace_id}`);
+    await expect(timing).toContainText("Finished");
+    await expect(timing).toContainText("Duration");
+    await expect(timing).not.toContainText("Last activity");
+    await expect(
+      page.getByTestId(`workspace-finished-${item.workspace_id}`),
+    ).toContainText(formatDateTime(index === 0 ? item.workflow_finished_at : item.finished_at));
+    await expect(
+      page.getByTestId(`workspace-duration-${item.workspace_id}`),
+    ).toContainText(`${20 + index}m 0s`);
+  }
+});
+
 test("local terminal cards use one complete lifecycle interval", async ({ page }) => {
   const completed = overview("ws_local_completed", "completed", {
     lifecycle: [
