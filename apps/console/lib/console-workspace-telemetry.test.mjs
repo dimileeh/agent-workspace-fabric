@@ -387,6 +387,22 @@ test("parseTelemetryPresentation rejects conflicting admitted vs ownership provi
   conflict.memory_bytes_samples[0].provider_resource_uid = "pod-uid-admitted";
   assert.equal(parseTelemetryPresentation(conflict), null);
 
+  // Reverse: samples match ownership while admitted names a different pod.
+  const conflictOwnership = structuredClone(SUCCESS);
+  conflictOwnership.admitted.provider_resource_uid = "pod-uid-admitted";
+  conflictOwnership.ownership.provider_resource_uid = "pod-uid-ownership";
+  conflictOwnership.cpu_cores_samples[0].provider_resource_uid = "pod-uid-ownership";
+  conflictOwnership.memory_bytes_samples[0].provider_resource_uid = "pod-uid-ownership";
+  assert.equal(parseTelemetryPresentation(conflictOwnership), null);
+
+  // Malformed identity on either side must fail closed (not silently prefer the other).
+  const malformedAdmitted = structuredClone(SUCCESS);
+  malformedAdmitted.admitted.provider_resource_uid = "";
+  assert.equal(parseTelemetryPresentation(malformedAdmitted), null);
+  const malformedOwnership = structuredClone(SUCCESS);
+  malformedOwnership.ownership.provider_resource_uid = 42;
+  assert.equal(parseTelemetryPresentation(malformedOwnership), null);
+
   const matching = structuredClone(SUCCESS);
   matching.admitted.provider_resource_uid = "pod-uid-shared";
   matching.ownership.provider_resource_uid = "pod-uid-shared";

@@ -311,26 +311,42 @@ function parseSampleArray(
 }
 
 /**
+ * Read provider_resource_uid from an admitted/ownership object.
+ * null = field absent; undefined = present but not a non-empty string (fail closed).
+ */
+function readPresentationResourceUidField(
+  container: Record<string, unknown> | null,
+): string | null | undefined {
+  if (container === null) {
+    return null;
+  }
+  if (!("provider_resource_uid" in container) || container.provider_resource_uid === undefined) {
+    return null;
+  }
+  const uid = container.provider_resource_uid;
+  if (typeof uid !== "string" || uid.length === 0) {
+    return undefined;
+  }
+  return uid;
+}
+
+/**
  * Resolve the presentation's resource identity when the producer supplies one.
  * Prefer admitted, then ownership — both are schema-compatible ownership fields.
- * Returns undefined when both are present and disagree (fail closed).
+ * Returns undefined when either field is malformed, or both are present and disagree
+ * (fail closed so Pod A samples cannot render under Pod B ownership).
  */
 function resolvePresentationResourceUid(
   payload: Record<string, unknown>,
 ): string | null | undefined {
-  let admittedUid: string | null = null;
-  let ownershipUid: string | null = null;
-  if (isPlainObject(payload.admitted)) {
-    const uid = payload.admitted.provider_resource_uid;
-    if (typeof uid === "string" && uid.length > 0) {
-      admittedUid = uid;
-    }
-  }
-  if (isPlainObject(payload.ownership)) {
-    const uid = payload.ownership.provider_resource_uid;
-    if (typeof uid === "string" && uid.length > 0) {
-      ownershipUid = uid;
-    }
+  const admittedUid = readPresentationResourceUidField(
+    isPlainObject(payload.admitted) ? payload.admitted : null,
+  );
+  const ownershipUid = readPresentationResourceUidField(
+    isPlainObject(payload.ownership) ? payload.ownership : null,
+  );
+  if (admittedUid === undefined || ownershipUid === undefined) {
+    return undefined;
   }
   if (admittedUid !== null && ownershipUid !== null && admittedUid !== ownershipUid) {
     return undefined;
