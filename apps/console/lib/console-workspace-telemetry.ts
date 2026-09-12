@@ -617,7 +617,10 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   const containerNames: string[] = [];
   for (const sample of atLatest) {
     used += sample.value;
-    if (sample.quality === "partial") {
+    // Fail closed: only exact "ok" is complete usage. Parse rejects unknown
+    // qualities; projection still treats any non-ok allowlisted quality
+    // (partial, stale) as incomplete rather than appearing complete.
+    if (sample.quality !== "ok") {
       usedPartial = true;
     }
     containerNames.push(sample.containerName);

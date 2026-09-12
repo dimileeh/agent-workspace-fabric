@@ -115,10 +115,21 @@ test("parseTelemetryPresentation rejects unknown sample quality rather than trea
   // Known sample qualities still parse (partial already covered by fixture).
   const okSample = structuredClone(SUCCESS);
   okSample.cpu_cores_samples[0].quality = "ok";
-  assert.ok(parseTelemetryPresentation(okSample));
+  const okParsed = parseTelemetryPresentation(okSample);
+  assert.ok(okParsed);
+  assert.equal(
+    projectWorkspaceTelemetryView(okParsed, { nowMs: FIXED_NOW }).cpu.usedPartial,
+    false,
+  );
   const staleSample = structuredClone(SUCCESS);
   staleSample.cpu_cores_samples[0].quality = "stale";
-  assert.ok(parseTelemetryPresentation(staleSample));
+  const staleParsed = parseTelemetryPresentation(staleSample);
+  assert.ok(staleParsed);
+  // Non-ok allowlisted quality must project as incomplete usage, not complete.
+  assert.equal(
+    projectWorkspaceTelemetryView(staleParsed, { nowMs: FIXED_NOW }).cpu.usedPartial,
+    true,
+  );
 });
 
 test("unallocated fixture preserves null admitted/cost and does not coerce to zero/free", () => {
