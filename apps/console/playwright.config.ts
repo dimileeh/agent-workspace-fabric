@@ -23,7 +23,9 @@ export default defineConfig({
     {
       command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
       url: "http://127.0.0.1:3100",
-      reuseExistingServer: !process.env.CI,
+      // Never reuse: a plain `npm run dev` on these ports lacks
+      // AWF_CONSOLE_TEST_HARNESS=1, so /test-harness/* would 404.
+      reuseExistingServer: false,
       timeout: 120_000,
       // Registers page.harness.tsx via next.config pageExtensions for /test-harness/*.
       env: {
@@ -34,7 +36,7 @@ export default defineConfig({
     {
       command: "npm run dev -- --hostname 127.0.0.1 --port 3101",
       url: "http://127.0.0.1:3101/workspaces",
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
       env: {
         ...hostedEnv,
