@@ -191,6 +191,7 @@ class WorkspaceRecoverySummary:
     current_operation: WorkspaceRecoveryCurrentOperation | None
     summary: str
     payload: dict[str, Any] | None
+    started_event_order: int | None = None
     provider_recovery: ProviderRecoveryStateView | None = None
 
 
@@ -239,6 +240,7 @@ class WorkspaceRecoveryPayload(TypedDict):
     action: str | None
     recovery_mode: str | None
     started_at: datetime
+    started_event_order: int | None
     current_operation: WorkspaceRecoveryCurrentOperationPayload | None
     summary: str
     payload: dict[str, Any] | None
@@ -1024,6 +1026,10 @@ def workspace_recovery_summary(
     )
     payload = _bounded_payload(operation_payload or event_payload or reverse_payload)
     provider_recovery_view = provider_recovery_state_for_workspace(workspace)
+    raw_started_event_order = getattr(reverse_event, "event_order", None)
+    started_event_order = (
+        raw_started_event_order if isinstance(raw_started_event_order, int) else None
+    )
 
     return WorkspaceRecoverySummary(
         from_state=getattr(reverse_event, "old_state", None),
@@ -1032,6 +1038,7 @@ def workspace_recovery_summary(
         action=action,
         recovery_mode=recovery_mode,
         started_at=_ensure_utc(reverse_event.occurred_at),
+        started_event_order=started_event_order,
         current_operation=current_operation,
         summary=_recovery_summary_text(
             workspace=workspace,
@@ -1062,6 +1069,7 @@ def recovery_payload(
         "action": summary.action,
         "recovery_mode": summary.recovery_mode,
         "started_at": summary.started_at,
+        "started_event_order": summary.started_event_order,
         "current_operation": (
             {
                 "id": current_operation.id,

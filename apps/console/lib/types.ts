@@ -83,6 +83,7 @@ export interface WorkspaceRecoverySummary {
   action: string | null;
   recovery_mode: string | null;
   started_at: string;
+  started_event_order?: number | null;
   current_operation: WorkspaceRecoveryCurrentOperation | null;
   summary: string;
   payload: Record<string, unknown> | null;
@@ -182,6 +183,7 @@ export interface WorkspaceEvent {
   new_state: string | null;
   reason_code: string | null;
   payload: Record<string, unknown> | null;
+  event_order?: number | null;
   occurred_at: string;
 }
 

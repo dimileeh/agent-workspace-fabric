@@ -596,6 +596,58 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
+      status: "destroyed",
+      recovery: {
+        started_at: terminalEvent.occurred_at,
+        started_event_order: 40,
+      },
+      latest_state_change: {
+        id: "event_destroyed",
+        event_type: "workspace.state_changed",
+        old_state: "destroying",
+        new_state: "destroyed",
+        occurred_at: "2026-09-06T12:30:00Z",
+        event_order: 43,
+      },
+      latest_workflow_terminal_state_change: {
+        ...terminalEvent,
+        old_state: "monitoring_pr",
+        new_state: "completed",
+        event_order: 41,
+      },
+    }),
+    { finishedAt: "2026-09-06T12:20:00Z", durationSeconds: null },
+    "event order must preserve a tied recovered finish after cleanup replaces the latest state change",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      recovery: {
+        started_at: terminalEvent.occurred_at,
+        started_event_order: 40,
+      },
+      latest_state_change: {
+        id: "event_destroyed",
+        event_type: "workspace.state_changed",
+        old_state: "destroying",
+        new_state: "destroyed",
+        occurred_at: "2026-09-06T12:30:00Z",
+        event_order: 43,
+      },
+      latest_workflow_terminal_state_change: {
+        ...terminalEvent,
+        old_state: "running",
+        new_state: "failed",
+        event_order: 39,
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a tied terminal event ordered before recovery must remain rejected after cleanup",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
       status: "failed",
       latest_state_change: {
         event_type: "workspace.state_changed",
