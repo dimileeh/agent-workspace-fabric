@@ -1121,6 +1121,41 @@ test("buildSparklineGeometry retains value extrema when even downsample would dr
   );
 });
 
+test("buildSparklineGeometry retains extrema when non-ok samples saturate the point budget", () => {
+  // n=65 all-partial: 63 interior non-ok exceed the 62 interior slots, so the
+  // non-ok fill can consume the entire budget before extrema reservation.
+  // Even downsample of the 63 interior indices (max 62) skips series index 32.
+  const n = MAX_SPARKLINE_POINTS + 1;
+  const spikeIdx = 32;
+  const nonOkInterior = Array.from({ length: n - 2 }, (_, i) => i + 1);
+  const nonOkSelected = new Set(
+    downsampleSeriesForSparkline(nonOkInterior, MAX_SPARKLINE_POINTS - 2),
+  );
+  assert.ok(
+    !nonOkSelected.has(spikeIdx),
+    "precondition: non-ok interior downsample skips spike index",
+  );
+
+  const points = Array.from({ length: n }, (_, i) => ({
+    value: i === spikeIdx ? 100 : 1,
+    quality: "partial",
+  }));
+
+  const geom = buildSparklineGeometry(points, 120, 28);
+  assert.ok(geom);
+  assert.equal(geom.qualification, "partial");
+  assert.ok(
+    countSparklineSvgPoints(geom) <= MAX_SPARKLINE_POINTS,
+    "extrema retention must stay within the sparkline point cap",
+  );
+  // Peak at series max maps to y=2.0; without it the dashed path is flat at y=26.0.
+  assert.match(
+    geom.paths.map((p) => p.d).join(" "),
+    /,2\.0\b/,
+    "sole interior spike must remain visible when non-ok fill would saturate the budget",
+  );
+});
+
 test("buildSparklineGeometry draws a marker for one sample and a path for two+", () => {
   assert.equal(buildSparklineGeometry([]), null);
 

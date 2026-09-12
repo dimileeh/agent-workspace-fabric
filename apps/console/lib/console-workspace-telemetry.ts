@@ -459,8 +459,10 @@ type SparklineDownsamplePoint = {
  * Plain even sampling can drop partial/stale samples and erase quality gaps;
  * when non-ok + endpoints exceed maxPoints, keep a bounded representative
  * subset of non-ok indices (never more than maxPoints total).
- * Also preserves series value min/max so a sole peak skipped by even sampling
- * cannot flatten the chart (geometry scales from retained points only).
+ * Reserves series value min/max before non-ok / even fill so a sole peak
+ * skipped by sampling cannot flatten the chart (geometry scales from
+ * retained points only), even when non-ok samples would otherwise saturate
+ * the point budget.
  * Returned points carry originalIndex so geometry can keep the time grid after
  * ok anchors are evicted.
  */
@@ -487,28 +489,11 @@ function downsampleSparklinePreservingQuality(
   const last = points.length - 1;
   const keep = new Set<number>([0, last]);
 
-  const nonOkInterior: number[] = [];
-  for (let i = 1; i < last; i++) {
-    if (sparklinePointQuality(points[i]!) !== "ok") {
-      nonOkInterior.push(i);
-    }
-  }
-
-  const interiorBudget = maxPoints - keep.size;
-  if (nonOkInterior.length <= interiorBudget) {
-    for (const idx of nonOkInterior) {
-      keep.add(idx);
-    }
-  } else if (interiorBudget > 0) {
-    for (const idx of downsampleSeriesForSparkline(nonOkInterior, interiorBudget)) {
-      keep.add(idx);
-    }
-  }
-
-  // Even sampling can skip a sole peak (e.g. n=65, max=64 skips index 32).
-  // Preserve series value extrema before filling so saturation events stay visible;
-  // geometry min/max are derived from retained points only.
-  if (keep.size < maxPoints && points.length > 0) {
+  // Even sampling (and non-ok representative fill) can skip a sole peak
+  // (e.g. n=65, max=64 skips index 32). Reserve extrema before consuming the
+  // interior budget so saturation events stay visible; geometry min/max are
+  // derived from retained points only.
+  if (points.length > 0 && keep.size < maxPoints) {
     let minIdx = 0;
     let maxIdx = 0;
     for (let i = 1; i < points.length; i++) {
@@ -524,6 +509,24 @@ function downsampleSparklinePreservingQuality(
     keep.add(maxIdx);
     if (keep.size < maxPoints) {
       keep.add(minIdx);
+    }
+  }
+
+  const nonOkInterior: number[] = [];
+  for (let i = 1; i < last; i++) {
+    if (sparklinePointQuality(points[i]!) !== "ok" && !keep.has(i)) {
+      nonOkInterior.push(i);
+    }
+  }
+
+  const interiorBudget = maxPoints - keep.size;
+  if (nonOkInterior.length <= interiorBudget) {
+    for (const idx of nonOkInterior) {
+      keep.add(idx);
+    }
+  } else if (interiorBudget > 0) {
+    for (const idx of downsampleSeriesForSparkline(nonOkInterior, interiorBudget)) {
+      keep.add(idx);
     }
   }
 
