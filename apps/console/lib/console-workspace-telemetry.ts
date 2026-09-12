@@ -459,6 +459,8 @@ type SparklineDownsamplePoint = {
  * Plain even sampling can drop partial/stale samples and erase quality gaps;
  * when non-ok + endpoints exceed maxPoints, keep a bounded representative
  * subset of non-ok indices (never more than maxPoints total).
+ * Also preserves series value min/max so a sole peak skipped by even sampling
+ * cannot flatten the chart (geometry scales from retained points only).
  * Returned points carry originalIndex so geometry can keep the time grid after
  * ok anchors are evicted.
  */
@@ -500,6 +502,28 @@ function downsampleSparklinePreservingQuality(
   } else if (interiorBudget > 0) {
     for (const idx of downsampleSeriesForSparkline(nonOkInterior, interiorBudget)) {
       keep.add(idx);
+    }
+  }
+
+  // Even sampling can skip a sole peak (e.g. n=65, max=64 skips index 32).
+  // Preserve series value extrema before filling so saturation events stay visible;
+  // geometry min/max are derived from retained points only.
+  if (keep.size < maxPoints && points.length > 0) {
+    let minIdx = 0;
+    let maxIdx = 0;
+    for (let i = 1; i < points.length; i++) {
+      const v = points[i]!.value;
+      if (v < points[minIdx]!.value) {
+        minIdx = i;
+      }
+      if (v > points[maxIdx]!.value) {
+        maxIdx = i;
+      }
+    }
+    // Prefer the peak when the remaining budget allows only one extrema slot.
+    keep.add(maxIdx);
+    if (keep.size < maxPoints) {
+      keep.add(minIdx);
     }
   }
 

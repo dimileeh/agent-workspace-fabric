@@ -1086,6 +1086,41 @@ test("downsampleSeriesForSparkline preserves endpoints and bounds length", () =>
   assert.equal(new Set(down).size, down.length);
 });
 
+test("buildSparklineGeometry retains value extrema when even downsample would drop them", () => {
+  // Even sampler for n=65 / max=64 skips index 32 (Math.round(32*64/63)=33).
+  const n = MAX_SPARKLINE_POINTS + 1;
+  const spikeIdx = 32;
+  const last = n - 1;
+  const evenSelected = new Set();
+  for (let i = 0; i < MAX_SPARKLINE_POINTS; i++) {
+    evenSelected.add(Math.round((i * last) / (MAX_SPARKLINE_POINTS - 1)));
+  }
+  assert.ok(!evenSelected.has(spikeIdx), "precondition: even downsample skips spike index");
+
+  const points = Array.from({ length: n }, (_, i) => ({
+    value: i === spikeIdx ? 100 : 1,
+  }));
+  const naive = downsampleSeriesForSparkline(points);
+  assert.ok(
+    naive.every((p) => p.value === 1),
+    "precondition: naive even downsample drops the sole peak",
+  );
+
+  const geom = buildSparklineGeometry(points, 120, 28);
+  assert.ok(geom);
+  assert.equal(geom.qualification, null);
+  assert.ok(
+    countSparklineSvgPoints(geom) <= MAX_SPARKLINE_POINTS,
+    "extrema retention must stay within the sparkline point cap",
+  );
+  // Peak at series max maps to y=2.0; without the peak every point is y=26.0 (flat).
+  assert.match(
+    geom.paths.map((p) => p.d).join(" "),
+    /,2\.0\b/,
+    "sole interior spike must remain visible after downsampling",
+  );
+});
+
 test("buildSparklineGeometry draws a marker for one sample and a path for two+", () => {
   assert.equal(buildSparklineGeometry([]), null);
 
