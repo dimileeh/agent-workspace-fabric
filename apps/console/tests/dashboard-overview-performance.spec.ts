@@ -1030,6 +1030,45 @@ test("explicit page navigation clears selection-owned refresh anchoring", async 
   await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
 });
 
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrd2_: when a filter
+// removes the selected row but its fallback lookup fails, the unchanged
+// selection must stop owning refresh anchoring for the remaining rows.
+test("filtering a selected workspace releases refresh anchoring", async ({ page }) => {
+  let failSelectedLookup = false;
+  let revision = 0;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    shouldFailBatch: () => failSelectedLookup,
+    resolvePageItems: (items, cursor) => {
+      if (cursor !== null || revision === 0) return items;
+      return items.map((item) => item.workspace_id === "ws_perf_0004"
+        ? { ...item, updated_at: "2026-09-11T12:04:00.000Z" }
+        : item);
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_perf_0001").click();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0001/);
+
+  failSelectedLookup = true;
+  await page.getByRole("button", { name: "Filters" }).click();
+  await page.getByPlaceholder("exact repo filter").fill("https://example.com/even.git");
+
+  const list = page.getByTestId("workspace-list-scroll");
+  await expect(page.getByTestId("workspace-card-ws_perf_0002")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0001/);
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+
+  revision = 1;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0004")).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hYbpe: a visible row
 // from the next page must not replace preceding viewport rows with a spacer.
 test("selecting a visible workspace keeps a boundary viewport covered", async ({ page }) => {

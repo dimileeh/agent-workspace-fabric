@@ -1133,7 +1133,9 @@ export function WorkspaceList({
     const shouldFollowSelection =
       selectedIndex >= 0 &&
       (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
-    if (selectionChanged) selectionOwnsScrollAnchorRef.current = false;
+    if (selectionChanged || selectedIndex < 0) {
+      selectionOwnsScrollAnchorRef.current = false;
+    }
     previousSelectedIdRef.current = selectedId;
     selectedWasLoadedRef.current = selectedIndex >= 0;
     const scrollContainer = scrollContainerRef.current;
