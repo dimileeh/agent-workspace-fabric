@@ -32,6 +32,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_a
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
+from awf.service import workspace_overview_pagination as _overview_pagination
 from awf.service.bounded_list import (
     bounded_list_limit,
     decode_bounded_list_cursor,
@@ -49,24 +50,11 @@ from awf.service.usage_store import (
     read_latest_usage_snapshot,
     read_latest_usage_snapshots,
 )
-from awf.service.workspace_observability_values import (
-    bounded_payload as _bounded_payload,
-)
-from awf.service.workspace_observability_values import (
-    ensure_utc as _ensure_utc,
-)
-from awf.service.workspace_overview_pagination import (
-    InvalidWorkspaceOverviewCursorError as InvalidWorkspaceOverviewCursorError,
-)
-from awf.service.workspace_overview_pagination import (
-    _decode_overview_cursor as _decode_overview_cursor,
-)
-from awf.service.workspace_overview_pagination import (
-    _encode_overview_cursor as _encode_overview_cursor,
-)
-from awf.service.workspace_overview_pagination import (
-    _WorkspaceOverviewCursor as _WorkspaceOverviewCursor,
-)
+
+InvalidWorkspaceOverviewCursorError = _overview_pagination.InvalidWorkspaceOverviewCursorError
+_WorkspaceOverviewCursor = _overview_pagination._WorkspaceOverviewCursor
+_decode_overview_cursor = _overview_pagination._decode_overview_cursor
+_encode_overview_cursor = _overview_pagination._encode_overview_cursor
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -75,7 +63,6 @@ _log = get_logger(__name__)
 
 DEFAULT_STALE_REASON_LIMIT = 50
 MAX_STALE_REASON_LIMIT = 500
-
 STALE_RUNNING_THRESHOLD_SECONDS = 600
 
 
@@ -1332,6 +1319,33 @@ def _payload_string(payload: Mapping[str, object] | None, key: str) -> str | Non
     return stripped or None
 
 
+def _bounded_payload(payload: Mapping[str, object] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    return cast(dict[str, Any], _json_safe_value(payload, depth=-1))
+
+
+def _json_safe_value(value: object, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, datetime):
+        return _ensure_utc(value).isoformat()
+    if depth >= 4:
+        return str(value)
+    if isinstance(value, Mapping):
+        safe: dict[str, Any] = {}
+        for index, (key, nested_value) in enumerate(value.items()):
+            if index >= 32:
+                safe["__truncated__"] = True
+                break
+            safe[str(key)] = _json_safe_value(nested_value, depth=depth + 1)
+        return safe
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        items = [_json_safe_value(item, depth=depth + 1) for item in list(value)[:20]]
+        return items + ["__truncated__"] if len(value) > 20 else items
+    return str(value)
+
+
 def _recovery_summary_text(
     *,
     workspace: Workspace,
@@ -1480,3 +1494,7 @@ def _stage_summary(
 
 def _duration_seconds(started_at: datetime, ended_at: datetime) -> int:
     return max(0, int((_ensure_utc(ended_at) - _ensure_utc(started_at)).total_seconds()))
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
