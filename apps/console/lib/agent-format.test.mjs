@@ -2048,6 +2048,71 @@ test("resolveWorkflowTiming truncates aggregate lifecycle duration once", async 
   });
 });
 
+// Regression for PR #964 review thread PRRT_kwDOSJAM6s6huQ_X: the completed
+// stage must compare the retained completion order with the order that first
+// closed its collapsed source stage before trusting the lifecycle duration.
+test("resolveWorkflowTiming checks completed terminal order before deriving duration", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const terminalEvent = {
+    event_type: "workspace.state_changed",
+    old_state: "pushing",
+    new_state: "completed",
+    occurred_at: "2026-09-06T12:10:00Z",
+    event_order: 7,
+  };
+  const item = {
+    status: "completed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00Z",
+        ended_at: "2026-09-06T12:05:00Z",
+        duration_seconds: 300,
+        status: "completed",
+      },
+      {
+        stage: "pushing",
+        started_at: "2026-09-06T12:05:00Z",
+        ended_at: "2026-09-06T12:10:00Z",
+        ended_event_order: 7,
+        duration_seconds: 300,
+        status: "completed",
+      },
+      {
+        stage: "completed",
+        started_at: "2026-09-06T12:10:00Z",
+        ended_at: "2026-09-06T12:10:00Z",
+        duration_seconds: 0,
+        status: "completed",
+      },
+    ],
+    latest_state_change: terminalEvent,
+    latest_workflow_terminal_state_change: terminalEvent,
+    last_event: terminalEvent,
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: "2026-09-06T12:10:00Z",
+    durationSeconds: 600,
+  });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [
+        item.lifecycle[0],
+        { ...item.lifecycle[1], ended_event_order: 5 },
+        item.lifecycle[2],
+      ],
+    }),
+    { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+    "a later same-tick completion must not derive duration from the first collapsed pushing visit",
+  );
+});
+
 test("resolveWorkflowTiming requires terminal evidence after the latest represented stage", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const item = {

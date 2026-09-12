@@ -686,6 +686,7 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     item.last_event;
   let finishedAt = latestEntered.stage.ended_at;
   let finishedMs = latestEntered.endedMs;
+  let lifecycleBoundaryStage = latestEntered.stage;
   if (latestEntered.stage.stage === "completed") {
     const previousEntered = chronologicallyEntered[chronologicallyEntered.length - 2];
     // The completed stage starts at workflow end but may itself end much later
@@ -701,6 +702,7 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     ) {
       return null;
     }
+    lifecycleBoundaryStage = previousEntered.stage;
     finishedAt = latestEntered.startedAt;
     finishedMs = latestEntered.startedMs;
     // A completed or destroyed status can corroborate legacy payloads that
@@ -740,22 +742,22 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     ) {
       return null;
     }
-    // Compare Core's workspace-local order with the event that first closed
-    // this collapsed stage. A later same-tick terminal event proves the finish
-    // but also proves an omitted re-entry, so the retained interval cannot
-    // prove duration. Legacy payloads without the boundary order stay
-    // conservative when the terminal event is ordered.
-    const terminalEventOrder = terminalEvent.event_order;
-    const lifecycleBoundaryOrder = latestEntered.stage.ended_event_order;
-    if (
-      typeof terminalEventOrder === "number" &&
-      Number.isSafeInteger(terminalEventOrder) &&
-      (typeof lifecycleBoundaryOrder !== "number" ||
-        !Number.isSafeInteger(lifecycleBoundaryOrder) ||
-        lifecycleBoundaryOrder !== terminalEventOrder)
-    ) {
-      return { finishedAt, finishedMs, durationSeconds: null };
-    }
+  }
+  // Compare Core's workspace-local order with the event that first closed
+  // the terminal source stage. A later same-tick terminal event proves the
+  // finish but also proves an omitted re-entry, so the retained interval
+  // cannot prove duration. Legacy payloads without the boundary order stay
+  // conservative when the terminal event is ordered.
+  const terminalEventOrder = terminalEvent?.event_order;
+  const lifecycleBoundaryOrder = lifecycleBoundaryStage.ended_event_order;
+  if (
+    typeof terminalEventOrder === "number" &&
+    Number.isSafeInteger(terminalEventOrder) &&
+    (typeof lifecycleBoundaryOrder !== "number" ||
+      !Number.isSafeInteger(lifecycleBoundaryOrder) ||
+      lifecycleBoundaryOrder !== terminalEventOrder)
+  ) {
+    return { finishedAt, finishedMs, durationSeconds: null };
   }
 
   const durationStages = entered
