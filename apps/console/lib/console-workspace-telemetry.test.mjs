@@ -903,3 +903,38 @@ test("buildSparklineGeometry preserves sample-grid x when non-ok eviction drops 
   assert.ok(Math.max(...xs1) - Math.min(...xs1) < width * 0.4);
   assert.ok(Math.min(...xs2) > Math.max(...xs1) + width * 0.2);
 });
+
+function countSparklineSvgPoints(geom) {
+  let n = geom.markers.length;
+  for (const path of geom.paths) {
+    n += path.d.split(" L ").length;
+  }
+  return n;
+}
+
+test("buildSparklineGeometry caps SVG points when non-ok series exceeds max", () => {
+  const n = MAX_SPARKLINE_POINTS * 32; // 2048 accepted samples
+  const allPartial = Array.from({ length: n }, (_, i) => ({
+    value: i,
+    quality: "partial",
+  }));
+  const partialGeom = buildSparklineGeometry(allPartial);
+  assert.ok(partialGeom);
+  assert.equal(partialGeom.qualification, "partial");
+  assert.ok(
+    countSparklineSvgPoints(partialGeom) <= MAX_SPARKLINE_POINTS,
+    "same-quality non-ok series must stay within the sparkline point cap",
+  );
+
+  const alternating = Array.from({ length: n }, (_, i) => ({
+    value: i,
+    quality: i % 2 === 0 ? "partial" : "stale",
+  }));
+  const altGeom = buildSparklineGeometry(alternating);
+  assert.ok(altGeom);
+  assert.equal(altGeom.qualification, "stale");
+  assert.ok(
+    countSparklineSvgPoints(altGeom) <= MAX_SPARKLINE_POINTS,
+    "alternating non-ok series must not emit unbounded SVG markers",
+  );
+});

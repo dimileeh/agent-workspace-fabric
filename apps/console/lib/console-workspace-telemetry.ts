@@ -437,9 +437,10 @@ type SparklineDownsamplePoint = {
 };
 
 /**
- * Downsample sparkline samples for SVG while retaining every non-ok point.
+ * Downsample sparkline samples for SVG while preferring non-ok representation.
  * Plain even sampling can drop partial/stale samples and erase quality gaps;
- * when non-ok + endpoints exceed maxPoints, those must-keep samples win.
+ * when non-ok + endpoints exceed maxPoints, keep a bounded representative
+ * subset of non-ok indices (never more than maxPoints total).
  * Returned points carry originalIndex so geometry can keep the time grid after
  * ok anchors are evicted.
  */
@@ -456,34 +457,44 @@ function downsampleSparklinePreservingQuality(
   if (points.length <= maxPoints) {
     return points.map((_, idx) => asDownsamplePoint(idx));
   }
+  if (maxPoints <= 0) {
+    return [];
+  }
+  if (maxPoints === 1) {
+    return [asDownsamplePoint(points.length - 1)];
+  }
 
   const last = points.length - 1;
-  const keep = new Set<number>();
-  for (let i = 0; i < maxPoints; i++) {
-    keep.add(Math.round((i * last) / (maxPoints - 1)));
-  }
-  for (let i = 0; i < points.length; i++) {
+  const keep = new Set<number>([0, last]);
+
+  const nonOkInterior: number[] = [];
+  for (let i = 1; i < last; i++) {
     if (sparklinePointQuality(points[i]!) !== "ok") {
-      keep.add(i);
+      nonOkInterior.push(i);
     }
   }
 
-  if (keep.size > maxPoints) {
-    const removable: number[] = [];
-    for (const idx of [...keep].sort((a, b) => a - b)) {
-      if (idx === 0 || idx === last) {
-        continue;
-      }
-      if (sparklinePointQuality(points[idx]!) === "ok") {
-        removable.push(idx);
-      }
+  const interiorBudget = maxPoints - keep.size;
+  if (nonOkInterior.length <= interiorBudget) {
+    for (const idx of nonOkInterior) {
+      keep.add(idx);
     }
-    let excess = keep.size - maxPoints;
-    while (excess > 0 && removable.length > 0) {
-      const mid = Math.floor(removable.length / 2);
-      keep.delete(removable[mid]!);
-      removable.splice(mid, 1);
-      excess -= 1;
+  } else if (interiorBudget > 0) {
+    for (const idx of downsampleSeriesForSparkline(nonOkInterior, interiorBudget)) {
+      keep.add(idx);
+    }
+  }
+
+  if (keep.size < maxPoints) {
+    const evenIdx = downsampleSeriesForSparkline(
+      Array.from({ length: points.length }, (_, i) => i),
+      maxPoints,
+    );
+    for (const idx of evenIdx) {
+      if (keep.size >= maxPoints) {
+        break;
+      }
+      keep.add(idx);
     }
   }
 
@@ -536,6 +547,21 @@ function worstSparklineQualification(
   return worst;
 }
 
+/** True when any original sample strictly between fromIdx and toIdx differs in quality. */
+function hasOriginalQualityBreak(
+  points: readonly SparklineInputPoint[],
+  fromIdx: number,
+  toIdx: number,
+  runQuality: TelemetryQuality,
+): boolean {
+  for (let j = fromIdx + 1; j < toIdx; j++) {
+    if (sparklinePointQuality(points[j]!) !== runQuality) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function pathDFromCoords(coords: readonly string[]): string {
   return `M ${coords.join(" L ")}`;
 }
@@ -544,9 +570,10 @@ function pathDFromCoords(coords: readonly string[]): string {
  * Map a sorted value series into SVG sparkline geometry.
  * Contiguous same-quality runs stay connected; quality transitions leave gaps.
  * One-sample runs become markers. Non-ok history is never a single unqualified path.
- * Qualification uses the full series; SVG downsampling preserves non-ok samples.
- * X uses each sample's original series index so ok-anchor eviction cannot warp
- * the time grid or join previously gapped non-ok runs into one path.
+ * Qualification uses the full series; SVG downsampling prefers non-ok samples
+ * within the point budget. X uses each sample's original series index so
+ * ok-anchor eviction cannot warp the time grid or join previously gapped
+ * non-ok runs into one path.
  */
 export function buildSparklineGeometry(
   points: readonly SparklineInputPoint[],
@@ -599,13 +626,17 @@ export function buildSparklineGeometry(
   let runStart = 0;
   for (let i = 1; i <= coords.length; i++) {
     const qualityBreak = i === coords.length || coords[i]!.quality !== coords[runStart]!.quality;
-    // Non-ok samples are never thinned, so a gap in original indices means ok
-    // anchors were dropped between clusters — do not join those runs.
-    const nonOkIndexGap =
-      i < coords.length &&
-      coords[runStart]!.quality !== "ok" &&
-      coords[i]!.originalIndex !== coords[i - 1]!.originalIndex + 1;
-    if (!qualityBreak && !nonOkIndexGap) {
+    // Index gaps from downsampling must not join distinct original quality runs
+    // (e.g. two partial clusters separated by ok samples).
+    const originalRunBreak =
+      !qualityBreak &&
+      hasOriginalQualityBreak(
+        points,
+        coords[i - 1]!.originalIndex,
+        coords[i]!.originalIndex,
+        coords[runStart]!.quality,
+      );
+    if (!qualityBreak && !originalRunBreak) {
       continue;
     }
     const run = coords.slice(runStart, i);
