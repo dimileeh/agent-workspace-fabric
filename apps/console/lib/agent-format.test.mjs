@@ -1341,6 +1341,85 @@ test("resolveWorkflowTiming requires the immediately preceding stage to reach co
   );
 });
 
+test("resolveWorkflowTiming rejects completed lifecycle timing contradicted by terminal status", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const lifecycle = [
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:01:00Z",
+      duration_seconds: 60,
+      status: "completed",
+    },
+    {
+      stage: "running",
+      started_at: "2026-09-06T12:01:00Z",
+      ended_at: "2026-09-06T12:15:00Z",
+      duration_seconds: 840,
+      status: "completed",
+    },
+    {
+      stage: "completed",
+      started_at: "2026-09-06T12:15:00Z",
+      ended_at: "2026-09-06T12:15:00Z",
+      duration_seconds: 0,
+      status: "completed",
+    },
+  ];
+
+  for (const terminalStatus of ["failed", "cancelled"]) {
+    const terminalEvent = {
+      event_type: "workspace.state_changed",
+      old_state: "running",
+      new_state: terminalStatus,
+      occurred_at: "2026-09-06T12:20:00Z",
+    };
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        status: terminalStatus,
+        recovery: null,
+        workflow_finished_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        lifecycle,
+        latest_workflow_terminal_state_change: terminalEvent,
+        latest_state_change: terminalEvent,
+        last_event: terminalEvent,
+      }),
+      { finishedAt: null, durationSeconds: null },
+      `a later ${terminalStatus} transition must override an inconsistent completed stage`,
+    );
+  }
+
+  const completedEvent = {
+    event_type: "workspace.state_changed",
+    old_state: "running",
+    new_state: "completed",
+    occurred_at: "2026-09-06T12:15:00Z",
+  };
+  const cleanupFailure = {
+    event_type: "workspace.state_changed",
+    old_state: "destroying",
+    new_state: "failed",
+    occurred_at: "2026-09-06T12:20:00Z",
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "failed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle,
+      latest_workflow_terminal_state_change: completedEvent,
+      latest_state_change: cleanupFailure,
+      last_event: cleanupFailure,
+    }),
+    { finishedAt: "2026-09-06T12:15:00Z", durationSeconds: 900 },
+    "a corroborated completed boundary must survive a later cleanup failure",
+  );
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {
@@ -1492,6 +1571,51 @@ test("resolveWorkflowTiming orders latest lifecycle stages at full recorded prec
     finishedAt: "2026-09-06T12:00:01.000800Z",
     durationSeconds: 1,
   });
+});
+
+test("resolveWorkflowTiming sorts duration stages at full recorded precision", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const requested = {
+    stage: "requested",
+    started_at: "2026-09-06T12:00:00.000100Z",
+    ended_at: "2026-09-06T12:00:00.000800Z",
+    duration_seconds: 0,
+    status: "completed",
+  };
+  const running = {
+    stage: "running",
+    started_at: "2026-09-06T12:00:00.000800Z",
+    ended_at: "2026-09-06T12:00:01.000800Z",
+    duration_seconds: 1,
+    status: "completed",
+  };
+  const completed = {
+    stage: "completed",
+    started_at: "2026-09-06T12:00:01.000800Z",
+    ended_at: "2026-09-06T12:00:01.000800Z",
+    duration_seconds: 0,
+    status: "completed",
+  };
+  const timingFor = (lifecycle) =>
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle,
+    });
+
+  const canonicalTiming = timingFor([requested, running, completed]);
+  assert.deepEqual(canonicalTiming, {
+    finishedAt: "2026-09-06T12:00:01.000800Z",
+    durationSeconds: 1,
+  });
+  assert.deepEqual(
+    timingFor([running, requested, completed]),
+    canonicalTiming,
+    "sub-millisecond stage order must not depend on lifecycle array order",
+  );
 });
 
 test("resolveWorkflowTiming rejects a sub-millisecond gap before completed", async () => {

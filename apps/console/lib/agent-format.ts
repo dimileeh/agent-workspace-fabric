@@ -533,6 +533,10 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     );
   }
 
+  const terminalEvent =
+    item.latest_workflow_terminal_state_change ??
+    item.latest_state_change ??
+    item.last_event;
   let finishedAt = latestEntered.stage.ended_at;
   let finishedMs = latestEntered.endedMs;
   if (latestEntered.stage.stage === "completed") {
@@ -552,15 +556,27 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     }
     finishedAt = latestEntered.startedAt;
     finishedMs = latestEntered.startedMs;
+    // A completed status can corroborate legacy payloads that predate retained
+    // state-change fields. Every other current status must retain the transition
+    // into completed, including the supported completed -> cleanup failure path.
+    const requiresCompletedTransition =
+      item.status !== "completed" ||
+      terminalEvent?.event_type === "workspace.state_changed";
+    if (
+      requiresCompletedTransition &&
+      (terminalEvent?.event_type !== "workspace.state_changed" ||
+        terminalEvent.old_state !== previousEntered.stage.stage ||
+        terminalEvent.new_state !== "completed" ||
+        !terminalEventMatchesWorkflowStatus(item, terminalEvent) ||
+        compareRecordedInstants(terminalEvent.occurred_at, finishedAt) !== 0)
+    ) {
+      return null;
+    }
   }
   if (finishedAt == null || finishedMs == null) {
     return null;
   }
   if (latestEntered.stage.stage !== "completed") {
-    const terminalEvent =
-      item.latest_workflow_terminal_state_change ??
-      item.latest_state_change ??
-      item.last_event;
     // Pauses such as blocked/recovering are absent from lifecycle summaries.
     // For terminal paths without a completed stage, only trust that boundary
     // when a retained workflow state-change corroborates the actual terminal
@@ -584,7 +600,12 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
         entry.stage.stage !== "completed" &&
         entry.startedMs <= finishedMs,
     )
-    .sort((left, right) => left.startedMs - right.startedMs);
+    .sort((left, right) => {
+      const instantOrder = compareRecordedInstants(left.startedAt, right.startedAt);
+      return instantOrder === 0
+        ? lifecycleStageOrder(left.stage.stage) - lifecycleStageOrder(right.stage.stage)
+        : (instantOrder ?? 0);
+    });
   // A contiguous tail can corroborate the finish without representing the
   // whole workflow. Only `requested` supplies the authoritative start needed
   // to calculate workflow duration.
