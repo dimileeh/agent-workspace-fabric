@@ -912,6 +912,20 @@ function accumulateSampleTotal(
   return total;
 }
 
+/** True when a same-instant partition lists the same container more than once. */
+function hasDuplicateContainers(
+  samples: readonly ParsedTelemetrySample[],
+): boolean {
+  const seen = new Set<string>();
+  for (const sample of samples) {
+    if (seen.has(sample.containerName)) {
+      return true;
+    }
+    seen.add(sample.containerName);
+  }
+  return false;
+}
+
 /**
  * True when every sample shares the same interval_start/interval_end instant
  * (epoch ms). Alternate RFC3339 spellings of the same moment must match;
@@ -971,6 +985,11 @@ function buildPodTotalSeries(
     // interval_start/interval_end at the same sample_time are different
     // measurement windows — do not sum them into a pod-total point.
     if (!samplesShareIntervalTuple(group)) {
+      continue;
+    }
+    // Fail closed: duplicate container@instant must not become a pod total
+    // (parse rejects these; projection still guards if identity is bypassed).
+    if (hasDuplicateContainers(group)) {
       continue;
     }
     const value = accumulateSampleTotal(group);
@@ -1091,6 +1110,11 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   }
   // Same sample_time with different interval windows is not one pod reading.
   if (!samplesShareIntervalTuple(atLatest)) {
+    incompletePartition = true;
+    usedPartial = true;
+  }
+  // Duplicate container in the latest partition would inflate the pod sum.
+  if (hasDuplicateContainers(atLatest)) {
     incompletePartition = true;
     usedPartial = true;
   }

@@ -707,6 +707,42 @@ test("parseTelemetryPresentation rejects duplicate container at same instant wit
   assert.equal(parseTelemetryPresentation(dup), null);
 });
 
+test("projection fails closed on duplicate container@instant even if parse were bypassed", () => {
+  // Defense in depth for aggregation: same container with Z vs +00:00 at one
+  // epoch must not sum into a complete pod total (Bugbot additional sites).
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  const presentation = {
+    ...parsed,
+    cpuSamples: [
+      {
+        containerName: "agent",
+        sampleTime: "2026-09-12T12:00:00Z",
+        intervalStart: "2026-09-12T11:59:00Z",
+        intervalEnd: "2026-09-12T12:00:00Z",
+        unit: "cores",
+        value: 0.1,
+        quality: "ok",
+        providerResourceUid: "pod-uid-example",
+      },
+      {
+        containerName: "agent",
+        sampleTime: "2026-09-12T12:00:00+00:00",
+        intervalStart: "2026-09-12T11:59:00+00:00",
+        intervalEnd: "2026-09-12T12:00:00+00:00",
+        unit: "cores",
+        value: 0.2,
+        quality: "ok",
+        providerResourceUid: "pod-uid-example",
+      },
+    ],
+  };
+  const view = projectWorkspaceTelemetryView(presentation, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, null);
+  assert.equal(view.cpu.usedPartial, true);
+  assert.deepEqual(view.cpu.series, []);
+});
+
 test("projectWorkspaceTelemetryView does not surface provider_resource_uid", () => {
   const parsed = parseTelemetryPresentation(SUCCESS);
   assert.ok(parsed);
