@@ -1331,12 +1331,6 @@ test(`workspace list stays at the top during refresh reorders (inspectorWorkspac
   const firstCardId = () =>
     list.locator('[data-testid^="workspace-card-"]').first().getAttribute("data-testid");
   const scrollTop = () => list.evaluate((element) => element.scrollTop);
-  const selectedViewportOffset = () =>
-    page.getByTestId("workspace-card-ws_perf_0001").evaluate((element) => {
-      const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
-      if (!listElement) throw new Error("workspace list is missing");
-      return element.getBoundingClientRect().top - listElement.getBoundingClientRect().top;
-    });
   const expectTop = async () => {
     await expect.poll(scrollTop).toBe(0);
   };
@@ -1362,19 +1356,12 @@ test(`workspace list stays at the top during refresh reorders (inspectorWorkspac
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0001");
   await list.evaluate((element) => element.scrollTo({ top: 0 }));
   await expectTop();
-  const selectedOffsetBeforeRefresh = inspectorWorkspaceId === "ws_perf_0001"
-    ? await selectedViewportOffset()
-    : null;
 
   await publishBackgroundRefresh(1, "workspace-card-ws_perf_0002");
+  await expectTop();
   if (inspectorWorkspaceId === "ws_perf_0001") {
     await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
-    await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
-    await expect.poll(selectedViewportOffset).toBeCloseTo(selectedOffsetBeforeRefresh ?? 0, 0);
-    expect(await scrollTop()).toBeGreaterThan(240);
-    await list.evaluate((element) => element.scrollTo({ top: 0 }));
   }
-  await expectTop();
   if (inspectorWorkspaceId) {
     // Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrFo_: once an
     // unrelated selected row becomes first, the next reorder must not mistake

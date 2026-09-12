@@ -972,10 +972,7 @@ export function WorkspaceList({
       previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
-    if (
-      !selectionOwnsScrollAnchorRef.current &&
-      scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
-    ) {
+    if (scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX) {
       setPageStart(0);
       setWindowStart(0);
       scrollWithoutLoading(0);
