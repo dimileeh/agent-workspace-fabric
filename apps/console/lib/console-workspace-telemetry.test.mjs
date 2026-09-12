@@ -452,14 +452,8 @@ test("same sample_time with mismatched intervals is partial, not a complete pod 
   // Different measurement windows must not be compared as a whole-pod total.
   assert.equal(view.cpu.usedCores, null);
   assert.equal(view.cpu.usedPartial, true);
-  assert.deepEqual(
-    view.cpu.series.map((p) => ({
-      sampleTime: p.sampleTime,
-      value: p.value,
-      quality: p.quality,
-    })),
-    [{ sampleTime: "2026-09-12T12:00:00+00:00", value: 0.25, quality: "partial" }],
-  );
+  // Do not emit a sparkline pod-total that sums across mismatched intervals.
+  assert.deepEqual(view.cpu.series, []);
 });
 
 test("sparkline series uses pod totals per timestamp, not raw per-container points", () => {

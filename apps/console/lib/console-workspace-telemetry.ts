@@ -933,7 +933,8 @@ function samplesShareIntervalTuple(samples: ParsedTelemetrySample[]): boolean {
  * containers would form a fake trend and disagree with meter totals.
  * Staggered scrapes that leave a timestamp missing containers seen elsewhere
  * in the series are marked partial (same completeness rule as the latest meter).
- * Same-timestamp samples with mismatched interval windows are also partial.
+ * Same-timestamp samples with mismatched interval windows are omitted — they are
+ * not one measurement window, so their sum must not appear as a pod total.
  */
 function buildPodTotalSeries(
   samples: ParsedTelemetrySample[],
@@ -954,6 +955,12 @@ function buildPodTotalSeries(
   }
   const points: WorkspaceTelemetrySeriesPoint[] = [];
   for (const [sampleTime, group] of byTime) {
+    // Aggregate only samples that share the full interval tuple. Differing
+    // interval_start/interval_end at the same sample_time are different
+    // measurement windows — do not sum them into a pod-total point.
+    if (!samplesShareIntervalTuple(group)) {
+      continue;
+    }
     const value = accumulateSampleTotal(group);
     // Fail closed: omit points whose byte pod-total is not an exact safe integer.
     if (value === null) {
@@ -973,16 +980,11 @@ function buildPodTotalSeries(
       }
     }
     // Incomplete partition vs containers seen in the series: do not present as ok.
-    // Mismatched measurement windows at the same sample_time are also partial.
     if (quality !== "stale") {
-      if (!samplesShareIntervalTuple(group)) {
-        quality = "partial";
-      } else {
-        for (const name of seriesContainers) {
-          if (!groupContainers.has(name)) {
-            quality = "partial";
-            break;
-          }
+      for (const name of seriesContainers) {
+        if (!groupContainers.has(name)) {
+          quality = "partial";
+          break;
         }
       }
     }
