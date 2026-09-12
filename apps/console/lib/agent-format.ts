@@ -536,21 +536,17 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   let finishedAt = latestEntered.stage.ended_at;
   let finishedMs = latestEntered.endedMs;
   if (latestEntered.stage.stage === "completed") {
-    const previousEndAt = entered.reduce<string | null>(
-      (latest, entry) =>
-        entry.stage.stage !== "completed" &&
-        entry.stage.ended_at != null &&
-        (latest == null || compareRecordedInstants(entry.stage.ended_at, latest) === 1)
-          ? entry.stage.ended_at
-          : latest,
-      null,
-    );
+    const previousEntered = chronologicallyEntered[chronologicallyEntered.length - 2];
     // The completed stage starts at workflow end but may itself end much later
-    // during cleanup. Require the preceding lifecycle boundary to corroborate
-    // that start so a collapsed retry history cannot invent a fresh finish.
+    // during cleanup. Require the immediately preceding entered stage to
+    // corroborate that start so an overlapping or collapsed retry history
+    // cannot invent a fresh finish.
     if (
-      previousEndAt == null ||
-      compareRecordedInstants(previousEndAt, latestEntered.startedAt) !== 0
+      previousEntered?.stage.ended_at == null ||
+      compareRecordedInstants(
+        previousEntered.stage.ended_at,
+        latestEntered.startedAt,
+      ) !== 0
     ) {
       return null;
     }
