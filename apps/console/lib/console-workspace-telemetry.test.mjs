@@ -514,17 +514,21 @@ test("unknown CPU/memory limits stay null rather than zero", () => {
   assert.notEqual(view.admitted?.memoryLimitBytes, 0);
 });
 
+function sampleTimestampForIndex(i) {
+  const day = String(1 + Math.floor(i / 86400)).padStart(2, "0");
+  const tod = i % 86400;
+  const hour = String(Math.floor(tod / 3600)).padStart(2, "0");
+  const minute = String(Math.floor((tod % 3600) / 60)).padStart(2, "0");
+  const second = String(tod % 60).padStart(2, "0");
+  return `2026-09-${day}T${hour}:${minute}:${second}+00:00`;
+}
+
 test("parseSampleArray keeps only the most recent MAX_TELEMETRY_SAMPLES", () => {
   const oversized = structuredClone(SUCCESS);
   const template = SUCCESS.cpu_cores_samples[0];
   const total = MAX_TELEMETRY_SAMPLES + 50;
   oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => {
-    const day = String(1 + Math.floor(i / 86400)).padStart(2, "0");
-    const tod = i % 86400;
-    const hour = String(Math.floor(tod / 3600)).padStart(2, "0");
-    const minute = String(Math.floor((tod % 3600) / 60)).padStart(2, "0");
-    const second = String(tod % 60).padStart(2, "0");
-    const ts = `2026-09-${day}T${hour}:${minute}:${second}+00:00`;
+    const ts = sampleTimestampForIndex(i);
     return {
       ...template,
       sample_time: ts,
@@ -538,6 +542,37 @@ test("parseSampleArray keeps only the most recent MAX_TELEMETRY_SAMPLES", () => 
   assert.equal(parsed.cpuSamples.length, MAX_TELEMETRY_SAMPLES);
   assert.equal(parsed.cpuSamples[0].value, 50);
   assert.equal(parsed.cpuSamples[parsed.cpuSamples.length - 1].value, total - 1);
+});
+
+test("parseSampleArray caps by sample_time when producer order is not chronological", () => {
+  const oversized = structuredClone(SUCCESS);
+  const template = SUCCESS.cpu_cores_samples[0];
+  const total = MAX_TELEMETRY_SAMPLES + 50;
+  // Newest timestamps first (reversed), so a tail slice would keep the oldest window.
+  oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => {
+    const index = total - 1 - i;
+    const ts = sampleTimestampForIndex(index);
+    return {
+      ...template,
+      sample_time: ts,
+      interval_start: ts,
+      interval_end: ts,
+      value: String(index),
+    };
+  });
+  const parsed = parseTelemetryPresentation(oversized);
+  assert.ok(parsed);
+  assert.equal(parsed.cpuSamples.length, MAX_TELEMETRY_SAMPLES);
+  // Retained window is newest-by-time (values 50..total-1), not the array tail (0..2047).
+  assert.equal(parsed.cpuSamples[0].value, 50);
+  assert.equal(parsed.cpuSamples[parsed.cpuSamples.length - 1].value, total - 1);
+  assert.equal(parsed.cpuSamples[0].sampleTime, sampleTimestampForIndex(50));
+  assert.equal(
+    parsed.cpuSamples[parsed.cpuSamples.length - 1].sampleTime,
+    sampleTimestampForIndex(total - 1),
+  );
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, total - 1);
 });
 
 test("downsampleSeriesForSparkline preserves endpoints and bounds length", () => {
