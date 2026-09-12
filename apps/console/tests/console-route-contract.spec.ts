@@ -264,7 +264,7 @@ async function assertRouteContract(page: Page, mode: Mode) {
 }
 
 test.describe("console route contract (local defaults)", () => {
-  test.use({ baseURL: "http://127.0.0.1:3100" });
+  test.use({ baseURL: "http://127.0.0.1:3190" });
 
   test("list/detail, stream, download, and controls hit /api/awf and /api/operator", async ({
     page,
@@ -274,7 +274,7 @@ test.describe("console route contract (local defaults)", () => {
 });
 
 test.describe("console route contract (hosted /workspaces)", () => {
-  test.use({ baseURL: "http://127.0.0.1:3101" });
+  test.use({ baseURL: "http://127.0.0.1:3191" });
 
   test("list/detail, stream, download, and controls stay under /workspaces bases", async ({
     page,

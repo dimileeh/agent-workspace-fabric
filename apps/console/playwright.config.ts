@@ -11,20 +11,23 @@ const hostedEnv = {
   NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS: "org_id,project_id",
 };
 
+// Dedicated ports (not 3100/3101): a developer's plain `npm run dev` must not
+// be reused — it lacks AWF_CONSOLE_TEST_HARNESS=1, so /test-harness/* 404s.
+const localHarnessOrigin = "http://127.0.0.1:3190";
+const hostedHarnessOrigin = "http://127.0.0.1:3191";
+
 export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
   use: {
-    baseURL: "http://127.0.0.1:3100",
+    baseURL: localHarnessOrigin,
     trace: "retain-on-failure",
   },
   webServer: [
     {
-      command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
-      url: "http://127.0.0.1:3100",
-      // Never reuse: a plain `npm run dev` on these ports lacks
-      // AWF_CONSOLE_TEST_HARNESS=1, so /test-harness/* would 404.
+      command: "npm run dev -- --hostname 127.0.0.1 --port 3190",
+      url: localHarnessOrigin,
       reuseExistingServer: false,
       timeout: 120_000,
       // Registers page.harness.tsx via next.config pageExtensions for /test-harness/*.
@@ -34,8 +37,8 @@ export default defineConfig({
       },
     },
     {
-      command: "npm run dev -- --hostname 127.0.0.1 --port 3101",
-      url: "http://127.0.0.1:3101/workspaces",
+      command: "npm run dev -- --hostname 127.0.0.1 --port 3191",
+      url: `${hostedHarnessOrigin}/workspaces`,
       reuseExistingServer: false,
       timeout: 120_000,
       env: {
