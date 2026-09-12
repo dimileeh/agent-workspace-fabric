@@ -1573,6 +1573,51 @@ test("resolveWorkflowTiming orders latest lifecycle stages at full recorded prec
   });
 });
 
+test("resolveWorkflowTiming sorts duration stages at full recorded precision", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const requested = {
+    stage: "requested",
+    started_at: "2026-09-06T12:00:00.000100Z",
+    ended_at: "2026-09-06T12:00:00.000800Z",
+    duration_seconds: 0,
+    status: "completed",
+  };
+  const running = {
+    stage: "running",
+    started_at: "2026-09-06T12:00:00.000800Z",
+    ended_at: "2026-09-06T12:00:01.000800Z",
+    duration_seconds: 1,
+    status: "completed",
+  };
+  const completed = {
+    stage: "completed",
+    started_at: "2026-09-06T12:00:01.000800Z",
+    ended_at: "2026-09-06T12:00:01.000800Z",
+    duration_seconds: 0,
+    status: "completed",
+  };
+  const timingFor = (lifecycle) =>
+    resolveWorkflowTiming({
+      status: "completed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle,
+    });
+
+  const canonicalTiming = timingFor([requested, running, completed]);
+  assert.deepEqual(canonicalTiming, {
+    finishedAt: "2026-09-06T12:00:01.000800Z",
+    durationSeconds: 1,
+  });
+  assert.deepEqual(
+    timingFor([running, requested, completed]),
+    canonicalTiming,
+    "sub-millisecond stage order must not depend on lifecycle array order",
+  );
+});
+
 test("resolveWorkflowTiming rejects a sub-millisecond gap before completed", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const item = {

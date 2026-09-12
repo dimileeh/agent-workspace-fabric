@@ -600,7 +600,12 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
         entry.stage.stage !== "completed" &&
         entry.startedMs <= finishedMs,
     )
-    .sort((left, right) => left.startedMs - right.startedMs);
+    .sort((left, right) => {
+      const instantOrder = compareRecordedInstants(left.startedAt, right.startedAt);
+      return instantOrder === 0
+        ? lifecycleStageOrder(left.stage.stage) - lifecycleStageOrder(right.stage.stage)
+        : (instantOrder ?? 0);
+    });
   // A contiguous tail can corroborate the finish without representing the
   // whole workflow. Only `requested` supplies the authoritative start needed
   // to calculate workflow duration.
