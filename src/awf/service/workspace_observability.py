@@ -1007,11 +1007,15 @@ def workspace_recovery_summary(
         return None
 
     recovery_event = _latest_recovery_event_after(events, reverse_event)
-    active_operation = _latest_recovery_operation(workspace, active_only=True)
-    relevant_operation = active_operation or _latest_recovery_operation(
-        workspace,
-        active_only=False,
-    )
+    if getattr(reverse_event, "event_type", None) == "workspace.remonitor_requested":
+        active_operation = None
+        relevant_operation = None
+    else:
+        active_operation = _latest_recovery_operation(workspace, active_only=True)
+        relevant_operation = active_operation or _latest_recovery_operation(
+            workspace,
+            active_only=False,
+        )
     operation_payload = _payload_mapping(getattr(relevant_operation, "payload", None))
     event_payload = _payload_mapping(
         getattr(recovery_event, "payload", None) if recovery_event is not None else None
