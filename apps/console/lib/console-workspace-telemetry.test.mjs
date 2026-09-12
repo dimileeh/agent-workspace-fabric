@@ -252,14 +252,13 @@ test("container partition does not merge samples across different sample_time mo
   const parsed = parseTelemetryPresentation(multi);
   assert.ok(parsed);
   const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
-  // Latest CPU group is agent@12:00 only — do not add sidecar 0.40 from earlier.
-  assert.equal(view.cpu.usedCores, 0.25);
-  // Incomplete partition vs containers seen in the series: not a complete pod total.
+  // Latest CPU group is agent@12:00 only — do not merge sidecar 0.40 from earlier,
+  // and do not present the agent-only subset as a complete pod total vs limits.
+  assert.equal(view.cpu.usedCores, null);
   assert.equal(view.cpu.usedPartial, true);
   // Memory latest group is independent; do not invent a pod total across times.
   assert.equal(view.memory.usedBytes, 536870912);
   assert.equal(view.memory.usedPartial, false);
-  assert.notEqual(view.cpu.usedCores + view.memory.usedBytes, 0.25 + 0.4);
 });
 
 test("same-timestamp multi-container samples may sum within that timestamp only", () => {

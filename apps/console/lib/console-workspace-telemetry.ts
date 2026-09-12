@@ -595,8 +595,8 @@ function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
 /**
  * Sum samples that share the exact same sample_time string identity.
  * Never merges across different moments. If the latest partition is missing
- * containers that appear elsewhere in the series, treat the sum as partial
- * rather than a complete pod total.
+ * containers that appear elsewhere in the series, treat usage as partial and
+ * unavailable (null) rather than presenting the subset as a complete pod total.
  */
 function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   used: number | null;
@@ -633,6 +633,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   const atLatest = samples.filter((s) => s.sampleTime === sampleTime);
   let used = 0;
   let usedPartial = false;
+  let incompletePartition = false;
   const containerNames: string[] = [];
   for (const sample of atLatest) {
     used += sample.value;
@@ -646,18 +647,19 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   }
   // Staggered scrapes can leave the newest timestamp with only a subset of
   // containers (e.g. agent@12:00, sidecar@11:59). Do not present that subset
-  // sum as a complete pod usage figure against requests/limits.
-  if (!usedPartial) {
-    const containersAtLatest = new Set(containerNames);
-    for (const sample of samples) {
-      if (!containersAtLatest.has(sample.containerName)) {
-        usedPartial = true;
-        break;
-      }
+  // sum as a complete pod usage figure against requests/limits — mark partial
+  // and leave used unavailable rather than comparing the subset to whole-pod
+  // requests/limits.
+  const containersAtLatest = new Set(containerNames);
+  for (const sample of samples) {
+    if (!containersAtLatest.has(sample.containerName)) {
+      incompletePartition = true;
+      usedPartial = true;
+      break;
     }
   }
   return {
-    used,
+    used: incompletePartition ? null : used,
     usedPartial,
     containerNames,
     sampleTime,
