@@ -10,7 +10,10 @@ import type {
   WorkspaceTelemetrySeriesPoint,
   WorkspaceTelemetryView,
 } from "@/lib/console-workspace-telemetry";
-import { TELEMETRY_VIEWS } from "@/lib/console-workspace-telemetry";
+import {
+  downsampleSeriesForSparkline,
+  TELEMETRY_VIEWS,
+} from "@/lib/console-workspace-telemetry";
 
 export type ConsoleWorkspaceTelemetryProps = {
   viewModel: WorkspaceTelemetryView;
@@ -133,14 +136,23 @@ function SeriesSparkline({
     const sorted = [...points].sort(
       (a, b) => Date.parse(a.sampleTime) - Date.parse(b.sampleTime),
     );
-    const values = sorted.map((p) => p.value);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
+    const series = downsampleSeriesForSparkline(sorted);
+    let min = series[0]!.value;
+    let max = series[0]!.value;
+    for (let i = 1; i < series.length; i++) {
+      const v = series[i]!.value;
+      if (v < min) {
+        min = v;
+      }
+      if (v > max) {
+        max = v;
+      }
+    }
     const span = max - min || 1;
     const w = 120;
     const h = 28;
-    const coords = sorted.map((p, i) => {
-      const x = sorted.length === 1 ? w / 2 : (i / (sorted.length - 1)) * w;
+    const coords = series.map((p, i) => {
+      const x = series.length === 1 ? w / 2 : (i / (series.length - 1)) * w;
       const y = h - ((p.value - min) / span) * (h - 4) - 2;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     });

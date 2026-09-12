@@ -28,6 +28,13 @@ export const COST_EXCLUSION_NOTE =
 const MAX_DECIMAL_MAGNITUDE = 1e15;
 /** Memory / ephemeral bytes upper bound (~1 PiB). */
 const MAX_BYTES_MAGNITUDE = 1e18;
+/**
+ * Hard cap on samples retained per metric array from a telemetry payload.
+ * Keeps the trailing (most recent) window when the producer sends more.
+ */
+export const MAX_TELEMETRY_SAMPLES = 2048;
+/** Max SVG points drawn for a telemetry sparkline after downsampling. */
+export const MAX_SPARKLINE_POINTS = 64;
 
 const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
@@ -222,7 +229,10 @@ function parseSampleArray(
     return null;
   }
   const samples: ParsedTelemetrySample[] = [];
-  for (const item of value) {
+  // Bound accepted count early; keep the trailing window (most recent samples).
+  const start = Math.max(0, value.length - MAX_TELEMETRY_SAMPLES);
+  for (let i = start; i < value.length; i++) {
+    const item = value[i];
     if (!isPlainObject(item)) {
       return null;
     }
@@ -276,6 +286,37 @@ function parseSampleArray(
     });
   }
   return samples;
+}
+
+/**
+ * Evenly downsample a sorted series for sparkline rendering.
+ * Always preserves first and last points when maxPoints >= 2.
+ */
+export function downsampleSeriesForSparkline<T>(
+  points: readonly T[],
+  maxPoints: number = MAX_SPARKLINE_POINTS,
+): T[] {
+  if (points.length <= maxPoints) {
+    return points.slice();
+  }
+  if (maxPoints <= 0) {
+    return [];
+  }
+  if (maxPoints === 1) {
+    return [points[points.length - 1]!];
+  }
+  const out: T[] = [];
+  const last = points.length - 1;
+  let prevIdx = -1;
+  for (let i = 0; i < maxPoints; i++) {
+    const idx = Math.round((i * last) / (maxPoints - 1));
+    if (idx === prevIdx) {
+      continue;
+    }
+    out.push(points[idx]!);
+    prevIdx = idx;
+  }
+  return out;
 }
 
 function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefined {

@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   COST_EXCLUSION_NOTE,
+  MAX_SPARKLINE_POINTS,
+  MAX_TELEMETRY_SAMPLES,
+  downsampleSeriesForSparkline,
   parseTelemetryPresentation,
   projectWorkspaceTelemetryView,
 } from "./console-workspace-telemetry.ts";
@@ -260,4 +263,36 @@ test("unknown CPU/memory limits stay null rather than zero", () => {
   assert.equal(view.admitted?.memoryLimitBytes, null);
   assert.notEqual(view.admitted?.cpuLimitCores, 0);
   assert.notEqual(view.admitted?.memoryLimitBytes, 0);
+});
+
+test("parseSampleArray keeps only the most recent MAX_TELEMETRY_SAMPLES", () => {
+  const oversized = structuredClone(SUCCESS);
+  const template = SUCCESS.cpu_cores_samples[0];
+  const total = MAX_TELEMETRY_SAMPLES + 50;
+  oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => ({
+    ...template,
+    sample_time: `2026-09-12T${String(Math.floor(i / 60) % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00+00:00`,
+    interval_start: `2026-09-12T${String(Math.floor(i / 60) % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00+00:00`,
+    interval_end: `2026-09-12T${String(Math.floor(i / 60) % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00+00:00`,
+    value: String(i),
+  }));
+  const parsed = parseTelemetryPresentation(oversized);
+  assert.ok(parsed);
+  assert.equal(parsed.cpuSamples.length, MAX_TELEMETRY_SAMPLES);
+  assert.equal(parsed.cpuSamples[0].value, 50);
+  assert.equal(parsed.cpuSamples[parsed.cpuSamples.length - 1].value, total - 1);
+});
+
+test("downsampleSeriesForSparkline preserves endpoints and bounds length", () => {
+  assert.deepEqual(downsampleSeriesForSparkline([]), []);
+  assert.deepEqual(downsampleSeriesForSparkline([1, 2, 3]), [1, 2, 3]);
+  assert.deepEqual(downsampleSeriesForSparkline([1, 2, 3], 0), []);
+  assert.deepEqual(downsampleSeriesForSparkline([1, 2, 3], 1), [3]);
+
+  const long = Array.from({ length: MAX_SPARKLINE_POINTS * 4 }, (_, i) => i);
+  const down = downsampleSeriesForSparkline(long);
+  assert.ok(down.length <= MAX_SPARKLINE_POINTS);
+  assert.equal(down[0], 0);
+  assert.equal(down[down.length - 1], long.length - 1);
+  assert.equal(new Set(down).size, down.length);
 });
