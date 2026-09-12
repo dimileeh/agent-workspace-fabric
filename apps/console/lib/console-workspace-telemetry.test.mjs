@@ -182,6 +182,31 @@ test("unallocated fixture preserves null admitted/cost and does not coerce to ze
   assert.equal(view.observedAt, null);
 });
 
+test("parseTelemetryPresentation rejects estimate_state that contradicts interval coverage", () => {
+  // complete + unpriced coverage would still project displayState "complete".
+  const completeWithUnpriced = structuredClone(SUCCESS);
+  completeWithUnpriced.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    unpriced_interval_seconds: 120,
+  };
+  assert.equal(parseTelemetryPresentation(completeWithUnpriced), null);
+
+  // unallocated must not retain priced or unpriced interval seconds.
+  const unallocatedPriced = structuredClone(UNALLOCATED);
+  unallocatedPriced.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    priced_interval_seconds: 60,
+  };
+  assert.equal(parseTelemetryPresentation(unallocatedPriced), null);
+
+  const unallocatedUnpriced = structuredClone(UNALLOCATED);
+  unallocatedUnpriced.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    unpriced_interval_seconds: 60,
+  };
+  assert.equal(parseTelemetryPresentation(unallocatedUnpriced), null);
+});
+
 test("parseTelemetryPresentation rejects unallocated state that disagrees with allocation or estimate", () => {
   // Envelope claims unallocated while retaining admitted resources, samples,
   // and a complete dollar estimate — would render a contradictory operator view.
