@@ -626,6 +626,41 @@ test("fresh envelope and meters with aged admitted observed_at is stale", () => 
   assert.equal(view.isStale, true);
 });
 
+test("implausibly future meter sample times fail closed as stale", () => {
+  // A future sample_time wins latestTimestamp over legitimate readings; without
+  // a closed freshness check, nowMs - ms is negative so isStale stays false
+  // indefinitely (malformed producer timestamp or collector clock skew).
+  const future = structuredClone(SUCCESS);
+  future.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      value: "0.10",
+    },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-13T12:00:00+00:00",
+      value: "0.90",
+    },
+  ];
+  future.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T12:00:00+00:00",
+    },
+  ];
+  future.observed_at = "2026-09-12T12:00:00+00:00";
+  const parsed = parseTelemetryPresentation(future);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, {
+    nowMs: Date.parse("2026-09-12T12:01:00+00:00"),
+  });
+  assert.equal(view.isStale, true);
+  assert.equal(view.sampleTime, "2026-09-13T12:00:00+00:00");
+});
+
 test("view enum accepts only 1h/6h/24h", () => {
   for (const view of ["1h", "6h", "24h"]) {
     assert.ok(parseTelemetryPresentation({ ...SUCCESS, view }));

@@ -1015,6 +1015,12 @@ function isTimestampOlderThanStaleThreshold(
   if (!Number.isFinite(ms)) {
     return false;
   }
+  // Fail closed: a future timestamp yields a negative age and would otherwise
+  // win latestTimestamp while staying isStale:false indefinitely (malformed
+  // producer time or severe collector clock skew).
+  if (ms > nowMs) {
+    return true;
+  }
   const thresholdMs = staleAfterSeconds * 1000;
   // Fail closed: an overflowing threshold can never be exceeded, so aged
   // telemetry would otherwise appear fresh forever.
