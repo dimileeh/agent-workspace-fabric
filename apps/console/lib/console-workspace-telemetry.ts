@@ -429,6 +429,52 @@ export function downsampleSeriesForSparkline<T>(
   return out;
 }
 
+/**
+ * Downsample sparkline samples for SVG while retaining every non-ok point.
+ * Plain even sampling can drop partial/stale samples and erase quality gaps;
+ * when non-ok + endpoints exceed maxPoints, those must-keep samples win.
+ */
+function downsampleSparklinePreservingQuality(
+  points: readonly SparklineInputPoint[],
+  maxPoints: number = MAX_SPARKLINE_POINTS,
+): SparklineInputPoint[] {
+  if (points.length <= maxPoints) {
+    return points.slice();
+  }
+
+  const last = points.length - 1;
+  const keep = new Set<number>();
+  for (let i = 0; i < maxPoints; i++) {
+    keep.add(Math.round((i * last) / (maxPoints - 1)));
+  }
+  for (let i = 0; i < points.length; i++) {
+    if (sparklinePointQuality(points[i]!) !== "ok") {
+      keep.add(i);
+    }
+  }
+
+  if (keep.size > maxPoints) {
+    const removable: number[] = [];
+    for (const idx of [...keep].sort((a, b) => a - b)) {
+      if (idx === 0 || idx === last) {
+        continue;
+      }
+      if (sparklinePointQuality(points[idx]!) === "ok") {
+        removable.push(idx);
+      }
+    }
+    let excess = keep.size - maxPoints;
+    while (excess > 0 && removable.length > 0) {
+      const mid = Math.floor(removable.length / 2);
+      keep.delete(removable[mid]!);
+      removable.splice(mid, 1);
+      excess -= 1;
+    }
+  }
+
+  return [...keep].sort((a, b) => a - b).map((idx) => points[idx]!);
+}
+
 export type SparklinePath = {
   d: string;
   quality: TelemetryQuality;
@@ -483,6 +529,7 @@ function pathDFromCoords(coords: readonly string[]): string {
  * Map a sorted value series into SVG sparkline geometry.
  * Contiguous same-quality runs stay connected; quality transitions leave gaps.
  * One-sample runs become markers. Non-ok history is never a single unqualified path.
+ * Qualification uses the full series; SVG downsampling preserves non-ok samples.
  */
 export function buildSparklineGeometry(
   points: readonly SparklineInputPoint[],
@@ -492,9 +539,9 @@ export function buildSparklineGeometry(
   if (points.length === 0) {
     return null;
   }
-  const series = downsampleSeriesForSparkline(points);
+  const qualification = worstSparklineQualification(points.map(sparklinePointQuality));
+  const series = downsampleSparklinePreservingQuality(points);
   const qualities = series.map(sparklinePointQuality);
-  const qualification = worstSparklineQualification(qualities);
 
   if (series.length === 1) {
     return {

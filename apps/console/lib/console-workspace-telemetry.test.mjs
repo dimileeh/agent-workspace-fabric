@@ -753,3 +753,37 @@ test("buildSparklineGeometry gaps and qualifies non-ok historical points", () =>
   assert.equal(partialOnly.markers.length, 0);
   assert.equal(partialOnly.qualification, "partial");
 });
+
+test("buildSparklineGeometry keeps qualification when downsample would drop non-ok", () => {
+  const last = MAX_SPARKLINE_POINTS * 4 - 1;
+  const selected = new Set();
+  for (let i = 0; i < MAX_SPARKLINE_POINTS; i++) {
+    selected.add(Math.round((i * last) / (MAX_SPARKLINE_POINTS - 1)));
+  }
+  let dropIdx = -1;
+  for (let i = 1; i < last; i++) {
+    if (!selected.has(i)) {
+      dropIdx = i;
+      break;
+    }
+  }
+  assert.ok(dropIdx > 0, "need an index even downsample would skip");
+
+  const points = Array.from({ length: last + 1 }, (_, i) => ({
+    value: i,
+    quality: i === dropIdx ? "partial" : "ok",
+  }));
+
+  // Precondition: naive even downsample drops the only non-ok sample.
+  const naive = downsampleSeriesForSparkline(points);
+  assert.ok(naive.every((p) => (p.quality ?? "ok") === "ok"));
+
+  const geom = buildSparklineGeometry(points);
+  assert.ok(geom);
+  assert.equal(geom.qualification, "partial");
+  assert.ok(
+    geom.markers.some((m) => m.quality === "partial") ||
+      geom.paths.some((p) => p.quality === "partial"),
+    "non-ok sample must remain visible after quality-preserving downsample",
+  );
+});
