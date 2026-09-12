@@ -204,7 +204,8 @@ function isNullableTimestamp(value: unknown): value is string | null {
 
 /**
  * Strict nonnegative finite decimal string. Rejects NaN/Infinity tokens,
- * scientific notation, negatives, and oversized magnitudes.
+ * scientific notation, negatives, oversized magnitudes, and lexical nonzeros
+ * that underflow to Number 0 (below the representable range).
  * When requireSafeInteger is set (byte counts), also rejects fractions and
  * values that lose precision under Number.
  */
@@ -225,6 +226,11 @@ function parseDecimalString(
   }
   const n = Number(trimmed);
   if (!Number.isFinite(n) || n < 0 || n > max) {
+    return undefined;
+  }
+  // Lexical nonzero that underflows to 0 (below Number.MIN_VALUE) must not be
+  // accepted as literal zero — CPU/USD would otherwise project fake-zero usage.
+  if (n === 0 && /[1-9]/.test(trimmed)) {
     return undefined;
   }
   if (options.requireSafeInteger && !Number.isSafeInteger(n)) {

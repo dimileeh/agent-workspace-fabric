@@ -285,6 +285,18 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
     badEst.estimate.estimated_usd = bad;
     assert.equal(parseTelemetryPresentation(badEst), null, `estimate ${bad}`);
   }
+  // Lexical nonzero below Number's range underflows to 0; must not become fake zero.
+  const underflow = `0.${"0".repeat(400)}1`;
+  assert.equal(Number(underflow), 0);
+  const underflowCpu = structuredClone(SUCCESS);
+  underflowCpu.cpu_cores_samples[0].value = underflow;
+  assert.equal(parseTelemetryPresentation(underflowCpu), null, "cpu underflow");
+  const underflowEst = structuredClone(SUCCESS);
+  underflowEst.estimate.estimated_usd = underflow;
+  assert.equal(parseTelemetryPresentation(underflowEst), null, "estimate underflow");
+  const underflowAdmitted = structuredClone(SUCCESS);
+  underflowAdmitted.admitted.cpu_request_cores = underflow;
+  assert.equal(parseTelemetryPresentation(underflowAdmitted), null, "admitted underflow");
   const negMem = structuredClone(SUCCESS);
   negMem.admitted.memory_limit_bytes = -1;
   assert.equal(parseTelemetryPresentation(negMem), null);
