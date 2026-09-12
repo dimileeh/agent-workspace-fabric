@@ -1,4 +1,5 @@
 import type { WorkspaceOverview } from "@/lib/types";
+import { lifecycleStages } from "./format.ts";
 
 type AgentLabelWorkspace = Pick<
   WorkspaceOverview,
@@ -279,6 +280,10 @@ type TimedLifecycleStage = {
   endedMs: number | null;
 };
 
+function lifecycleStageOrder(stage: string): number {
+  return lifecycleStages.findIndex((candidate) => candidate === stage);
+}
+
 const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
 
@@ -460,19 +465,35 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       entered.push({ stage, startedAt: stage.started_at, startedMs, endedMs });
     }
   }
-  const latestEntered = entered.reduce<TimedLifecycleStage | null>(
+  let latestEntered = entered.reduce<TimedLifecycleStage | null>(
     (latest, entry) =>
       latest == null || compareRecordedInstants(entry.startedAt, latest.startedAt) === 1
         ? entry
         : latest,
     null,
   );
-  if (
-    latestEntered == null ||
-    entered.filter((entry) => sameRecordedInstant(entry.startedAt, latestEntered.startedAt))
-      .length !== 1
-  ) {
+  if (latestEntered == null) {
     return null;
+  }
+  const latestStartedAt = latestEntered.startedAt;
+  const latestCandidates = entered.filter((entry) =>
+    sameRecordedInstant(entry.startedAt, latestStartedAt),
+  );
+  if (latestCandidates.length > 1) {
+    const stageOrders = latestCandidates.map((entry) =>
+      lifecycleStageOrder(entry.stage.stage),
+    );
+    if (
+      stageOrders.some((stageOrder) => stageOrder < 0) ||
+      new Set(stageOrders).size !== stageOrders.length
+    ) {
+      return null;
+    }
+    latestEntered = latestCandidates.reduce((latest, entry) =>
+      lifecycleStageOrder(entry.stage.stage) > lifecycleStageOrder(latest.stage.stage)
+        ? entry
+        : latest,
+    );
   }
 
   let finishedAt = latestEntered.stage.ended_at;
