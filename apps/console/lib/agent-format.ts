@@ -740,6 +740,17 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     ) {
       return null;
     }
+    // Current Core events carry a workspace-local order, but lifecycle stages
+    // retain only timestamps. When an ordered terminal event ties the retained
+    // stage end, that stage may have been closed by an earlier same-tick pause
+    // before re-entry and terminal exit. The event still proves the finish;
+    // without the lifecycle boundary's order it cannot prove the duration.
+    if (
+      typeof terminalEvent.event_order === "number" &&
+      Number.isSafeInteger(terminalEvent.event_order)
+    ) {
+      return { finishedAt, finishedMs, durationSeconds: null };
+    }
   }
 
   const durationStages = entered

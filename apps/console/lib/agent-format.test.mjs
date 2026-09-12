@@ -2456,6 +2456,26 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
     }),
     { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: 300 },
   );
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6huEEr: Core orders
+  // running -> blocked -> running -> failed transitions that can share one
+  // timestamp. The collapsed lifecycle retains the first running boundary, so
+  // an ordered terminal event at that same instant proves the finish but cannot
+  // prove that the retained interval represents the final running visit.
+  const tiedOrderedTerminalEvent = {
+    ...stateChanged("running", "failed", "2026-09-06T12:05:00Z"),
+    id: "event_after_same_tick_pause_resume",
+    event_order: 7,
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      latest_state_change: tiedOrderedTerminalEvent,
+      latest_workflow_terminal_state_change: tiedOrderedTerminalEvent,
+      last_event: tiedOrderedTerminalEvent,
+    }),
+    { finishedAt: "2026-09-06T12:05:00Z", durationSeconds: null },
+    "an ordered terminal tie must retain only the authoritative finish",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
