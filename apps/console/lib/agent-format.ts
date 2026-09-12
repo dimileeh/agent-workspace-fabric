@@ -353,12 +353,20 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   finishedAt: string;
   finishedMs: number;
 } | null {
-  // Recovery makes the collapsed lifecycle ambiguous. Its dedicated terminal
-  // event is still authoritative only when it belongs to the latest recovery.
   const recoveryStartedAt = item.recovery?.started_at;
   const terminalEvent = item.latest_workflow_terminal_state_change;
+  const isDirectPauseExit =
+    recoveryStartedAt == null &&
+    (terminalEvent?.old_state === "blocked" ||
+      terminalEvent?.old_state === "recovering") &&
+    (terminalEvent.new_state === "failed" ||
+      terminalEvent.new_state === "cancelled");
+  // Recovery makes the collapsed lifecycle ambiguous, so its dedicated
+  // terminal event must belong to the latest recovery. Blocked and recovering
+  // are themselves omitted from that lifecycle and recovery summary; a direct
+  // terminal exit from either pause is authoritative without that boundary.
   if (
-    recoveryStartedAt == null ||
+    (recoveryStartedAt == null && !isDirectPauseExit) ||
     terminalEvent?.event_type !== "workspace.state_changed" ||
     (terminalEvent.new_state !== "completed" &&
       terminalEvent.new_state !== "failed" &&
@@ -371,7 +379,9 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   const finishedMs = recordedMilliseconds(terminalEvent.occurred_at);
   if (
     finishedMs == null ||
-    compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt) !== 1
+    (!isDirectPauseExit &&
+      (recoveryStartedAt == null ||
+        compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt) !== 1))
   ) {
     return null;
   }

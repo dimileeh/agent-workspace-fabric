@@ -1358,6 +1358,41 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
     { finishedAt: null, durationSeconds: null },
     "an omitted pause must not be accepted when timestamps happen to coincide",
   );
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6hrdNM: Core's
+  // dedicated retained terminal event proves the finish after an omitted pause,
+  // but the collapsed lifecycle still cannot prove the complete duration.
+  for (const pauseStatus of ["blocked", "recovering"]) {
+    for (const terminalStatus of ["failed", "cancelled"]) {
+      const terminalEvent = stateChanged(
+        pauseStatus,
+        terminalStatus,
+        "2026-09-06T12:10:00Z",
+      );
+      assert.deepEqual(
+        resolveWorkflowTiming({
+          ...item,
+          status: terminalStatus,
+          latest_workflow_terminal_state_change: terminalEvent,
+          last_event: terminalEvent,
+        }),
+        { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+        `${pauseStatus} -> ${terminalStatus} must use the retained terminal finish`,
+      );
+    }
+  }
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "completed",
+      latest_workflow_terminal_state_change: stateChanged(
+        "blocked",
+        "completed",
+        "2026-09-06T12:10:00Z",
+      ),
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an unsupported blocked -> completed event must not bypass recovery corroboration",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
