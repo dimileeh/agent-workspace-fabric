@@ -993,6 +993,43 @@ test("selecting a visible workspace keeps its rail position", async ({ page }) =
     .toBe(scrollTopBeforeSelection);
 });
 
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrOrC: Previous uses
+// a suppressed programmatic scroll, so it must explicitly release anchoring
+// owned by a selected row on the page being left.
+test("explicit page navigation clears selection-owned refresh anchoring", async ({ page }) => {
+  let revision = 0;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePageItems: (items, cursor) => {
+      if (cursor !== null || revision === 0) return items;
+      return items.map((item) => item.workspace_id === "ws_perf_0002"
+        ? { ...item, updated_at: "2026-09-11T12:02:00.000Z" }
+        : item);
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByTestId("workspace-card-ws_perf_0101").click();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0101/);
+
+  const list = page.getByTestId("workspace-list-scroll");
+  await page.getByRole("button", { name: "Previous workspace results" }).click();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+
+  revision = 1;
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0002")).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hYbpe: a visible row
 // from the next page must not replace preceding viewport rows with a spacer.
 test("selecting a visible workspace keeps a boundary viewport covered", async ({ page }) => {
