@@ -49,7 +49,6 @@ import {
   displayedTaskKey,
   MAX_FULLSCREEN_LOG_WORKSPACES,
 } from "@/lib/console-dashboard-derived";
-import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   attentionAgeSeconds,
@@ -72,6 +71,7 @@ import type { OperatorPreferences } from "@/lib/operator-preferences";
 import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
+import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import type { ConsoleDashboardCountEvidence, WorkspaceOverview } from "@/lib/types";
 import {
 Badge, KpiStat,
@@ -271,8 +271,8 @@ export function FleetHealthStrip({
 }) {
   const anyStale = kpis.some((kpi) => kpi.stale);
   // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
-  // error — that banner is cleared on success — but do not let non-null counts
-  // look fully current either.
+  // error — that banner is cleared on success — but surface coverage so operators
+  // can tell a degraded snapshot from a complete one (CONSOLE_BACKEND_CONTRACT).
   const coverageNotice = formatDashboardCoverageNotice(
     coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
     countEvidence,

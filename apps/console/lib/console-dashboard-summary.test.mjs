@@ -336,10 +336,14 @@ test("parseDashboardSummary rejects a positive exact lower bound with one unknow
 });
 
 test("confirmed KPI lower bounds stay qualified while exact values win", () => {
+  // Production-shaped 29/24/5 evidence: confirmed nonzero + evidenced zero → N confirmed.
   const lowerBounds = parseDashboardSummary(
     summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } }),
   );
   assert.ok(lowerBounds);
+  assert.equal(lowerBounds.count_evidence.total_workspaces, 29);
+  assert.equal(lowerBounds.count_evidence.status_known_workspaces, 24);
+  assert.equal(lowerBounds.count_evidence.status_unknown_workspaces, 5);
   const lowerBoundKpis = fleetKpisFromDashboardSummary({
     summary: lowerBounds,
     summaryStale: true,

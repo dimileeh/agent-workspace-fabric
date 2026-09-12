@@ -136,6 +136,11 @@ function countRelationshipsAreValid(counts: Record<DashboardCountKey, number | n
 
 const CONFIRMED_COUNT_HINT = "confirmed lower bound; exact metric count is incomplete";
 
+/**
+ * Exact counts win; otherwise confirmed evidence (including evidenced zero) is
+ * rendered as a visibly qualified lower bound (`N confirmed`) per
+ * docs/CONSOLE_BACKEND_CONTRACT.md — never as an unqualified exact total.
+ */
 function displayCount(
   exact: number | null | undefined,
   confirmed: number | null | undefined,
