@@ -291,12 +291,21 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   const underflowCpu = structuredClone(SUCCESS);
   underflowCpu.cpu_cores_samples[0].value = underflow;
   assert.equal(parseTelemetryPresentation(underflowCpu), null, "cpu underflow");
+  const underflowMem = structuredClone(SUCCESS);
+  // Keep a cores-scale underflow on a cores field; memory bytes require safe integers.
+  underflowMem.admitted.cpu_limit_cores = underflow;
+  assert.equal(parseTelemetryPresentation(underflowMem), null, "admitted cpu_limit underflow");
   const underflowEst = structuredClone(SUCCESS);
   underflowEst.estimate.estimated_usd = underflow;
   assert.equal(parseTelemetryPresentation(underflowEst), null, "estimate underflow");
   const underflowAdmitted = structuredClone(SUCCESS);
   underflowAdmitted.admitted.cpu_request_cores = underflow;
   assert.equal(parseTelemetryPresentation(underflowAdmitted), null, "admitted underflow");
+  // Canonical lexical zeros must still parse as real zero (not rejected as underflow).
+  const exactZero = structuredClone(SUCCESS);
+  exactZero.cpu_cores_samples[0].value = "0.000";
+  exactZero.estimate.estimated_usd = "0";
+  assert.notEqual(parseTelemetryPresentation(exactZero), null, "lexical exact zero ok");
   const negMem = structuredClone(SUCCESS);
   negMem.admitted.memory_limit_bytes = -1;
   assert.equal(parseTelemetryPresentation(negMem), null);

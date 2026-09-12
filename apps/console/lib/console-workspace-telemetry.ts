@@ -230,7 +230,8 @@ function parseDecimalString(
   }
   // Lexical nonzero that underflows to 0 (below Number.MIN_VALUE) must not be
   // accepted as literal zero — CPU/USD would otherwise project fake-zero usage.
-  if (n === 0 && /[1-9]/.test(trimmed)) {
+  // Only canonical lexical zeros ("0", "0.0", …) may parse as numeric 0.
+  if (n === 0 && !/^0(?:\.0+)?$/.test(trimmed)) {
     return undefined;
   }
   if (options.requireSafeInteger && !Number.isSafeInteger(n)) {
