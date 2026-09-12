@@ -1338,11 +1338,7 @@ export function WorkspaceList({
     );
 
     if (suppressScrollLoadRef.current) return;
-    selectionOwnsScrollAnchorRef.current =
-      selectedId !== null &&
-      items[firstVisibleRow]?.workspace_id === selectedId &&
-      Math.abs(element.scrollTop - rowOffsets[firstVisibleRow]) <=
-        WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+    selectionOwnsScrollAnchorRef.current = false;
     if (
       preserveScrollTopRef.current !== null &&
       Math.abs(element.scrollTop - preserveScrollTopRef.current) >
@@ -1376,7 +1372,7 @@ export function WorkspaceList({
         suppressNextButtonLoadRef.current = true;
       }
     }
-  }, [hasMore, items, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets, selectedId]);
+  }, [hasMore, items, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
 
   const showWindow = useCallback((nextStart: number) => {
     const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));

@@ -1342,6 +1342,23 @@ test(`workspace list stays at the top during refresh reorders (inspectorWorkspac
     // that incidental position for selection-owned scrolling.
     await publishBackgroundRefresh(2, "workspace-card-ws_perf_0001");
     await expectTop();
+    if (inspectorWorkspaceId === "ws_perf_0001") {
+      // Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrXgy: manually
+      // returning to the top while that selected row is first must not restore
+      // selection ownership and follow it on the next reorder.
+      await list.evaluate(async (element) => {
+        element.scrollTo({ top: 1_000 });
+        await new Promise(requestAnimationFrame);
+      });
+      expect(await scrollTop()).toBeGreaterThan(240);
+      await list.evaluate(async (element) => {
+        element.scrollTo({ top: 0 });
+        await new Promise(requestAnimationFrame);
+      });
+      await expectTop();
+      await publishBackgroundRefresh(3, "workspace-card-ws_perf_0000");
+      await expectTop();
+    }
     return;
   }
 
