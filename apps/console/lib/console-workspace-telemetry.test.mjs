@@ -501,6 +501,45 @@ test("same-instant RFC3339 spellings share interval and partition identity", () 
   assert.equal(view.sampleTimeMixed, false);
 });
 
+test("distinct sub-millisecond sample_times stay separate partitions", () => {
+  // Date.parse truncates to ms, so .000001Z and .000002Z share one epoch ms.
+  // Identity must retain sub-ms fraction or two same-container readings of 1
+  // and 2 become a current usage of 3 and a single history point.
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  multi.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00.000001Z",
+      interval_start: "2026-09-12T11:59:00.000001Z",
+      interval_end: "2026-09-12T12:00:00.000001Z",
+      value: "1",
+    },
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00.000002Z",
+      interval_start: "2026-09-12T11:59:00.000002Z",
+      interval_end: "2026-09-12T12:00:00.000002Z",
+      value: "2",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, 2);
+  assert.equal(view.cpu.usedPartial, false);
+  assert.equal(view.cpu.sampleTime, "2026-09-12T12:00:00.000002Z");
+  assert.deepEqual(
+    view.cpu.series.map((p) => ({ sampleTime: p.sampleTime, value: p.value })),
+    [
+      { sampleTime: "2026-09-12T12:00:00.000001Z", value: 1 },
+      { sampleTime: "2026-09-12T12:00:00.000002Z", value: 2 },
+    ],
+  );
+});
+
 test("sparkline series uses pod totals per timestamp, not raw per-container points", () => {
   const multi = structuredClone(SUCCESS);
   const base = SUCCESS.cpu_cores_samples[0];
@@ -681,9 +720,9 @@ test("parseTelemetryPresentation rejects duplicate container samples at the same
 });
 
 test("parseTelemetryPresentation rejects duplicate container at same instant with alternate RFC3339 spellings", () => {
-  // Projection partitions by epoch ms; identity must use the same key or Z vs
-  // +00:00 spellings of one container@instant would parse as distinct rows and
-  // inflate the pod total when summed.
+  // Projection partitions by normalized instant key; identity must use the same
+  // key or Z vs +00:00 spellings of one container@instant would parse as
+  // distinct rows and inflate the pod total when summed.
   const dup = structuredClone(SUCCESS);
   const base = SUCCESS.cpu_cores_samples[0];
   dup.cpu_cores_samples = [

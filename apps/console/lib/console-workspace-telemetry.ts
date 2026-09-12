@@ -375,8 +375,9 @@ function resolvePresentationResourceUid(
 /**
  * Fail closed on cross-resource samples and duplicate container@time rows.
  * Distinct containers at the same timestamp remain valid (pod partition sum).
- * Duplicate identity uses epoch ms (not raw RFC3339 spelling) so Z / offset
- * forms of the same instant cannot slip through parse and inflate pod totals.
+ * Duplicate identity uses normalized instant keys (not raw RFC3339 spelling) so
+ * Z / offset forms of the same instant cannot slip through parse and inflate
+ * pod totals, while distinct sub-ms instants stay distinct.
  * Every retained sample must carry a non-empty UID matching one presentation-wide
  * identity (admitted/ownership when present, else the shared sample series UID).
  */
@@ -388,7 +389,7 @@ function assertSampleIdentities(
   for (const samples of sampleGroups) {
     const seenContainerAtTime = new Set<string>();
     for (const sample of samples) {
-      const identityKey = `${timestampInstantMs(sample.sampleTime)}\0${sample.containerName}`;
+      const identityKey = `${timestampInstantKey(sample.sampleTime)}\0${sample.containerName}`;
       if (seenContainerAtTime.has(identityKey)) {
         return false;
       }
@@ -881,13 +882,50 @@ function timestampInstantMs(value: string): number {
   return Date.parse(value);
 }
 
+/**
+ * Fractional digits beyond milliseconds (Date.parse precision). Trailing zeros
+ * are stripped so `.000001` and `.000001000` share identity.
+ */
+function submillisecondFraction(value: string): string {
+  const fractionalSeconds = RFC3339_DATE_TIME.exec(value)?.[7] ?? "";
+  return fractionalSeconds.slice(4).replace(/0+$/, "");
+}
+
+/**
+ * Exact instant identity for partitioning: epoch ms + sub-ms fraction.
+ * Equates Z / offset spellings of the same UTC moment; keeps distinct
+ * sub-millisecond instants that Date.parse would otherwise collapse.
+ */
+function timestampInstantKey(value: string): string {
+  return `${timestampInstantMs(value)}\0${submillisecondFraction(value)}`;
+}
+
+/** Order two validated RFC3339 instants, including sub-millisecond fraction. */
+function compareTimestampInstants(left: string, right: string): number {
+  const leftMs = timestampInstantMs(left);
+  const rightMs = timestampInstantMs(right);
+  if (leftMs !== rightMs) {
+    return leftMs < rightMs ? -1 : 1;
+  }
+  const leftFrac = submillisecondFraction(left);
+  const rightFrac = submillisecondFraction(right);
+  const precision = Math.max(leftFrac.length, rightFrac.length);
+  const normalizedLeft = leftFrac.padEnd(precision, "0");
+  const normalizedRight = rightFrac.padEnd(precision, "0");
+  return normalizedLeft === normalizedRight
+    ? 0
+    : normalizedLeft < normalizedRight
+      ? -1
+      : 1;
+}
+
 function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
   let latest: string | null = null;
-  let latestMs = Number.NEGATIVE_INFINITY;
   for (const sample of samples) {
-    const ms = timestampInstantMs(sample.sampleTime);
-    if (ms > latestMs) {
-      latestMs = ms;
+    if (
+      latest === null ||
+      compareTimestampInstants(sample.sampleTime, latest) > 0
+    ) {
       latest = sample.sampleTime;
     }
   }
@@ -928,22 +966,23 @@ function hasDuplicateContainers(
 
 /**
  * True when every sample shares the same interval_start/interval_end instant
- * (epoch ms). Alternate RFC3339 spellings of the same moment must match;
- * samples that only share sample_time may still cover different measurement
- * windows and must not be treated as one complete pod reading.
+ * (normalized key, including sub-ms). Alternate RFC3339 spellings of the same
+ * moment must match; samples that only share sample_time may still cover
+ * different measurement windows and must not be treated as one complete pod
+ * reading.
  */
 function samplesShareIntervalTuple(samples: ParsedTelemetrySample[]): boolean {
   if (samples.length <= 1) {
     return true;
   }
   const first = samples[0];
-  const startMs = timestampInstantMs(first.intervalStart);
-  const endMs = timestampInstantMs(first.intervalEnd);
+  const startKey = timestampInstantKey(first.intervalStart);
+  const endKey = timestampInstantKey(first.intervalEnd);
   for (let i = 1; i < samples.length; i++) {
     const sample = samples[i];
     if (
-      timestampInstantMs(sample.intervalStart) !== startMs ||
-      timestampInstantMs(sample.intervalEnd) !== endMs
+      timestampInstantKey(sample.intervalStart) !== startKey ||
+      timestampInstantKey(sample.intervalEnd) !== endKey
     ) {
       return false;
     }
@@ -967,11 +1006,12 @@ function buildPodTotalSeries(
     return [];
   }
   const seriesContainers = new Set<string>();
-  // Group by instant so Z / offset spellings of the same moment share a partition.
-  const byTime = new Map<number, ParsedTelemetrySample[]>();
+  // Group by exact instant so Z / offset spellings share a partition while
+  // distinct sub-ms readings stay separate.
+  const byTime = new Map<string, ParsedTelemetrySample[]>();
   for (const sample of samples) {
     seriesContainers.add(sample.containerName);
-    const key = timestampInstantMs(sample.sampleTime);
+    const key = timestampInstantKey(sample.sampleTime);
     const group = byTime.get(key);
     if (group) {
       group.push(sample);
@@ -1027,12 +1067,12 @@ function buildPodTotalSeries(
       containerName: names.join(","),
     });
   }
-  points.sort((a, b) => Date.parse(a.sampleTime) - Date.parse(b.sampleTime));
+  points.sort((a, b) => compareTimestampInstants(a.sampleTime, b.sampleTime));
   return points;
 }
 
 /**
- * Sum samples that share the same sample_time instant (epoch ms).
+ * Sum samples that share the same sample_time instant (normalized key).
  * Never merges across different moments. If the latest partition is missing
  * containers that appear elsewhere in the series, or containers disagree on
  * interval windows, treat usage as partial and unavailable (null) rather than
@@ -1069,9 +1109,9 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
       series,
     };
   }
-  const latestMs = timestampInstantMs(sampleTime);
+  const latestKey = timestampInstantKey(sampleTime);
   const atLatest = samples.filter(
-    (s) => timestampInstantMs(s.sampleTime) === latestMs,
+    (s) => timestampInstantKey(s.sampleTime) === latestKey,
   );
   let usedPartial = false;
   let usedStale = false;
@@ -1221,7 +1261,9 @@ function resolveDisplaySampleTime(
   );
   if (meterTimes.length > 0) {
     // Prefer meter times so a newer envelope cannot label aged readings.
-    return meterTimes.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b));
+    return meterTimes.reduce((a, b) =>
+      compareTimestampInstants(a, b) >= 0 ? a : b,
+    );
   }
   return observedAt;
 }
@@ -1229,10 +1271,10 @@ function resolveDisplaySampleTime(
 function meterSampleTimesAreMixed(
   meterSampleTimes: Array<string | null>,
 ): boolean {
-  const distinct = new Set<number>();
+  const distinct = new Set<string>();
   for (const value of meterSampleTimes) {
     if (typeof value === "string") {
-      distinct.add(timestampInstantMs(value));
+      distinct.add(timestampInstantKey(value));
     }
   }
   return distinct.size > 1;
