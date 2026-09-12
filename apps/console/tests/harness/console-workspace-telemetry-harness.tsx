@@ -42,6 +42,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const lastGoodAt = searchParams.get("lastGood");
   const unknownLimits = searchParams.get("unknownLimits") === "1";
   const admittedPartial = searchParams.get("admittedPartial") === "1";
+  const incompleteSeries = searchParams.get("incompleteSeries") === "1";
   const nowMsParam = searchParams.get("nowMs");
   const nowMs = nowMsParam ? Number(nowMsParam) : Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -55,7 +56,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     }
     let raw = structuredClone(FIXTURES[fixtureName] ?? FIXTURES.success);
     if (
-      (unknownLimits || admittedPartial) &&
+      (unknownLimits || admittedPartial || incompleteSeries) &&
       raw &&
       typeof raw === "object" &&
       raw !== null
@@ -66,6 +67,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
           memory_limit_bytes?: number | null;
           partial?: boolean;
         } | null;
+        cpu_cores_samples?: Array<Record<string, unknown>>;
       };
       if (envelope.admitted) {
         if (unknownLimits) {
@@ -76,13 +78,72 @@ export function ConsoleWorkspaceTelemetryHarness() {
           envelope.admitted.partial = true;
         }
       }
+      if (incompleteSeries && envelope.cpu_cores_samples?.[0]) {
+        const base = envelope.cpu_cores_samples[0];
+        // Staggered scrapes: earlier timestamps have both containers (ok totals);
+        // latest timestamp is missing sidecar → projected partial history point.
+        envelope.cpu_cores_samples = [
+          {
+            ...base,
+            container_name: "agent",
+            sample_time: "2026-09-12T11:58:00+00:00",
+            interval_start: "2026-09-12T11:58:00+00:00",
+            interval_end: "2026-09-12T11:58:00+00:00",
+            value: "0.20",
+            quality: "ok",
+          },
+          {
+            ...base,
+            container_name: "sidecar",
+            sample_time: "2026-09-12T11:58:00+00:00",
+            interval_start: "2026-09-12T11:58:00+00:00",
+            interval_end: "2026-09-12T11:58:00+00:00",
+            value: "0.10",
+            quality: "ok",
+          },
+          {
+            ...base,
+            container_name: "agent",
+            sample_time: "2026-09-12T11:59:00+00:00",
+            interval_start: "2026-09-12T11:59:00+00:00",
+            interval_end: "2026-09-12T11:59:00+00:00",
+            value: "0.25",
+            quality: "ok",
+          },
+          {
+            ...base,
+            container_name: "sidecar",
+            sample_time: "2026-09-12T11:59:00+00:00",
+            interval_start: "2026-09-12T11:59:00+00:00",
+            interval_end: "2026-09-12T11:59:00+00:00",
+            value: "0.15",
+            quality: "ok",
+          },
+          {
+            ...base,
+            container_name: "agent",
+            sample_time: "2026-09-12T12:00:00+00:00",
+            interval_start: "2026-09-12T12:00:00+00:00",
+            interval_end: "2026-09-12T12:00:00+00:00",
+            value: "0.25",
+            quality: "ok",
+          },
+        ];
+      }
     }
     const parsed = parseTelemetryPresentation(raw);
     if (!parsed) {
       return null;
     }
     return projectWorkspaceTelemetryView(parsed, { nowMs });
-  }, [capabilitiesAbsent, fixtureName, unknownLimits, admittedPartial, nowMs]);
+  }, [
+    capabilitiesAbsent,
+    fixtureName,
+    unknownLimits,
+    admittedPartial,
+    incompleteSeries,
+    nowMs,
+  ]);
 
   const onViewChange = useCallback((view: TelemetryViewWindow) => {
     setSelectedView(view);

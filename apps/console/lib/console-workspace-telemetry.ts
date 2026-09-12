@@ -422,21 +422,63 @@ export function downsampleSeriesForSparkline<T>(
   return out;
 }
 
+export type SparklinePath = {
+  d: string;
+  quality: TelemetryQuality;
+};
+
+export type SparklineMarker = {
+  x: number;
+  y: number;
+  quality: TelemetryQuality;
+};
+
 export type SparklineGeometry = {
   w: number;
   h: number;
-  /** Stroked polyline for 2+ samples; null when only a marker is drawn. */
-  pathD: string | null;
-  /** Centered marker for a single sample (a lone `M` would stroke nothing). */
-  marker: { x: number; y: number } | null;
+  /** Contiguous same-quality runs with 2+ samples (gaps between quality changes). */
+  paths: SparklinePath[];
+  /** Single-sample runs (including a lone series point). */
+  markers: SparklineMarker[];
+  /** Worst non-ok quality present, or null when every point is ok. */
+  qualification: "partial" | "stale" | null;
 };
+
+type SparklineInputPoint = {
+  value: number;
+  quality?: TelemetryQuality;
+};
+
+function sparklinePointQuality(point: SparklineInputPoint): TelemetryQuality {
+  return point.quality ?? "ok";
+}
+
+function worstSparklineQualification(
+  qualities: readonly TelemetryQuality[],
+): "partial" | "stale" | null {
+  let worst: "partial" | "stale" | null = null;
+  for (const quality of qualities) {
+    if (quality === "stale") {
+      return "stale";
+    }
+    if (quality === "partial") {
+      worst = "partial";
+    }
+  }
+  return worst;
+}
+
+function pathDFromCoords(coords: readonly string[]): string {
+  return `M ${coords.join(" L ")}`;
+}
 
 /**
  * Map a sorted value series into SVG sparkline geometry.
- * One sample → marker only; two or more → stroked path.
+ * Contiguous same-quality runs stay connected; quality transitions leave gaps.
+ * One-sample runs become markers. Non-ok history is never a single unqualified path.
  */
 export function buildSparklineGeometry(
-  points: readonly { value: number }[],
+  points: readonly SparklineInputPoint[],
   width = 120,
   height = 28,
 ): SparklineGeometry | null {
@@ -444,14 +486,19 @@ export function buildSparklineGeometry(
     return null;
   }
   const series = downsampleSeriesForSparkline(points);
+  const qualities = series.map(sparklinePointQuality);
+  const qualification = worstSparklineQualification(qualities);
+
   if (series.length === 1) {
     return {
       w: width,
       h: height,
-      pathD: null,
-      marker: { x: width / 2, y: height / 2 },
+      paths: [],
+      markers: [{ x: width / 2, y: height / 2, quality: qualities[0]! }],
+      qualification,
     };
   }
+
   let min = series[0]!.value;
   let max = series[0]!.value;
   for (let i = 1; i < series.length; i++) {
@@ -467,13 +514,36 @@ export function buildSparklineGeometry(
   const coords = series.map((p, i) => {
     const x = (i / (series.length - 1)) * width;
     const y = height - ((p.value - min) / span) * (height - 4) - 2;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+    return { x, y, text: `${x.toFixed(1)},${y.toFixed(1)}`, quality: qualities[i]! };
   });
+
+  const paths: SparklinePath[] = [];
+  const markers: SparklineMarker[] = [];
+  let runStart = 0;
+  for (let i = 1; i <= coords.length; i++) {
+    const endRun = i === coords.length || coords[i]!.quality !== coords[runStart]!.quality;
+    if (!endRun) {
+      continue;
+    }
+    const run = coords.slice(runStart, i);
+    const quality = run[0]!.quality;
+    if (run.length === 1) {
+      markers.push({ x: run[0]!.x, y: run[0]!.y, quality });
+    } else {
+      paths.push({
+        d: pathDFromCoords(run.map((c) => c.text)),
+        quality,
+      });
+    }
+    runStart = i;
+  }
+
   return {
     w: width,
     h: height,
-    pathD: `M ${coords.join(" L ")}`,
-    marker: null,
+    paths,
+    markers,
+    qualification,
   };
 }
 

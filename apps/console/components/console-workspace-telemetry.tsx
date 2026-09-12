@@ -154,7 +154,18 @@ function SeriesSparkline({
     <div
       className="rounded-[var(--radius-control)] border border-line bg-surface px-2 py-1"
       data-testid={`telemetry-series-${label}`}
+      data-sparkline-qualification={geom.qualification ?? "ok"}
     >
+      {geom.qualification ? (
+        <div className="mb-0.5 flex items-center justify-end">
+          <span
+            className="text-[10px] font-medium text-attention-text"
+            data-testid={`telemetry-series-${label}-qualify`}
+          >
+            {geom.qualification}
+          </span>
+        </div>
+      ) : null}
       <svg
         width="100%"
         height={geom.h}
@@ -163,18 +174,49 @@ function SeriesSparkline({
         aria-hidden
         className="block"
       >
-        {geom.pathD ? (
-          <path d={geom.pathD} fill="none" stroke="var(--info)" strokeWidth="1.5" />
-        ) : null}
-        {geom.marker ? (
-          <circle
-            cx={geom.marker.x}
-            cy={geom.marker.y}
-            r={2.5}
-            fill="var(--info)"
-            data-testid={`telemetry-series-${label}-marker`}
-          />
-        ) : null}
+        {geom.paths.map((path, index) => {
+          const nonOk = path.quality !== "ok";
+          return (
+            <path
+              key={`${path.quality}-${index}`}
+              d={path.d}
+              fill="none"
+              stroke={nonOk ? "var(--attention)" : "var(--info)"}
+              strokeWidth="1.5"
+              strokeDasharray={nonOk ? "3 2" : undefined}
+              data-sparkline-path={path.quality}
+              data-testid={
+                index === 0
+                  ? `telemetry-series-${label}-path-${path.quality}`
+                  : `telemetry-series-${label}-path-${path.quality}-${index}`
+              }
+            />
+          );
+        })}
+        {geom.markers.map((marker, index) => {
+          const nonOk = marker.quality !== "ok";
+          const markerTestId =
+            marker.quality === "ok"
+              ? `telemetry-series-${label}-marker`
+              : `telemetry-series-${label}-marker-${marker.quality}`;
+          return (
+            <circle
+              key={`${marker.quality}-${index}`}
+              cx={marker.x}
+              cy={marker.y}
+              r={2.5}
+              fill={nonOk ? "var(--attention)" : "var(--info)"}
+              stroke={nonOk ? "var(--attention-text)" : undefined}
+              strokeWidth={nonOk ? 1 : undefined}
+              data-sparkline-marker={marker.quality}
+              data-testid={
+                index === 0 || marker.quality === "ok"
+                  ? markerTestId
+                  : `${markerTestId}-${index}`
+              }
+            />
+          );
+        })}
       </svg>
     </div>
   );

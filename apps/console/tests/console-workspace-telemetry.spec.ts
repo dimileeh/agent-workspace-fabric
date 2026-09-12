@@ -139,6 +139,18 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("lim");
   });
 
+  test("incomplete historical partitions qualify sparkline history", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await openHarness(page, { fixture: "success", incompleteSeries: "1" });
+
+    const cpu = page.getByTestId("telemetry-series-cpu");
+    await expect(cpu).toHaveAttribute("data-sparkline-qualification", "partial");
+    await expect(page.getByTestId("telemetry-series-cpu-qualify")).toHaveText("partial");
+    // Non-ok history must not be a single unqualified solid path.
+    await expect(page.getByTestId("telemetry-series-cpu-path-ok")).toBeVisible();
+    await expect(page.getByTestId("telemetry-series-cpu-marker-partial")).toBeVisible();
+  });
+
   test("unallocated cost is not fake zero", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, { fixture: "unallocated" });

@@ -671,13 +671,46 @@ test("buildSparklineGeometry draws a marker for one sample and a path for two+",
 
   const single = buildSparklineGeometry([{ value: 0.25 }]);
   assert.ok(single);
-  assert.equal(single.pathD, null);
-  assert.deepEqual(single.marker, { x: 60, y: 14 });
+  assert.equal(single.paths.length, 0);
+  assert.equal(single.qualification, null);
+  assert.deepEqual(single.markers, [{ x: 60, y: 14, quality: "ok" }]);
 
   const multi = buildSparklineGeometry([{ value: 1 }, { value: 3 }, { value: 2 }]);
   assert.ok(multi);
-  assert.equal(multi.marker, null);
-  assert.ok(multi.pathD);
-  assert.match(multi.pathD, /^M /);
-  assert.match(multi.pathD, / L /);
+  assert.equal(multi.markers.length, 0);
+  assert.equal(multi.qualification, null);
+  assert.equal(multi.paths.length, 1);
+  assert.equal(multi.paths[0].quality, "ok");
+  assert.match(multi.paths[0].d, /^M /);
+  assert.match(multi.paths[0].d, / L /);
+});
+
+test("buildSparklineGeometry gaps and qualifies non-ok historical points", () => {
+  const geom = buildSparklineGeometry([
+    { value: 1, quality: "ok" },
+    { value: 2, quality: "ok" },
+    { value: 3, quality: "partial" },
+    { value: 4, quality: "stale" },
+    { value: 5, quality: "ok" },
+    { value: 6, quality: "ok" },
+  ]);
+  assert.ok(geom);
+  // Two ok runs (2 pts each) + one partial marker + one stale marker — no cross-quality joins.
+  assert.equal(geom.paths.length, 2);
+  assert.ok(geom.paths.every((p) => p.quality === "ok"));
+  assert.deepEqual(
+    geom.markers.map((m) => m.quality),
+    ["partial", "stale"],
+  );
+  assert.equal(geom.qualification, "stale");
+
+  const partialOnly = buildSparklineGeometry([
+    { value: 1, quality: "partial" },
+    { value: 2, quality: "partial" },
+  ]);
+  assert.ok(partialOnly);
+  assert.equal(partialOnly.paths.length, 1);
+  assert.equal(partialOnly.paths[0].quality, "partial");
+  assert.equal(partialOnly.markers.length, 0);
+  assert.equal(partialOnly.qualification, "partial");
 });
