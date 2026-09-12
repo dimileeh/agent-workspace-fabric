@@ -50,6 +50,8 @@ ENV NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS=${NEXT_PUBLIC_AWF_CONSOLE_CONTEXT
 
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/next.config.ts ./next.config.ts
+# Required by next.config.ts pageExtensions resolver (harness outside production graph).
+COPY --from=build /app/console-test-harness-routes.ts ./console-test-harness-routes.ts
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
 
