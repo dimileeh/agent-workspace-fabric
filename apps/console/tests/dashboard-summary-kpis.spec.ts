@@ -158,7 +158,8 @@ for (const viewport of [
     await page.goto("/");
     await waitForConsoleReady(page);
 
-    // Unknown statuses preclude exact counts; visible lower bounds remain qualified, including zero.
+    // Unknown workflow statuses make every exact count unproven, so the fixture
+    // exposes only explicitly qualified lower bounds, including zero.
     await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1 confirmed");
     await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0 confirmed");
     await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1 confirmed");
