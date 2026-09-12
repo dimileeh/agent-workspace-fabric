@@ -12,6 +12,7 @@ import type {
 } from "@/lib/console-workspace-telemetry";
 import {
   buildSparklineGeometry,
+  formatCores,
   TELEMETRY_VIEWS,
 } from "@/lib/console-workspace-telemetry";
 
@@ -30,14 +31,6 @@ export type ConsoleWorkspaceTelemetryProps = {
   workspaceId?: string;
   modelLabel?: string;
 };
-
-function formatCores(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return "—";
-  }
-  const text = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
-  return `${text} cores`;
-}
 
 function formatWorkloadUsd(value: number): string {
   if (value >= 1) {

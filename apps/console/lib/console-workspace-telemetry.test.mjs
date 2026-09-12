@@ -11,6 +11,7 @@ import {
   MAX_TELEMETRY_SAMPLES,
   buildSparklineGeometry,
   downsampleSeriesForSparkline,
+  formatCores,
   parseTelemetryPresentation,
   projectWorkspaceTelemetryView,
 } from "./console-workspace-telemetry.ts";
@@ -937,4 +938,16 @@ test("buildSparklineGeometry caps SVG points when non-ok series exceeds max", ()
     countSparklineSvgPoints(altGeom) <= MAX_SPARKLINE_POINTS,
     "alternating non-ok series must not emit unbounded SVG markers",
   );
+});
+
+test("formatCores preserves sub-centicore readings as millicores", () => {
+  assert.equal(formatCores(0.004), "4 millicores");
+  assert.equal(formatCores(0.0045), "4.5 millicores");
+  assert.equal(formatCores(0.01), "0.01 cores");
+  assert.equal(formatCores(0.25), "0.25 cores");
+  assert.equal(formatCores(1), "1 cores");
+  assert.equal(formatCores(0), "0 cores");
+  assert.equal(formatCores(null), "—");
+  assert.equal(formatCores(undefined), "—");
+  assert.equal(formatCores(Number.NaN), "—");
 });

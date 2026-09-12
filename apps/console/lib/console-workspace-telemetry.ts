@@ -1189,3 +1189,23 @@ export function projectWorkspaceTelemetryView(
     exclusionNote: COST_EXCLUSION_NOTE,
   };
 }
+
+/**
+ * Format CPU cores for the resource meter.
+ * Sub-centicore samples (e.g. 0.004) must not collapse to "0 cores" via toFixed(2).
+ */
+export function formatCores(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  const abs = Math.abs(value);
+  if (abs > 0 && abs < 0.01) {
+    const millicores = value * 1000;
+    const text = Number.isInteger(millicores)
+      ? String(millicores)
+      : millicores.toFixed(2).replace(/\.?0+$/, "");
+    return `${text} millicores`;
+  }
+  const text = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
+  return `${text} cores`;
+}
