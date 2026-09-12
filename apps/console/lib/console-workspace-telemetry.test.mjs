@@ -540,6 +540,49 @@ test("distinct sub-millisecond sample_times stay separate partitions", () => {
   );
 });
 
+test("same sub-millisecond instant keeps identity across RFC3339 spellings", () => {
+  // Exact instant keys must equate Z / offset / trailing-zero forms of one
+  // sub-ms moment (agent-format style) while still not collapsing distinct
+  // fractions — otherwise pod totals stay split or inflate incorrectly.
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  multi.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00.000001Z",
+      interval_start: "2026-09-12T11:59:00.000001Z",
+      interval_end: "2026-09-12T12:00:00.000001Z",
+      value: "0.10",
+    },
+    {
+      ...base,
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:00.000001000+00:00",
+      interval_start: "2026-09-12T11:59:00.000001000+00:00",
+      interval_end: "2026-09-12T12:00:00.000001000+00:00",
+      value: "0.15",
+    },
+  ];
+  multi.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T13:00:00.000001+01:00",
+      interval_start: "2026-09-12T12:59:00.000001+01:00",
+      interval_end: "2026-09-12T13:00:00.000001+01:00",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, 0.25);
+  assert.equal(view.cpu.usedPartial, false);
+  assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
+  assert.equal(view.cpu.series.length, 1);
+  assert.equal(view.cpu.series[0].value, 0.25);
+  assert.equal(view.sampleTimeMixed, false);
+});
+
 test("sparkline series uses pod totals per timestamp, not raw per-container points", () => {
   const multi = structuredClone(SUCCESS);
   const base = SUCCESS.cpu_cores_samples[0];
