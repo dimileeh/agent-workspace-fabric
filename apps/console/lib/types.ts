@@ -39,6 +39,7 @@ export interface WorkspaceLifecycleStage {
   stage: string;
   started_at: string | null;
   ended_at: string | null;
+  ended_event_order?: number | null;
   duration_seconds: number | null;
   status: WorkspaceLifecycleStageStatus;
 }

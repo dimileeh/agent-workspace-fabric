@@ -26,6 +26,7 @@ class LifecycleStageSummary:
     stage: str
     started_at: datetime | None
     ended_at: datetime | None
+    ended_event_order: int | None
     duration_seconds: int | None
     status: LifecycleStageStatus
 
@@ -81,6 +82,7 @@ class LifecycleStagePayload(TypedDict):
     stage: str
     started_at: datetime | None
     ended_at: datetime | None
+    ended_event_order: int | None
     duration_seconds: int | None
     status: LifecycleStageStatus
 
@@ -144,3 +146,4 @@ class _RecoveryOperationLike(Protocol):
 class _LifecycleAccumulator:
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    ended_event_order: int | None = None

@@ -480,6 +480,10 @@ def workspace_lifecycle_summary(
                 old_accumulator.started_at = occurred_at
             if old_accumulator.ended_at is None:
                 old_accumulator.ended_at = occurred_at
+                raw_event_order = getattr(event, "event_order", None)
+                old_accumulator.ended_event_order = (
+                    raw_event_order if isinstance(raw_event_order, int) else None
+                )
         if new_status is not None and new_status in accumulators:
             new_accumulator = accumulators[new_status]
             if new_accumulator.started_at is None:
@@ -819,6 +823,7 @@ def lifecycle_payload(
             "stage": item.stage,
             "started_at": item.started_at,
             "ended_at": item.ended_at,
+            "ended_event_order": item.ended_event_order,
             "duration_seconds": item.duration_seconds,
             "status": item.status,
         }
@@ -1335,6 +1340,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=None,
             ended_at=None,
+            ended_event_order=None,
             duration_seconds=None,
             status="terminal_skipped",
         )
@@ -1343,6 +1349,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=None,
             ended_at=None,
+            ended_event_order=None,
             duration_seconds=None,
             status="pending",
         )
@@ -1351,6 +1358,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=accumulator.started_at,
             ended_at=accumulator.ended_at,
+            ended_event_order=accumulator.ended_event_order,
             duration_seconds=_duration_seconds(accumulator.started_at, accumulator.ended_at),
             status="completed",
         )
@@ -1359,6 +1367,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=accumulator.started_at,
             ended_at=None,
+            ended_event_order=None,
             duration_seconds=_duration_seconds(accumulator.started_at, now),
             status="active",
         )
@@ -1366,6 +1375,7 @@ def _stage_summary(
         stage=stage.value,
         started_at=accumulator.started_at,
         ended_at=None,
+        ended_event_order=None,
         duration_seconds=None,
         status="completed",
     )

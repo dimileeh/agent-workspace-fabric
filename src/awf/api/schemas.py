@@ -519,6 +519,7 @@ class WorkspaceLifecycleStageResponse(BaseModel):
     stage: str
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    ended_event_order: int | None = None
     duration_seconds: int | None = None
     status: WorkspaceLifecycleStageStatus
 

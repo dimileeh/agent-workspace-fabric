@@ -39,6 +39,7 @@ def _lifecycle_event(
     occurred_at: datetime,
     old_state: str | None = None,
     new_state: str | None = None,
+    event_order: int | None = None,
 ) -> object:
     return SimpleNamespace(
         event_type=event_type,
@@ -47,6 +48,7 @@ def _lifecycle_event(
         reason_code="TEST",
         payload=None,
         occurred_at=occurred_at,
+        event_order=event_order,
     )
 
 
@@ -441,6 +443,7 @@ def test_lifecycle_summary_marks_future_stages_terminal_skipped() -> None:
                 occurred_at=failed_at,
                 old_state=WorkspaceStatus.validating.value,
                 new_state=WorkspaceStatus.failed.value,
+                event_order=6,
             ),
         ],
     )
@@ -454,11 +457,63 @@ def test_lifecycle_summary_marks_future_stages_terminal_skipped() -> None:
     }
 
     assert stages["validating"].ended_at == failed_at
+    assert stages["validating"].ended_event_order == 6
     assert stages["validating"].duration_seconds == 15
     assert stages["validating"].status == "completed"
     assert stages["pushing"].status == "terminal_skipped"
     assert stages["monitoring_pr"].status == "terminal_skipped"
     assert stages["completed"].status == "terminal_skipped"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_retains_first_boundary_order_across_reentry() -> None:
+    base = datetime(2026, 4, 27, 13, 30, tzinfo=UTC)
+    terminal_at = base + timedelta(seconds=30)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.failed,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.running.value,
+                event_order=1,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=terminal_at,
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.blocked.value,
+                event_order=2,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=terminal_at,
+                old_state=WorkspaceStatus.blocked.value,
+                new_state=WorkspaceStatus.running.value,
+                event_order=3,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=terminal_at,
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.failed.value,
+                event_order=4,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=terminal_at,
+        )
+    }
+
+    assert stages["running"].ended_at == terminal_at
+    assert stages["running"].ended_event_order == 2
 
 
 @pytest.mark.unit
@@ -793,6 +848,7 @@ def test_observability_payloads_include_identity_lifecycle_and_usage() -> None:
         "stage": "requested",
         "started_at": base,
         "ended_at": None,
+        "ended_event_order": None,
         "duration_seconds": 12,
         "status": "active",
     }

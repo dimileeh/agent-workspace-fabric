@@ -10200,6 +10200,17 @@
             ],
             "title": "Ended At"
           },
+          "ended_event_order": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended Event Order"
+          },
           "stage": {
             "title": "Stage",
             "type": "string"
