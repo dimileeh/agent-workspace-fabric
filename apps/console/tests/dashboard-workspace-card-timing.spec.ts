@@ -149,8 +149,9 @@ test("hosted terminal cards use workflow finish and recorded duration for every 
   page,
 }) => {
   const terminals = (["completed", "failed", "cancelled", "destroyed"] as const).map(
-    (status, index) =>
-      overview(`ws_hosted_${status}`, status, {
+    (status, index) => {
+      const workspaceId = `ws_hosted_${status}`;
+      return overview(workspaceId, status, {
         started_at: "2026-09-06T12:00:00Z",
         workflow_finished_at: `2026-09-06T12:${20 + index}:00Z`,
         finished_at: null,
@@ -158,7 +159,30 @@ test("hosted terminal cards use workflow finish and recorded duration for every 
         native_runtime_finished_at: "2026-09-06T12:05:00Z",
         last_activity_at: "2026-09-06T12:40:00Z",
         updated_at: "2026-09-06T12:45:00Z",
-      }),
+        ...(status === "destroyed"
+          ? {
+              latest_workflow_terminal_state_change: stateChangedEvent(
+                workspaceId,
+                "monitoring_pr",
+                "completed",
+                `2026-09-06T12:${20 + index}:00Z`,
+              ),
+              latest_destroying_state_change: stateChangedEvent(
+                workspaceId,
+                "completed",
+                "destroying",
+                "2026-09-06T12:35:00Z",
+              ),
+              latest_state_change: stateChangedEvent(
+                workspaceId,
+                "destroying",
+                "destroyed",
+                "2026-09-06T12:36:00Z",
+              ),
+            }
+          : {}),
+      });
+    },
   );
   await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: terminals });
 
@@ -204,6 +228,24 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
     ],
   });
   const destroyed = overview("ws_local_destroyed", "destroyed", {
+    latest_workflow_terminal_state_change: stateChangedEvent(
+      "ws_local_destroyed",
+      "running",
+      "completed",
+      "2026-09-06T12:09:00Z",
+    ),
+    latest_destroying_state_change: stateChangedEvent(
+      "ws_local_destroyed",
+      "completed",
+      "destroying",
+      "2026-09-06T12:20:00Z",
+    ),
+    latest_state_change: stateChangedEvent(
+      "ws_local_destroyed",
+      "destroying",
+      "destroyed",
+      "2026-09-06T12:30:00Z",
+    ),
     lifecycle: [
       stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
       stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:09:00Z", 480),
@@ -233,7 +275,7 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
   }
 });
 
-test("destroying cards preserve terminal timing only after a workflow terminal boundary", async ({
+test("destroy cleanup cards preserve terminal timing only after a workflow terminal boundary", async ({
   page,
 }) => {
   const postTerminal = overview("ws_destroying_post_terminal", "destroying", {
@@ -286,8 +328,32 @@ test("destroying cards preserve terminal timing only after a workflow terminal b
       stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
     ],
   });
+  const destroyedDirectly = overview("ws_destroyed_direct", "destroyed", {
+    latest_state_change: stateChangedEvent(
+      "ws_destroyed_direct",
+      "destroying",
+      "destroyed",
+      "2026-09-06T12:04:00Z",
+    ),
+    latest_destroying_state_change: stateChangedEvent(
+      "ws_destroyed_direct",
+      "ready",
+      "destroying",
+      "2026-09-06T12:02:00Z",
+    ),
+    last_activity_at: "2026-09-06T12:04:00Z",
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
+    ],
+  });
   await mockAwfConsoleApi(page, {
-    overviewItems: [postTerminal, directDestroy, retriedDirectDestroy],
+    overviewItems: [
+      postTerminal,
+      directDestroy,
+      retriedDirectDestroy,
+      destroyedDirectly,
+    ],
   });
   await page.route(
     `**/api/awf/workspaces/${postTerminal.workspace_id}`,
@@ -328,6 +394,13 @@ test("destroying cards preserve terminal timing only after a workflow terminal b
   await expect(retriedDirectTiming).toContainText("Last activity");
   await expect(retriedDirectTiming).not.toContainText("Finished");
   await expect(retriedDirectTiming).not.toContainText("Duration");
+
+  const destroyedDirectTiming = page.getByTestId(
+    `workspace-timing-${destroyedDirectly.workspace_id}`,
+  );
+  await expect(destroyedDirectTiming).toContainText("Last activity");
+  await expect(destroyedDirectTiming).not.toContainText("Finished");
+  await expect(destroyedDirectTiming).not.toContainText("Duration");
 
   await terminalCard.click();
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();
@@ -580,6 +653,24 @@ test("terminal cards call missing or ambiguous timing not recorded while preserv
       summary: "Workflow retried.",
       payload: null,
     },
+    latest_workflow_terminal_state_change: stateChangedEvent(
+      "ws_timing_retry",
+      "running",
+      "failed",
+      "2026-09-06T12:08:00Z",
+    ),
+    latest_destroying_state_change: stateChangedEvent(
+      "ws_timing_retry",
+      "failed",
+      "destroying",
+      "2026-09-06T12:31:00Z",
+    ),
+    latest_state_change: stateChangedEvent(
+      "ws_timing_retry",
+      "destroying",
+      "destroyed",
+      "2026-09-06T12:32:00Z",
+    ),
     lifecycle: [
       stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
       stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),

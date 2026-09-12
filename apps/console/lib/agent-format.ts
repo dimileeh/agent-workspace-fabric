@@ -209,7 +209,6 @@ const TERMINAL_WORKFLOW_STATUSES = new Set<WorkspaceOverview["status"]>([
   "completed",
   "failed",
   "cancelled",
-  "destroyed",
 ]);
 
 type RetainedTerminalEvent = NonNullable<
@@ -256,28 +255,44 @@ function terminalEventMatchesWorkflowStatus(
 
 /**
  * True when workflow timing should be presented as terminal. Destroy cleanup
- * is post-terminal only when its latest state transition entered cleanup from
- * the retained workflow terminal transition. Retry history can retain an older
- * terminal event, so its presence alone does not prove the current attempt
- * finished before a direct destroy.
+ * is post-terminal only when its retained cleanup entry came from the retained
+ * workflow terminal transition and a destroyed workspace retains the matching
+ * cleanup exit. Retry history can retain an older terminal event, so its
+ * presence alone does not prove the current attempt finished before a direct
+ * destroy.
  */
 export function hasTerminalWorkflowTiming(
   item: Pick<
     WorkspaceOverview,
     | "status"
+    | "latest_destroying_state_change"
     | "latest_state_change"
     | "latest_workflow_terminal_state_change"
   >,
 ): boolean {
   const terminalTransition = item.latest_workflow_terminal_state_change;
   const cleanupTransition = item.latest_state_change;
+  const cleanupEntryTransition =
+    item.status === "destroyed"
+      ? item.latest_destroying_state_change
+      : cleanupTransition;
+  const cleanupExitMatchesStatus =
+    item.status === "destroying" ||
+    (item.status === "destroyed" &&
+      cleanupTransition?.event_type === "workspace.state_changed" &&
+      cleanupTransition.old_state === "destroying" &&
+      cleanupTransition.new_state === "destroyed");
   return (
     TERMINAL_WORKFLOW_STATUSES.has(item.status) ||
-    (item.status === "destroying" &&
+    ((item.status === "destroying" || item.status === "destroyed") &&
       terminalTransition?.event_type === "workspace.state_changed" &&
-      cleanupTransition?.event_type === "workspace.state_changed" &&
-      cleanupTransition.new_state === "destroying" &&
-      cleanupEntryMatchesRetainedTerminal(cleanupTransition, terminalTransition) &&
+      cleanupEntryTransition?.event_type === "workspace.state_changed" &&
+      cleanupEntryTransition.new_state === "destroying" &&
+      cleanupEntryMatchesRetainedTerminal(
+        cleanupEntryTransition,
+        terminalTransition,
+      ) &&
+      cleanupExitMatchesStatus &&
       terminalTransition.new_state !== "destroyed" &&
       TERMINAL_WORKFLOW_STATUSES.has(
         terminalTransition.new_state as WorkspaceOverview["status"],

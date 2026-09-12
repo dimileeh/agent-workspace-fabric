@@ -145,7 +145,7 @@ test("workspace summary uses resolved workflow timing", () => {
 
   assert.match(
     summarySource,
-    /resolveWorkflowTiming\(workflowTimingInput\)/,
+    /resolveWorkflowTiming\(overview\)/,
     "Expected WorkspaceSummary to share the card workflow timing resolver",
   );
   assert.match(summarySource, /workflowFinishedAt = workflowTiming\.finishedAt/);
