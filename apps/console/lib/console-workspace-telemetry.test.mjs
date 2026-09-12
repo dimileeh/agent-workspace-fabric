@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   COST_EXCLUSION_NOTE,
   MAX_SPARKLINE_POINTS,
+  MAX_STALE_AFTER_SECONDS,
   MAX_TELEMETRY_SAMPLES,
   buildSparklineGeometry,
   downsampleSeriesForSparkline,
@@ -161,6 +162,30 @@ test("partial fixture keeps missing memory used and partial cost without fabrica
   assert.equal(view.estimate.estimatedUsd, 0.004);
   assert.equal(view.estimate.unpricedIntervalSeconds, 600);
   assert.equal(view.estimate.pricedIntervalSeconds, 1800);
+});
+
+test("parseTelemetryPresentation rejects stale_after_seconds that overflow thresholdMs", () => {
+  // Number.MAX_VALUE is finite and integer-ish, but * 1000 => Infinity and
+  // would make age-based freshness always false.
+  const maxValue = structuredClone(SUCCESS);
+  maxValue.stale_after_seconds = Number.MAX_VALUE;
+  assert.equal(parseTelemetryPresentation(maxValue), null);
+
+  const aboveCap = structuredClone(SUCCESS);
+  aboveCap.stale_after_seconds = MAX_STALE_AFTER_SECONDS + 1;
+  assert.equal(parseTelemetryPresentation(aboveCap), null);
+
+  const atCap = structuredClone(SUCCESS);
+  atCap.stale_after_seconds = MAX_STALE_AFTER_SECONDS;
+  assert.ok(parseTelemetryPresentation(atCap));
+
+  const negative = structuredClone(SUCCESS);
+  negative.stale_after_seconds = -1;
+  assert.equal(parseTelemetryPresentation(negative), null);
+
+  const fractional = structuredClone(SUCCESS);
+  fractional.stale_after_seconds = 300.5;
+  assert.equal(parseTelemetryPresentation(fractional), null);
 });
 
 test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings", () => {

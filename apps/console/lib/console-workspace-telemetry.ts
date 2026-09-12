@@ -40,6 +40,13 @@ const MAX_BYTES_MAGNITUDE = Number.MAX_SAFE_INTEGER;
 export const MAX_TELEMETRY_SAMPLES = 2048;
 /** Max SVG points drawn for a telemetry sparkline after downsampling. */
 export const MAX_SPARKLINE_POINTS = 64;
+/**
+ * Cap stale_after_seconds so thresholdMs = seconds * 1000 stays a safe
+ * finite integer. Larger finite values (e.g. Number.MAX_VALUE) overflow to
+ * Infinity on multiply and make age checks always false, so arbitrarily old
+ * telemetry would appear fresh.
+ */
+export const MAX_STALE_AFTER_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
 
 const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
@@ -669,9 +676,7 @@ export function parseTelemetryPresentation(
     return null;
   }
   if (
-    typeof payload.stale_after_seconds !== "number" ||
-    !Number.isFinite(payload.stale_after_seconds) ||
-    payload.stale_after_seconds < 0 ||
+    !isNonNegativeFiniteNumber(payload.stale_after_seconds, MAX_STALE_AFTER_SECONDS) ||
     !Number.isInteger(payload.stale_after_seconds)
   ) {
     return null;
