@@ -41,6 +41,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const requestError = searchParams.get("error");
   const lastGoodAt = searchParams.get("lastGood");
   const unknownLimits = searchParams.get("unknownLimits") === "1";
+  const admittedPartial = searchParams.get("admittedPartial") === "1";
   const nowMsParam = searchParams.get("nowMs");
   const nowMs = nowMsParam ? Number(nowMsParam) : Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -53,16 +54,27 @@ export function ConsoleWorkspaceTelemetryHarness() {
       return null;
     }
     let raw = structuredClone(FIXTURES[fixtureName] ?? FIXTURES.success);
-    if (unknownLimits && raw && typeof raw === "object" && raw !== null) {
+    if (
+      (unknownLimits || admittedPartial) &&
+      raw &&
+      typeof raw === "object" &&
+      raw !== null
+    ) {
       const envelope = raw as {
         admitted?: {
           cpu_limit_cores?: string | null;
           memory_limit_bytes?: number | null;
+          partial?: boolean;
         } | null;
       };
       if (envelope.admitted) {
-        envelope.admitted.cpu_limit_cores = null;
-        envelope.admitted.memory_limit_bytes = null;
+        if (unknownLimits) {
+          envelope.admitted.cpu_limit_cores = null;
+          envelope.admitted.memory_limit_bytes = null;
+        }
+        if (admittedPartial) {
+          envelope.admitted.partial = true;
+        }
       }
     }
     const parsed = parseTelemetryPresentation(raw);
@@ -70,7 +82,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
       return null;
     }
     return projectWorkspaceTelemetryView(parsed, { nowMs });
-  }, [capabilitiesAbsent, fixtureName, unknownLimits, nowMs]);
+  }, [capabilitiesAbsent, fixtureName, unknownLimits, admittedPartial, nowMs]);
 
   const onViewChange = useCallback((view: TelemetryViewWindow) => {
     setSelectedView(view);

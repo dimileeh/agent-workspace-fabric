@@ -326,7 +326,9 @@ export function ConsoleWorkspaceTelemetry({
                 viewModel.cpu.usedCores,
                 admitted?.cpuLimitCores ?? null,
               )}
-              partial={viewModel.cpu.usedPartial}
+              partial={
+                viewModel.cpu.usedPartial || Boolean(admitted?.partial)
+              }
             />
             <ResourceMeter
               label="Memory"
@@ -342,7 +344,9 @@ export function ConsoleWorkspaceTelemetry({
                 viewModel.memory.usedBytes,
                 admitted?.memoryLimitBytes ?? null,
               )}
-              partial={viewModel.memory.usedPartial}
+              partial={
+                viewModel.memory.usedPartial || Boolean(admitted?.partial)
+              }
             />
           </div>
         )}

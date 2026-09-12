@@ -125,6 +125,20 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByTestId("telemetry-workload-cost-value")).toContainText("partial");
   });
 
+  test("admitted.partial surfaces on resource meters when usage samples are ok", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    // Success fixture has ok usage samples; force allocation incompleteness only.
+    await openHarness(page, { fixture: "success", admittedPartial: "1" });
+
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("partial");
+    await expect(page.getByTestId("telemetry-meter-memory")).toContainText("partial");
+    // Req/lim remain visible but are qualified by the allocation-partial badge.
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("req");
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("lim");
+  });
+
   test("unallocated cost is not fake zero", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, { fixture: "unallocated" });
