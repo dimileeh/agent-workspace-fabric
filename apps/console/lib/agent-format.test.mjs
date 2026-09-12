@@ -1892,39 +1892,134 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
       `a resumed running -> ${terminalStatus} transition must use the retained finish`,
     );
+    for (const [cleanupStatus, cleanupEvent] of [
+      [
+        "destroying",
+        stateChanged(terminalStatus, "destroying", "2026-09-06T12:20:00Z"),
+      ],
+      [
+        "destroyed",
+        stateChanged("destroying", "destroyed", "2026-09-06T12:30:00Z"),
+      ],
+    ]) {
+      assert.deepEqual(
+        resolveWorkflowTiming({
+          ...item,
+          status: cleanupStatus,
+          latest_state_change: cleanupEvent,
+          latest_workflow_terminal_state_change: terminalEvent,
+          last_event: cleanupEvent,
+        }),
+        { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+        `a ${cleanupStatus} cleanup must retain the resumed ${terminalStatus} finish`,
+      );
+    }
   }
   const postPrTerminalEvent = {
     ...stateChanged("monitoring_pr", "completed", "2026-09-06T12:10:00Z"),
     id: "event_resumed_post_pr_completed",
   };
+  const postPrLifecycle = [
+    item.lifecycle[0],
+    item.lifecycle[1],
+    {
+      stage: "monitoring_pr",
+      started_at: "2026-09-06T12:05:00Z",
+      ended_at: "2026-09-06T12:06:00Z",
+      duration_seconds: 60,
+      status: "completed",
+    },
+    {
+      stage: "completed",
+      started_at: "2026-09-06T12:10:00Z",
+      ended_at: "2026-09-06T12:10:00Z",
+      duration_seconds: 0,
+      status: "completed",
+    },
+  ];
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
       status: "completed",
-      lifecycle: [
-        item.lifecycle[0],
-        item.lifecycle[1],
-        {
-          stage: "monitoring_pr",
-          started_at: "2026-09-06T12:05:00Z",
-          ended_at: "2026-09-06T12:06:00Z",
-          duration_seconds: 60,
-          status: "completed",
-        },
-        {
-          stage: "completed",
-          started_at: "2026-09-06T12:10:00Z",
-          ended_at: "2026-09-06T12:10:00Z",
-          duration_seconds: 0,
-          status: "completed",
-        },
-      ],
+      lifecycle: postPrLifecycle,
       latest_state_change: postPrTerminalEvent,
       latest_workflow_terminal_state_change: postPrTerminalEvent,
       last_event: postPrTerminalEvent,
     }),
     { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
     "a resumed post-PR pause must use the retained completion finish",
+  );
+  for (const [cleanupStatus, cleanupEvent] of [
+    [
+      "destroying",
+      stateChanged("completed", "destroying", "2026-09-06T12:20:00Z"),
+    ],
+    [
+      "destroyed",
+      stateChanged("destroying", "destroyed", "2026-09-06T12:30:00Z"),
+    ],
+  ]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        status: cleanupStatus,
+        lifecycle: postPrLifecycle,
+        latest_state_change: cleanupEvent,
+        latest_workflow_terminal_state_change: postPrTerminalEvent,
+        last_event: cleanupEvent,
+      }),
+      { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+      `a ${cleanupStatus} cleanup must retain the resumed post-PR finish`,
+    );
+  }
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      latest_state_change: stateChanged(
+        "destroying",
+        "destroyed",
+        "2026-09-06T12:09:00Z",
+      ),
+      latest_workflow_terminal_state_change: {
+        ...stateChanged("running", "failed", "2026-09-06T12:10:00Z"),
+        id: "event_resumed_after_cleanup",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an earlier cleanup transition must not corroborate a later retained finish",
+  );
+  const tiedTerminalEvent = {
+    ...stateChanged("running", "failed", "2026-09-06T12:10:00Z"),
+    id: "event_resumed_before_tied_cleanup",
+    event_order: 40,
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      latest_state_change: {
+        ...stateChanged("destroying", "destroyed", "2026-09-06T12:10:00Z"),
+        event_order: 41,
+      },
+      latest_workflow_terminal_state_change: tiedTerminalEvent,
+    }),
+    { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+    "event order must corroborate cleanup recorded at the terminal timestamp",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      latest_state_change: stateChanged(
+        "destroying",
+        "destroyed",
+        "2026-09-06T12:10:00Z",
+      ),
+      latest_workflow_terminal_state_change: tiedTerminalEvent,
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "a tied cleanup without event order must not corroborate the retained finish",
   );
   assert.deepEqual(
     resolveWorkflowTiming({
