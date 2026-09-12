@@ -890,6 +890,8 @@ function buildPodTotalSeries(
 function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   used: number | null;
   usedPartial: boolean;
+  /** True when the displayed (latest) partition includes a producer-stale sample. */
+  usedStale: boolean;
   containerNames: string[] | null;
   sampleTime: string | null;
   series: WorkspaceTelemetrySeriesPoint[];
@@ -899,6 +901,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
     return {
       used: null,
       usedPartial: false,
+      usedStale: false,
       containerNames: null,
       sampleTime: null,
       series,
@@ -909,6 +912,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
     return {
       used: null,
       usedPartial: false,
+      usedStale: false,
       containerNames: null,
       sampleTime: null,
       series,
@@ -916,6 +920,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   }
   const atLatest = samples.filter((s) => s.sampleTime === sampleTime);
   let usedPartial = false;
+  let usedStale = false;
   let incompletePartition = false;
   const containerNames: string[] = [];
   for (const sample of atLatest) {
@@ -924,6 +929,9 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
     // (partial, stale) as incomplete rather than appearing complete.
     if (sample.quality !== "ok") {
       usedPartial = true;
+      if (sample.quality === "stale") {
+        usedStale = true;
+      }
     }
     containerNames.push(sample.containerName);
   }
@@ -949,6 +957,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   return {
     used: incompletePartition || used === null ? null : used,
     usedPartial,
+    usedStale,
     containerNames,
     sampleTime,
     series,
@@ -987,17 +996,22 @@ function isTimestampOlderThanStaleThreshold(
 }
 
 /**
- * Stale when producer marks state/quality stale, or when the envelope,
- * admitted allocation snapshot, or any meter sample time used for displayed
- * CPU/memory values exceeds the threshold. Fresh envelopes/meters must not
- * mask aged allocation requests/limits or aged resource samples.
+ * Stale when producer marks state/quality stale, when a displayed CPU/memory
+ * aggregate includes a stale sample, or when the envelope, admitted allocation
+ * snapshot, or any meter sample time used for displayed CPU/memory values
+ * exceeds the threshold. Fresh envelopes/meters must not mask aged allocation
+ * requests/limits, aged resource samples, or producer-stale current readings.
  */
 function computeIsStale(
   presentation: ParsedTelemetryPresentation,
   nowMs: number,
   meterSampleTimes: Array<string | null>,
+  meterHasStaleSample: boolean,
 ): boolean {
   if (presentation.state === "stale" || presentation.quality === "stale") {
+    return true;
+  }
+  if (meterHasStaleSample) {
     return true;
   }
   const staleAfter = presentation.staleAfterSeconds;
@@ -1066,7 +1080,12 @@ export function projectWorkspaceTelemetryView(
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: presentation.observedAt,
     sampleTime,
-    isStale: computeIsStale(presentation, nowMs, meterSampleTimes),
+    isStale: computeIsStale(
+      presentation,
+      nowMs,
+      meterSampleTimes,
+      cpuAgg.usedStale || memAgg.usedStale,
+    ),
     admitted:
       presentation.admitted === null
         ? null

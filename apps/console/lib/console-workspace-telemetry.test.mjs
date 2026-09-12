@@ -134,6 +134,38 @@ test("parseTelemetryPresentation rejects unknown sample quality rather than trea
   );
 });
 
+test("stale current meter sample quality marks live view stale even when timestamps are fresh", () => {
+  // Envelope/admitted/sample times are within stale_after; only sample quality is stale.
+  const staleCpu = structuredClone(SUCCESS);
+  staleCpu.cpu_cores_samples[0].quality = "stale";
+  const cpuParsed = parseTelemetryPresentation(staleCpu);
+  assert.ok(cpuParsed);
+  const cpuView = projectWorkspaceTelemetryView(cpuParsed, { nowMs: FIXED_NOW });
+  assert.equal(cpuView.state, "success");
+  assert.equal(cpuView.quality, "ok");
+  assert.equal(cpuView.cpu.usedPartial, true);
+  assert.equal(cpuView.isStale, true);
+
+  const staleMem = structuredClone(SUCCESS);
+  staleMem.memory_bytes_samples[0].quality = "stale";
+  const memParsed = parseTelemetryPresentation(staleMem);
+  assert.ok(memParsed);
+  const memView = projectWorkspaceTelemetryView(memParsed, { nowMs: FIXED_NOW });
+  assert.equal(memView.memory.usedPartial, true);
+  assert.equal(memView.isStale, true);
+
+  // Partial sample quality downgrades the meter but is not live-stale by itself.
+  const partialCpu = structuredClone(SUCCESS);
+  partialCpu.cpu_cores_samples[0].quality = "partial";
+  const partialParsed = parseTelemetryPresentation(partialCpu);
+  assert.ok(partialParsed);
+  const partialView = projectWorkspaceTelemetryView(partialParsed, {
+    nowMs: FIXED_NOW,
+  });
+  assert.equal(partialView.cpu.usedPartial, true);
+  assert.equal(partialView.isStale, false);
+});
+
 test("unallocated fixture preserves null admitted/cost and does not coerce to zero/free", () => {
   const parsed = parseTelemetryPresentation(UNALLOCATED);
   assert.ok(parsed);
