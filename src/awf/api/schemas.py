@@ -1160,6 +1160,8 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     last_event: WorkspaceEventResponse | None
     # Latest state transition, even when a newer cleanup/audit event is last.
     latest_state_change: WorkspaceEventResponse | None = None
+    # Latest transition into destroying, retained after cleanup reaches destroyed.
+    latest_destroying_state_change: WorkspaceEventResponse | None = None
     # Latest transition into a workflow-terminal state, retained across the
     # later destroying/destroyed cleanup sequence.
     latest_workflow_terminal_state_change: WorkspaceEventResponse | None = None

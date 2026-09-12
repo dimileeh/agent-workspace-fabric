@@ -216,6 +216,8 @@ type RetainedTerminalEvent = NonNullable<
   WorkspaceOverview["latest_workflow_terminal_state_change"]
 >;
 
+type RetainedStateChangeEvent = NonNullable<WorkspaceOverview["latest_state_change"]>;
+
 function terminalEventMatchesWorkflowStatus(
   item: WorkspaceOverview,
   terminalEvent: RetainedTerminalEvent,
@@ -368,6 +370,26 @@ function recordedMilliseconds(value: string | null | undefined): number | null {
   return Number.isFinite(milliseconds) ? milliseconds : null;
 }
 
+function eventStrictlyFollows(
+  later: RetainedStateChangeEvent,
+  earlier: RetainedStateChangeEvent,
+): boolean {
+  const recordedOrder = compareRecordedInstants(later.occurred_at, earlier.occurred_at);
+  if (recordedOrder == null || recordedOrder === -1) {
+    return false;
+  }
+  const laterEventOrder = later.event_order;
+  const earlierEventOrder = earlier.event_order;
+  const hasEventOrderProof =
+    typeof laterEventOrder === "number" &&
+    Number.isSafeInteger(laterEventOrder) &&
+    typeof earlierEventOrder === "number" &&
+    Number.isSafeInteger(earlierEventOrder);
+  return hasEventOrderProof
+    ? laterEventOrder > earlierEventOrder
+    : recordedOrder === 1;
+}
+
 function retainedTerminalEventTiming(item: WorkspaceOverview): {
   finishedAt: string;
   finishedMs: number;
@@ -393,35 +415,29 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
         )
       : null;
   const latestStateChange = item.latest_state_change;
-  const cleanupOrder =
-    latestStateChange != null && terminalEvent != null
-      ? compareRecordedInstants(
-          latestStateChange.occurred_at,
-          terminalEvent.occurred_at,
-        )
-      : null;
-  const cleanupEventOrder = latestStateChange?.event_order;
+  const destroyingStateChange =
+    item.status === "destroying"
+      ? latestStateChange
+      : item.status === "destroyed"
+        ? item.latest_destroying_state_change
+        : null;
   const terminalEventOrder = terminalEvent?.event_order;
-  const hasCleanupEventOrderProof =
-    typeof cleanupEventOrder === "number" &&
-    Number.isSafeInteger(cleanupEventOrder) &&
-    typeof terminalEventOrder === "number" &&
-    Number.isSafeInteger(terminalEventOrder);
-  const cleanupFollowsTerminalEvent =
-    cleanupOrder != null &&
-    cleanupOrder !== -1 &&
-    (hasCleanupEventOrderProof
-      ? cleanupEventOrder > terminalEventOrder
-      : cleanupOrder === 1);
+  const cleanupEnteredFromTerminal =
+    terminalEvent != null &&
+    destroyingStateChange?.event_type === "workspace.state_changed" &&
+    destroyingStateChange.old_state === terminalEvent.new_state &&
+    destroyingStateChange.new_state === "destroying" &&
+    eventStrictlyFollows(destroyingStateChange, terminalEvent);
   const subsequentCleanupCorroboratesTerminal =
     terminalEvent != null &&
+    cleanupEnteredFromTerminal &&
     latestStateChange?.event_type === "workspace.state_changed" &&
     latestStateChange.new_state === item.status &&
-    ((latestStateChange.old_state === terminalEvent.new_state &&
-      latestStateChange.new_state === "destroying") ||
-      (latestStateChange.old_state === "destroying" &&
-        latestStateChange.new_state === "destroyed")) &&
-    cleanupFollowsTerminalEvent;
+    (item.status === "destroying" ||
+      (item.status === "destroyed" &&
+        destroyingStateChange != null &&
+        latestStateChange.old_state === "destroying" &&
+        eventStrictlyFollows(latestStateChange, destroyingStateChange)));
   const isRetainedResumeExit =
     recoveryStartedAt == null &&
     terminalEvent != null &&
@@ -445,7 +461,7 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   // terminal exit from either pause is authoritative without that boundary.
   // After a pause resumes, the lifecycle retains the first interval for the
   // re-entered stage. The matching current state transition, or a subsequent
-  // cleanup transition that follows it, can prove the later finish, but not a
+  // cleanup chain that entered from it, can prove the later finish, but not a
   // duration that spans the omitted pause.
   if (
     (recoveryStartedAt == null &&

@@ -743,6 +743,9 @@ class TestWorkspaceDirectRoutes:
         assert item.latest_state_change is not None
         assert item.latest_state_change.old_state == WorkspaceStatus.destroying.value
         assert item.latest_state_change.new_state == WorkspaceStatus.destroyed.value
+        assert item.latest_destroying_state_change is not None
+        assert item.latest_destroying_state_change.old_state == WorkspaceStatus.failed.value
+        assert item.latest_destroying_state_change.new_state == WorkspaceStatus.destroying.value
         assert item.latest_workflow_terminal_state_change is not None
         assert item.latest_workflow_terminal_state_change.old_state == WorkspaceStatus.running.value
         assert item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.failed.value
