@@ -347,12 +347,33 @@ test("destroy cleanup cards preserve terminal timing only after a workflow termi
       stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
     ],
   });
+  const cleanupFailedDirectly = overview("ws_cleanup_failed_direct", "failed", {
+    latest_state_change: stateChangedEvent(
+      "ws_cleanup_failed_direct",
+      "destroying",
+      "failed",
+      "2026-09-06T12:04:00Z",
+    ),
+    latest_destroying_state_change: stateChangedEvent(
+      "ws_cleanup_failed_direct",
+      "ready",
+      "destroying",
+      "2026-09-06T12:02:00Z",
+    ),
+    latest_workflow_terminal_state_change: null,
+    last_activity_at: "2026-09-06T12:04:00Z",
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
+    ],
+  });
   await mockAwfConsoleApi(page, {
     overviewItems: [
       postTerminal,
       directDestroy,
       retriedDirectDestroy,
       destroyedDirectly,
+      cleanupFailedDirectly,
     ],
   });
   await page.route(
@@ -401,6 +422,13 @@ test("destroy cleanup cards preserve terminal timing only after a workflow termi
   await expect(destroyedDirectTiming).toContainText("Last activity");
   await expect(destroyedDirectTiming).not.toContainText("Finished");
   await expect(destroyedDirectTiming).not.toContainText("Duration");
+
+  const cleanupFailedDirectTiming = page.getByTestId(
+    `workspace-timing-${cleanupFailedDirectly.workspace_id}`,
+  );
+  await expect(cleanupFailedDirectTiming).toContainText("Last activity");
+  await expect(cleanupFailedDirectTiming).not.toContainText("Finished");
+  await expect(cleanupFailedDirectTiming).not.toContainText("Duration");
 
   await terminalCard.click();
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();

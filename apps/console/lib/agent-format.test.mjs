@@ -542,6 +542,52 @@ test("hasTerminalWorkflowTiming requires a workflow terminal cleanup chain for d
   );
 });
 
+test("hasTerminalWorkflowTiming requires a workflow terminal boundary before cleanup failure", async () => {
+  const { hasTerminalWorkflowTiming } = await import("./agent-format.ts");
+  const cleanupFailure = {
+    event_type: "workspace.state_changed",
+    old_state: "destroying",
+    new_state: "failed",
+    occurred_at: "2026-09-06T12:30:00Z",
+  };
+
+  assert.equal(
+    hasTerminalWorkflowTiming({
+      status: "failed",
+      latest_state_change: cleanupFailure,
+      latest_destroying_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "ready",
+        new_state: "destroying",
+        occurred_at: "2026-09-06T12:20:00Z",
+      },
+      latest_workflow_terminal_state_change: null,
+    }),
+    false,
+    "ready -> destroying -> failed has no workflow terminal boundary",
+  );
+  assert.equal(
+    hasTerminalWorkflowTiming({
+      status: "failed",
+      latest_state_change: cleanupFailure,
+      latest_destroying_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "ready",
+        new_state: "destroying",
+        occurred_at: "2026-09-06T12:20:00Z",
+      },
+      latest_workflow_terminal_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "running",
+        new_state: "failed",
+        occurred_at: "2026-09-06T12:08:00Z",
+      },
+    }),
+    false,
+    "a direct cleanup failure must not reuse an older workflow terminal transition",
+  );
+});
+
 test("resolveWorkflowTiming preserves explicit duration without a terminal finish", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const item = {
