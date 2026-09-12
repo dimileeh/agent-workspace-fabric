@@ -446,7 +446,12 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     return null;
   }
   const entered: TimedLifecycleStage[] = [];
+  const seenStages = new Set<string>();
   for (const stage of item.lifecycle) {
+    if (seenStages.has(stage.stage)) {
+      return null;
+    }
+    seenStages.add(stage.stage);
     const startedMs = recordedMilliseconds(stage.started_at);
     const endedMs = recordedMilliseconds(stage.ended_at);
     if (
