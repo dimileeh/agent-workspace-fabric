@@ -819,3 +819,52 @@ test("buildSparklineGeometry keeps qualification when downsample would drop non-
     "non-ok sample must remain visible after quality-preserving downsample",
   );
 });
+
+test("buildSparklineGeometry preserves sample-grid x when non-ok eviction drops ok anchors", () => {
+  const n = MAX_SPARKLINE_POINTS * 2;
+  const last = n - 1;
+  const width = 120;
+  // Two localized partial clusters separated by ok samples. Non-ok count alone
+  // exceeds the SVG budget so quality-preserving downsample must drop ok grid
+  // anchors between the clusters.
+  const c1Start = 8;
+  const c1End = 40;
+  const c2Start = 88;
+  const c2End = 120;
+  const nonOkCount = c1End - c1Start + 1 + (c2End - c2Start + 1);
+  assert.ok(nonOkCount > MAX_SPARKLINE_POINTS, "non-ok must force ok eviction");
+
+  const points = Array.from({ length: n }, (_, i) => ({
+    value: 1,
+    quality: (i >= c1Start && i <= c1End) || (i >= c2Start && i <= c2End) ? "partial" : "ok",
+  }));
+
+  const geom = buildSparklineGeometry(points, width, 28);
+  assert.ok(geom);
+  assert.equal(geom.qualification, "partial");
+
+  const partialPaths = geom.paths.filter((p) => p.quality === "partial");
+  assert.equal(
+    partialPaths.length,
+    2,
+    "gapped non-ok clusters must stay separate paths after ok-anchor eviction",
+  );
+
+  function pathXs(d) {
+    return [...d.matchAll(/(\d+(?:\.\d+)?),/g)].map((m) => Number(m[1]));
+  }
+
+  const xs1 = pathXs(partialPaths[0].d);
+  const xs2 = pathXs(partialPaths[1].d);
+  assert.ok(xs1.length >= 2);
+  assert.ok(xs2.length >= 2);
+
+  const expected = (idx) => (idx / last) * width;
+  assert.ok(Math.min(...xs1) >= expected(c1Start) - 0.1);
+  assert.ok(Math.max(...xs1) <= expected(c1End) + 0.1);
+  assert.ok(Math.min(...xs2) >= expected(c2Start) - 0.1);
+  assert.ok(Math.max(...xs2) <= expected(c2End) + 0.1);
+  // Localized clusters must not stretch across the full sparkline width.
+  assert.ok(Math.max(...xs1) - Math.min(...xs1) < width * 0.4);
+  assert.ok(Math.min(...xs2) > Math.max(...xs1) + width * 0.2);
+});

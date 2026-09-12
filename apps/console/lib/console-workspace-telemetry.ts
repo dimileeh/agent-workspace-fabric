@@ -429,17 +429,32 @@ export function downsampleSeriesForSparkline<T>(
   return out;
 }
 
+type SparklineDownsamplePoint = {
+  value: number;
+  quality: TelemetryQuality;
+  /** Index in the pre-downsample series; anchors SVG x to the sample grid. */
+  originalIndex: number;
+};
+
 /**
  * Downsample sparkline samples for SVG while retaining every non-ok point.
  * Plain even sampling can drop partial/stale samples and erase quality gaps;
  * when non-ok + endpoints exceed maxPoints, those must-keep samples win.
+ * Returned points carry originalIndex so geometry can keep the time grid after
+ * ok anchors are evicted.
  */
 function downsampleSparklinePreservingQuality(
   points: readonly SparklineInputPoint[],
   maxPoints: number = MAX_SPARKLINE_POINTS,
-): SparklineInputPoint[] {
+): SparklineDownsamplePoint[] {
+  const asDownsamplePoint = (idx: number): SparklineDownsamplePoint => ({
+    value: points[idx]!.value,
+    quality: sparklinePointQuality(points[idx]!),
+    originalIndex: idx,
+  });
+
   if (points.length <= maxPoints) {
-    return points.slice();
+    return points.map((_, idx) => asDownsamplePoint(idx));
   }
 
   const last = points.length - 1;
@@ -472,7 +487,7 @@ function downsampleSparklinePreservingQuality(
     }
   }
 
-  return [...keep].sort((a, b) => a - b).map((idx) => points[idx]!);
+  return [...keep].sort((a, b) => a - b).map(asDownsamplePoint);
 }
 
 export type SparklinePath = {
@@ -530,6 +545,8 @@ function pathDFromCoords(coords: readonly string[]): string {
  * Contiguous same-quality runs stay connected; quality transitions leave gaps.
  * One-sample runs become markers. Non-ok history is never a single unqualified path.
  * Qualification uses the full series; SVG downsampling preserves non-ok samples.
+ * X uses each sample's original series index so ok-anchor eviction cannot warp
+ * the time grid or join previously gapped non-ok runs into one path.
  */
 export function buildSparklineGeometry(
   points: readonly SparklineInputPoint[],
@@ -541,14 +558,14 @@ export function buildSparklineGeometry(
   }
   const qualification = worstSparklineQualification(points.map(sparklinePointQuality));
   const series = downsampleSparklinePreservingQuality(points);
-  const qualities = series.map(sparklinePointQuality);
+  const lastOrig = points.length - 1;
 
   if (series.length === 1) {
     return {
       w: width,
       h: height,
       paths: [],
-      markers: [{ x: width / 2, y: height / 2, quality: qualities[0]! }],
+      markers: [{ x: width / 2, y: height / 2, quality: series[0]!.quality }],
       qualification,
     };
   }
@@ -565,18 +582,30 @@ export function buildSparklineGeometry(
     }
   }
   const span = max - min || 1;
-  const coords = series.map((p, i) => {
-    const x = (i / (series.length - 1)) * width;
+  const coords = series.map((p) => {
+    const x = (p.originalIndex / lastOrig) * width;
     const y = height - ((p.value - min) / span) * (height - 4) - 2;
-    return { x, y, text: `${x.toFixed(1)},${y.toFixed(1)}`, quality: qualities[i]! };
+    return {
+      x,
+      y,
+      text: `${x.toFixed(1)},${y.toFixed(1)}`,
+      quality: p.quality,
+      originalIndex: p.originalIndex,
+    };
   });
 
   const paths: SparklinePath[] = [];
   const markers: SparklineMarker[] = [];
   let runStart = 0;
   for (let i = 1; i <= coords.length; i++) {
-    const endRun = i === coords.length || coords[i]!.quality !== coords[runStart]!.quality;
-    if (!endRun) {
+    const qualityBreak = i === coords.length || coords[i]!.quality !== coords[runStart]!.quality;
+    // Non-ok samples are never thinned, so a gap in original indices means ok
+    // anchors were dropped between clusters — do not join those runs.
+    const nonOkIndexGap =
+      i < coords.length &&
+      coords[runStart]!.quality !== "ok" &&
+      coords[i]!.originalIndex !== coords[i - 1]!.originalIndex + 1;
+    if (!qualityBreak && !nonOkIndexGap) {
       continue;
     }
     const run = coords.slice(runStart, i);
