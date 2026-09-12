@@ -1758,7 +1758,7 @@
       },
       "ConsoleDashboardCountEvidenceResponse": {
         "additionalProperties": false,
-        "description": "Population coverage and confirmed lower bounds from the summary snapshot.\n\nKnown plus unknown equals total; every confirmed counter is at most the\nknown population and follows the v1 count relationships. At the summary\nlevel, every non-null exact counter equals its confirmed counterpart.",
+        "description": "Population coverage and confirmed lower bounds from the summary snapshot.\n\nKnown plus unknown equals total; every confirmed counter is at most the\nknown population and follows the v1 count relationships. At the summary\nlevel, every non-null exact counter equals its confirmed counterpart, and\nexact counters require every workspace workflow status to be known.",
         "properties": {
           "confirmed_counts": {
             "$ref": "#/components/schemas/ConsoleDashboardConfirmedCountsResponse"
