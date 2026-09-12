@@ -532,9 +532,24 @@ def test_recovery_summary_uses_failed_remonitor_reset_as_latest_boundary() -> No
             "to": WorkspaceStatus.monitoring_pr.value,
         },
     }
+    stale_operation_payload: dict[str, object] = {
+        "source": "pr_monitor",
+        "reason": "stale recovery from the previous monitor episode",
+        "requested_action": "rebase",
+        "recovery_mode": "rebase_only",
+    }
     workspace = _workspace_for_recovery(
         status=WorkspaceStatus.destroyed,
         created_at=base,
+        operations=[
+            _recovery_operation(
+                operation_id="op_old_recovery",
+                operation_type=OperationType.rebase.value,
+                status=OperationStatus.succeeded.value,
+                created_at=failed_at - timedelta(seconds=5),
+                payload=stale_operation_payload,
+            )
+        ],
         events=[
             _recovery_event(
                 event_id="evt_earlier_recovery",
@@ -573,6 +588,9 @@ def test_recovery_summary_uses_failed_remonitor_reset_as_latest_boundary() -> No
     assert summary.started_at == remonitor_at
     assert summary.started_event_order == 17
     assert summary.reason_code == "resume the PR monitor"
+    assert summary.action is None
+    assert summary.recovery_mode is None
+    assert summary.current_operation is None
     assert summary.payload == remonitor_payload
 
 
