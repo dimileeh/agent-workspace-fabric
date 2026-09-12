@@ -138,6 +138,8 @@ export type WorkspaceTelemetryView = {
   cpu: {
     usedCores: number | null;
     usedPartial: boolean;
+    /** True when the displayed CPU partition includes a producer-stale sample. */
+    usedStale: boolean;
     sampleTime: string | null;
     series: WorkspaceTelemetrySeriesPoint[];
     containerNamesAtSample: string[] | null;
@@ -145,6 +147,8 @@ export type WorkspaceTelemetryView = {
   memory: {
     usedBytes: number | null;
     usedPartial: boolean;
+    /** True when the displayed memory partition includes a producer-stale sample. */
+    usedStale: boolean;
     sampleTime: string | null;
     series: WorkspaceTelemetrySeriesPoint[];
     containerNamesAtSample: string[] | null;
@@ -1420,6 +1424,7 @@ export function projectWorkspaceTelemetryView(
     cpu: {
       usedCores: cpuAgg.used,
       usedPartial: cpuAgg.usedPartial,
+      usedStale: cpuAgg.usedStale,
       sampleTime: cpuAgg.sampleTime,
       series: cpuAgg.series,
       containerNamesAtSample: cpuAgg.containerNames,
@@ -1427,6 +1432,7 @@ export function projectWorkspaceTelemetryView(
     memory: {
       usedBytes: memAgg.used,
       usedPartial: memAgg.usedPartial,
+      usedStale: memAgg.usedStale,
       sampleTime: memAgg.sampleTime,
       series: memAgg.series,
       containerNamesAtSample: memAgg.containerNames,

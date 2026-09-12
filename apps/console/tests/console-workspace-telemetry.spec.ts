@@ -327,6 +327,19 @@ test.describe("console workspace telemetry harness", () => {
     await expect(
       page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']").first(),
     ).toBeVisible();
+
+    // Producer-stale current sample quality must also surface when the envelope
+    // remains success/ok (historical suppresses age-based stale only).
+    await openHarness(page, {
+      fixture: "success",
+      mode: "historical",
+      sampleStale: "1",
+      nowMs: String(Date.parse("2026-09-12T12:00:00+00:00")),
+    });
+    await expect(page.getByTestId("telemetry-mode-label")).toHaveText("Historical");
+    await expect(
+      page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']").first(),
+    ).toBeVisible();
   });
 
   test("harness route is reachable when AWF_CONSOLE_TEST_HARNESS build entry is enabled", async ({

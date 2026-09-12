@@ -255,11 +255,15 @@ export function ConsoleWorkspaceTelemetry({
   const memRequestLabel =
     admitted == null ? "—" : formatBytesOrUnknown(admitted.memoryRequestBytes);
 
-  // Historical mode suppresses wall-clock aging only; producer envelope
-  // state/quality "stale" must still dim/flag the panel (parity with partial).
-  const envelopeStale =
-    viewModel.state === "stale" || viewModel.quality === "stale";
-  const stale = mode === "live" ? viewModel.isStale : envelopeStale;
+  // Historical mode suppresses wall-clock aging only; producer stale
+  // (envelope state/quality or current sample quality) must still dim/flag
+  // the panel. Age-only isStale must not surface in historical mode.
+  const producerStale =
+    viewModel.state === "stale" ||
+    viewModel.quality === "stale" ||
+    viewModel.cpu.usedStale ||
+    viewModel.memory.usedStale;
+  const stale = mode === "live" ? viewModel.isStale : producerStale;
   const modeLabel = mode === "historical" ? "Historical" : "Live";
   // Envelope-level partial is not implied by nested meter/cost badges; surface it
   // in the panel header (glyph + label) when the producer marks state or quality

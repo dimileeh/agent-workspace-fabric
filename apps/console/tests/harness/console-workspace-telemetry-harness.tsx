@@ -45,6 +45,8 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const incompleteSeries = searchParams.get("incompleteSeries") === "1";
   // Differing but fresh CPU vs memory sample times (mixed Sample label).
   const mixedSampleTimes = searchParams.get("mixedSampleTimes") === "1";
+  // Current meter sample quality=stale with success/ok envelope (producer-stale sample).
+  const sampleStale = searchParams.get("sampleStale") === "1";
   // Envelope-level partial with complete nested fields (no meter/cost badges).
   // envelopePartial=1 → state+quality; envelopeQualityPartial=1 → quality only.
   const envelopePartial = searchParams.get("envelopePartial") === "1";
@@ -67,6 +69,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
         admittedPartial ||
         incompleteSeries ||
         mixedSampleTimes ||
+        sampleStale ||
         envelopePartial ||
         envelopeQualityPartial) &&
       raw &&
@@ -89,6 +92,12 @@ export function ConsoleWorkspaceTelemetryHarness() {
         envelope.quality = "partial";
       } else if (envelopeQualityPartial) {
         envelope.quality = "partial";
+      }
+      if (sampleStale && envelope.cpu_cores_samples?.[0]) {
+        envelope.cpu_cores_samples[0] = {
+          ...envelope.cpu_cores_samples[0],
+          quality: "stale",
+        };
       }
       if (envelope.admitted) {
         if (unknownLimits) {
@@ -184,6 +193,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     admittedPartial,
     incompleteSeries,
     mixedSampleTimes,
+    sampleStale,
     envelopePartial,
     envelopeQualityPartial,
     nowMs,

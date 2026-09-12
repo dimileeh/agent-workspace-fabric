@@ -75,6 +75,8 @@ test("projectWorkspaceTelemetryView allowlists fields and omits ownership/eviden
     "https://cloud.google.com/kubernetes-engine/pricing",
   );
   assert.equal(view.isStale, false);
+  assert.equal(view.cpu.usedStale, false);
+  assert.equal(view.memory.usedStale, false);
   assert.equal(view.sampleTime, "2026-09-12T12:00:00+00:00");
 });
 
@@ -169,6 +171,8 @@ test("stale current meter sample quality marks live view stale even when timesta
   assert.equal(cpuView.state, "success");
   assert.equal(cpuView.quality, "ok");
   assert.equal(cpuView.cpu.usedPartial, true);
+  assert.equal(cpuView.cpu.usedStale, true);
+  assert.equal(cpuView.memory.usedStale, false);
   assert.equal(cpuView.isStale, true);
 
   const staleMem = structuredClone(SUCCESS);
@@ -177,6 +181,8 @@ test("stale current meter sample quality marks live view stale even when timesta
   assert.ok(memParsed);
   const memView = projectWorkspaceTelemetryView(memParsed, { nowMs: FIXED_NOW });
   assert.equal(memView.memory.usedPartial, true);
+  assert.equal(memView.memory.usedStale, true);
+  assert.equal(memView.cpu.usedStale, false);
   assert.equal(memView.isStale, true);
 
   // Partial sample quality downgrades the meter but is not live-stale by itself.
@@ -188,6 +194,7 @@ test("stale current meter sample quality marks live view stale even when timesta
     nowMs: FIXED_NOW,
   });
   assert.equal(partialView.cpu.usedPartial, true);
+  assert.equal(partialView.cpu.usedStale, false);
   assert.equal(partialView.isStale, false);
 });
 
