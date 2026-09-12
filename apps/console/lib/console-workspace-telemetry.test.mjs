@@ -276,6 +276,64 @@ test("same-timestamp multi-container samples may sum within that timestamp only"
   assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
 });
 
+test("sparkline series uses pod totals per timestamp, not raw per-container points", () => {
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  multi.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T11:59:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T11:59:00+00:00",
+      value: "0.10",
+    },
+    {
+      ...base,
+      container_name: "sidecar",
+      sample_time: "2026-09-12T11:59:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T11:59:00+00:00",
+      value: "0.15",
+    },
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.20",
+    },
+    {
+      ...base,
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.05",
+      quality: "partial",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  // Meter and history must agree on pod totals (not four raw container points).
+  assert.equal(view.cpu.usedCores, 0.25);
+  assert.equal(view.cpu.usedPartial, true);
+  assert.equal(view.cpu.series.length, 2);
+  assert.deepEqual(
+    view.cpu.series.map((p) => ({
+      sampleTime: p.sampleTime,
+      value: p.value,
+      quality: p.quality,
+    })),
+    [
+      { sampleTime: "2026-09-12T11:59:00+00:00", value: 0.25, quality: "ok" },
+      { sampleTime: "2026-09-12T12:00:00+00:00", value: 0.25, quality: "partial" },
+    ],
+  );
+  assert.equal(view.cpu.series[1].value, view.cpu.usedCores);
+});
 test("parseTelemetryPresentation rejects mismatched sample provider_resource_uid", () => {
   const mismatched = structuredClone(SUCCESS);
   mismatched.cpu_cores_samples[0].provider_resource_uid = "other-pod-uid";

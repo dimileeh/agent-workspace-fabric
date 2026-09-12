@@ -648,6 +648,53 @@ function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
 }
 
 /**
+ * Build sparkline history as one pod-total point per sample_time.
+ * Raw per-container rows must not be plotted as a single line — same-timestamp
+ * containers would form a fake trend and disagree with meter totals.
+ */
+function buildPodTotalSeries(
+  samples: ParsedTelemetrySample[],
+): WorkspaceTelemetrySeriesPoint[] {
+  if (samples.length === 0) {
+    return [];
+  }
+  const byTime = new Map<string, ParsedTelemetrySample[]>();
+  for (const sample of samples) {
+    const group = byTime.get(sample.sampleTime);
+    if (group) {
+      group.push(sample);
+    } else {
+      byTime.set(sample.sampleTime, [sample]);
+    }
+  }
+  const points: WorkspaceTelemetrySeriesPoint[] = [];
+  for (const [sampleTime, group] of byTime) {
+    let value = 0;
+    let quality: TelemetryQuality = "ok";
+    const names: string[] = [];
+    for (const sample of group) {
+      value += sample.value;
+      names.push(sample.containerName);
+      if (sample.quality !== "ok") {
+        // Prefer "stale" over "partial" when both appear; otherwise any non-ok.
+        if (sample.quality === "stale" || quality === "ok") {
+          quality = sample.quality;
+        }
+      }
+    }
+    names.sort();
+    points.push({
+      sampleTime,
+      value,
+      quality,
+      containerName: names.join(","),
+    });
+  }
+  points.sort((a, b) => Date.parse(a.sampleTime) - Date.parse(b.sampleTime));
+  return points;
+}
+
+/**
  * Sum samples that share the exact same sample_time string identity.
  * Never merges across different moments. If the latest partition is missing
  * containers that appear elsewhere in the series, treat usage as partial and
@@ -660,12 +707,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   sampleTime: string | null;
   series: WorkspaceTelemetrySeriesPoint[];
 } {
-  const series: WorkspaceTelemetrySeriesPoint[] = samples.map((s) => ({
-    sampleTime: s.sampleTime,
-    value: s.value,
-    quality: s.quality,
-    containerName: s.containerName,
-  }));
+  const series = buildPodTotalSeries(samples);
   if (samples.length === 0) {
     return {
       used: null,
