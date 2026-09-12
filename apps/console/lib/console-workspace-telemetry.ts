@@ -840,6 +840,27 @@ export function parseTelemetryPresentation(
     return null;
   }
 
+  // Envelope state must agree with allocation and estimate. An "unallocated"
+  // notice with admitted resources, usage samples, or a dollar cost is a
+  // contradictory operator view — fail closed rather than render it.
+  const envelopeUnallocated = payload.state === "unallocated";
+  if (envelopeUnallocated !== (estimate.estimateState === "unallocated")) {
+    return null;
+  }
+  if (envelopeUnallocated) {
+    if (admitted !== null) {
+      return null;
+    }
+    if (cpuSamples.length > 0 || memorySamples.length > 0) {
+      return null;
+    }
+    if (estimate.estimatedUsd !== null) {
+      return null;
+    }
+  } else if (admitted === null) {
+    return null;
+  }
+
   return {
     state: payload.state,
     quality: payload.quality,

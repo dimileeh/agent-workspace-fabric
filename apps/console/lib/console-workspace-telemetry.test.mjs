@@ -182,6 +182,45 @@ test("unallocated fixture preserves null admitted/cost and does not coerce to ze
   assert.equal(view.observedAt, null);
 });
 
+test("parseTelemetryPresentation rejects unallocated state that disagrees with allocation or estimate", () => {
+  // Envelope claims unallocated while retaining admitted resources, samples,
+  // and a complete dollar estimate — would render a contradictory operator view.
+  const contradictory = structuredClone(SUCCESS);
+  contradictory.state = "unallocated";
+  assert.equal(parseTelemetryPresentation(contradictory), null);
+
+  const withAdmitted = structuredClone(UNALLOCATED);
+  withAdmitted.admitted = structuredClone(SUCCESS.admitted);
+  assert.equal(parseTelemetryPresentation(withAdmitted), null);
+
+  const withSamples = structuredClone(UNALLOCATED);
+  withSamples.cpu_cores_samples = structuredClone(SUCCESS.cpu_cores_samples);
+  assert.equal(parseTelemetryPresentation(withSamples), null);
+
+  const withMemSamples = structuredClone(UNALLOCATED);
+  withMemSamples.memory_bytes_samples = structuredClone(SUCCESS.memory_bytes_samples);
+  assert.equal(parseTelemetryPresentation(withMemSamples), null);
+
+  const withCompleteEstimate = structuredClone(UNALLOCATED);
+  withCompleteEstimate.estimate = structuredClone(SUCCESS.estimate);
+  assert.equal(parseTelemetryPresentation(withCompleteEstimate), null);
+
+  const withPricedUnallocated = structuredClone(UNALLOCATED);
+  withPricedUnallocated.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    estimated_usd: "1.25",
+  };
+  assert.equal(parseTelemetryPresentation(withPricedUnallocated), null);
+
+  const estimateUnallocatedOnly = structuredClone(SUCCESS);
+  estimateUnallocatedOnly.estimate = structuredClone(UNALLOCATED.estimate);
+  assert.equal(parseTelemetryPresentation(estimateUnallocatedOnly), null);
+
+  const nullAdmittedAllocated = structuredClone(SUCCESS);
+  nullAdmittedAllocated.admitted = null;
+  assert.equal(parseTelemetryPresentation(nullAdmittedAllocated), null);
+});
+
 test("partial fixture keeps missing memory used and partial cost without fabricating values", () => {
   const parsed = parseTelemetryPresentation(PARTIAL);
   assert.ok(parsed);
