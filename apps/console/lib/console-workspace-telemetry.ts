@@ -782,19 +782,25 @@ function parseEstimate(value: unknown): ParsedEstimate | null {
   ) {
     return null;
   }
-  // Fail closed on estimate_state / interval contradictions: complete must not
-  // claim unpriced coverage, and unallocated must not retain priced seconds.
-  if (
-    value.estimate_state === "complete" &&
-    value.unpriced_interval_seconds !== 0
-  ) {
-    return null;
-  }
-  if (
-    value.estimate_state === "unallocated" &&
-    (value.priced_interval_seconds !== 0 || value.unpriced_interval_seconds !== 0)
-  ) {
-    return null;
+  // Fail closed on estimate_state vs amount/interval contradictions so
+  // resolveCostDisplayState cannot present contradictory pricing as complete.
+  if (value.estimate_state === "complete") {
+    if (value.unpriced_interval_seconds !== 0 || estimatedUsd === null) {
+      return null;
+    }
+  } else if (value.estimate_state === "unallocated") {
+    if (
+      value.priced_interval_seconds !== 0 ||
+      value.unpriced_interval_seconds !== 0 ||
+      estimatedUsd !== null
+    ) {
+      return null;
+    }
+  } else if (value.estimate_state === "partial") {
+    // Partial means some coverage is explicitly unpriced.
+    if (value.unpriced_interval_seconds === 0) {
+      return null;
+    }
   }
   if (typeof value.rate_table_version !== "string") {
     return null;

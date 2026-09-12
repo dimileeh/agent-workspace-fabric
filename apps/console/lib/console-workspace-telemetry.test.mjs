@@ -207,6 +207,32 @@ test("parseTelemetryPresentation rejects estimate_state that contradicts interva
   assert.equal(parseTelemetryPresentation(unallocatedUnpriced), null);
 });
 
+test("parseTelemetryPresentation rejects estimate_state that contradicts amount fields", () => {
+  // complete with a null amount would surface as unpriced despite estimate_state.
+  const completeNullAmount = structuredClone(SUCCESS);
+  completeNullAmount.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    estimated_usd: null,
+  };
+  assert.equal(parseTelemetryPresentation(completeNullAmount), null);
+
+  // unallocated must not carry a dollar amount.
+  const unallocatedWithAmount = structuredClone(UNALLOCATED);
+  unallocatedWithAmount.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    estimated_usd: "0.0100000",
+  };
+  assert.equal(parseTelemetryPresentation(unallocatedWithAmount), null);
+
+  // partial without unpriced coverage is not a partial estimate.
+  const partialFullyPriced = structuredClone(PARTIAL);
+  partialFullyPriced.estimate = {
+    ...structuredClone(PARTIAL.estimate),
+    unpriced_interval_seconds: 0,
+  };
+  assert.equal(parseTelemetryPresentation(partialFullyPriced), null);
+});
+
 test("parseTelemetryPresentation rejects unallocated state that disagrees with allocation or estimate", () => {
   // Envelope claims unallocated while retaining admitted resources, samples,
   // and a complete dollar estimate — would render a contradictory operator view.
