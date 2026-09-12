@@ -71,7 +71,8 @@ import type { OperatorPreferences } from "@/lib/operator-preferences";
 import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
-import type { WorkspaceOverview } from "@/lib/types";
+import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
+import type { ConsoleDashboardCountEvidence, WorkspaceOverview } from "@/lib/types";
 import {
 Badge, KpiStat,
 SmallExternalAnchor,
@@ -257,14 +258,25 @@ export function FleetHealthStrip({
   kpis,
   error,
   lastSuccessAt,
+  coverageStatus,
+  coverageNotes,
+  countEvidence,
 }: {
   kpis: FleetKpi[];
   error?: string | null;
   lastSuccessAt?: string | null;
+  coverageStatus?: "complete" | "partial" | "unknown" | null;
+  coverageNotes?: readonly string[] | null;
+  countEvidence?: ConsoleDashboardCountEvidence | null;
 }) {
   const anyStale = kpis.some((kpi) => kpi.stale);
-  // Partial/unknown coverage on HTTP 200 is presentation-silent: keep request-error
-  // and stale banners only. Backend coverage/count_evidence fields remain parsed.
+  // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
+  // error — that banner is cleared on success — but surface coverage so operators
+  // can tell a degraded snapshot from a complete one (CONSOLE_BACKEND_CONTRACT).
+  const coverageNotice = formatDashboardCoverageNotice(
+    coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
+    countEvidence,
+  );
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
       {error ? (
@@ -277,6 +289,19 @@ export function FleetHealthStrip({
           <span>{error}</span>
           {lastSuccessAt ? (
             <span className="text-danger-text/80">· last success {lastSuccessAt}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {coverageNotice ? (
+        <div
+          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text"
+          role="status"
+          data-testid="dashboard-summary-coverage"
+        >
+          <span aria-hidden>⚠</span>
+          <span>{coverageNotice}</span>
+          {!error && lastSuccessAt ? (
+            <span className="text-attention-text/80">· last complete {lastSuccessAt}</span>
           ) : null}
         </div>
       ) : null}

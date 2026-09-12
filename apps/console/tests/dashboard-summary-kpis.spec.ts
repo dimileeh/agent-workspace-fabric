@@ -12,9 +12,6 @@ async function waitForConsoleReady(page: Page) {
 const kpi = (page: Page, label: string) =>
   page.getByText(label, { exact: true }).locator("..").filter({ has: page.locator(".kpi-value") });
 
-const COVERAGE_OR_CONFIRMED_COPY =
-  /confirmed|lower bound|partial coverage|coverage unknown|workflow statuses known/i;
-
 function hostedCountEvidenceSummary(): ConsoleDashboardSummary {
   const base = hostedDashboardSummary() as ConsoleDashboardSummary;
   return {
@@ -115,13 +112,6 @@ function mixedExactAndConfirmedSummary(): ConsoleDashboardSummary {
   });
 }
 
-async function assertNoCoverageChrome(page: Page) {
-  await expect(page.getByTestId("dashboard-summary-coverage")).toHaveCount(0);
-  await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
-  const strip = page.getByLabel("Fleet health");
-  await expect(strip).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
-}
-
 /** Page + Fleet health strip must not overflow on any count-selection fixture. */
 async function assertNoHorizontalOverflow(page: Page) {
   const overflow = await page.evaluate(() => {
@@ -162,10 +152,10 @@ test("KPI values come from dashboard-summary when saturation absent", async ({ p
   await expect(kpi(page, "Capacity")).toHaveCount(0);
 
   expect(requested.some((path) => path.includes("/metrics/resources/saturation"))).toBe(false);
-  await assertNoCoverageChrome(page);
+  await expect(page.getByTestId("dashboard-summary-coverage")).toHaveCount(0);
 });
 
-test("null dashboard counts render as dash not zero without coverage banner", async ({ page }) => {
+test("null dashboard counts render as dash not zero with coverage banner", async ({ page }) => {
   await mockAwfConsoleApi(page, {
     dashboardSummary: localDashboardSummary({
       coverage: { status: "partial", notes: ["queued_count_unavailable"] },
@@ -191,11 +181,18 @@ test("null dashboard counts render as dash not zero without coverage banner", as
   await expect(kpi(page, "Failed").locator(".kpi-value")).toHaveText("0");
   await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("3");
 
-  // HTTP 200 clears the request error; partial coverage alone must not surface a banner.
-  await assertNoCoverageChrome(page);
+  // HTTP 200 clears the request error; partial coverage must still be explicit.
+  const coverage = page.getByTestId("dashboard-summary-coverage");
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText("partial coverage");
+  await expect(coverage).toContainText("queued count unavailable");
+  await expect(coverage).toContainText("last complete 2026-09-06T17:00:00Z");
+  await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
 });
 
-test("unknown dashboard coverage stays silent without a request error", async ({ page }) => {
+test("unknown dashboard coverage renders an explicit notice without a request error", async ({
+  page,
+}) => {
   await mockAwfConsoleApi(page, {
     dashboardSummary: localDashboardSummary({
       coverage: { status: "unknown", notes: ["provider_lag"] },
@@ -218,7 +215,11 @@ test("unknown dashboard coverage stays silent without a request error", async ({
   await waitForConsoleReady(page);
   await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("3");
   await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("—");
-  await assertNoCoverageChrome(page);
+  const coverage = page.getByTestId("dashboard-summary-coverage");
+  await expect(coverage).toBeVisible();
+  await expect(coverage).toContainText("coverage unknown");
+  await expect(coverage).toContainText("provider lag");
+  await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
 });
 
 const VIEWPORTS = [
@@ -232,6 +233,7 @@ type CountScenario = {
   mode: "local" | "hosted";
   summary: () => ConsoleDashboardSummary;
   assertKpis: (page: Page) => Promise<void>;
+  expectCoverage?: (page: Page) => Promise<void>;
 };
 
 const COUNT_SCENARIOS: CountScenario[] = [
@@ -240,16 +242,23 @@ const COUNT_SCENARIOS: CountScenario[] = [
     mode: "hosted",
     summary: hostedCountEvidenceSummary,
     assertKpis: async (page) => {
-      // Unknown workflow statuses leave exact counts null; confirmed evidence still shows
-      // plain numbers (including evidenced zeros) — never "N confirmed" or lower-bound copy.
-      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1");
-      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0");
-      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1");
-      await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0");
-      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0");
+      // Unknown workflow statuses leave exact counts null; confirmed evidence shows
+      // visibly qualified lower bounds (`N confirmed`) per CONSOLE_BACKEND_CONTRACT.
+      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1 confirmed");
+      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0 confirmed");
+      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1 confirmed");
+      await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0 confirmed");
+      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0 confirmed");
+      await expect(kpi(page, "Running")).toContainText("exact metric count is incomplete");
       await expect(kpi(page, "Completed")).toContainText("last 24h");
-      await expect(kpi(page, "Completed")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
-      await expect(kpi(page, "Running")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+      await expect(kpi(page, "Completed")).toContainText("exact metric count is incomplete");
+    },
+    expectCoverage: async (page) => {
+      const coverage = page.getByTestId("dashboard-summary-coverage");
+      await expect(coverage).toContainText("24 of 29 workflow statuses known; 5 unknown");
+      await expect(coverage).toContainText("terminal timestamp unavailable");
+      await expect(coverage).toContainText("attention evidence unavailable");
+      await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
     },
   },
   {
@@ -268,7 +277,9 @@ const COUNT_SCENARIOS: CountScenario[] = [
       await expect(kpi(page, "Cancelled").locator(".kpi-value")).toHaveText("1");
       await expect(kpi(page, "Failed").locator(".kpi-value")).toHaveText("2");
       await expect(kpi(page, "Completed")).toContainText("last 24h");
-      await expect(kpi(page, "Completed")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+    },
+    expectCoverage: async (page) => {
+      await expect(page.getByTestId("dashboard-summary-coverage")).toHaveCount(0);
     },
   },
   {
@@ -276,27 +287,33 @@ const COUNT_SCENARIOS: CountScenario[] = [
     mode: "local",
     summary: mixedExactAndConfirmedSummary,
     assertKpis: async (page) => {
-      // Exact wins when both present; confirmed fills nulls; evidenced zeros stay plain.
+      // Exact wins when both present; confirmed fills nulls with `N confirmed`.
       await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("7");
-      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("3");
+      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("3 confirmed");
       await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("2");
-      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("1 confirmed");
       await expect(kpi(page, "Awaiting human").locator(".kpi-value")).toHaveText("0");
-      await expect(kpi(page, "Auto-retrying").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Auto-retrying").locator(".kpi-value")).toHaveText("0 confirmed");
       await expect(kpi(page, "Queued").locator(".kpi-value")).toHaveText("1");
-      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("4");
-      await expect(kpi(page, "Cancelled").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("4 confirmed");
+      await expect(kpi(page, "Cancelled").locator(".kpi-value")).toHaveText("0 confirmed");
       await expect(kpi(page, "Failed").locator(".kpi-value")).toHaveText("0");
       await expect(kpi(page, "Completed")).toContainText("last 24h");
-      await expect(kpi(page, "Active")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
-      await expect(kpi(page, "Running")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+      await expect(kpi(page, "Running")).toContainText("exact metric count is incomplete");
+    },
+    expectCoverage: async (page) => {
+      const coverage = page.getByTestId("dashboard-summary-coverage");
+      await expect(coverage).toBeVisible();
+      await expect(coverage).toContainText("partial coverage");
+      await expect(coverage).toContainText("11 of 11 workflow statuses known; 0 unknown");
+      await expect(coverage).toContainText("some counts unavailable");
     },
   },
 ];
 
 for (const viewport of VIEWPORTS) {
   for (const scenario of COUNT_SCENARIOS) {
-    test(`${scenario.name} renders plain numbers on ${viewport.name}`, async ({ page }) => {
+    test(`${scenario.name} stays contract-qualified on ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await mockAwfConsoleApi(page, {
         mode: scenario.mode,
@@ -306,7 +323,9 @@ for (const viewport of VIEWPORTS) {
       await page.goto("/");
       await waitForConsoleReady(page);
       await scenario.assertKpis(page);
-      await assertNoCoverageChrome(page);
+      if (scenario.expectCoverage) {
+        await scenario.expectCoverage(page);
+      }
       await assertNoHorizontalOverflow(page);
 
       await page.screenshot({
@@ -343,6 +362,6 @@ test("status counters stay consistent for escalation/retry/terminal fixtures", a
   await expect(kpi(page, "Auto-retrying").locator(".kpi-value")).toHaveText("1");
   await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("3");
   await expect(kpi(page, "Completed")).toContainText("last 24h");
-  await assertNoCoverageChrome(page);
+  await expect(page.getByTestId("dashboard-summary-coverage")).toHaveCount(0);
   await page.screenshot({ path: "test-results/dashboard-summary-kpis-desktop.png", fullPage: true });
 });

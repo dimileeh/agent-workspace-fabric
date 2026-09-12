@@ -1176,6 +1176,15 @@ export function ConsoleDashboard() {
           lastSuccessAt={
             fleetSummaryAvailable ? (dashboardSummary?.last_success_at ?? null) : null
           }
+          coverageStatus={
+            fleetSummaryAvailable ? (dashboardSummary?.coverage.status ?? null) : null
+          }
+          coverageNotes={
+            fleetSummaryAvailable ? (dashboardSummary?.coverage.notes ?? null) : null
+          }
+          countEvidence={
+            fleetSummaryAvailable ? (dashboardSummary?.count_evidence ?? null) : null
+          }
         />
       ) : null}
       <SectionNav
