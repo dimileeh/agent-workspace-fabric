@@ -1027,6 +1027,35 @@ test("resolveWorkflowTiming rejects lifecycle timing that contradicts stage stat
     );
   }
 
+  for (const malformedStage of [
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:10:00Z",
+      duration_seconds: 600,
+    },
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:10:00Z",
+      duration_seconds: 600,
+      status: "future_status",
+    },
+  ]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        status: "completed",
+        recovery: null,
+        workflow_finished_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        lifecycle: [malformedStage, completedStage],
+      }),
+      { finishedAt: null, durationSeconds: null },
+      "missing or unknown stage status must invalidate lifecycle fallback",
+    );
+  }
+
   assert.deepEqual(
     resolveWorkflowTiming({
       status: "failed",
