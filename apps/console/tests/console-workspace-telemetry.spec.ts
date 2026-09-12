@@ -312,10 +312,21 @@ test.describe("console workspace telemetry harness", () => {
       nowMs: String(Date.parse("2026-09-12T12:06:00+00:00")),
     });
     await expect(page.getByTestId("telemetry-mode-label")).toHaveText("Historical");
-    // Historical mode does not dim as live-stale even if observed_at is aged.
+    // Historical mode suppresses age-based live freshness only.
     await expect(
       page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']"),
     ).toHaveCount(0);
+
+    // Producer envelope state/quality "stale" must still surface in historical mode.
+    await openHarness(page, {
+      fixture: "stale",
+      mode: "historical",
+      nowMs: String(Date.parse("2026-09-12T12:00:00+00:00")),
+    });
+    await expect(page.getByTestId("telemetry-mode-label")).toHaveText("Historical");
+    await expect(
+      page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']").first(),
+    ).toBeVisible();
   });
 
   test("harness route is reachable when AWF_CONSOLE_TEST_HARNESS build entry is enabled", async ({
