@@ -502,9 +502,52 @@ test("container partition does not merge samples across different sample_time mo
       { sampleTime: "2026-09-12T12:00:00+00:00", value: 0.25, quality: "partial" },
     ],
   );
-  // Memory latest group is independent; do not invent a pod total across times.
-  assert.equal(view.memory.usedBytes, 536870912);
-  assert.equal(view.memory.usedPartial, false);
+  // Memory only saw agent, but CPU observed sidecar elsewhere — do not treat
+  // agent-only memory as a complete pod total vs whole-Pod request/limit.
+  assert.equal(view.memory.usedBytes, null);
+  assert.equal(view.memory.usedPartial, true);
+});
+
+test("cross-meter container union marks narrower meter incomplete", () => {
+  // CPU observes agent+sidecar at one instant; memory only reports agent.
+  // Independent per-meter expected sets would treat memory as complete.
+  const multi = structuredClone(SUCCESS);
+  const cpuBase = SUCCESS.cpu_cores_samples[0];
+  const memBase = SUCCESS.memory_bytes_samples[0];
+  multi.cpu_cores_samples = [
+    { ...cpuBase, container_name: "agent", value: "0.10" },
+    { ...cpuBase, container_name: "sidecar", value: "0.15" },
+  ];
+  multi.memory_bytes_samples = [
+    { ...memBase, container_name: "agent", value: "536870912" },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, 0.25);
+  assert.equal(view.cpu.usedPartial, false);
+  assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
+  assert.equal(view.memory.usedBytes, null);
+  assert.equal(view.memory.usedPartial, true);
+  assert.equal(view.memory.series[0]?.quality, "partial");
+
+  // Symmetric: memory has both containers, CPU only agent.
+  const symmetric = structuredClone(SUCCESS);
+  symmetric.cpu_cores_samples = [
+    { ...cpuBase, container_name: "agent", value: "0.10" },
+  ];
+  symmetric.memory_bytes_samples = [
+    { ...memBase, container_name: "agent", value: "268435456" },
+    { ...memBase, container_name: "sidecar", value: "268435456" },
+  ];
+  const symParsed = parseTelemetryPresentation(symmetric);
+  assert.ok(symParsed);
+  const symView = projectWorkspaceTelemetryView(symParsed, { nowMs: FIXED_NOW });
+  assert.equal(symView.memory.usedBytes, 536870912);
+  assert.equal(symView.memory.usedPartial, false);
+  assert.equal(symView.cpu.usedCores, null);
+  assert.equal(symView.cpu.usedPartial, true);
+  assert.equal(symView.cpu.series[0]?.quality, "partial");
 });
 
 test("same-timestamp multi-container samples may sum within that timestamp only", () => {
@@ -513,12 +556,23 @@ test("same-timestamp multi-container samples may sum within that timestamp only"
     { ...SUCCESS.cpu_cores_samples[0], container_name: "agent", value: "0.10" },
     { ...SUCCESS.cpu_cores_samples[0], container_name: "sidecar", value: "0.15" },
   ];
+  // Memory must also cover the union or the CPU total is compared alone.
+  multi.memory_bytes_samples = [
+    { ...SUCCESS.memory_bytes_samples[0], container_name: "agent", value: "268435456" },
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      container_name: "sidecar",
+      value: "268435456",
+    },
+  ];
   const parsed = parseTelemetryPresentation(multi);
   assert.ok(parsed);
   const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
   assert.equal(view.cpu.usedCores, 0.25);
   assert.equal(view.cpu.usedPartial, false);
   assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
+  assert.equal(view.memory.usedBytes, 536870912);
+  assert.equal(view.memory.usedPartial, false);
 });
 
 test("same sample_time with mismatched intervals is partial, not a complete pod total", () => {

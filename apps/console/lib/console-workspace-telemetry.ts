@@ -1048,27 +1048,42 @@ function samplesShareIntervalTuple(samples: ParsedTelemetrySample[]): boolean {
   return true;
 }
 
+/** Container names observed across one or more sample arrays. */
+function collectContainerNames(
+  ...sampleLists: readonly (readonly ParsedTelemetrySample[])[]
+): Set<string> {
+  const names = new Set<string>();
+  for (const samples of sampleLists) {
+    for (const sample of samples) {
+      names.add(sample.containerName);
+    }
+  }
+  return names;
+}
+
 /**
  * Build sparkline history as one pod-total point per sample_time instant.
  * Raw per-container rows must not be plotted as a single line — same-timestamp
  * containers would form a fake trend and disagree with meter totals.
  * Staggered scrapes that leave a timestamp missing containers seen elsewhere
- * in the series are marked partial (same completeness rule as the latest meter).
+ * in the series (or on the sibling meter via `expectedContainers`) are marked
+ * partial (same completeness rule as the latest meter).
  * Same-timestamp samples with mismatched interval windows are omitted — they are
  * not one measurement window, so their sum must not appear as a pod total.
  */
 function buildPodTotalSeries(
   samples: ParsedTelemetrySample[],
+  expectedContainers?: ReadonlySet<string>,
 ): WorkspaceTelemetrySeriesPoint[] {
   if (samples.length === 0) {
     return [];
   }
-  const seriesContainers = new Set<string>();
+  const seriesContainers =
+    expectedContainers ?? collectContainerNames(samples);
   // Group by exact instant so Z / offset spellings share a partition while
   // distinct sub-ms readings stay separate.
   const byTime = new Map<string, ParsedTelemetrySample[]>();
   for (const sample of samples) {
-    seriesContainers.add(sample.containerName);
     const key = timestampInstantKey(sample.sampleTime);
     const group = byTime.get(key);
     if (group) {
@@ -1132,11 +1147,15 @@ function buildPodTotalSeries(
 /**
  * Sum samples that share the same sample_time instant (normalized key).
  * Never merges across different moments. If the latest partition is missing
- * containers that appear elsewhere in the series, or containers disagree on
- * interval windows, treat usage as partial and unavailable (null) rather than
- * presenting the subset / mismatched windows as a complete pod total.
+ * containers that appear elsewhere in the series (or on the sibling meter via
+ * `expectedContainers`), or containers disagree on interval windows, treat
+ * usage as partial and unavailable (null) rather than presenting the subset /
+ * mismatched windows as a complete pod total.
  */
-function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
+function aggregateAtTimestamp(
+  samples: ParsedTelemetrySample[],
+  expectedContainers?: ReadonlySet<string>,
+): {
   used: number | null;
   usedPartial: boolean;
   /** True when the displayed (latest) partition includes a producer-stale sample. */
@@ -1145,7 +1164,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   sampleTime: string | null;
   series: WorkspaceTelemetrySeriesPoint[];
 } {
-  const series = buildPodTotalSeries(samples);
+  const series = buildPodTotalSeries(samples, expectedContainers);
   if (samples.length === 0) {
     return {
       used: null,
@@ -1197,10 +1216,13 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   // containers (e.g. agent@12:00, sidecar@11:59). Do not present that subset
   // sum as a complete pod usage figure against requests/limits — mark partial
   // and leave used unavailable rather than comparing the subset to whole-pod
-  // requests/limits.
+  // requests/limits. When `expectedContainers` is supplied (cross-meter union),
+  // also require containers observed only on the sibling meter.
   const containersAtLatest = new Set(containerNames);
-  for (const sample of samples) {
-    if (!containersAtLatest.has(sample.containerName)) {
+  const requiredContainers =
+    expectedContainers ?? collectContainerNames(samples);
+  for (const name of requiredContainers) {
+    if (!containersAtLatest.has(name)) {
       incompletePartition = true;
       usedPartial = true;
       break;
@@ -1347,8 +1369,20 @@ export function projectWorkspaceTelemetryView(
   options: { nowMs?: number } = {},
 ): WorkspaceTelemetryView {
   const nowMs = options.nowMs ?? Date.now();
-  const cpuAgg = aggregateAtTimestamp(presentation.cpuSamples);
-  const memAgg = aggregateAtTimestamp(presentation.memorySamples);
+  // Completeness is pod-scoped: a container seen on either meter must be present
+  // on both before either reading is treated as a whole-Pod total vs limits.
+  const expectedContainers = collectContainerNames(
+    presentation.cpuSamples,
+    presentation.memorySamples,
+  );
+  const cpuAgg = aggregateAtTimestamp(
+    presentation.cpuSamples,
+    expectedContainers,
+  );
+  const memAgg = aggregateAtTimestamp(
+    presentation.memorySamples,
+    expectedContainers,
+  );
   const meterSampleTimes = [cpuAgg.sampleTime, memAgg.sampleTime];
   const sampleTime = resolveDisplaySampleTime(
     meterSampleTimes,
