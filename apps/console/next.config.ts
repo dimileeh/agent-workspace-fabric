@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveConsolePageExtensions } from "./lib/console-test-harness-routes.ts";
+import { resolveConsolePageExtensions } from "./console-test-harness-routes.ts";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const defaultAllowedDevOrigins = ["127.0.0.1", "localhost"];
@@ -12,6 +12,8 @@ const allowedDevOrigins = uniqueAllowedDevOrigins([
 ]);
 // Keep in sync with normalizeBasePath in lib/console-urls.ts (avoid importing
 // that module here so the slim runtime image does not need apps/console/lib).
+// pageExtensions uses ./console-test-harness-routes.ts, which the runtime image
+// copies alongside this file (see Dockerfile).
 const basePath = normalizeBasePath(process.env.NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH);
 
 const nextConfig: NextConfig = {
