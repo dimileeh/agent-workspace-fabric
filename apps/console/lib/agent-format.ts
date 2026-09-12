@@ -280,6 +280,13 @@ type TimedLifecycleStage = {
   endedMs: number | null;
 };
 
+const LIFECYCLE_STAGE_STATUSES = new Set([
+  "pending",
+  "active",
+  "completed",
+  "terminal_skipped",
+]);
+
 function lifecycleStageOrder(stage: string): number {
   return lifecycleStages.findIndex((candidate) => candidate === stage);
 }
@@ -448,6 +455,9 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
   const entered: TimedLifecycleStage[] = [];
   const seenStages = new Set<string>();
   for (const stage of item.lifecycle) {
+    if (!LIFECYCLE_STAGE_STATUSES.has(stage.status)) {
+      return null;
+    }
     if (seenStages.has(stage.stage)) {
       return null;
     }
