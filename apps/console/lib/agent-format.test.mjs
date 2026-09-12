@@ -543,6 +543,7 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     started_at: "2026-09-06T12:10:00Z",
   };
   const terminalEvent = {
+    id: "event_terminal",
     event_type: "workspace.state_changed",
     old_state: "validating",
     new_state: "completed",
@@ -555,6 +556,7 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     finished_at: null,
     duration_seconds: null,
     lifecycle: [],
+    latest_state_change: terminalEvent,
     latest_workflow_terminal_state_change: terminalEvent,
   };
 
@@ -562,6 +564,35 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     finishedAt: "2026-09-06T12:20:00Z",
     durationSeconds: null,
   });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      recovery: { started_at: terminalEvent.occurred_at },
+    }),
+    { finishedAt: "2026-09-06T12:20:00Z", durationSeconds: null },
+    "backend event ordering must retain a terminal transition at the recovery timestamp",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      recovery: { started_at: terminalEvent.occurred_at },
+      latest_state_change: {
+        id: "event_destroyed",
+        event_type: "workspace.state_changed",
+        old_state: "destroying",
+        new_state: "destroyed",
+        occurred_at: "2026-09-06T12:30:00Z",
+      },
+      latest_workflow_terminal_state_change: {
+        ...terminalEvent,
+        old_state: "running",
+        new_state: "failed",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "timestamp equality alone must not reuse a pre-recovery terminal event",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,

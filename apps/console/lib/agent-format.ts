@@ -377,11 +377,23 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   }
 
   const finishedMs = recordedMilliseconds(terminalEvent.occurred_at);
+  const recoveryComparison =
+    recoveryStartedAt == null
+      ? null
+      : compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt);
+  // Both overview fields are selected from the backend's event_order-sorted
+  // history. A matching latest-state ID therefore proves which transition won
+  // when recovery and its terminal transition share a recorded instant.
+  const orderedAfterSameInstantRecovery =
+    recoveryComparison === 0 &&
+    typeof terminalEvent.id === "string" &&
+    terminalEvent.id.length > 0 &&
+    item.latest_state_change?.id === terminalEvent.id;
   if (
     finishedMs == null ||
     (!isDirectPauseExit &&
-      (recoveryStartedAt == null ||
-        compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt) !== 1))
+      recoveryComparison !== 1 &&
+      !orderedAfterSameInstantRecovery)
   ) {
     return null;
   }
