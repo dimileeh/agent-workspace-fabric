@@ -543,6 +543,7 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     started_at: "2026-09-06T12:10:00Z",
   };
   const terminalEvent = {
+    id: "event_terminal",
     event_type: "workspace.state_changed",
     old_state: "validating",
     new_state: "completed",
@@ -555,6 +556,7 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     finished_at: null,
     duration_seconds: null,
     lifecycle: [],
+    latest_state_change: terminalEvent,
     latest_workflow_terminal_state_change: terminalEvent,
   };
 
@@ -562,6 +564,35 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
     finishedAt: "2026-09-06T12:20:00Z",
     durationSeconds: null,
   });
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      recovery: { started_at: terminalEvent.occurred_at },
+    }),
+    { finishedAt: "2026-09-06T12:20:00Z", durationSeconds: null },
+    "backend event ordering must retain a terminal transition at the recovery timestamp",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "destroyed",
+      recovery: { started_at: terminalEvent.occurred_at },
+      latest_state_change: {
+        id: "event_destroyed",
+        event_type: "workspace.state_changed",
+        old_state: "destroying",
+        new_state: "destroyed",
+        occurred_at: "2026-09-06T12:30:00Z",
+      },
+      latest_workflow_terminal_state_change: {
+        ...terminalEvent,
+        old_state: "running",
+        new_state: "failed",
+      },
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "timestamp equality alone must not reuse a pre-recovery terminal event",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
@@ -1142,6 +1173,76 @@ test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array
     "ambiguous fallback timing must not depend on lifecycle array order",
   );
   assert.deepEqual(runningFirst, { finishedAt: null, durationSeconds: null });
+});
+
+test("resolveWorkflowTiming orders exact lifecycle timestamp ties by stage", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const terminalEvent = {
+    event_type: "workspace.state_changed",
+    old_state: "pushing",
+    new_state: "failed",
+    occurred_at: "2026-09-06T12:30:00Z",
+  };
+  const item = {
+    status: "failed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle: [
+      {
+        stage: "requested",
+        started_at: "2026-09-06T12:00:00Z",
+        ended_at: "2026-09-06T12:10:00Z",
+        duration_seconds: 600,
+        status: "completed",
+      },
+      {
+        stage: "running",
+        started_at: "2026-09-06T12:10:00Z",
+        ended_at: "2026-09-06T12:20:00Z",
+        duration_seconds: 600,
+        status: "completed",
+      },
+      {
+        stage: "validating",
+        started_at: "2026-09-06T12:20:00Z",
+        ended_at: "2026-09-06T12:20:00Z",
+        duration_seconds: 0,
+        status: "completed",
+      },
+      {
+        stage: "pushing",
+        started_at: "2026-09-06T12:20:00Z",
+        ended_at: "2026-09-06T12:30:00Z",
+        duration_seconds: 600,
+        status: "completed",
+      },
+    ],
+    latest_workflow_terminal_state_change: terminalEvent,
+    last_event: terminalEvent,
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: "2026-09-06T12:30:00Z",
+    durationSeconds: 1800,
+  });
+  assert.deepEqual(
+    resolveWorkflowTiming({ ...item, lifecycle: [...item.lifecycle, item.lifecycle[3]] }),
+    {
+      finishedAt: null,
+      durationSeconds: null,
+    },
+    "a duplicate stage cannot resolve an exact timestamp tie",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      lifecycle: [...item.lifecycle, { ...item.lifecycle[3], stage: "future_stage" }],
+    }),
+    { finishedAt: null, durationSeconds: null },
+    "an unknown stage cannot resolve an exact timestamp tie",
+  );
 });
 
 test("resolveWorkflowTiming orders latest lifecycle stages at full recorded precision", async () => {
