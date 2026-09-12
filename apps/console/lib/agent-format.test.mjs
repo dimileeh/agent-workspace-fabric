@@ -1183,6 +1183,52 @@ test("resolveWorkflowTiming rejects stage durations that contradict their timest
   );
 });
 
+test("resolveWorkflowTiming rejects repeated lifecycle stages at different timestamps", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const terminalEvent = {
+    event_type: "workspace.state_changed",
+    old_state: "running",
+    new_state: "failed",
+    occurred_at: "2026-09-06T12:20:00Z",
+  };
+
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      status: "failed",
+      recovery: null,
+      workflow_finished_at: null,
+      finished_at: null,
+      duration_seconds: null,
+      lifecycle: [
+        {
+          stage: "requested",
+          started_at: "2026-09-06T12:00:00Z",
+          ended_at: "2026-09-06T12:05:00Z",
+          duration_seconds: 300,
+          status: "completed",
+        },
+        {
+          stage: "requested",
+          started_at: "2026-09-06T12:05:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 300,
+          status: "completed",
+        },
+        {
+          stage: "running",
+          started_at: "2026-09-06T12:10:00Z",
+          ended_at: "2026-09-06T12:20:00Z",
+          duration_seconds: 600,
+          status: "completed",
+        },
+      ],
+      latest_workflow_terminal_state_change: terminalEvent,
+      last_event: terminalEvent,
+    }),
+    { finishedAt: null, durationSeconds: null },
+  );
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {
