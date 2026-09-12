@@ -412,6 +412,17 @@ def test_dashboard_summary_count_evidence_rejects_exact_count_mismatch(count_key
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("count_key", _COUNT_KEYS)
+def test_dashboard_summary_count_evidence_rejects_unproven_exact_count(
+    count_key: str,
+) -> None:
+    payload = _summary_with_count_evidence()
+    payload["counts"][count_key] = payload["count_evidence"]["confirmed_counts"][count_key]
+    with pytest.raises(ValidationError, match="unknown.*exact"):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_dashboard_summary_count_evidence_keeps_coverage_reasons_independent() -> None:
     payload = _summary_with_count_evidence(total=1, known=1, unknown=0)
     payload["coverage"]["notes"] = [

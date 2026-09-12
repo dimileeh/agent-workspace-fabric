@@ -549,6 +549,12 @@ export function parseDashboardSummary(
     if (coverage.status === "complete" && evidence.status_unknown_workspaces !== 0) {
       return null;
     }
+    if (
+      evidence.status_unknown_workspaces > 0 &&
+      DASHBOARD_COUNT_KEYS.some((key) => exactCounts[key] !== null)
+    ) {
+      return null;
+    }
   }
   return {
     ...(payload as ConsoleDashboardSummary),
