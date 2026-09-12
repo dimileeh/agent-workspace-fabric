@@ -647,21 +647,61 @@ function resolveCostDisplayState(estimate: ParsedEstimate): CostDisplayState {
   return "complete";
 }
 
+function isTimestampOlderThanStaleThreshold(
+  timestamp: string,
+  nowMs: number,
+  staleAfterSeconds: number,
+): boolean {
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) {
+    return false;
+  }
+  return nowMs - ms > staleAfterSeconds * 1000;
+}
+
+/**
+ * Stale when producer marks state/quality stale, or when the envelope or any
+ * meter sample time used for displayed CPU/memory values exceeds the threshold.
+ * Fresh envelopes must not mask aged resource samples.
+ */
 function computeIsStale(
   presentation: ParsedTelemetryPresentation,
   nowMs: number,
+  meterSampleTimes: Array<string | null>,
 ): boolean {
   if (presentation.state === "stale" || presentation.quality === "stale") {
     return true;
   }
-  if (presentation.observedAt === null) {
-    return false;
+  const staleAfter = presentation.staleAfterSeconds;
+  if (
+    presentation.observedAt !== null &&
+    isTimestampOlderThanStaleThreshold(presentation.observedAt, nowMs, staleAfter)
+  ) {
+    return true;
   }
-  const observedMs = Date.parse(presentation.observedAt);
-  if (!Number.isFinite(observedMs)) {
-    return false;
+  for (const sampleTime of meterSampleTimes) {
+    if (
+      sampleTime !== null &&
+      isTimestampOlderThanStaleThreshold(sampleTime, nowMs, staleAfter)
+    ) {
+      return true;
+    }
   }
-  return nowMs - observedMs > presentation.staleAfterSeconds * 1000;
+  return false;
+}
+
+function resolveDisplaySampleTime(
+  meterSampleTimes: Array<string | null>,
+  observedAt: string | null,
+): string | null {
+  const meterTimes = meterSampleTimes.filter(
+    (v): v is string => typeof v === "string",
+  );
+  if (meterTimes.length > 0) {
+    // Prefer meter times so a newer envelope cannot label aged readings.
+    return meterTimes.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b));
+  }
+  return observedAt;
 }
 
 /**
@@ -675,14 +715,11 @@ export function projectWorkspaceTelemetryView(
   const nowMs = options.nowMs ?? Date.now();
   const cpuAgg = aggregateAtTimestamp(presentation.cpuSamples);
   const memAgg = aggregateAtTimestamp(presentation.memorySamples);
-
-  let sampleTime: string | null = null;
-  const candidates = [cpuAgg.sampleTime, memAgg.sampleTime, presentation.observedAt].filter(
-    (v): v is string => typeof v === "string",
+  const meterSampleTimes = [cpuAgg.sampleTime, memAgg.sampleTime];
+  const sampleTime = resolveDisplaySampleTime(
+    meterSampleTimes,
+    presentation.observedAt,
   );
-  if (candidates.length > 0) {
-    sampleTime = candidates.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b));
-  }
 
   return {
     state: presentation.state,
@@ -691,7 +728,7 @@ export function projectWorkspaceTelemetryView(
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: presentation.observedAt,
     sampleTime,
-    isStale: computeIsStale(presentation, nowMs),
+    isStale: computeIsStale(presentation, nowMs, meterSampleTimes),
     admitted:
       presentation.admitted === null
         ? null

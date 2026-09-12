@@ -303,6 +303,22 @@ test("stale fixture and clock-based freshness", () => {
   assert.equal(aged.isStale, true);
 });
 
+test("fresh envelope with aged meter samples is stale and Sample uses sample times", () => {
+  const agedMeters = structuredClone(SUCCESS);
+  // Envelope is fresh relative to now; CPU/memory readings are older than stale_after.
+  agedMeters.observed_at = "2026-09-12T12:05:00+00:00";
+  agedMeters.cpu_cores_samples[0].sample_time = "2026-09-12T11:50:00+00:00";
+  agedMeters.memory_bytes_samples[0].sample_time = "2026-09-12T11:51:00+00:00";
+  const parsed = parseTelemetryPresentation(agedMeters);
+  assert.ok(parsed);
+  const nowMs = Date.parse("2026-09-12T12:05:30+00:00");
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs });
+  assert.equal(view.isStale, true);
+  // Sample label must reflect meter times, not the newer envelope observed_at.
+  assert.equal(view.sampleTime, "2026-09-12T11:51:00+00:00");
+  assert.notEqual(view.sampleTime, agedMeters.observed_at);
+});
+
 test("view enum accepts only 1h/6h/24h", () => {
   for (const view of ["1h", "6h", "24h"]) {
     assert.ok(parseTelemetryPresentation({ ...SUCCESS, view }));
