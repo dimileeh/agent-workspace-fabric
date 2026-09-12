@@ -567,6 +567,7 @@ class WorkspaceRecoverySummaryResponse(BaseModel):
     action: str | None = None
     recovery_mode: str | None = None
     started_at: datetime
+    started_event_order: int | None = None
     current_operation: WorkspaceRecoveryCurrentOperationResponse | None = None
     summary: str
     payload: dict[str, Any] | None = None
@@ -1027,6 +1028,7 @@ class WorkspaceEventResponse(BaseModel):
     new_state: str | None
     reason_code: str | None
     payload: dict[str, Any] | None
+    event_order: int | None = None
     occurred_at: datetime
 
 

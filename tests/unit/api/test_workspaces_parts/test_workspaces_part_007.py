@@ -793,6 +793,9 @@ class TestWorkspaceDirectRoutes:
         assert item.latest_state_change.event_type == "workspace.remonitor_requested"
         assert item.latest_state_change.old_state == WorkspaceStatus.failed.value
         assert item.latest_state_change.new_state == WorkspaceStatus.monitoring_pr.value
+        assert item.latest_state_change.event_order is not None
+        assert item.recovery is not None
+        assert item.recovery.started_event_order == item.latest_state_change.event_order
 
     @pytest.mark.unit
     @pytest.mark.parametrize("task_tag", [None, "AIRA-T109"])
@@ -936,13 +939,16 @@ class TestWorkspaceDirectRoutes:
         item = response.items[0]
         assert item.last_event is not None
         assert item.last_event.event_type == "workspace.test_marker"
+        assert item.last_event.event_order == 6
         assert item.latest_state_change is not None
         assert item.latest_state_change.event_type == "workspace.state_changed"
         assert item.latest_state_change.new_state == WorkspaceStatus.cancelled.value
+        assert item.latest_state_change.event_order == 5
         assert item.latest_workflow_terminal_state_change is not None
         assert (
             item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.cancelled.value
         )
+        assert item.latest_workflow_terminal_state_change.event_order == 5
         assert events.iterations == 1
         assert item.pr_number == 7
         assert item.pr_url == "https://github.com/example/app/pull/7"

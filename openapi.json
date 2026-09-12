@@ -9496,6 +9496,17 @@
       "WorkspaceEventResponse": {
         "description": "Representation of an immutable workspace event.",
         "properties": {
+          "event_order": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Order"
+          },
           "event_type": {
             "title": "Event Type",
             "type": "string"
@@ -11964,6 +11975,17 @@
             "format": "date-time",
             "title": "Started At",
             "type": "string"
+          },
+          "started_event_order": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started Event Order"
           },
           "summary": {
             "title": "Summary",

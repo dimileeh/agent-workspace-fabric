@@ -38,6 +38,7 @@ def _recovery_event(
     reason_code: str | None = "RECOVERY_DISPATCH",
     payload: dict[str, object] | None = None,
     event_id: str = "evt_recovery",
+    event_order: int | None = None,
 ) -> object:
     return SimpleNamespace(
         id=event_id,
@@ -47,6 +48,7 @@ def _recovery_event(
         new_state=new_state,
         reason_code=reason_code,
         payload=payload,
+        event_order=event_order,
         occurred_at=occurred_at,
     )
 
@@ -554,6 +556,7 @@ def test_recovery_summary_uses_failed_remonitor_reset_as_latest_boundary() -> No
                 event_id="evt_remonitor",
                 event_type="workspace.remonitor_requested",
                 occurred_at=remonitor_at,
+                event_order=17,
                 old_state=WorkspaceStatus.failed.value,
                 new_state=WorkspaceStatus.monitoring_pr.value,
                 reason_code="OPERATOR_REMONITOR",
@@ -568,6 +571,7 @@ def test_recovery_summary_uses_failed_remonitor_reset_as_latest_boundary() -> No
     assert summary.from_state == WorkspaceStatus.failed.value
     assert summary.to_state == WorkspaceStatus.monitoring_pr.value
     assert summary.started_at == remonitor_at
+    assert summary.started_event_order == 17
     assert summary.reason_code == "resume the PR monitor"
     assert summary.payload == remonitor_payload
 

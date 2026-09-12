@@ -386,14 +386,22 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
     recoveryStartedAt == null
       ? null
       : compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt);
-  // Both overview fields are selected from the backend's event_order-sorted
-  // history. A matching latest-state ID therefore proves which transition won
-  // when recovery and its terminal transition share a recorded instant.
+  const terminalEventOrder = terminalEvent.event_order;
+  const recoveryStartedEventOrder = item.recovery?.started_event_order;
+  const explicitEventOrderProof =
+    typeof terminalEventOrder === "number" &&
+    Number.isSafeInteger(terminalEventOrder) &&
+    typeof recoveryStartedEventOrder === "number" &&
+    Number.isSafeInteger(recoveryStartedEventOrder) &&
+    terminalEventOrder > recoveryStartedEventOrder;
+  // Event order remains authoritative after cleanup replaces latest_state_change.
+  // Retain the matching-ID proof for legacy payloads without order metadata.
   const orderedAfterSameInstantRecovery =
     recoveryComparison === 0 &&
-    typeof terminalEvent.id === "string" &&
-    terminalEvent.id.length > 0 &&
-    item.latest_state_change?.id === terminalEvent.id;
+    (explicitEventOrderProof ||
+      (typeof terminalEvent.id === "string" &&
+        terminalEvent.id.length > 0 &&
+        item.latest_state_change?.id === terminalEvent.id));
   if (
     finishedMs == null ||
     (!isDirectPauseExit &&
