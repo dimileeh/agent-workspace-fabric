@@ -1271,6 +1271,17 @@ test(`workspace list stays at the top during refresh reorders (inspectorWorkspac
     await expect.poll(() => firstPageRequests).toBeGreaterThan(requestsBeforeRefresh);
     await expect.poll(firstCardId).toBe(expectedFirstCardId);
   };
+  const publishBackgroundRefresh = async (
+    nextRevision: number,
+    expectedFirstCardId: string,
+  ) => {
+    revision = nextRevision;
+    const requestsBeforeRefresh = firstPageRequests;
+    await expect
+      .poll(() => firstPageRequests, { timeout: 7_000 })
+      .toBeGreaterThan(requestsBeforeRefresh);
+    await expect.poll(firstCardId).toBe(expectedFirstCardId);
+  };
 
   await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0001");
   await list.evaluate((element) => element.scrollTo({ top: 0 }));
@@ -1279,21 +1290,23 @@ test(`workspace list stays at the top during refresh reorders (inspectorWorkspac
     ? await selectedViewportOffset()
     : null;
 
-  revision = 1;
-  const requestsBeforeBackgroundPoll = firstPageRequests;
-  await expect
-    .poll(() => firstPageRequests, { timeout: 7_000 })
-    .toBeGreaterThan(requestsBeforeBackgroundPoll);
-  await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0002");
+  await publishBackgroundRefresh(1, "workspace-card-ws_perf_0002");
   if (inspectorWorkspaceId === "ws_perf_0001") {
     await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
     await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
     await expect.poll(selectedViewportOffset).toBeCloseTo(selectedOffsetBeforeRefresh ?? 0, 0);
     expect(await scrollTop()).toBeGreaterThan(240);
-    return;
+    await list.evaluate((element) => element.scrollTo({ top: 0 }));
   }
   await expectTop();
-  if (inspectorWorkspaceId === "ws_perf_0002") return;
+  if (inspectorWorkspaceId) {
+    // Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrFo_: once an
+    // unrelated selected row becomes first, the next reorder must not mistake
+    // that incidental position for selection-owned scrolling.
+    await publishBackgroundRefresh(2, "workspace-card-ws_perf_0001");
+    await expectTop();
+    return;
+  }
 
   await publishRefresh(2, "workspace-card-ws_perf_0001");
   await expectTop();

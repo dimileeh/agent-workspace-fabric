@@ -1017,6 +1017,7 @@ export function WorkspaceList({
   const nearBottomTriggeredRef = useRef(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const selectedWasLoadedRef = useRef(false);
+  const selectionOwnsScrollAnchorRef = useRef(false);
   const committedListGeometryRef = useRef<{
     workspaceIds: readonly string[];
     rowOffsets: readonly number[];
@@ -1066,7 +1067,7 @@ export function WorkspaceList({
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
     if (
-      selectedId !== previous.workspaceIds[0] &&
+      !selectionOwnsScrollAnchorRef.current &&
       scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
     ) {
       setPageStart(0);
@@ -1124,6 +1125,7 @@ export function WorkspaceList({
     const selectedIndex = selectedId
       ? items.findIndex((item) => item.workspace_id === selectedId)
       : -1;
+    const selectionChanged = selectedId !== previousSelectedIdRef.current;
     const selectedBecameLoaded =
       selectedIndex >= 0 &&
       selectedId === previousSelectedIdRef.current &&
@@ -1131,6 +1133,7 @@ export function WorkspaceList({
     const shouldFollowSelection =
       selectedIndex >= 0 &&
       (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
+    if (selectionChanged) selectionOwnsScrollAnchorRef.current = false;
     previousSelectedIdRef.current = selectedId;
     selectedWasLoadedRef.current = selectedIndex >= 0;
     const scrollContainer = scrollContainerRef.current;
@@ -1144,6 +1147,12 @@ export function WorkspaceList({
       const viewportEnd = viewportStart + scrollContainer.clientHeight - controlsHeight;
       return selectedRowEnd > viewportStart && selectedRowStart < viewportEnd;
     })();
+    if (shouldFollowSelection && scrollContainer) {
+      selectionOwnsScrollAnchorRef.current =
+        !selectedIsVisible ||
+        Math.abs(scrollContainer.scrollTop - selectedRowStart) <=
+          WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+    }
     const selectedWindowStart = shouldFollowSelection && !selectedIsVisible
       ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
         WORKSPACE_RENDER_WINDOW_SIZE
@@ -1329,6 +1338,11 @@ export function WorkspaceList({
     );
 
     if (suppressScrollLoadRef.current) return;
+    selectionOwnsScrollAnchorRef.current =
+      selectedId !== null &&
+      items[firstVisibleRow]?.workspace_id === selectedId &&
+      Math.abs(element.scrollTop - rowOffsets[firstVisibleRow]) <=
+        WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
     if (
       preserveScrollTopRef.current !== null &&
       Math.abs(element.scrollTop - preserveScrollTopRef.current) >
@@ -1362,7 +1376,7 @@ export function WorkspaceList({
         suppressNextButtonLoadRef.current = true;
       }
     }
-  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
+  }, [hasMore, items, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets, selectedId]);
 
   const showWindow = useCallback((nextStart: number) => {
     const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
