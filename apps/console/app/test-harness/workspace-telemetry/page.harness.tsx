@@ -4,8 +4,10 @@ import { notFound } from "next/navigation";
 import { ConsoleWorkspaceTelemetryHarness } from "@/tests/harness/console-workspace-telemetry-harness";
 
 /**
- * Env-gated test harness route. Returns 404 unless AWF_CONSOLE_TEST_HARNESS=1
- * (Playwright webServer). Not linked from product UI — not a public debug surface.
+ * Test-only App Router entry (`page.harness.tsx`). Registered via
+ * `pageExtensions` only when AWF_CONSOLE_TEST_HARNESS=1 in a non-production
+ * build (Playwright webServer), so it is outside the production route graph.
+ * Runtime check is defense in depth if the build entry is enabled.
  */
 export default function WorkspaceTelemetryHarnessPage() {
   if (process.env.AWF_CONSOLE_TEST_HARNESS !== "1") {

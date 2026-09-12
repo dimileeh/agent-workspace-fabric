@@ -180,11 +180,12 @@ test.describe("console workspace telemetry harness", () => {
     ).toHaveCount(0);
   });
 
-  test("harness route 404s without AWF_CONSOLE_TEST_HARNESS is covered by env-gated page", async ({
+  test("harness route is reachable when AWF_CONSOLE_TEST_HARNESS build entry is enabled", async ({
     page,
   }) => {
-    // When the env flag is set (Playwright webServer), the harness is reachable.
-    // This assertion documents the positive path; without the flag the page calls notFound().
+    // Playwright webServer sets AWF_CONSOLE_TEST_HARNESS=1 so next.config
+    // registers page.harness.tsx. Production builds omit that pageExtensions
+    // entry, so the route is outside the shipped route graph.
     await openHarness(page, { fixture: "success" });
     await expect(page.getByTestId("telemetry-harness-root")).toBeVisible();
   });

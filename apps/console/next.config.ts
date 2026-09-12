@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveConsolePageExtensions } from "./lib/console-test-harness-routes.ts";
+
 const root = dirname(fileURLToPath(import.meta.url));
 const defaultAllowedDevOrigins = ["127.0.0.1", "localhost"];
 const allowedDevOrigins = uniqueAllowedDevOrigins([
@@ -16,6 +18,9 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   // Allow a second Playwright-hosted dev server from the same tree.
   distDir: process.env.AWF_CONSOLE_DIST_DIR || ".next",
+  // `page.harness.tsx` is registered only when AWF_CONSOLE_TEST_HARNESS=1 in a
+  // non-production build (Playwright); production builds omit the harness route.
+  pageExtensions: resolveConsolePageExtensions(),
   turbopack: {
     root,
   },

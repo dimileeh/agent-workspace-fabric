@@ -29,7 +29,8 @@ const LONG_MODEL_LABEL =
 
 /**
  * Test-only harness that mounts the real ConsoleWorkspaceTelemetry component.
- * Not linked from product UI; gated by AWF_CONSOLE_TEST_HARNESS on the page route.
+ * Not linked from product UI; served only via page.harness.tsx when the
+ * AWF_CONSOLE_TEST_HARNESS build entry is enabled (Playwright).
  */
 export function ConsoleWorkspaceTelemetryHarness() {
   const searchParams = useSearchParams();

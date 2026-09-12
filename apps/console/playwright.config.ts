@@ -25,7 +25,7 @@ export default defineConfig({
       url: "http://127.0.0.1:3100",
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
-      // Enables env-gated /test-harness/* routes used by focused component specs.
+      // Registers page.harness.tsx via next.config pageExtensions for /test-harness/*.
       env: {
         ...process.env,
         AWF_CONSOLE_TEST_HARNESS: "1",
