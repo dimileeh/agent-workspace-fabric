@@ -478,6 +478,20 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
       entered.push({ stage, startedAt: stage.started_at, startedMs, endedMs });
     }
   }
+  const chronologicallyEntered = [...entered].sort((left, right) => {
+    const instantOrder = compareRecordedInstants(left.startedAt, right.startedAt);
+    return instantOrder === 0
+      ? lifecycleStageOrder(left.stage.stage) - lifecycleStageOrder(right.stage.stage)
+      : (instantOrder ?? 0);
+  });
+  let previousStageOrder = -1;
+  for (const entry of chronologicallyEntered) {
+    const stageOrder = lifecycleStageOrder(entry.stage.stage);
+    if (stageOrder < 0 || stageOrder <= previousStageOrder) {
+      return null;
+    }
+    previousStageOrder = stageOrder;
+  }
   let latestEntered = entered.reduce<TimedLifecycleStage | null>(
     (latest, entry) =>
       latest == null || compareRecordedInstants(entry.startedAt, latest.startedAt) === 1
