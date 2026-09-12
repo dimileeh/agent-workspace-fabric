@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  COST_EXCLUSION_NOTE,
+  parseTelemetryPresentation,
+  projectWorkspaceTelemetryView,
+} from "./console-workspace-telemetry.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_DIR = join(HERE, "fixtures/console-workspace-telemetry");
+
+function loadFixture(name) {
+  return JSON.parse(readFileSync(join(FIXTURE_DIR, `${name}.json`), "utf8"));
+}
+
+const SUCCESS = loadFixture("success");
+const PARTIAL = loadFixture("partial");
+const STALE = loadFixture("stale");
+const UNALLOCATED = loadFixture("unallocated");
+
+const FIXED_NOW = Date.parse("2026-09-12T12:01:00+00:00");
+
+test("parseTelemetryPresentation accepts all four verbatim producer fixtures", () => {
+  for (const [name, raw] of [
+    ["success", SUCCESS],
+    ["partial", PARTIAL],
+    ["stale", STALE],
+    ["unallocated", UNALLOCATED],
+  ]) {
+    const parsed = parseTelemetryPresentation(raw);
+    assert.ok(parsed, `expected ${name} fixture to parse`);
+    assert.equal(parsed.state, raw.state);
+    assert.equal(parsed.quality, raw.quality);
+    assert.equal(parsed.view, raw.view);
+    assert.equal(parsed.staleAfterSeconds, 300);
+  }
+});
+
+test("projectWorkspaceTelemetryView allowlists fields and omits ownership/evidence/notes from display strings", () => {
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+
+  const serialized = JSON.stringify(view);
+  assert.equal(serialized.includes("org_example"), false);
+  assert.equal(serialized.includes("cell_example"), false);
+  assert.equal(serialized.includes("owner_pod_example"), false);
+  assert.equal(serialized.includes("job-uid-example"), false);
+  assert.equal(serialized.includes("partial_samples"), false);
+  assert.equal(serialized.includes("kubernetes.io/container"), false);
+  assert.equal(view.exclusionNote, COST_EXCLUSION_NOTE);
+
+  assert.equal(view.cpu.usedCores, 0.25);
+  assert.equal(view.memory.usedBytes, 1073741824);
+  assert.equal(view.admitted?.cpuRequestCores, 0.5);
+  assert.equal(view.admitted?.cpuLimitCores, 1);
+  assert.equal(view.admitted?.memoryRequestBytes, 2147483648);
+  assert.equal(view.admitted?.memoryLimitBytes, 4294967296);
+  assert.equal(view.estimate.estimatedUsd, 0.0123456);
+  assert.equal(view.estimate.displayState, "complete");
+  assert.equal(view.estimate.currency, "USD");
+  assert.equal(view.estimate.rateTableVersion, "gke-autopilot-pod-2026-09-12");
+  assert.equal(
+    view.estimate.rateSource,
+    "https://cloud.google.com/kubernetes-engine/pricing",
+  );
+  assert.equal(view.isStale, false);
+  assert.equal(view.sampleTime, "2026-09-12T12:00:00+00:00");
+});
+
+test("parseTelemetryPresentation rejects non-objects and malformed envelopes", () => {
+  assert.equal(parseTelemetryPresentation(null), null);
+  assert.equal(parseTelemetryPresentation(undefined), null);
+  assert.equal(parseTelemetryPresentation([]), null);
+  assert.equal(parseTelemetryPresentation("x"), null);
+  assert.equal(parseTelemetryPresentation({ ...SUCCESS, state: "nope" }), null);
+  assert.equal(parseTelemetryPresentation({ ...SUCCESS, view: "2h" }), null);
+  assert.equal(parseTelemetryPresentation({ ...SUCCESS, quality: 1 }), null);
+  assert.equal(parseTelemetryPresentation({ ...SUCCESS, estimate: null }), null);
+  const { state: _s, ...missingState } = SUCCESS;
+  assert.equal(parseTelemetryPresentation(missingState), null);
+});
+
+test("parseTelemetryPresentation rejects mixed-unit sample series", () => {
+  const cpuBytes = structuredClone(SUCCESS);
+  cpuBytes.cpu_cores_samples[0].unit = "bytes";
+  assert.equal(parseTelemetryPresentation(cpuBytes), null);
+
+  const memCores = structuredClone(SUCCESS);
+  memCores.memory_bytes_samples[0].unit = "cores";
+  assert.equal(parseTelemetryPresentation(memCores), null);
+});
+
+test("unallocated fixture preserves null admitted/cost and does not coerce to zero/free", () => {
+  const parsed = parseTelemetryPresentation(UNALLOCATED);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.state, "unallocated");
+  assert.equal(view.admitted, null);
+  assert.equal(view.cpu.usedCores, null);
+  assert.equal(view.memory.usedBytes, null);
+  assert.equal(view.estimate.estimatedUsd, null);
+  assert.equal(view.estimate.displayState, "unallocated");
+  assert.equal(view.estimate.rateTableVersion, null);
+  assert.notEqual(view.estimate.estimatedUsd, 0);
+  assert.equal(view.observedAt, null);
+});
+
+test("partial fixture keeps missing memory used and partial cost without fabricating values", () => {
+  const parsed = parseTelemetryPresentation(PARTIAL);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.state, "partial");
+  assert.equal(view.cpu.usedCores, 0.1);
+  assert.equal(view.cpu.usedPartial, true);
+  assert.equal(view.memory.usedBytes, null);
+  assert.equal(view.memory.series.length, 0);
+  assert.equal(view.estimate.displayState, "partial");
+  assert.equal(view.estimate.estimatedUsd, 0.004);
+  assert.equal(view.estimate.unpricedIntervalSeconds, 600);
+  assert.equal(view.estimate.pricedIntervalSeconds, 1800);
+});
+
+test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings", () => {
+  for (const bad of ["NaN", "Infinity", "-1", "-0.01", "1e309", "1e20", "not-a-number", ""]) {
+    const badCpu = structuredClone(SUCCESS);
+    badCpu.cpu_cores_samples[0].value = bad;
+    assert.equal(parseTelemetryPresentation(badCpu), null, `cpu value ${bad}`);
+  }
+  for (const bad of ["NaN", "Infinity", "-0.01", "1e20"]) {
+    const badEst = structuredClone(SUCCESS);
+    badEst.estimate.estimated_usd = bad;
+    assert.equal(parseTelemetryPresentation(badEst), null, `estimate ${bad}`);
+  }
+  const negMem = structuredClone(SUCCESS);
+  negMem.admitted.memory_limit_bytes = -1;
+  assert.equal(parseTelemetryPresentation(negMem), null);
+
+  const nonFiniteMem = structuredClone(SUCCESS);
+  nonFiniteMem.admitted.memory_request_bytes = Number.POSITIVE_INFINITY;
+  assert.equal(parseTelemetryPresentation(nonFiniteMem), null);
+
+  const numericCpuRequest = structuredClone(SUCCESS);
+  numericCpuRequest.admitted.cpu_request_cores = 0.5;
+  assert.equal(parseTelemetryPresentation(numericCpuRequest), null);
+
+  const stringMem = structuredClone(SUCCESS);
+  stringMem.admitted.memory_limit_bytes = "4294967296";
+  assert.equal(parseTelemetryPresentation(stringMem), null);
+});
+
+test("container partition does not merge samples across different sample_time moments", () => {
+  const multi = structuredClone(SUCCESS);
+  multi.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.25",
+    },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-12T11:59:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T11:59:00+00:00",
+      value: "0.40",
+    },
+  ];
+  // Memory only at the older timestamp — latest CPU timestamp lacks memory.
+  multi.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      container_name: "agent",
+      sample_time: "2026-09-12T11:59:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T11:59:00+00:00",
+      value: "536870912",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  // Latest CPU group is agent@12:00 only — do not add sidecar 0.40 from earlier.
+  assert.equal(view.cpu.usedCores, 0.25);
+  // Memory latest group is independent; do not invent a pod total across times.
+  assert.equal(view.memory.usedBytes, 536870912);
+  assert.notEqual(view.cpu.usedCores + view.memory.usedBytes, 0.25 + 0.4);
+});
+
+test("same-timestamp multi-container samples may sum within that timestamp only", () => {
+  const multi = structuredClone(SUCCESS);
+  multi.cpu_cores_samples = [
+    { ...SUCCESS.cpu_cores_samples[0], container_name: "agent", value: "0.10" },
+    { ...SUCCESS.cpu_cores_samples[0], container_name: "sidecar", value: "0.15" },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, 0.25);
+  assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
+});
+
+test("stale fixture and clock-based freshness", () => {
+  const staleParsed = parseTelemetryPresentation(STALE);
+  assert.ok(staleParsed);
+  const staleView = projectWorkspaceTelemetryView(staleParsed, {
+    nowMs: Date.parse("2026-09-12T12:00:00+00:00"),
+  });
+  assert.equal(staleView.isStale, true);
+  assert.equal(staleView.state, "stale");
+  assert.equal(staleView.view, "24h");
+
+  const successParsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(successParsed);
+  const fresh = projectWorkspaceTelemetryView(successParsed, {
+    nowMs: Date.parse("2026-09-12T12:02:00+00:00"),
+  });
+  assert.equal(fresh.isStale, false);
+
+  const aged = projectWorkspaceTelemetryView(successParsed, {
+    nowMs: Date.parse("2026-09-12T12:06:00+00:00"),
+  });
+  assert.equal(aged.isStale, true);
+});
+
+test("view enum accepts only 1h/6h/24h", () => {
+  for (const view of ["1h", "6h", "24h"]) {
+    assert.ok(parseTelemetryPresentation({ ...SUCCESS, view }));
+  }
+  for (const view of ["", "12h", "1H", "all"]) {
+    assert.equal(parseTelemetryPresentation({ ...SUCCESS, view }), null);
+  }
+});
+
+test("decimal-string CPU/estimate vs numeric admitted memory bytes are preserved", () => {
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  assert.equal(typeof parsed.admitted?.cpuRequestCores, "number");
+  assert.equal(typeof parsed.admitted?.memoryLimitBytes, "number");
+  assert.equal(typeof parsed.estimate.estimatedUsd, "number");
+  assert.equal(parsed.cpuSamples[0].value, 0.25);
+  assert.equal(parsed.memorySamples[0].value, 1073741824);
+});
+
+test("unknown CPU/memory limits stay null rather than zero", () => {
+  const unknown = structuredClone(SUCCESS);
+  unknown.admitted.cpu_limit_cores = null;
+  unknown.admitted.memory_limit_bytes = null;
+  const parsed = parseTelemetryPresentation(unknown);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.admitted?.cpuLimitCores, null);
+  assert.equal(view.admitted?.memoryLimitBytes, null);
+  assert.notEqual(view.admitted?.cpuLimitCores, 0);
+  assert.notEqual(view.admitted?.memoryLimitBytes, 0);
+});
