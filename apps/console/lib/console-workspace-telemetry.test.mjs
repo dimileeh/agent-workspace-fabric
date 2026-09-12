@@ -175,6 +175,9 @@ test("parseTelemetryPresentation rejects stale_after_seconds that overflow thres
   aboveCap.stale_after_seconds = MAX_STALE_AFTER_SECONDS + 1;
   assert.equal(parseTelemetryPresentation(aboveCap), null);
 
+  // Operational 7d cap (not MAX_SAFE_INTEGER/1000).
+  assert.equal(MAX_STALE_AFTER_SECONDS, 7 * 24 * 60 * 60);
+
   const atCap = structuredClone(SUCCESS);
   atCap.stale_after_seconds = MAX_STALE_AFTER_SECONDS;
   assert.ok(parseTelemetryPresentation(atCap));
@@ -186,6 +189,17 @@ test("parseTelemetryPresentation rejects stale_after_seconds that overflow thres
   const fractional = structuredClone(SUCCESS);
   fractional.stale_after_seconds = 300.5;
   assert.equal(parseTelemetryPresentation(fractional), null);
+});
+
+test("overflowing staleAfterSeconds fail-closes freshness to stale", () => {
+  // Defense in depth if a huge threshold bypasses parse (e.g. mutated view model).
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  parsed.staleAfterSeconds = Number.MAX_VALUE;
+  const view = projectWorkspaceTelemetryView(parsed, {
+    nowMs: Date.parse("2026-09-12T12:02:00+00:00"),
+  });
+  assert.equal(view.isStale, true);
 });
 
 test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings", () => {

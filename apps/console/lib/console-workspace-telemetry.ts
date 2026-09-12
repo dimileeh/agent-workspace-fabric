@@ -41,12 +41,12 @@ export const MAX_TELEMETRY_SAMPLES = 2048;
 /** Max SVG points drawn for a telemetry sparkline after downsampling. */
 export const MAX_SPARKLINE_POINTS = 64;
 /**
- * Cap stale_after_seconds so thresholdMs = seconds * 1000 stays a safe
- * finite integer. Larger finite values (e.g. Number.MAX_VALUE) overflow to
- * Infinity on multiply and make age checks always false, so arbitrarily old
- * telemetry would appear fresh.
+ * Operational cap for stale_after_seconds (7d). Rejects absurd finite values
+ * (e.g. Number.MAX_VALUE) that would make thresholdMs = seconds * 1000 become
+ * Infinity and treat arbitrarily old telemetry as fresh. Also stays far below
+ * Number.MAX_SAFE_INTEGER / 1000 so the ms conversion remains a safe integer.
  */
-export const MAX_STALE_AFTER_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
+export const MAX_STALE_AFTER_SECONDS = 7 * 24 * 60 * 60;
 
 const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
@@ -930,7 +930,13 @@ function isTimestampOlderThanStaleThreshold(
   if (!Number.isFinite(ms)) {
     return false;
   }
-  return nowMs - ms > staleAfterSeconds * 1000;
+  const thresholdMs = staleAfterSeconds * 1000;
+  // Fail closed: an overflowing threshold can never be exceeded, so aged
+  // telemetry would otherwise appear fresh forever.
+  if (!Number.isFinite(thresholdMs)) {
+    return true;
+  }
+  return nowMs - ms > thresholdMs;
 }
 
 /**
