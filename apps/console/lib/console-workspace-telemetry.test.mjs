@@ -425,6 +425,32 @@ test("parseTelemetryPresentation rejects mismatched sample provider_resource_uid
   assert.equal(parseTelemetryPresentation(mixedSeries), null);
 });
 
+test("parseTelemetryPresentation rejects samples without provider_resource_uid", () => {
+  const omitted = structuredClone(SUCCESS);
+  delete omitted.cpu_cores_samples[0].provider_resource_uid;
+  assert.equal(parseTelemetryPresentation(omitted), null);
+
+  const empty = structuredClone(SUCCESS);
+  empty.memory_bytes_samples[0].provider_resource_uid = "";
+  assert.equal(parseTelemetryPresentation(empty), null);
+});
+
+test("parseTelemetryPresentation rejects cross-metric sample UID mismatch without presentation UID", () => {
+  const cross = structuredClone(SUCCESS);
+  delete cross.admitted.provider_resource_uid;
+  delete cross.ownership.provider_resource_uid;
+  cross.cpu_cores_samples[0].provider_resource_uid = "pod-uid-cpu";
+  cross.memory_bytes_samples[0].provider_resource_uid = "pod-uid-memory";
+  assert.equal(parseTelemetryPresentation(cross), null);
+
+  const aligned = structuredClone(SUCCESS);
+  delete aligned.admitted.provider_resource_uid;
+  delete aligned.ownership.provider_resource_uid;
+  aligned.cpu_cores_samples[0].provider_resource_uid = "pod-uid-shared";
+  aligned.memory_bytes_samples[0].provider_resource_uid = "pod-uid-shared";
+  assert.ok(parseTelemetryPresentation(aligned));
+});
+
 test("parseTelemetryPresentation rejects conflicting admitted vs ownership provider_resource_uid", () => {
   const conflict = structuredClone(SUCCESS);
   conflict.admitted.provider_resource_uid = "pod-uid-admitted";

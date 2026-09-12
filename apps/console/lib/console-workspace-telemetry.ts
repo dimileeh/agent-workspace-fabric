@@ -360,30 +360,32 @@ function resolvePresentationResourceUid(
 /**
  * Fail closed on cross-resource samples and duplicate container@time rows.
  * Distinct containers at the same timestamp remain valid (pod partition sum).
+ * Every retained sample must carry a non-empty UID matching one presentation-wide
+ * identity (admitted/ownership when present, else the shared sample series UID).
  */
 function assertSampleIdentities(
-  samples: ParsedTelemetrySample[],
+  sampleGroups: readonly ParsedTelemetrySample[][],
   expectedResourceUid: string | null,
 ): boolean {
-  const seenContainerAtTime = new Set<string>();
-  let seriesUid: string | null = null;
-  for (const sample of samples) {
-    const identityKey = `${sample.sampleTime}\0${sample.containerName}`;
-    if (seenContainerAtTime.has(identityKey)) {
-      return false;
-    }
-    seenContainerAtTime.add(identityKey);
+  let seriesUid: string | null = expectedResourceUid;
+  for (const samples of sampleGroups) {
+    const seenContainerAtTime = new Set<string>();
+    for (const sample of samples) {
+      const identityKey = `${sample.sampleTime}\0${sample.containerName}`;
+      if (seenContainerAtTime.has(identityKey)) {
+        return false;
+      }
+      seenContainerAtTime.add(identityKey);
 
-    if (sample.providerResourceUid === null) {
-      continue;
-    }
-    if (expectedResourceUid !== null && sample.providerResourceUid !== expectedResourceUid) {
-      return false;
-    }
-    if (seriesUid === null) {
-      seriesUid = sample.providerResourceUid;
-    } else if (sample.providerResourceUid !== seriesUid) {
-      return false;
+      const uid = sample.providerResourceUid;
+      if (uid === null || uid.length === 0) {
+        return false;
+      }
+      if (seriesUid === null) {
+        seriesUid = uid;
+      } else if (uid !== seriesUid) {
+        return false;
+      }
     }
   }
   return true;
@@ -640,10 +642,7 @@ export function parseTelemetryPresentation(
   if (expectedResourceUid === undefined) {
     return null;
   }
-  if (
-    !assertSampleIdentities(cpuSamples, expectedResourceUid) ||
-    !assertSampleIdentities(memorySamples, expectedResourceUid)
-  ) {
+  if (!assertSampleIdentities([cpuSamples, memorySamples], expectedResourceUid)) {
     return null;
   }
   const estimate = parseEstimate(payload.estimate);
