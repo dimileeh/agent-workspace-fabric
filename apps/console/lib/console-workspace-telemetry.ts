@@ -874,11 +874,16 @@ export function parseTelemetryPresentation(
   };
 }
 
+/** Epoch ms for a parsed RFC3339 sample timestamp (already validated upstream). */
+function timestampInstantMs(value: string): number {
+  return Date.parse(value);
+}
+
 function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
   let latest: string | null = null;
   let latestMs = Number.NEGATIVE_INFINITY;
   for (const sample of samples) {
-    const ms = Date.parse(sample.sampleTime);
+    const ms = timestampInstantMs(sample.sampleTime);
     if (ms > latestMs) {
       latestMs = ms;
       latest = sample.sampleTime;
@@ -906,20 +911,23 @@ function accumulateSampleTotal(
 }
 
 /**
- * True when every sample shares the same interval_start/interval_end string
- * identity. Samples that only share sample_time may still cover different
- * measurement windows and must not be treated as one complete pod reading.
+ * True when every sample shares the same interval_start/interval_end instant
+ * (epoch ms). Alternate RFC3339 spellings of the same moment must match;
+ * samples that only share sample_time may still cover different measurement
+ * windows and must not be treated as one complete pod reading.
  */
 function samplesShareIntervalTuple(samples: ParsedTelemetrySample[]): boolean {
   if (samples.length <= 1) {
     return true;
   }
   const first = samples[0];
+  const startMs = timestampInstantMs(first.intervalStart);
+  const endMs = timestampInstantMs(first.intervalEnd);
   for (let i = 1; i < samples.length; i++) {
     const sample = samples[i];
     if (
-      sample.intervalStart !== first.intervalStart ||
-      sample.intervalEnd !== first.intervalEnd
+      timestampInstantMs(sample.intervalStart) !== startMs ||
+      timestampInstantMs(sample.intervalEnd) !== endMs
     ) {
       return false;
     }
@@ -928,7 +936,7 @@ function samplesShareIntervalTuple(samples: ParsedTelemetrySample[]): boolean {
 }
 
 /**
- * Build sparkline history as one pod-total point per sample_time.
+ * Build sparkline history as one pod-total point per sample_time instant.
  * Raw per-container rows must not be plotted as a single line — same-timestamp
  * containers would form a fake trend and disagree with meter totals.
  * Staggered scrapes that leave a timestamp missing containers seen elsewhere
@@ -943,18 +951,20 @@ function buildPodTotalSeries(
     return [];
   }
   const seriesContainers = new Set<string>();
-  const byTime = new Map<string, ParsedTelemetrySample[]>();
+  // Group by instant so Z / offset spellings of the same moment share a partition.
+  const byTime = new Map<number, ParsedTelemetrySample[]>();
   for (const sample of samples) {
     seriesContainers.add(sample.containerName);
-    const group = byTime.get(sample.sampleTime);
+    const key = timestampInstantMs(sample.sampleTime);
+    const group = byTime.get(key);
     if (group) {
       group.push(sample);
     } else {
-      byTime.set(sample.sampleTime, [sample]);
+      byTime.set(key, [sample]);
     }
   }
   const points: WorkspaceTelemetrySeriesPoint[] = [];
-  for (const [sampleTime, group] of byTime) {
+  for (const group of byTime.values()) {
     // Aggregate only samples that share the full interval tuple. Differing
     // interval_start/interval_end at the same sample_time are different
     // measurement windows — do not sum them into a pod-total point.
@@ -990,7 +1000,7 @@ function buildPodTotalSeries(
     }
     names.sort();
     points.push({
-      sampleTime,
+      sampleTime: group[0].sampleTime,
       value,
       quality,
       containerName: names.join(","),
@@ -1001,7 +1011,7 @@ function buildPodTotalSeries(
 }
 
 /**
- * Sum samples that share the exact same sample_time string identity.
+ * Sum samples that share the same sample_time instant (epoch ms).
  * Never merges across different moments. If the latest partition is missing
  * containers that appear elsewhere in the series, or containers disagree on
  * interval windows, treat usage as partial and unavailable (null) rather than
@@ -1038,7 +1048,10 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
       series,
     };
   }
-  const atLatest = samples.filter((s) => s.sampleTime === sampleTime);
+  const latestMs = timestampInstantMs(sampleTime);
+  const atLatest = samples.filter(
+    (s) => timestampInstantMs(s.sampleTime) === latestMs,
+  );
   let usedPartial = false;
   let usedStale = false;
   let incompletePartition = false;
@@ -1190,9 +1203,12 @@ function resolveDisplaySampleTime(
 function meterSampleTimesAreMixed(
   meterSampleTimes: Array<string | null>,
 ): boolean {
-  const distinct = new Set(
-    meterSampleTimes.filter((v): v is string => typeof v === "string"),
-  );
+  const distinct = new Set<number>();
+  for (const value of meterSampleTimes) {
+    if (typeof value === "string") {
+      distinct.add(timestampInstantMs(value));
+    }
+  }
   return distinct.size > 1;
 }
 

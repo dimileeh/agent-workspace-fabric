@@ -456,6 +456,51 @@ test("same sample_time with mismatched intervals is partial, not a complete pod 
   assert.deepEqual(view.cpu.series, []);
 });
 
+test("same-instant RFC3339 spellings share interval and partition identity", () => {
+  // Producers may serialize the same UTC instant as Z or an equivalent offset.
+  // Raw-string equality would treat a complete scrape as mismatched/partial.
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  multi.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00Z",
+      interval_start: "2026-09-12T11:59:00Z",
+      interval_end: "2026-09-12T12:00:00Z",
+      value: "0.10",
+    },
+    {
+      ...base,
+      container_name: "sidecar",
+      sample_time: "2026-09-12T13:00:00+01:00",
+      interval_start: "2026-09-12T12:59:00+01:00",
+      interval_end: "2026-09-12T13:00:00+01:00",
+      value: "0.15",
+    },
+  ];
+  // Memory uses yet another spelling of the same sample instant as agent.
+  multi.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.usedCores, 0.25);
+  assert.equal(view.cpu.usedPartial, false);
+  assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
+  assert.equal(view.cpu.series.length, 1);
+  assert.equal(view.cpu.series[0].value, 0.25);
+  assert.equal(view.cpu.series[0].quality, "ok");
+  // CPU Z / memory +00:00 are the same instant — not a mixed Sample label.
+  assert.equal(view.sampleTimeMixed, false);
+});
+
 test("sparkline series uses pod totals per timestamp, not raw per-container points", () => {
   const multi = structuredClone(SUCCESS);
   const base = SUCCESS.cpu_cores_samples[0];
