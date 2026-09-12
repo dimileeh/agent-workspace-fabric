@@ -75,13 +75,16 @@ function localExactCountSummary(): ConsoleDashboardSummary {
 
 /** Exact counts win; confirmed evidence fills only null exact fields. */
 function mixedExactAndConfirmedSummary(): ConsoleDashboardSummary {
+  // Parser invariants: unknown statuses must be 0 when any exact count is
+  // non-null, and every non-null exact value must equal confirmed_counts.
+  // Null exact fields remain so confirmed fallback is still exercised.
   return localDashboardSummary({
     coverage: {
       status: "partial",
-      notes: ["some_statuses_unknown"],
+      notes: ["some_counts_unavailable"],
     },
     counts: {
-      active: 5,
+      active: 7,
       executing: null,
       monitoring_pr: 2,
       awaiting_operator: null,
@@ -93,20 +96,20 @@ function mixedExactAndConfirmedSummary(): ConsoleDashboardSummary {
       failed_last_window: 0,
     },
     count_evidence: {
-      total_workspaces: 12,
-      status_known_workspaces: 8,
-      status_unknown_workspaces: 4,
+      total_workspaces: 11,
+      status_known_workspaces: 11,
+      status_unknown_workspaces: 0,
       confirmed_counts: {
-        active: 99,
+        active: 7,
         executing: 3,
-        monitoring_pr: 99,
+        monitoring_pr: 2,
         awaiting_operator: 1,
-        awaiting_human: 99,
+        awaiting_human: 0,
         retrying: 0,
-        queued: 99,
+        queued: 1,
         completed_last_window: 4,
         cancelled_last_window: 0,
-        failed_last_window: 99,
+        failed_last_window: 0,
       },
     },
   });
@@ -274,7 +277,7 @@ const COUNT_SCENARIOS: CountScenario[] = [
     summary: mixedExactAndConfirmedSummary,
     assertKpis: async (page) => {
       // Exact wins when both present; confirmed fills nulls; evidenced zeros stay plain.
-      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("5");
+      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("7");
       await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("3");
       await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("2");
       await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("1");
