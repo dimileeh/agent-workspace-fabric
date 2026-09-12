@@ -59,6 +59,9 @@ test.describe("console workspace telemetry harness", () => {
     await expect(root).toBeVisible();
     await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("0.25");
     await expect(page.getByTestId("telemetry-meter-memory")).toContainText("1.0 GB");
+    // Success fixture has one CPU/memory sample — must show a marker, not an empty stroke.
+    await expect(page.getByTestId("telemetry-series-cpu-marker")).toBeVisible();
+    await expect(page.getByTestId("telemetry-series-memory-marker")).toBeVisible();
     await expect(page.getByTestId("telemetry-workload-cost-value")).toContainText("$");
     await expect(page.getByText("Estimated workload cost")).toBeVisible();
     await expect(page.getByText(/LLM usage/i)).toHaveCount(0);

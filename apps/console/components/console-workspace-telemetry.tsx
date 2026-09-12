@@ -11,7 +11,7 @@ import type {
   WorkspaceTelemetryView,
 } from "@/lib/console-workspace-telemetry";
 import {
-  downsampleSeriesForSparkline,
+  buildSparklineGeometry,
   TELEMETRY_VIEWS,
 } from "@/lib/console-workspace-telemetry";
 
@@ -129,37 +129,17 @@ function SeriesSparkline({
   points: WorkspaceTelemetrySeriesPoint[];
   label: string;
 }) {
-  const path = useMemo(() => {
+  const geom = useMemo(() => {
     if (points.length === 0) {
       return null;
     }
     const sorted = [...points].sort(
       (a, b) => Date.parse(a.sampleTime) - Date.parse(b.sampleTime),
     );
-    const series = downsampleSeriesForSparkline(sorted);
-    let min = series[0]!.value;
-    let max = series[0]!.value;
-    for (let i = 1; i < series.length; i++) {
-      const v = series[i]!.value;
-      if (v < min) {
-        min = v;
-      }
-      if (v > max) {
-        max = v;
-      }
-    }
-    const span = max - min || 1;
-    const w = 120;
-    const h = 28;
-    const coords = series.map((p, i) => {
-      const x = series.length === 1 ? w / 2 : (i / (series.length - 1)) * w;
-      const y = h - ((p.value - min) / span) * (h - 4) - 2;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    });
-    return { d: `M ${coords.join(" L ")}`, w, h };
+    return buildSparklineGeometry(sorted);
   }, [points]);
 
-  if (!path) {
+  if (!geom) {
     return (
       <div
         className="flex h-10 items-center rounded-[var(--radius-control)] border border-dashed border-line px-2 text-[11px] text-fg-muted"
@@ -177,13 +157,24 @@ function SeriesSparkline({
     >
       <svg
         width="100%"
-        height={path.h}
-        viewBox={`0 0 ${path.w} ${path.h}`}
+        height={geom.h}
+        viewBox={`0 0 ${geom.w} ${geom.h}`}
         preserveAspectRatio="none"
         aria-hidden
         className="block"
       >
-        <path d={path.d} fill="none" stroke="var(--info)" strokeWidth="1.5" />
+        {geom.pathD ? (
+          <path d={geom.pathD} fill="none" stroke="var(--info)" strokeWidth="1.5" />
+        ) : null}
+        {geom.marker ? (
+          <circle
+            cx={geom.marker.x}
+            cy={geom.marker.y}
+            r={2.5}
+            fill="var(--info)"
+            data-testid={`telemetry-series-${label}-marker`}
+          />
+        ) : null}
       </svg>
     </div>
   );

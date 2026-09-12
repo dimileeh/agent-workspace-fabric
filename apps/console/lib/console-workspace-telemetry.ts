@@ -393,6 +393,61 @@ export function downsampleSeriesForSparkline<T>(
   return out;
 }
 
+export type SparklineGeometry = {
+  w: number;
+  h: number;
+  /** Stroked polyline for 2+ samples; null when only a marker is drawn. */
+  pathD: string | null;
+  /** Centered marker for a single sample (a lone `M` would stroke nothing). */
+  marker: { x: number; y: number } | null;
+};
+
+/**
+ * Map a sorted value series into SVG sparkline geometry.
+ * One sample → marker only; two or more → stroked path.
+ */
+export function buildSparklineGeometry(
+  points: readonly { value: number }[],
+  width = 120,
+  height = 28,
+): SparklineGeometry | null {
+  if (points.length === 0) {
+    return null;
+  }
+  const series = downsampleSeriesForSparkline(points);
+  if (series.length === 1) {
+    return {
+      w: width,
+      h: height,
+      pathD: null,
+      marker: { x: width / 2, y: height / 2 },
+    };
+  }
+  let min = series[0]!.value;
+  let max = series[0]!.value;
+  for (let i = 1; i < series.length; i++) {
+    const v = series[i]!.value;
+    if (v < min) {
+      min = v;
+    }
+    if (v > max) {
+      max = v;
+    }
+  }
+  const span = max - min || 1;
+  const coords = series.map((p, i) => {
+    const x = (i / (series.length - 1)) * width;
+    const y = height - ((p.value - min) / span) * (height - 4) - 2;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return {
+    w: width,
+    h: height,
+    pathD: `M ${coords.join(" L ")}`,
+    marker: null,
+  };
+}
+
 function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefined {
   if (value === null) {
     return null;

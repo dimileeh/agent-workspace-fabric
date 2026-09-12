@@ -8,6 +8,7 @@ import {
   COST_EXCLUSION_NOTE,
   MAX_SPARKLINE_POINTS,
   MAX_TELEMETRY_SAMPLES,
+  buildSparklineGeometry,
   downsampleSeriesForSparkline,
   parseTelemetryPresentation,
   projectWorkspaceTelemetryView,
@@ -420,4 +421,20 @@ test("downsampleSeriesForSparkline preserves endpoints and bounds length", () =>
   assert.equal(down[0], 0);
   assert.equal(down[down.length - 1], long.length - 1);
   assert.equal(new Set(down).size, down.length);
+});
+
+test("buildSparklineGeometry draws a marker for one sample and a path for two+", () => {
+  assert.equal(buildSparklineGeometry([]), null);
+
+  const single = buildSparklineGeometry([{ value: 0.25 }]);
+  assert.ok(single);
+  assert.equal(single.pathD, null);
+  assert.deepEqual(single.marker, { x: 60, y: 14 });
+
+  const multi = buildSparklineGeometry([{ value: 1 }, { value: 3 }, { value: 2 }]);
+  assert.ok(multi);
+  assert.equal(multi.marker, null);
+  assert.ok(multi.pathD);
+  assert.match(multi.pathD, /^M /);
+  assert.match(multi.pathD, / L /);
 });
