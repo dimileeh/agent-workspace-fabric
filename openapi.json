@@ -11238,6 +11238,16 @@
             ],
             "title": "Last Log At"
           },
+          "latest_destroying_state_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "latest_state_change": {
             "anyOf": [
               {

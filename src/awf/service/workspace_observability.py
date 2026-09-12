@@ -397,6 +397,15 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
+    latest_destroying_state_change = next(
+        (
+            event
+            for event in reversed(ordered_events)
+            if event.event_type == "workspace.state_changed"
+            and _coerce_workspace_status(event.new_state) == WorkspaceStatus.destroying
+        ),
+        None,
+    )
     latest_workflow_terminal_state_change = next(
         (
             event
@@ -460,6 +469,11 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         latest_state_change=(
             WorkspaceEventResponse.model_validate(latest_state_change)
             if latest_state_change is not None
+            else None
+        ),
+        latest_destroying_state_change=(
+            WorkspaceEventResponse.model_validate(latest_destroying_state_change)
+            if latest_destroying_state_change is not None
             else None
         ),
         latest_workflow_terminal_state_change=(
