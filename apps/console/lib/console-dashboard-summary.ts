@@ -1,6 +1,7 @@
 import { capacityUtilizationPct } from "./format.ts";
 import type {
   ConsoleBackendKind,
+  ConsoleDashboardCountEvidence,
   ConsoleDashboardCounts,
   ConsoleDashboardSummary,
   ResourceSaturationSummary,
@@ -133,10 +134,12 @@ function countRelationshipsAreValid(counts: Record<DashboardCountKey, number | n
   return true;
 }
 
+const CONFIRMED_COUNT_HINT = "confirmed lower bound; exact metric count is incomplete";
+
 /**
- * Plain numeric presentation: exact counts win; otherwise confirmed evidence
- * (including evidenced zero). No "confirmed" suffix or lower-bound hint copy —
- * incomplete coverage stays a backend field, not strip chrome.
+ * Exact counts win; otherwise confirmed evidence (including evidenced zero) is
+ * rendered as a visibly qualified lower bound (`N confirmed`) per
+ * docs/CONSOLE_BACKEND_CONTRACT.md — never as an unqualified exact total.
  */
 function displayCount(
   exact: number | null | undefined,
@@ -147,10 +150,57 @@ function displayCount(
     return { value: exact, hint: baseHint };
   }
   if (confirmed != null) {
-    return { value: confirmed, hint: baseHint };
+    return {
+      value: confirmed,
+      suffix: " confirmed",
+      hint: baseHint ? `${baseHint} · ${CONFIRMED_COUNT_HINT}` : CONFIRMED_COUNT_HINT,
+    };
   }
   // Null ≠ zero: incomplete/unknown counts without evidence render as an em dash.
   return { value: DASH };
+}
+
+const COVERAGE_NOTE_LABELS: Record<string, string> = {
+  queued_count_unavailable: "queued count unavailable",
+  no_prior_successful_snapshot: "no prior successful snapshot",
+};
+
+function formatCoverageNote(note: string): string {
+  const known = COVERAGE_NOTE_LABELS[note];
+  if (known) {
+    return known;
+  }
+  const trimmed = note.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.replaceAll("_", " ");
+}
+
+/**
+ * Operator-facing incomplete-coverage notice for an HTTP 200 summary.
+ * Null when coverage is missing or complete — request errors stay a separate banner.
+ */
+export function formatDashboardCoverageNotice(
+  coverage: { status: string; notes?: readonly string[] | null } | null | undefined,
+  countEvidence?: ConsoleDashboardCountEvidence | null,
+): string | null {
+  if (!coverage || (coverage.status !== "partial" && coverage.status !== "unknown")) {
+    return null;
+  }
+  const notes = (coverage.notes ?? [])
+    .map((note) => formatCoverageNote(note))
+    .filter((note) => note.length > 0);
+  if (countEvidence) {
+    notes.unshift(
+      `${countEvidence.status_known_workspaces} of ${countEvidence.total_workspaces} workflow statuses known; ${countEvidence.status_unknown_workspaces} unknown`,
+    );
+  }
+  const headline = coverage.status === "partial" ? "partial coverage" : "coverage unknown";
+  if (notes.length === 0) {
+    return `${headline} — some counts are incomplete`;
+  }
+  return `${headline} — ${notes.join("; ")}`;
 }
 
 export function fleetKpisFromDashboardSummary(options: {
