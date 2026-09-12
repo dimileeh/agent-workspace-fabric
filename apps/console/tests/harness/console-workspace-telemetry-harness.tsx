@@ -45,6 +45,8 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const incompleteSeries = searchParams.get("incompleteSeries") === "1";
   // Differing but fresh CPU vs memory sample times (mixed Sample label).
   const mixedSampleTimes = searchParams.get("mixedSampleTimes") === "1";
+  // Envelope-level partial with complete nested fields (no meter/cost badges).
+  const envelopePartial = searchParams.get("envelopePartial") === "1";
   const nowMsParam = searchParams.get("nowMs");
   const nowMs = nowMsParam ? Number(nowMsParam) : Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -61,12 +63,15 @@ export function ConsoleWorkspaceTelemetryHarness() {
       (unknownLimits ||
         admittedPartial ||
         incompleteSeries ||
-        mixedSampleTimes) &&
+        mixedSampleTimes ||
+        envelopePartial) &&
       raw &&
       typeof raw === "object" &&
       raw !== null
     ) {
       const envelope = raw as {
+        state?: string;
+        quality?: string;
         admitted?: {
           cpu_limit_cores?: string | null;
           memory_limit_bytes?: number | null;
@@ -75,6 +80,10 @@ export function ConsoleWorkspaceTelemetryHarness() {
         cpu_cores_samples?: Array<Record<string, unknown>>;
         memory_bytes_samples?: Array<Record<string, unknown>>;
       };
+      if (envelopePartial) {
+        envelope.state = "partial";
+        envelope.quality = "partial";
+      }
       if (envelope.admitted) {
         if (unknownLimits) {
           envelope.admitted.cpu_limit_cores = null;
@@ -169,6 +178,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     admittedPartial,
     incompleteSeries,
     mixedSampleTimes,
+    envelopePartial,
     nowMs,
   ]);
 

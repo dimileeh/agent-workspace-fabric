@@ -139,6 +139,28 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("lim");
   });
 
+  test("envelope state/quality partial surfaces when nested fields are complete", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    // Success nested fields stay complete; only envelope state/quality is partial.
+    await openHarness(page, { fixture: "success", envelopePartial: "1" });
+
+    const root = page.getByTestId("console-workspace-telemetry");
+    await expect(root).toHaveAttribute("data-awf-telemetry-state", "partial");
+    await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
+    await expect(page.getByTestId("telemetry-partial-indicator")).toHaveText("partial");
+    // Nested meters/cost must not already qualify — panel indicator is the signal.
+    await expect(page.getByTestId("telemetry-meter-cpu")).not.toContainText("partial");
+    await expect(page.getByTestId("telemetry-meter-memory")).not.toContainText("partial");
+    await expect(page.getByTestId("telemetry-workload-cost-value")).not.toContainText(
+      "partial",
+    );
+
+    await openHarness(page, { fixture: "success" });
+    await expect(page.getByTestId("telemetry-partial-indicator")).toHaveCount(0);
+  });
+
   test("incomplete historical partitions qualify sparkline history", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, { fixture: "success", incompleteSeries: "1" });

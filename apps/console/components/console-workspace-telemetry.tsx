@@ -257,6 +257,10 @@ export function ConsoleWorkspaceTelemetry({
 
   const stale = mode === "live" && viewModel.isStale;
   const modeLabel = mode === "historical" ? "Historical" : "Live";
+  // Envelope-level partial is not implied by nested meter/cost badges; surface it
+  // when the producer marks state or quality partial (data_quality_notes stay hidden).
+  const envelopePartial =
+    viewModel.state === "partial" || viewModel.quality === "partial";
 
   return (
     <Panel
@@ -333,6 +337,15 @@ export function ConsoleWorkspaceTelemetry({
           >
             {modeLabel}
           </span>
+          {envelopePartial ? (
+            <span
+              className="inline-flex items-center rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 font-medium text-attention-text"
+              data-testid="telemetry-partial-indicator"
+              title="Producer reported incomplete telemetry for this window"
+            >
+              partial
+            </span>
+          ) : null}
           <span
             className="tnum"
             data-testid="telemetry-sample-time"
