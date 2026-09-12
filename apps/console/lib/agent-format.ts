@@ -287,15 +287,7 @@ function submillisecondFraction(value: string): string {
   return fractionalSeconds.slice(4).replace(/0+$/, "");
 }
 
-function compareRecordedInstants(left: string, right: string): number | null {
-  const leftMs = recordedMilliseconds(left);
-  const rightMs = recordedMilliseconds(right);
-  if (leftMs == null || rightMs == null) {
-    return null;
-  }
-  if (leftMs !== rightMs) {
-    return leftMs < rightMs ? -1 : 1;
-  }
+function compareSubmillisecondFractions(left: string, right: string): number {
   const leftFraction = submillisecondFraction(left);
   const rightFraction = submillisecondFraction(right);
   const precision = Math.max(leftFraction.length, rightFraction.length);
@@ -306,6 +298,18 @@ function compareRecordedInstants(left: string, right: string): number | null {
     : normalizedLeft < normalizedRight
       ? -1
       : 1;
+}
+
+function compareRecordedInstants(left: string, right: string): number | null {
+  const leftMs = recordedMilliseconds(left);
+  const rightMs = recordedMilliseconds(right);
+  if (leftMs == null || rightMs == null) {
+    return null;
+  }
+  if (leftMs !== rightMs) {
+    return leftMs < rightMs ? -1 : 1;
+  }
+  return compareSubmillisecondFractions(left, right);
 }
 
 function recordedMilliseconds(value: string | null | undefined): number | null {
@@ -384,17 +388,16 @@ function recordedIntervalDurationSeconds(
   endedAt: string,
   endedMs: number,
 ): number {
-  const submillisecondMicroseconds = (value: string): number => {
-    const fractionalSeconds = RFC3339_DATE_TIME.exec(value)?.[7] ?? "";
-    return Number(fractionalSeconds.slice(4, 7).padEnd(3, "0"));
-  };
   const elapsedMilliseconds = endedMs - startedMs;
   const elapsedWholeSeconds = Math.floor(elapsedMilliseconds / 1000);
-  const elapsedMicroseconds =
-    (elapsedMilliseconds - elapsedWholeSeconds * 1000) * 1000 +
-    submillisecondMicroseconds(endedAt) -
-    submillisecondMicroseconds(startedAt);
-  return elapsedWholeSeconds + Math.floor(elapsedMicroseconds / 1_000_000);
+  const elapsedMillisecondRemainder =
+    elapsedMilliseconds - elapsedWholeSeconds * 1000;
+  // Date.parse retains milliseconds. The remaining fractional digits can
+  // lower the floored duration only at an exact millisecond-second boundary.
+  return elapsedMillisecondRemainder === 0 &&
+    compareSubmillisecondFractions(endedAt, startedAt) === -1
+    ? elapsedWholeSeconds - 1
+    : elapsedWholeSeconds;
 }
 
 function lifecycleWorkflowTiming(item: WorkspaceOverview): {

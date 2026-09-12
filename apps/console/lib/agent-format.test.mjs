@@ -1040,6 +1040,30 @@ test("resolveWorkflowTiming rejects stage durations that contradict their timest
     },
     "duration validation must retain Core's microsecond precision",
   );
+  const nanosecondItem = {
+    ...item,
+    lifecycle: [
+      {
+        ...item.lifecycle[0],
+        started_at: "2026-09-06T12:00:00.0000009Z",
+        ended_at: "2026-09-06T12:00:01.0000001Z",
+        duration_seconds: 0,
+      },
+      {
+        ...item.lifecycle[1],
+        started_at: "2026-09-06T12:00:01.0000001Z",
+        ended_at: "2026-09-06T12:00:01.0000001Z",
+      },
+    ],
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming(nanosecondItem),
+    {
+      finishedAt: "2026-09-06T12:00:01.0000001Z",
+      durationSeconds: 0,
+    },
+    "duration validation must retain hosted nanosecond precision",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...submillisecondItem,
