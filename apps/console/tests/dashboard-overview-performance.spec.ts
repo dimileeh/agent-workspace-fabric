@@ -304,6 +304,126 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByText("1 selected for logs", { exact: true })).toBeVisible();
 });
 
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6hp4wm: a list shrink
+// can clamp the DOM scroll position before the virtual page is repaired. The
+// repair must happen in the layout effect so an empty window is never painted.
+test("membership shrink repairs an at-top virtual window before paint", async ({ page }) => {
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+
+  await page.getByRole("button", { name: "Filters" }).click();
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => {
+    element.dataset.paintedEmptyWindow = "false";
+    new MutationObserver(() => {
+      if (!element.querySelector('[data-testid^="workspace-card-"]')) {
+        requestAnimationFrame(() => {
+          if (!element.querySelector('[data-testid^="workspace-card-"]')) {
+            element.dataset.paintedEmptyWindow = "true";
+          }
+        });
+      }
+    }).observe(element, { childList: true, subtree: true });
+  });
+
+  await page.getByPlaceholder("Search workspaces").fill("ws_perf_0001");
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
+  await list.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  await expect(list).toHaveAttribute("data-painted-empty-window", "false");
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(1);
+});
+
+test("a newer user scroll supersedes a pending history restore", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, {
+    delayContinuation: true,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  await releaseHistory();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => overviewRequests).toEqual([
+    null,
+    String(PAGE_SIZE),
+    String(PAGE_SIZE * 2),
+  ]);
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight * 0.6 }));
+  const visibleAnchor = () => list.evaluate((element) => {
+    const viewportTop = element.querySelector<HTMLElement>(":scope > .sticky")
+      ?.getBoundingClientRect().bottom ?? element.getBoundingClientRect().top;
+    const row = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    ).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    const bounds = row?.getBoundingClientRect();
+    return {
+      id: row?.dataset.testid ?? null,
+      offsetRatio: bounds ? (bounds.top - viewportTop) / bounds.height : null,
+    };
+  });
+  await expect.poll(async () => (await visibleAnchor()).id).not.toBeNull();
+  const afterUserScroll = await visibleAnchor();
+
+  await releaseHistory();
+  await expect(page.getByText(`101–200 of ${PAGE_SIZE * 3} loaded`, { exact: true }))
+    .toBeVisible();
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(afterUserScroll.id);
+  const afterAppend = await visibleAnchor();
+  expect(afterAppend.offsetRatio).toBeCloseTo(afterUserScroll.offsetRatio ?? 0, 1);
+  expect(overviewRequests.filter((cursor) => cursor !== null)).toHaveLength(2);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+});
+
+test("a same-window user scroll supersedes a pending history fallback", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, {
+    delayContinuation: true,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: 1_000 }));
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(1_000);
+
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  const requestScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollTop + 400 }));
+  await expect.poll(() => list.evaluate((element) => element.scrollTop))
+    .toBe(requestScrollTop + 400);
+  const newerScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await releaseHistory();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(newerScrollTop);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hMh1_: when a full
 // page of newer workspaces makes page one disjoint, the old keyset cursor skips
 // the pages inserted ahead of its boundary.
@@ -567,17 +687,30 @@ test("filtered continuation backfills unchanged first-page membership", async ({
   const statusGroup = page.getByRole("group", { name: "Status" });
   await statusGroup.getByRole("button", { name: /Status all/ }).click();
   await statusGroup.getByLabel("completed").check();
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
-  await expect.poll(() => completedRequests).toContain("completed-page-2");
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  // This regression exercises filtered cursor backfill. Dispatch setup loads
+  // without Playwright scrolling the footer into the independent near-bottom
+  // loader, which can otherwise advance the stale cursor before membership
+  // changes and leave an extra retained row in the test fixture.
+  const requestHistoryWithoutScrolling = async (expectedCursor: string) => {
+    await expect(async () => {
+      if (!completedRequests.includes(expectedCursor)) {
+        await loadMore.evaluate((button: HTMLButtonElement) => button.click());
+      }
+      expect(completedRequests).toContain(expectedCursor);
+    }).toPass({ intervals: [100, 250, 500], timeout: 5_000 });
+  };
+  await requestHistoryWithoutScrolling("completed-page-2");
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
 
   // Membership can change after the latest page-one poll. The continuation
   // itself must be armed to replay the loaded range; waiting for another poll
   // would leave a window where the stale page-three cursor skips this row.
   membershipGrew = true;
   const firstPageRequests = completedRequests.filter((cursor) => cursor === null).length;
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await requestHistoryWithoutScrolling("shifted-completed-page-3");
 
-  await expect.poll(() => completedRequests).toContain("shifted-completed-page-3");
   expect(completedRequests.filter((cursor) => cursor === null)).toHaveLength(firstPageRequests);
   await expect(page.getByText(new RegExp(`of ${PAGE_SIZE * 3} loaded$`))).toBeVisible();
   await page.getByPlaceholder("Search workspaces").fill("Newly matching off-page workspace");
@@ -860,6 +993,167 @@ test("selecting a visible workspace keeps its rail position", async ({ page }) =
     .toBe(scrollTopBeforeSelection);
 });
 
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrOrC: Previous uses
+// a suppressed programmatic scroll, so it must explicitly release anchoring
+// owned by a selected row on the page being left.
+test("explicit page navigation clears selection-owned refresh anchoring", async ({ page }) => {
+  let revision = 0;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    resolvePageItems: (items, cursor) => {
+      if (cursor !== null || revision === 0) return items;
+      return items.map((item) => item.workspace_id === "ws_perf_0002"
+        ? { ...item, updated_at: "2026-09-11T12:02:00.000Z" }
+        : item);
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByTestId("workspace-card-ws_perf_0101").click();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0101/);
+
+  const list = page.getByTestId("workspace-list-scroll");
+  await page.getByRole("button", { name: "Previous workspace results" }).click();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+
+  revision = 1;
+  await page.locator("header").getByRole("button", { name: "Refresh" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0002")).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+});
+
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6htdHu: a suppressed
+// Previous scroll must cancel the request-time position held by an in-flight
+// near-bottom history load.
+test("explicit page navigation cancels a pending history restore", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  const routeOptions: OverviewRouteOptions = {
+    delayContinuation: false,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  };
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, routeOptions);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
+    await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
+  }
+
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByText("201–300 of 300 loaded", { exact: true })).toBeVisible();
+
+  routeOptions.delayContinuation = true;
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => overviewRequests).toContain(String(PAGE_SIZE * 3));
+
+  await page.getByRole("button", { name: "Previous workspace results" }).click();
+  await expect(page.getByText("101–200 of 300 loaded", { exact: true })).toBeVisible();
+  const navigatedScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await releaseHistory();
+  await expect(page.getByText("101–200 of 400 loaded", { exact: true })).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(
+    navigatedScrollTop,
+  );
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+});
+
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6htmJV: selecting an
+// already-loaded row outside the viewport must supersede the request-time
+// position held by an in-flight near-bottom history load.
+test("selection navigation cancels a pending history restore", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  const routeOptions: OverviewRouteOptions = {
+    delayContinuation: false,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  };
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, routeOptions);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
+    await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
+  }
+
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByText("201–300 of 300 loaded", { exact: true })).toBeVisible();
+
+  routeOptions.delayContinuation = true;
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => overviewRequests).toContain(String(PAGE_SIZE * 3));
+
+  await page.evaluate(() => {
+    window.history.pushState(null, "", "/?workspaceId=ws_perf_0101");
+  });
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0101/);
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+  const selectedScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await releaseHistory();
+  await expect(page.getByText("101–200 of 400 loaded", { exact: true })).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(
+    selectedScrollTop,
+  );
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+});
+
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrd2_: when a filter
+// removes the selected row but its fallback lookup fails, the unchanged
+// selection must stop owning refresh anchoring for the remaining rows.
+test("filtering a selected workspace releases refresh anchoring", async ({ page }) => {
+  let failSelectedLookup = false;
+  let revision = 0;
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    shouldFailBatch: () => failSelectedLookup,
+    resolvePageItems: (items, cursor) => {
+      if (cursor !== null || revision === 0) return items;
+      return items.map((item) => item.workspace_id === "ws_perf_0004"
+        ? { ...item, updated_at: "2026-09-11T12:04:00.000Z" }
+        : item);
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await page.getByTestId("workspace-card-ws_perf_0001").click();
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0001/);
+
+  failSelectedLookup = true;
+  await page.getByRole("button", { name: "Filters" }).click();
+  await page.getByPlaceholder("exact repo filter").fill("https://example.com/even.git");
+
+  const list = page.getByTestId("workspace-list-scroll");
+  await expect(page.getByTestId("workspace-card-ws_perf_0002")).toBeVisible();
+  await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0001/);
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+
+  revision = 1;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  await expect(page.getByTestId("workspace-card-ws_perf_0004")).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+});
+
 // Regression for PR #958 review thread PRRT_kwDOSJAM6s6hYbpe: a visible row
 // from the next page must not replace preceding viewport rows with a spacer.
 test("selecting a visible workspace keeps a boundary viewport covered", async ({ page }) => {
@@ -1046,6 +1340,219 @@ test("virtualization remeasures variable rows after filtering and viewport resiz
   );
 });
 
+for (const inspectorWorkspaceId of [null, "ws_perf_0001", "ws_perf_0002"] as const) {
+test(`workspace list stays at the top during refresh reorders (inspectorWorkspaceId=${inspectorWorkspaceId})`, async ({
+  page,
+}) => {
+  let firstPageRequests = 0;
+  let revision = 0;
+  const expandedTitle = "Updated workspace title that wraps after a passive refresh ".repeat(8);
+  const prependedWorkspace = {
+    ...workspaceOverview(0),
+    updated_at: "2026-09-11T12:04:00.000Z",
+    last_activity_at: "2026-09-11T12:04:00.000Z",
+  };
+  const historyPrepend = {
+    ...workspaceOverview(0),
+    workspace_id: "ws_perf_newest",
+    task_id: "task-ws_perf_newest",
+    title: "Newest workspace while reading history",
+    task_prompt: "Inspect the newest workspace while reading history",
+    branch_name: "perf/newest",
+    updated_at: "2026-09-11T12:06:00.000Z",
+    last_activity_at: "2026-09-11T12:06:00.000Z",
+  };
+  await page.setViewportSize({ width: 1_508, height: 1_000 });
+  await mockAwfConsoleApi(page);
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => {
+      if (cursor === null) firstPageRequests += 1;
+    },
+    resolvePageItems: (items, cursor) => {
+      if (cursor !== null || revision === 0) return items;
+      const updatedItems = items.map((item) => {
+        if (
+          revision === 1 &&
+          inspectorWorkspaceId === "ws_perf_0001" &&
+          item.workspace_id === "ws_perf_0001"
+        ) {
+          return { ...item, updated_at: "2026-09-10T11:59:30.500Z" };
+        }
+        if (revision === 1 && item.workspace_id === "ws_perf_0002") {
+          return { ...item, updated_at: "2026-09-11T12:02:00.000Z" };
+        }
+        if (revision === 2 && item.workspace_id === "ws_perf_0001") {
+          return { ...item, updated_at: "2026-09-11T12:03:00.000Z" };
+        }
+        if (revision === 4 && item.workspace_id === "ws_perf_0002") {
+          return {
+            ...item,
+            title: expandedTitle,
+            updated_at: "2026-09-11T12:05:00.000Z",
+          };
+        }
+        if (revision === 6 && item.workspace_id === "ws_perf_0001") {
+          return { ...item, updated_at: "2026-09-11T12:07:00.000Z" };
+        }
+        return item;
+      });
+      if (revision === 3 || revision === 4) {
+        return [prependedWorkspace, ...updatedItems.slice(0, -1)];
+      }
+      if (revision >= 5) {
+        return [historyPrepend, ...updatedItems.slice(0, -1)];
+      }
+      return updatedItems;
+    },
+  });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  if (inspectorWorkspaceId) {
+    await page.getByTestId(`workspace-card-${inspectorWorkspaceId}`).click();
+    await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  }
+  const list = page.getByTestId("workspace-list-scroll");
+  const firstCardId = () =>
+    list.locator('[data-testid^="workspace-card-"]').first().getAttribute("data-testid");
+  const scrollTop = () => list.evaluate((element) => element.scrollTop);
+  const expectTop = async () => {
+    await expect.poll(scrollTop).toBe(0);
+  };
+  const publishRefresh = async (nextRevision: number, expectedFirstCardId: string) => {
+    revision = nextRevision;
+    const requestsBeforeRefresh = firstPageRequests;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => firstPageRequests).toBeGreaterThan(requestsBeforeRefresh);
+    await expect.poll(firstCardId).toBe(expectedFirstCardId);
+  };
+  const publishBackgroundRefresh = async (
+    nextRevision: number,
+    expectedFirstCardId: string,
+  ) => {
+    revision = nextRevision;
+    const requestsBeforeRefresh = firstPageRequests;
+    await expect
+      .poll(() => firstPageRequests, { timeout: 7_000 })
+      .toBeGreaterThan(requestsBeforeRefresh);
+    await expect.poll(firstCardId).toBe(expectedFirstCardId);
+  };
+
+  await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0001");
+  await list.evaluate((element) => element.scrollTo({ top: 0 }));
+  await expectTop();
+
+  await publishBackgroundRefresh(1, "workspace-card-ws_perf_0002");
+  await expectTop();
+  if (inspectorWorkspaceId === "ws_perf_0001") {
+    await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  }
+  if (inspectorWorkspaceId) {
+    // Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrFo_: once an
+    // unrelated selected row becomes first, the next reorder must not mistake
+    // that incidental position for selection-owned scrolling.
+    await publishBackgroundRefresh(2, "workspace-card-ws_perf_0001");
+    await expectTop();
+    if (inspectorWorkspaceId === "ws_perf_0001") {
+      // Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrXgy: manually
+      // returning to the top while that selected row is first must not restore
+      // selection ownership and follow it on the next reorder.
+      await list.evaluate(async (element) => {
+        element.scrollTo({ top: 1_000 });
+        await new Promise(requestAnimationFrame);
+      });
+      expect(await scrollTop()).toBeGreaterThan(240);
+      await list.evaluate(async (element) => {
+        element.scrollTo({ top: 0 });
+        await new Promise(requestAnimationFrame);
+      });
+      await expectTop();
+      await publishBackgroundRefresh(3, "workspace-card-ws_perf_0000");
+      await expectTop();
+    }
+    return;
+  }
+
+  await publishRefresh(2, "workspace-card-ws_perf_0001");
+  await expectTop();
+  await publishRefresh(3, "workspace-card-ws_perf_0000");
+  await expectTop();
+
+  const initialRowHeight = await page.getByTestId("workspace-card-ws_perf_0002")
+    .evaluate((element) => element.getBoundingClientRect().height);
+  await publishRefresh(4, "workspace-card-ws_perf_0002");
+  await expect(page.getByTestId("workspace-title-ws_perf_0002")).toHaveText(expandedTitle);
+  await expect.poll(() => page.getByTestId("workspace-card-ws_perf_0002")
+    .evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(initialRowHeight);
+  await expectTop();
+
+  const historyAnchor = page.getByTestId("workspace-card-ws_perf_0020");
+  await historyAnchor.evaluate((element) => {
+    const listElement = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]');
+    if (!listElement) throw new Error("workspace list is missing");
+    listElement.scrollTo({
+      top: listElement.scrollTop + element.getBoundingClientRect().top -
+        listElement.getBoundingClientRect().top + element.getBoundingClientRect().height * 0.35,
+    });
+  });
+  const visibleAnchor = () => list.evaluate((element) => {
+    const viewportTop = element.querySelector<HTMLElement>(":scope > .sticky")
+      ?.getBoundingClientRect().bottom ?? element.getBoundingClientRect().top;
+    const row = Array.from(
+      element.querySelectorAll<HTMLElement>('[data-testid^="workspace-card-"]'),
+    ).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    const bounds = row?.getBoundingClientRect();
+    return {
+      id: row?.dataset.testid ?? null,
+      offsetRatio: bounds ? (bounds.top - viewportTop) / bounds.height : null,
+    };
+  });
+  const beforeHistoryRefresh = await visibleAnchor();
+  expect(beforeHistoryRefresh.id).not.toBeNull();
+  expect(await scrollTop()).toBeGreaterThan(240);
+
+  await publishRefresh(5, "workspace-card-ws_perf_newest");
+  await expect.poll(async () => (await visibleAnchor()).id).toBe(beforeHistoryRefresh.id);
+  const afterHistoryRefresh = await visibleAnchor();
+  expect(afterHistoryRefresh.offsetRatio).toBeCloseTo(beforeHistoryRefresh.offsetRatio ?? 0, 1);
+
+  await list.evaluate((element) => element.scrollTo({ top: 0 }));
+  await expectTop();
+  const fractionalTop = await list.evaluate((element) => {
+    element.scrollTo({ top: 0.25 });
+    return element.scrollTop;
+  });
+  expect(Math.abs(fractionalTop)).toBeLessThanOrEqual(0.5);
+
+  // Chromium clamps native scrollTop at zero, so simulate Safari's elastic
+  // overscroll while retaining the component's observable scrollTo behavior.
+  await list.evaluate((element) => {
+    let simulatedScrollTop = -20;
+    Object.defineProperty(element, "scrollTop", {
+      configurable: true,
+      get: () => simulatedScrollTop,
+    });
+    element.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
+      if (typeof options === "number") {
+        simulatedScrollTop = y ?? simulatedScrollTop;
+      } else if (options?.top !== undefined) {
+        simulatedScrollTop = options.top;
+      }
+    };
+  });
+  expect(await scrollTop()).toBe(-20);
+
+  revision = 6;
+  const requestsBeforeFinalPoll = firstPageRequests;
+  await expect
+    .poll(() => firstPageRequests, { timeout: 7_000 })
+    .toBeGreaterThan(requestsBeforeFinalPoll);
+  await expect.poll(firstCardId).toBe("workspace-card-ws_perf_0001");
+  await expectTop();
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
+});
+}
+
 test("keeps the visible row anchored when a refresh changes row heights", async ({ page }) => {
   const expandedTitle =
     "Expanded after refresh with enough detail to wrap across several lines in the workspace rail ".repeat(4);
@@ -1231,8 +1738,12 @@ test("height restore keeps the viewport covered across a virtual-window boundary
 
   await page.goto("/");
   await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
-    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    // This setup needs one button-driven page at a time. Playwright's locator
+    // click can scroll the footer into the near-bottom autoload threshold and
+    // race that request with the button handler.
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
     await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
   }
 

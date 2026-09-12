@@ -39,6 +39,7 @@ export interface WorkspaceLifecycleStage {
   stage: string;
   started_at: string | null;
   ended_at: string | null;
+  ended_event_order?: number | null;
   duration_seconds: number | null;
   status: WorkspaceLifecycleStageStatus;
 }
@@ -83,6 +84,7 @@ export interface WorkspaceRecoverySummary {
   action: string | null;
   recovery_mode: string | null;
   started_at: string;
+  started_event_order?: number | null;
   current_operation: WorkspaceRecoveryCurrentOperation | null;
   summary: string;
   payload: Record<string, unknown> | null;
@@ -182,6 +184,7 @@ export interface WorkspaceEvent {
   new_state: string | null;
   reason_code: string | null;
   payload: Record<string, unknown> | null;
+  event_order?: number | null;
   occurred_at: string;
 }
 
@@ -230,6 +233,12 @@ export interface WorkspaceOverview {
   current_phase: string;
   active_operation: string | null;
   last_event: WorkspaceEvent | null;
+  /** Latest state transition, retained when a newer non-state audit event exists. */
+  latest_state_change?: WorkspaceEvent | null;
+  /** Latest transition into destroying, retained after cleanup reaches destroyed. */
+  latest_destroying_state_change?: WorkspaceEvent | null;
+  /** Latest completed/failed/cancelled transition, retained across destroy cleanup. */
+  latest_workflow_terminal_state_change?: WorkspaceEvent | null;
   pr_url: string | null;
   pr_number?: number | null;
   failure_reason: string | null;
@@ -991,6 +1000,26 @@ export interface ConsoleDashboardCounts {
   failed_last_window: number | null;
 }
 
+export interface ConsoleDashboardConfirmedCounts {
+  active: number;
+  executing: number;
+  monitoring_pr: number;
+  awaiting_operator: number;
+  awaiting_human: number;
+  retrying: number;
+  queued: number;
+  completed_last_window: number;
+  cancelled_last_window: number;
+  failed_last_window: number;
+}
+
+export interface ConsoleDashboardCountEvidence {
+  total_workspaces: number;
+  status_known_workspaces: number;
+  status_unknown_workspaces: number;
+  confirmed_counts: ConsoleDashboardConfirmedCounts;
+}
+
 export interface ConsoleDashboardSummary {
   schema_version: number;
   scope: ConsoleSummaryScope;
@@ -1008,6 +1037,7 @@ export interface ConsoleDashboardSummary {
     notes: string[];
   };
   counts: ConsoleDashboardCounts;
+  count_evidence?: ConsoleDashboardCountEvidence | null;
   overlap: {
     awaiting_human_subset_of_monitoring_pr: true;
     awaiting_operator_in_active_not_executing: true;

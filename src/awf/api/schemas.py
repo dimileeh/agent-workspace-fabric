@@ -519,6 +519,7 @@ class WorkspaceLifecycleStageResponse(BaseModel):
     stage: str
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    ended_event_order: int | None = None
     duration_seconds: int | None = None
     status: WorkspaceLifecycleStageStatus
 
@@ -567,6 +568,7 @@ class WorkspaceRecoverySummaryResponse(BaseModel):
     action: str | None = None
     recovery_mode: str | None = None
     started_at: datetime
+    started_event_order: int | None = None
     current_operation: WorkspaceRecoveryCurrentOperationResponse | None = None
     summary: str
     payload: dict[str, Any] | None = None
@@ -1027,6 +1029,7 @@ class WorkspaceEventResponse(BaseModel):
     new_state: str | None
     reason_code: str | None
     payload: dict[str, Any] | None
+    event_order: int | None = None
     occurred_at: datetime
 
 
@@ -1156,6 +1159,13 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     current_phase: str
     active_operation: str | None
     last_event: WorkspaceEventResponse | None
+    # Latest state transition, even when a newer cleanup/audit event is last.
+    latest_state_change: WorkspaceEventResponse | None = None
+    # Latest transition into destroying, retained after cleanup reaches destroyed.
+    latest_destroying_state_change: WorkspaceEventResponse | None = None
+    # Latest transition into a workflow-terminal state, retained across the
+    # later destroying/destroyed cleanup sequence.
+    latest_workflow_terminal_state_change: WorkspaceEventResponse | None = None
     pr_url: str | None
     pr_number: int | None = None
     failure_reason: str | None

@@ -1686,6 +1686,108 @@
         "title": "ConsoleCapabilityItemResponse",
         "type": "object"
       },
+      "ConsoleDashboardConfirmedCountsResponse": {
+        "additionalProperties": false,
+        "description": "Strict confirmed lower bounds using the exact v1 count-key inventory.",
+        "properties": {
+          "active": {
+            "minimum": 0.0,
+            "title": "Active",
+            "type": "integer"
+          },
+          "awaiting_human": {
+            "minimum": 0.0,
+            "title": "Awaiting Human",
+            "type": "integer"
+          },
+          "awaiting_operator": {
+            "minimum": 0.0,
+            "title": "Awaiting Operator",
+            "type": "integer"
+          },
+          "cancelled_last_window": {
+            "minimum": 0.0,
+            "title": "Cancelled Last Window",
+            "type": "integer"
+          },
+          "completed_last_window": {
+            "minimum": 0.0,
+            "title": "Completed Last Window",
+            "type": "integer"
+          },
+          "executing": {
+            "minimum": 0.0,
+            "title": "Executing",
+            "type": "integer"
+          },
+          "failed_last_window": {
+            "minimum": 0.0,
+            "title": "Failed Last Window",
+            "type": "integer"
+          },
+          "monitoring_pr": {
+            "minimum": 0.0,
+            "title": "Monitoring Pr",
+            "type": "integer"
+          },
+          "queued": {
+            "minimum": 0.0,
+            "title": "Queued",
+            "type": "integer"
+          },
+          "retrying": {
+            "minimum": 0.0,
+            "title": "Retrying",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active",
+          "executing",
+          "monitoring_pr",
+          "awaiting_operator",
+          "awaiting_human",
+          "retrying",
+          "queued",
+          "completed_last_window",
+          "cancelled_last_window",
+          "failed_last_window"
+        ],
+        "title": "ConsoleDashboardConfirmedCountsResponse",
+        "type": "object"
+      },
+      "ConsoleDashboardCountEvidenceResponse": {
+        "additionalProperties": false,
+        "description": "Population coverage and confirmed lower bounds from the summary snapshot.\n\nKnown plus unknown equals total; every confirmed counter is at most the\nknown population and follows the v1 count relationships. At the summary\nlevel, every non-null exact counter equals its confirmed counterpart, and\nexact counters require every workspace workflow status to be known.",
+        "properties": {
+          "confirmed_counts": {
+            "$ref": "#/components/schemas/ConsoleDashboardConfirmedCountsResponse"
+          },
+          "status_known_workspaces": {
+            "minimum": 0.0,
+            "title": "Status Known Workspaces",
+            "type": "integer"
+          },
+          "status_unknown_workspaces": {
+            "minimum": 0.0,
+            "title": "Status Unknown Workspaces",
+            "type": "integer"
+          },
+          "total_workspaces": {
+            "minimum": 0.0,
+            "title": "Total Workspaces",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_workspaces",
+          "status_known_workspaces",
+          "status_unknown_workspaces",
+          "confirmed_counts"
+        ],
+        "title": "ConsoleDashboardCountEvidenceResponse",
+        "type": "object"
+      },
       "ConsoleDashboardCountsResponse": {
         "additionalProperties": false,
         "description": "Nullable nonnegative fleet counts as strict ints (no string/bool coerce).",
@@ -1887,6 +1989,17 @@
             "format": "date-time",
             "title": "As Of",
             "type": "string"
+          },
+          "count_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConsoleDashboardCountEvidenceResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional same-snapshot population evidence and confirmed lower bounds; semantic sibling-field invariants are enforced by producers and readers."
           },
           "counts": {
             "$ref": "#/components/schemas/ConsoleDashboardCountsResponse"
@@ -9383,6 +9496,17 @@
       "WorkspaceEventResponse": {
         "description": "Representation of an immutable workspace event.",
         "properties": {
+          "event_order": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Order"
+          },
           "event_type": {
             "title": "Event Type",
             "type": "string"
@@ -10075,6 +10199,17 @@
               }
             ],
             "title": "Ended At"
+          },
+          "ended_event_order": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended Event Order"
           },
           "stage": {
             "title": "Stage",
@@ -11114,6 +11249,36 @@
             ],
             "title": "Last Log At"
           },
+          "latest_destroying_state_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_state_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_workflow_terminal_state_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceEventResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "lifecycle": {
             "items": {
               "$ref": "#/components/schemas/WorkspaceLifecycleStageResponse"
@@ -11831,6 +11996,17 @@
             "format": "date-time",
             "title": "Started At",
             "type": "string"
+          },
+          "started_event_order": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started Event Order"
           },
           "summary": {
             "title": "Summary",

@@ -39,7 +39,12 @@ useRef,
 useState
 } from "react";
 
-import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
+import {
+formatAgentLabel,
+formatAgentTitle,
+hasTerminalWorkflowTiming,
+resolveWorkflowTiming
+} from "@/lib/agent-format";
 import {
   displayedTaskKey,
   MAX_FULLSCREEN_LOG_WORKSPACES,
@@ -59,20 +64,17 @@ compactDuration,
 compactId,
 formatDateTime,
 lifecycleStages,
+recordedDurationLabel,
 relativeTime,
-toneClass,
-type StatusTone
+toneClass, type StatusTone
 } from "@/lib/format";
 import type { OperatorPreferences } from "@/lib/operator-preferences";
 import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
-import type {
-WorkspaceOverview
-} from "@/lib/types";
+import type { ConsoleDashboardCountEvidence, WorkspaceOverview } from "@/lib/types";
 import {
-Badge,
-KpiStat,
+Badge, KpiStat,
 SmallExternalAnchor,
 SortDirection,
 WorkspaceSortKey,
@@ -258,12 +260,14 @@ export function FleetHealthStrip({
   lastSuccessAt,
   coverageStatus,
   coverageNotes,
+  countEvidence,
 }: {
   kpis: FleetKpi[];
   error?: string | null;
   lastSuccessAt?: string | null;
   coverageStatus?: "complete" | "partial" | "unknown" | null;
   coverageNotes?: readonly string[] | null;
+  countEvidence?: ConsoleDashboardCountEvidence | null;
 }) {
   const anyStale = kpis.some((kpi) => kpi.stale);
   // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
@@ -271,6 +275,7 @@ export function FleetHealthStrip({
   // look fully current either.
   const coverageNotice = formatDashboardCoverageNotice(
     coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
+    countEvidence,
   );
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
@@ -694,6 +699,7 @@ export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
 export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;
 export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
 const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
+const WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX = 0.5;
 
 function workspaceRowAtOffset(rowOffsets: readonly number[], offset: number): number {
   let low = 0;
@@ -757,6 +763,8 @@ const WorkspaceCard = memo(function WorkspaceCard({
     ? attentionAgeSeconds(attentionSince(item))
     : null;
   const taskKey = displayedTaskKey(item);
+  const terminal = hasTerminalWorkflowTiming(item);
+  const terminalTiming = terminal ? resolveWorkflowTiming(item) : null;
   return (
     <div
       data-testid={`workspace-card-${item.workspace_id}`}
@@ -818,14 +826,32 @@ const WorkspaceCard = memo(function WorkspaceCard({
                         </span>
                       ) : null}
                     </span>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
-                      <span>created {formatDateTime(item.created_at)}</span>
-                      <span>updated {formatDateTime(item.updated_at)}</span>
-                      {item.last_activity_at ? (
+                    <div
+                      className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500"
+                      data-testid={`workspace-timing-${item.workspace_id}`}
+                    >
+                      <span>Created {formatDateTime(item.created_at)}</span>
+                      {terminal ? (
+                        <>
+                          <span data-testid={`workspace-finished-${item.workspace_id}`}>
+                            Finished{" "}
+                            {terminalTiming?.finishedAt
+                              ? formatDateTime(terminalTiming.finishedAt)
+                              : "not recorded"}
+                          </span>
+                          <span data-testid={`workspace-duration-${item.workspace_id}`}>
+                            Duration{" "}
+                            {recordedDurationLabel(terminalTiming?.durationSeconds) ?? "not recorded"}
+                          </span>
+                        </>
+                      ) : (
                         <span data-testid={`workspace-last-activity-${item.workspace_id}`}>
-                          activity {formatDateTime(item.last_activity_at)}
+                          Last activity{" "}
+                          {item.last_activity_at
+                            ? formatDateTime(item.last_activity_at)
+                            : "not recorded"}
                         </span>
-                      ) : null}
+                      )}
                     </div>
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
                       <Bot size={13} aria-hidden className="shrink-0" />
@@ -986,6 +1012,7 @@ export function WorkspaceList({
   const nearBottomTriggeredRef = useRef(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const selectedWasLoadedRef = useRef(false);
+  const selectionOwnsScrollAnchorRef = useRef(false);
   const committedListGeometryRef = useRef<{
     workspaceIds: readonly string[];
     rowOffsets: readonly number[];
@@ -1034,6 +1061,12 @@ export function WorkspaceList({
       previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
+    if (scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX) {
+      setPageStart(0);
+      setWindowStart(0);
+      scrollWithoutLoading(0);
+      return;
+    }
 
     const previousAnchorIndex = workspaceRowAtOffset(
       previous.rowOffsets,
@@ -1084,6 +1117,7 @@ export function WorkspaceList({
     const selectedIndex = selectedId
       ? items.findIndex((item) => item.workspace_id === selectedId)
       : -1;
+    const selectionChanged = selectedId !== previousSelectedIdRef.current;
     const selectedBecameLoaded =
       selectedIndex >= 0 &&
       selectedId === previousSelectedIdRef.current &&
@@ -1091,6 +1125,9 @@ export function WorkspaceList({
     const shouldFollowSelection =
       selectedIndex >= 0 &&
       (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
+    if (selectionChanged || selectedIndex < 0) {
+      selectionOwnsScrollAnchorRef.current = false;
+    }
     previousSelectedIdRef.current = selectedId;
     selectedWasLoadedRef.current = selectedIndex >= 0;
     const scrollContainer = scrollContainerRef.current;
@@ -1104,6 +1141,14 @@ export function WorkspaceList({
       const viewportEnd = viewportStart + scrollContainer.clientHeight - controlsHeight;
       return selectedRowEnd > viewportStart && selectedRowStart < viewportEnd;
     })();
+    if (shouldFollowSelection && scrollContainer) {
+      const selectionOwnsScrollAnchor = !selectedIsVisible ||
+        Math.abs(scrollContainer.scrollTop - selectedRowStart) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+      selectionOwnsScrollAnchorRef.current = selectionOwnsScrollAnchor;
+      if (selectionOwnsScrollAnchor) {
+        preserveScrollTopRef.current = null;
+      }
+    }
     const selectedWindowStart = shouldFollowSelection && !selectedIsVisible
       ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
         WORKSPACE_RENDER_WINDOW_SIZE
@@ -1199,7 +1244,11 @@ export function WorkspaceList({
       preserveScrollTopRef.current;
     preserveScrollTopRef.current = null;
     if (scrollTop !== null) {
-      scrollWithoutLoading(scrollTop);
+      const scrollContainer = scrollContainerRef.current;
+      const atTop =
+        scrollContainer !== null &&
+        scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+      scrollWithoutLoading(atTop ? 0 : scrollTop);
     }
   }, [items, rowOffsets, scrollWithoutLoading]);
 
@@ -1285,6 +1334,14 @@ export function WorkspaceList({
     );
 
     if (suppressScrollLoadRef.current) return;
+    selectionOwnsScrollAnchorRef.current = false;
+    if (
+      preserveScrollTopRef.current !== null &&
+      Math.abs(element.scrollTop - preserveScrollTopRef.current) >
+        WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
+    ) {
+      preserveScrollTopRef.current = null;
+    }
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;
@@ -1311,10 +1368,12 @@ export function WorkspaceList({
         suppressNextButtonLoadRef.current = true;
       }
     }
-  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
+  }, [hasMore, items, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
 
   const showWindow = useCallback((nextStart: number) => {
     const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
+    selectionOwnsScrollAnchorRef.current = false;
+    preserveScrollTopRef.current = null;
     setPageStart(boundedStart);
     setWindowStart(Math.min(boundedStart, maxWindowStart));
     scrollWithoutLoading(rowOffsets[boundedStart] ?? 0);
