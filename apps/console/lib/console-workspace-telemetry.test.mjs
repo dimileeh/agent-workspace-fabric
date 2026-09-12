@@ -283,6 +283,18 @@ test("container partition does not merge samples across different sample_time mo
   // and do not present the agent-only subset as a complete pod total vs limits.
   assert.equal(view.cpu.usedCores, null);
   assert.equal(view.cpu.usedPartial, true);
+  // Historical sparkline groups must also mark incomplete partitions (not ok).
+  assert.deepEqual(
+    view.cpu.series.map((p) => ({
+      sampleTime: p.sampleTime,
+      value: p.value,
+      quality: p.quality,
+    })),
+    [
+      { sampleTime: "2026-09-12T11:59:00+00:00", value: 0.4, quality: "partial" },
+      { sampleTime: "2026-09-12T12:00:00+00:00", value: 0.25, quality: "partial" },
+    ],
+  );
   // Memory latest group is independent; do not invent a pod total across times.
   assert.equal(view.memory.usedBytes, 536870912);
   assert.equal(view.memory.usedPartial, false);
@@ -360,6 +372,41 @@ test("sparkline series uses pod totals per timestamp, not raw per-container poin
   );
   assert.equal(view.cpu.series[1].value, view.cpu.usedCores);
 });
+
+test("incomplete historical partitions keep stale over forced partial", () => {
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  multi.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "sidecar",
+      sample_time: "2026-09-12T11:59:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T11:59:00+00:00",
+      value: "0.40",
+      quality: "stale",
+    },
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.25",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.deepEqual(
+    view.cpu.series.map((p) => ({ sampleTime: p.sampleTime, quality: p.quality })),
+    [
+      { sampleTime: "2026-09-12T11:59:00+00:00", quality: "stale" },
+      { sampleTime: "2026-09-12T12:00:00+00:00", quality: "partial" },
+    ],
+  );
+});
+
 test("parseTelemetryPresentation rejects mismatched sample provider_resource_uid", () => {
   const mismatched = structuredClone(SUCCESS);
   mismatched.cpu_cores_samples[0].provider_resource_uid = "other-pod-uid";

@@ -717,6 +717,8 @@ function accumulateSampleTotal(
  * Build sparkline history as one pod-total point per sample_time.
  * Raw per-container rows must not be plotted as a single line — same-timestamp
  * containers would form a fake trend and disagree with meter totals.
+ * Staggered scrapes that leave a timestamp missing containers seen elsewhere
+ * in the series are marked partial (same completeness rule as the latest meter).
  */
 function buildPodTotalSeries(
   samples: ParsedTelemetrySample[],
@@ -724,8 +726,10 @@ function buildPodTotalSeries(
   if (samples.length === 0) {
     return [];
   }
+  const seriesContainers = new Set<string>();
   const byTime = new Map<string, ParsedTelemetrySample[]>();
   for (const sample of samples) {
+    seriesContainers.add(sample.containerName);
     const group = byTime.get(sample.sampleTime);
     if (group) {
       group.push(sample);
@@ -742,12 +746,23 @@ function buildPodTotalSeries(
     }
     let quality: TelemetryQuality = "ok";
     const names: string[] = [];
+    const groupContainers = new Set<string>();
     for (const sample of group) {
       names.push(sample.containerName);
+      groupContainers.add(sample.containerName);
       if (sample.quality !== "ok") {
         // Prefer "stale" over "partial" when both appear; otherwise any non-ok.
         if (sample.quality === "stale" || quality === "ok") {
           quality = sample.quality;
+        }
+      }
+    }
+    // Incomplete partition vs containers seen in the series: do not present as ok.
+    if (quality !== "stale") {
+      for (const name of seriesContainers) {
+        if (!groupContainers.has(name)) {
+          quality = "partial";
+          break;
         }
       }
     }
