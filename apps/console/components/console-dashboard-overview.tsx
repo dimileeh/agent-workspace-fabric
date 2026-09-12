@@ -1053,10 +1053,14 @@ export function WorkspaceList({
       return selectedRowEnd > viewportStart && selectedRowStart < viewportEnd;
     })();
     if (shouldFollowSelection && scrollContainer) {
-      selectionOwnsScrollAnchorRef.current =
+      const selectionOwnsScrollAnchor =
         !selectedIsVisible ||
         Math.abs(scrollContainer.scrollTop - selectedRowStart) <=
           WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+      selectionOwnsScrollAnchorRef.current = selectionOwnsScrollAnchor;
+      if (selectionOwnsScrollAnchor) {
+        preserveScrollTopRef.current = null;
+      }
     }
     const selectedWindowStart = shouldFollowSelection && !selectedIsVisible
       ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *

@@ -1071,6 +1071,50 @@ test("explicit page navigation cancels a pending history restore", async ({ page
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
 });
 
+// Regression for PR #965 review thread PRRT_kwDOSJAM6s6htmJV: selecting an
+// already-loaded row outside the viewport must supersede the request-time
+// position held by an in-flight near-bottom history load.
+test("selection navigation cancels a pending history restore", async ({ page }) => {
+  const overviewRequests: Array<string | null> = [];
+  const routeOptions: OverviewRouteOptions = {
+    delayContinuation: false,
+    onRequest: (cursor) => overviewRequests.push(cursor),
+  };
+  await mockAwfConsoleApi(page);
+  const releaseHistory = await installLargeFleetOverview(page, routeOptions);
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
+    await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
+  }
+
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByText("201–300 of 300 loaded", { exact: true })).toBeVisible();
+
+  routeOptions.delayContinuation = true;
+  const list = page.getByTestId("workspace-list-scroll");
+  await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => overviewRequests).toContain(String(PAGE_SIZE * 3));
+
+  await page.evaluate(() => {
+    window.history.pushState(null, "", "/?workspaceId=ws_perf_0101");
+  });
+  await expect(page).toHaveURL(/workspaceId=ws_perf_0101/);
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+  const selectedScrollTop = await list.evaluate((element) => element.scrollTop);
+
+  await releaseHistory();
+  await expect(page.getByText("101–200 of 400 loaded", { exact: true })).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(
+    selectedScrollTop,
+  );
+  await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
+});
+
 // Regression for PR #965 review thread PRRT_kwDOSJAM6s6hrd2_: when a filter
 // removes the selected row but its fallback lookup fails, the unchanged
 // selection must stop owning refresh anchoring for the remaining rows.
