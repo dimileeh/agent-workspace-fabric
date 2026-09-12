@@ -570,11 +570,10 @@ function sampleTimestampForIndex(i) {
   return `2026-09-${day}T${hour}:${minute}:${second}+00:00`;
 }
 
-test("parseSampleArray keeps only the most recent MAX_TELEMETRY_SAMPLES", () => {
-  const oversized = structuredClone(SUCCESS);
+test("parseSampleArray accepts exactly MAX_TELEMETRY_SAMPLES", () => {
+  const atCap = structuredClone(SUCCESS);
   const template = SUCCESS.cpu_cores_samples[0];
-  const total = MAX_TELEMETRY_SAMPLES + 50;
-  oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => {
+  atCap.cpu_cores_samples = Array.from({ length: MAX_TELEMETRY_SAMPLES }, (_, i) => {
     const ts = sampleTimestampForIndex(i);
     return {
       ...template,
@@ -584,44 +583,49 @@ test("parseSampleArray keeps only the most recent MAX_TELEMETRY_SAMPLES", () => 
       value: String(i),
     };
   });
-  const parsed = parseTelemetryPresentation(oversized);
+  const parsed = parseTelemetryPresentation(atCap);
   assert.ok(parsed);
   assert.equal(parsed.cpuSamples.length, MAX_TELEMETRY_SAMPLES);
-  assert.equal(parsed.cpuSamples[0].value, 50);
-  assert.equal(parsed.cpuSamples[parsed.cpuSamples.length - 1].value, total - 1);
+  assert.equal(parsed.cpuSamples[0].value, 0);
+  assert.equal(parsed.cpuSamples[parsed.cpuSamples.length - 1].value, MAX_TELEMETRY_SAMPLES - 1);
 });
 
-test("parseSampleArray caps by sample_time when producer order is not chronological", () => {
+test("parseSampleArray rejects arrays larger than MAX_TELEMETRY_SAMPLES before retaining", () => {
   const oversized = structuredClone(SUCCESS);
   const template = SUCCESS.cpu_cores_samples[0];
-  const total = MAX_TELEMETRY_SAMPLES + 50;
-  // Newest timestamps first (reversed), so a tail slice would keep the oldest window.
-  oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => {
-    const index = total - 1 - i;
-    const ts = sampleTimestampForIndex(index);
-    return {
-      ...template,
-      sample_time: ts,
-      interval_start: ts,
-      interval_end: ts,
-      value: String(index),
-    };
-  });
-  const parsed = parseTelemetryPresentation(oversized);
-  assert.ok(parsed);
-  assert.equal(parsed.cpuSamples.length, MAX_TELEMETRY_SAMPLES);
-  // Retained window is newest-by-time (values 50..total-1), not the array tail (0..2047).
-  assert.equal(parsed.cpuSamples[0].value, 50);
-  assert.equal(parsed.cpuSamples[parsed.cpuSamples.length - 1].value, total - 1);
-  assert.equal(parsed.cpuSamples[0].sampleTime, sampleTimestampForIndex(50));
-  assert.equal(
-    parsed.cpuSamples[parsed.cpuSamples.length - 1].sampleTime,
-    sampleTimestampForIndex(total - 1),
+  // Length gate must fail closed without parsing/sorting the full input.
+  oversized.cpu_cores_samples = Array.from(
+    { length: MAX_TELEMETRY_SAMPLES + 1 },
+    (_, i) => {
+      const ts = sampleTimestampForIndex(i);
+      return {
+        ...template,
+        sample_time: ts,
+        interval_start: ts,
+        interval_end: ts,
+        value: String(i),
+      };
+    },
   );
-  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
-  assert.equal(view.cpu.usedCores, total - 1);
-});
+  assert.equal(parseTelemetryPresentation(oversized), null);
 
+  const oversizedMem = structuredClone(SUCCESS);
+  const memTemplate = SUCCESS.memory_bytes_samples[0];
+  oversizedMem.memory_bytes_samples = Array.from(
+    { length: MAX_TELEMETRY_SAMPLES + 1 },
+    (_, i) => {
+      const ts = sampleTimestampForIndex(i);
+      return {
+        ...memTemplate,
+        sample_time: ts,
+        interval_start: ts,
+        interval_end: ts,
+        value: String(1024 + i),
+      };
+    },
+  );
+  assert.equal(parseTelemetryPresentation(oversizedMem), null);
+});
 test("downsampleSeriesForSparkline preserves endpoints and bounds length", () => {
   assert.deepEqual(downsampleSeriesForSparkline([]), []);
   assert.deepEqual(downsampleSeriesForSparkline([1, 2, 3]), [1, 2, 3]);

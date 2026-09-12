@@ -33,9 +33,9 @@ const MAX_DECIMAL_MAGNITUDE = 1e15;
  */
 const MAX_BYTES_MAGNITUDE = Number.MAX_SAFE_INTEGER;
 /**
- * Hard cap on samples retained per metric array from a telemetry payload.
- * When the producer sends more, keeps the newest window by sample_time
- * (not array position — payloads need not be chronological).
+ * Hard cap on samples accepted per metric array from a telemetry payload.
+ * Larger arrays fail closed before parse so a misbehaving producer cannot
+ * force unbounded allocation or an O(n log n) sort in the console.
  */
 export const MAX_TELEMETRY_SAMPLES = 2048;
 /** Max SVG points drawn for a telemetry sparkline after downsampling. */
@@ -240,27 +240,6 @@ function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value
   return typeof value === "string" && (allowed as readonly string[]).includes(value);
 }
 
-/**
- * When over the hard cap, keep the newest samples by sample_time.
- * Equal timestamps keep the later array index; output is ascending by time.
- */
-function retainNewestSamplesByTime(
-  samples: ParsedTelemetrySample[],
-): ParsedTelemetrySample[] {
-  if (samples.length <= MAX_TELEMETRY_SAMPLES) {
-    return samples;
-  }
-  const ranked = samples.map((sample, index) => ({
-    sample,
-    index,
-    ms: Date.parse(sample.sampleTime),
-  }));
-  ranked.sort((a, b) => b.ms - a.ms || b.index - a.index);
-  const kept = ranked.slice(0, MAX_TELEMETRY_SAMPLES);
-  kept.sort((a, b) => a.ms - b.ms || a.index - b.index);
-  return kept.map((entry) => entry.sample);
-}
-
 function parseSampleArray(
   value: unknown,
   expectedUnit: "cores" | "bytes",
@@ -268,8 +247,11 @@ function parseSampleArray(
   if (!Array.isArray(value)) {
     return null;
   }
+  // Reject before parsing so the cap bounds CPU/memory, not only retained output.
+  if (value.length > MAX_TELEMETRY_SAMPLES) {
+    return null;
+  }
   const samples: ParsedTelemetrySample[] = [];
-  // Parse the full array, then cap by sample_time (order is not assumed chronological).
   for (let i = 0; i < value.length; i++) {
     const item = value[i];
     if (!isPlainObject(item)) {
@@ -328,7 +310,7 @@ function parseSampleArray(
         typeof item.provider_resource_uid === "string" ? item.provider_resource_uid : null,
     });
   }
-  return retainNewestSamplesByTime(samples);
+  return samples;
 }
 
 /**
