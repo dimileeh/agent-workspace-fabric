@@ -481,6 +481,67 @@ test("distinctFinishedAt omits finished_at already shown as Workflow finished", 
   assert.equal(distinctFinishedAt({}), null);
 });
 
+test("hasTerminalWorkflowTiming requires a workflow terminal cleanup chain for destroyed workspaces", async () => {
+  const { hasTerminalWorkflowTiming } = await import("./agent-format.ts");
+  const terminalTransition = {
+    event_type: "workspace.state_changed",
+    old_state: "running",
+    new_state: "failed",
+    occurred_at: "2026-09-06T12:08:00Z",
+  };
+  const destroyedTransition = {
+    event_type: "workspace.state_changed",
+    old_state: "destroying",
+    new_state: "destroyed",
+    occurred_at: "2026-09-06T12:30:00Z",
+  };
+
+  assert.equal(
+    hasTerminalWorkflowTiming({
+      status: "destroyed",
+      latest_state_change: destroyedTransition,
+      latest_destroying_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "failed",
+        new_state: "destroying",
+        occurred_at: "2026-09-06T12:20:00Z",
+      },
+      latest_workflow_terminal_state_change: terminalTransition,
+    }),
+    true,
+  );
+  assert.equal(
+    hasTerminalWorkflowTiming({
+      status: "destroyed",
+      latest_state_change: destroyedTransition,
+      latest_destroying_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "ready",
+        new_state: "destroying",
+        occurred_at: "2026-09-06T12:20:00Z",
+      },
+      latest_workflow_terminal_state_change: terminalTransition,
+    }),
+    false,
+    "a direct destroy must not reuse an older workflow terminal transition",
+  );
+  assert.equal(
+    hasTerminalWorkflowTiming({
+      status: "destroyed",
+      latest_state_change: destroyedTransition,
+      latest_destroying_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "ready",
+        new_state: "destroying",
+        occurred_at: "2026-09-06T12:20:00Z",
+      },
+      latest_workflow_terminal_state_change: null,
+    }),
+    false,
+    "ready -> destroying -> destroyed has no workflow terminal boundary",
+  );
+});
+
 test("resolveWorkflowTiming preserves explicit duration without a terminal finish", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const item = {
@@ -640,6 +701,14 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
         new_state: "destroyed",
         occurred_at: "2026-09-06T12:30:00Z",
         event_order: 43,
+      },
+      latest_destroying_state_change: {
+        id: "event_destroying",
+        event_type: "workspace.state_changed",
+        old_state: "completed",
+        new_state: "destroying",
+        occurred_at: "2026-09-06T12:25:00Z",
+        event_order: 42,
       },
       latest_workflow_terminal_state_change: {
         ...terminalEvent,
@@ -1452,7 +1521,7 @@ test("resolveWorkflowTiming rejects completed lifecycle timing contradicted by t
   );
 });
 
-test("resolveWorkflowTiming infers destroyed timing without a retained completed transition", async () => {
+test("resolveWorkflowTiming infers destroyed timing from a corroborated completed cleanup", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const lifecycle = [
     {
@@ -1484,6 +1553,24 @@ test("resolveWorkflowTiming infers destroyed timing without a retained completed
     finished_at: null,
     duration_seconds: null,
     lifecycle,
+    latest_state_change: {
+      event_type: "workspace.state_changed",
+      old_state: "destroying",
+      new_state: "destroyed",
+      occurred_at: "2026-09-06T12:21:00Z",
+    },
+    latest_destroying_state_change: {
+      event_type: "workspace.state_changed",
+      old_state: "completed",
+      new_state: "destroying",
+      occurred_at: "2026-09-06T12:20:00Z",
+    },
+    latest_workflow_terminal_state_change: {
+      event_type: "workspace.state_changed",
+      old_state: "running",
+      new_state: "completed",
+      occurred_at: "2026-09-06T12:15:00Z",
+    },
   };
 
   assert.deepEqual(resolveWorkflowTiming(item), {
@@ -2319,6 +2406,11 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
           "running",
           terminalStatus,
           "2026-09-06T12:05:00Z",
+        ),
+        latest_destroying_state_change: stateChanged(
+          terminalStatus,
+          "destroying",
+          "2026-09-06T12:10:00Z",
         ),
         latest_state_change: stateChanged(
           "destroying",
