@@ -1918,6 +1918,52 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       );
     }
   }
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6hsx00: cleanup can
+  // fail after the retained transition records a resumed workflow failure.
+  const resumedFailure = {
+    ...stateChanged("running", "failed", "2026-09-06T12:10:00Z"),
+    id: "event_resumed_before_cleanup_failure",
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      latest_state_change: stateChanged(
+        "destroying",
+        "failed",
+        "2026-09-06T12:30:00Z",
+      ),
+      latest_destroying_state_change: stateChanged(
+        "failed",
+        "destroying",
+        "2026-09-06T12:20:00Z",
+      ),
+      latest_workflow_terminal_state_change: resumedFailure,
+    }),
+    { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+    "a cleanup failure must retain the resumed workflow failure timestamp",
+  );
+  for (const [destroyingEvent, reason] of [
+    [undefined, "missing cleanup-entry provenance"],
+    [
+      stateChanged("failed", "destroying", "2026-09-06T12:09:00Z"),
+      "cleanup that predates the retained failure",
+    ],
+  ]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        latest_state_change: stateChanged(
+          "destroying",
+          "failed",
+          "2026-09-06T12:30:00Z",
+        ),
+        latest_destroying_state_change: destroyingEvent,
+        latest_workflow_terminal_state_change: resumedFailure,
+      }),
+      { finishedAt: null, durationSeconds: null },
+      `${reason} must not corroborate a retained workflow finish`,
+    );
+  }
   const postPrTerminalEvent = {
     ...stateChanged("monitoring_pr", "completed", "2026-09-06T12:10:00Z"),
     id: "event_resumed_post_pr_completed",

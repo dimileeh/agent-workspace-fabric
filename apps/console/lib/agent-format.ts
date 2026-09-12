@@ -418,7 +418,7 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   const destroyingStateChange =
     item.status === "destroying"
       ? latestStateChange
-      : item.status === "destroyed"
+      : item.status === "destroyed" || item.status === "failed"
         ? item.latest_destroying_state_change
         : null;
   const terminalEventOrder = terminalEvent?.event_order;
@@ -434,7 +434,7 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
     latestStateChange?.event_type === "workspace.state_changed" &&
     latestStateChange.new_state === item.status &&
     (item.status === "destroying" ||
-      (item.status === "destroyed" &&
+      ((item.status === "destroyed" || item.status === "failed") &&
         destroyingStateChange != null &&
         latestStateChange.old_state === "destroying" &&
         eventStrictlyFollows(latestStateChange, destroyingStateChange)));
