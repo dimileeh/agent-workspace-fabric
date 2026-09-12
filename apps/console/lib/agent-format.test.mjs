@@ -1871,6 +1871,61 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       );
     }
   }
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6hskU-: after a
+  // blocked/recovering pause resumes through running, Core keeps the first
+  // running interval in the collapsed lifecycle and does not emit `recovery`.
+  // The matching retained/current state transition is the authoritative finish,
+  // but the missing pause interval keeps the duration ambiguous.
+  for (const terminalStatus of ["failed", "cancelled"]) {
+    const terminalEvent = {
+      ...stateChanged("running", terminalStatus, "2026-09-06T12:10:00Z"),
+      id: `event_resumed_${terminalStatus}`,
+    };
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        status: terminalStatus,
+        latest_state_change: terminalEvent,
+        latest_workflow_terminal_state_change: terminalEvent,
+        last_event: terminalEvent,
+      }),
+      { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+      `a resumed running -> ${terminalStatus} transition must use the retained finish`,
+    );
+  }
+  const postPrTerminalEvent = {
+    ...stateChanged("monitoring_pr", "completed", "2026-09-06T12:10:00Z"),
+    id: "event_resumed_post_pr_completed",
+  };
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
+      status: "completed",
+      lifecycle: [
+        item.lifecycle[0],
+        item.lifecycle[1],
+        {
+          stage: "monitoring_pr",
+          started_at: "2026-09-06T12:05:00Z",
+          ended_at: "2026-09-06T12:06:00Z",
+          duration_seconds: 60,
+          status: "completed",
+        },
+        {
+          stage: "completed",
+          started_at: "2026-09-06T12:10:00Z",
+          ended_at: "2026-09-06T12:10:00Z",
+          duration_seconds: 0,
+          status: "completed",
+        },
+      ],
+      latest_state_change: postPrTerminalEvent,
+      latest_workflow_terminal_state_change: postPrTerminalEvent,
+      last_event: postPrTerminalEvent,
+    }),
+    { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+    "a resumed post-PR pause must use the retained completion finish",
+  );
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,

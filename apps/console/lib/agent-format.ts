@@ -287,6 +287,13 @@ const LIFECYCLE_STAGE_STATUSES = new Set([
   "terminal_skipped",
 ]);
 
+const RESUMED_TERMINAL_SOURCE_STAGES = new Set([
+  "running",
+  "validating",
+  "pushing",
+  "monitoring_pr",
+]);
+
 function lifecycleStageOrder(stage: string): number {
   return lifecycleStages.findIndex((candidate) => candidate === stage);
 }
@@ -373,12 +380,45 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
       terminalEvent?.old_state === "recovering") &&
     (terminalEvent.new_state === "failed" ||
       terminalEvent.new_state === "cancelled");
+  const retainedSourceStages = item.lifecycle.filter(
+    (stage) => stage.stage === terminalEvent?.old_state,
+  );
+  const retainedSourceStage =
+    retainedSourceStages.length === 1 ? retainedSourceStages[0] : null;
+  const retainedSourceIntervalOrder =
+    retainedSourceStage?.started_at != null && retainedSourceStage.ended_at != null
+      ? compareRecordedInstants(
+          retainedSourceStage.ended_at,
+          retainedSourceStage.started_at,
+        )
+      : null;
+  const isRetainedResumeExit =
+    recoveryStartedAt == null &&
+    terminalEvent != null &&
+    typeof terminalEvent.id === "string" &&
+    terminalEvent.id.length > 0 &&
+    item.latest_state_change?.id === terminalEvent.id &&
+    terminalEvent.old_state != null &&
+    RESUMED_TERMINAL_SOURCE_STAGES.has(terminalEvent.old_state) &&
+    retainedSourceStage?.status === "completed" &&
+    retainedSourceStage.ended_at != null &&
+    retainedSourceIntervalOrder != null &&
+    retainedSourceIntervalOrder !== -1 &&
+    compareRecordedInstants(
+      terminalEvent.occurred_at,
+      retainedSourceStage.ended_at,
+    ) === 1;
   // Recovery makes the collapsed lifecycle ambiguous, so its dedicated
   // terminal event must belong to the latest recovery. Blocked and recovering
   // are themselves omitted from that lifecycle and recovery summary; a direct
   // terminal exit from either pause is authoritative without that boundary.
+  // After a pause resumes, the lifecycle retains the first interval for the
+  // re-entered stage; the matching current state transition can prove the later
+  // finish, but not a duration that spans the omitted pause.
   if (
-    (recoveryStartedAt == null && !isDirectPauseExit) ||
+    (recoveryStartedAt == null &&
+      !isDirectPauseExit &&
+      !isRetainedResumeExit) ||
     terminalEvent?.event_type !== "workspace.state_changed" ||
     (terminalEvent.new_state !== "completed" &&
       terminalEvent.new_state !== "failed" &&
@@ -412,6 +452,7 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   if (
     finishedMs == null ||
     (!isDirectPauseExit &&
+      !isRetainedResumeExit &&
       recoveryComparison !== 1 &&
       !orderedAfterSameInstantRecovery)
   ) {
