@@ -119,6 +119,22 @@ async function assertNoCoverageChrome(page: Page) {
   await expect(strip).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
 }
 
+/** Page + Fleet health strip must not overflow on any count-selection fixture. */
+async function assertNoHorizontalOverflow(page: Page) {
+  const overflow = await page.evaluate(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    const viewport = window.innerWidth;
+    const amount = Math.max(root.scrollWidth, body.scrollWidth) - viewport;
+    const strip = document.querySelector('[aria-label="Fleet health"]');
+    const stripOverflow =
+      strip instanceof HTMLElement ? strip.scrollWidth > strip.clientWidth + 1 : false;
+    return { amount, stripOverflow, viewport };
+  });
+  expect(overflow.amount, JSON.stringify(overflow)).toBeLessThanOrEqual(1);
+  expect(overflow.stripOverflow, JSON.stringify(overflow)).toBe(false);
+}
+
 test("KPI values come from dashboard-summary when saturation absent", async ({ page }) => {
   const requested: string[] = [];
   await mockAwfConsoleApi(page, {
@@ -288,11 +304,7 @@ for (const viewport of VIEWPORTS) {
       await waitForConsoleReady(page);
       await scenario.assertKpis(page);
       await assertNoCoverageChrome(page);
-
-      const hasHorizontalOverflow = await page.evaluate(
-        () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
-      );
-      expect(hasHorizontalOverflow).toBe(false);
+      await assertNoHorizontalOverflow(page);
 
       await page.screenshot({
         path: `test-results/dashboard-summary-kpis-${scenario.name}-${viewport.name}.png`,
