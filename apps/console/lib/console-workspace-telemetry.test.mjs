@@ -98,6 +98,29 @@ test("parseTelemetryPresentation rejects mixed-unit sample series", () => {
   assert.equal(parseTelemetryPresentation(memCores), null);
 });
 
+test("parseTelemetryPresentation rejects unknown sample quality rather than treating it as complete", () => {
+  for (const bad of ["typo", "complete", "", 1, null, undefined]) {
+    const badCpu = structuredClone(SUCCESS);
+    badCpu.cpu_cores_samples[0].quality = bad;
+    assert.equal(
+      parseTelemetryPresentation(badCpu),
+      null,
+      `cpu sample quality ${String(bad)}`,
+    );
+  }
+  const badMem = structuredClone(SUCCESS);
+  badMem.memory_bytes_samples[0].quality = "unknown";
+  assert.equal(parseTelemetryPresentation(badMem), null);
+
+  // Known sample qualities still parse (partial already covered by fixture).
+  const okSample = structuredClone(SUCCESS);
+  okSample.cpu_cores_samples[0].quality = "ok";
+  assert.ok(parseTelemetryPresentation(okSample));
+  const staleSample = structuredClone(SUCCESS);
+  staleSample.cpu_cores_samples[0].quality = "stale";
+  assert.ok(parseTelemetryPresentation(staleSample));
+});
+
 test("unallocated fixture preserves null admitted/cost and does not coerce to zero/free", () => {
   const parsed = parseTelemetryPresentation(UNALLOCATED);
   assert.ok(parsed);

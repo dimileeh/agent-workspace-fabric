@@ -49,7 +49,7 @@ export type ParsedTelemetrySample = {
   intervalEnd: string;
   unit: "cores" | "bytes";
   value: number;
-  quality: string;
+  quality: TelemetryQuality;
   /** Retained for identity checks; never projected into WorkspaceTelemetryView. */
   providerResourceUid: string | null;
 };
@@ -95,7 +95,7 @@ export type ParsedTelemetryPresentation = {
 export type WorkspaceTelemetrySeriesPoint = {
   sampleTime: string;
   value: number;
-  quality: string;
+  quality: TelemetryQuality;
   containerName: string;
 };
 
@@ -254,7 +254,8 @@ function parseSampleArray(
     ) {
       return null;
     }
-    if (typeof item.quality !== "string") {
+    // Fail closed: unknown/typo quality must not parse as complete usage.
+    if (!isOneOf(item.quality, TELEMETRY_QUALITIES)) {
       return null;
     }
     // Producer metric_type may say core_usage_time while unit is cores — accept as naming quirk.
