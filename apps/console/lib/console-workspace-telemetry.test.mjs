@@ -101,6 +101,30 @@ test("parseTelemetryPresentation rejects mixed-unit sample series", () => {
   assert.equal(parseTelemetryPresentation(memCores), null);
 });
 
+test("parseTelemetryPresentation rejects samples with reversed interval windows", () => {
+  const reversedCpu = structuredClone(SUCCESS);
+  reversedCpu.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  reversedCpu.cpu_cores_samples[0].interval_end = "2026-09-12T11:59:00+00:00";
+  assert.equal(parseTelemetryPresentation(reversedCpu), null);
+
+  const reversedMem = structuredClone(SUCCESS);
+  reversedMem.memory_bytes_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  reversedMem.memory_bytes_samples[0].interval_end = "2026-09-12T11:59:00+00:00";
+  assert.equal(parseTelemetryPresentation(reversedMem), null);
+
+  // Same wall clock via offset, but end is earlier in UTC.
+  const reversedOffset = structuredClone(SUCCESS);
+  reversedOffset.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  reversedOffset.cpu_cores_samples[0].interval_end = "2026-09-12T12:30:00+01:00";
+  assert.equal(parseTelemetryPresentation(reversedOffset), null);
+
+  // Sub-millisecond reverse must also fail closed.
+  const reversedSubMs = structuredClone(SUCCESS);
+  reversedSubMs.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00.000002Z";
+  reversedSubMs.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00.000001Z";
+  assert.equal(parseTelemetryPresentation(reversedSubMs), null);
+});
+
 test("parseTelemetryPresentation rejects unknown sample quality rather than treating it as complete", () => {
   for (const bad of ["typo", "complete", "", 1, null, undefined]) {
     const badCpu = structuredClone(SUCCESS);

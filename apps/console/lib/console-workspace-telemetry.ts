@@ -295,6 +295,10 @@ function parseSampleArray(
     ) {
       return null;
     }
+    // Reject reversed measurement windows (equal start/end remain valid).
+    if (compareTimestampInstants(item.interval_start, item.interval_end) > 0) {
+      return null;
+    }
     // Fail closed: unknown/typo quality must not parse as complete usage.
     if (!isOneOf(item.quality, TELEMETRY_QUALITIES)) {
       return null;
