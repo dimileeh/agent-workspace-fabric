@@ -409,6 +409,20 @@ test("fresh envelope with aged meter samples is stale and Sample uses sample tim
   assert.notEqual(view.sampleTime, agedMeters.observed_at);
 });
 
+test("fresh envelope and meters with aged admitted observed_at is stale", () => {
+  const agedAdmitted = structuredClone(SUCCESS);
+  // Envelope + meters are within stale_after; allocation snapshot is not.
+  agedAdmitted.observed_at = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.cpu_cores_samples[0].sample_time = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.memory_bytes_samples[0].sample_time = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.admitted.observed_at = "2026-09-12T11:50:00+00:00";
+  const parsed = parseTelemetryPresentation(agedAdmitted);
+  assert.ok(parsed);
+  const nowMs = Date.parse("2026-09-12T12:05:30+00:00");
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs });
+  assert.equal(view.isStale, true);
+});
+
 test("view enum accepts only 1h/6h/24h", () => {
   for (const view of ["1h", "6h", "24h"]) {
     assert.ok(parseTelemetryPresentation({ ...SUCCESS, view }));

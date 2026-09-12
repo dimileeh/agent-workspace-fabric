@@ -790,9 +790,10 @@ function isTimestampOlderThanStaleThreshold(
 }
 
 /**
- * Stale when producer marks state/quality stale, or when the envelope or any
- * meter sample time used for displayed CPU/memory values exceeds the threshold.
- * Fresh envelopes must not mask aged resource samples.
+ * Stale when producer marks state/quality stale, or when the envelope,
+ * admitted allocation snapshot, or any meter sample time used for displayed
+ * CPU/memory values exceeds the threshold. Fresh envelopes/meters must not
+ * mask aged allocation requests/limits or aged resource samples.
  */
 function computeIsStale(
   presentation: ParsedTelemetryPresentation,
@@ -806,6 +807,16 @@ function computeIsStale(
   if (
     presentation.observedAt !== null &&
     isTimestampOlderThanStaleThreshold(presentation.observedAt, nowMs, staleAfter)
+  ) {
+    return true;
+  }
+  if (
+    presentation.admitted !== null &&
+    isTimestampOlderThanStaleThreshold(
+      presentation.admitted.observedAt,
+      nowMs,
+      staleAfter,
+    )
   ) {
     return true;
   }
