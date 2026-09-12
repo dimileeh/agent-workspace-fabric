@@ -1282,6 +1282,7 @@ export function WorkspaceList({
   const showWindow = useCallback((nextStart: number) => {
     const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
     selectionOwnsScrollAnchorRef.current = false;
+    preserveScrollTopRef.current = null;
     setPageStart(boundedStart);
     setWindowStart(Math.min(boundedStart, maxWindowStart));
     scrollWithoutLoading(rowOffsets[boundedStart] ?? 0);
