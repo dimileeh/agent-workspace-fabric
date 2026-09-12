@@ -565,6 +565,20 @@ test("resolveWorkflowTiming uses the retained terminal event after recovery", as
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
+      status: "failed",
+      latest_state_change: {
+        event_type: "workspace.state_changed",
+        old_state: "destroying",
+        new_state: "failed",
+        occurred_at: "2026-09-06T12:30:00Z",
+      },
+    }),
+    { finishedAt: "2026-09-06T12:20:00Z", durationSeconds: null },
+    "cleanup failure must preserve the recovered completed workflow finish",
+  );
+  assert.deepEqual(
+    resolveWorkflowTiming({
+      ...item,
       status: "destroyed",
       recovery: { started_at: "2026-09-06T12:21:00Z" },
       latest_state_change: {
