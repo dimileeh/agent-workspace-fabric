@@ -21,10 +21,10 @@ function hostedCountEvidenceSummary(): ConsoleDashboardSummary {
       notes: ["terminal_timestamp_unavailable", "attention_evidence_unavailable"],
     },
     counts: {
-      active: 1,
+      active: null,
       executing: null,
       monitoring_pr: null,
-      awaiting_operator: 0,
+      awaiting_operator: null,
       awaiting_human: null,
       retrying: null,
       queued: null,
@@ -158,10 +158,10 @@ for (const viewport of [
     await page.goto("/");
     await waitForConsoleReady(page);
 
-    // Exact values retain their existing naked rendering and win over matching evidence.
-    await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1");
-    await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0");
-    // Null exact values use explicit, visible lower-bound qualification, including zero.
+    // Unknown workflow statuses make every exact count unproven, so the fixture
+    // exposes only explicitly qualified lower bounds, including zero.
+    await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1 confirmed");
+    await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0 confirmed");
     await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1 confirmed");
     await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0 confirmed");
     await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0 confirmed");
