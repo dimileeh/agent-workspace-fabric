@@ -244,16 +244,25 @@ test("local terminal cards use one complete lifecycle interval", async ({ page }
       stage("completed", "2026-09-06T12:10:00Z", "2026-09-06T12:10:00Z", 0),
     ],
   });
-  const failed = overview("ws_local_failed", "failed", {
-    last_event: stateChangedEvent(
+  const failedTerminalEvent = {
+    ...stateChangedEvent(
       "ws_local_failed",
       "running",
       "failed",
       "2026-09-06T12:08:00Z",
     ),
+    event_order: 7,
+  };
+  const failed = overview("ws_local_failed", "failed", {
+    last_event: failedTerminalEvent,
+    latest_state_change: failedTerminalEvent,
+    latest_workflow_terminal_state_change: failedTerminalEvent,
     lifecycle: [
       stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
-      stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
+      {
+        ...stage("running", "2026-09-06T12:01:00Z", "2026-09-06T12:08:00Z", 420),
+        ended_event_order: 7,
+      },
       stage("validating", null, null, null),
     ],
   });
