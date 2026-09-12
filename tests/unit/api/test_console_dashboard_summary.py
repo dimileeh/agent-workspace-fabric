@@ -423,6 +423,19 @@ def test_dashboard_summary_count_evidence_rejects_unproven_exact_count(
 
 
 @pytest.mark.unit
+def test_dashboard_summary_count_evidence_rejects_positive_exact_lower_bound() -> None:
+    payload = _summary_with_count_evidence(
+        total=30,
+        known=29,
+        unknown=1,
+        confirmed_patch={"active": 8, "executing": 8},
+    )
+    payload["counts"]["active"] = 8
+    with pytest.raises(ValidationError, match="unknown.*exact"):
+        ConsoleDashboardSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_dashboard_summary_count_evidence_keeps_coverage_reasons_independent() -> None:
     payload = _summary_with_count_evidence(total=1, known=1, unknown=0)
     payload["coverage"]["notes"] = [

@@ -324,6 +324,17 @@ test("parseDashboardSummary rejects exact counts while any workflow status is un
   }
 });
 
+test("parseDashboardSummary rejects a positive exact lower bound with one unknown status", () => {
+  const payload = summaryWithCountEvidence({
+    total: 30,
+    known: 29,
+    unknown: 1,
+    confirmed: { active: 8, executing: 8 },
+  });
+  payload.counts.active = 8;
+  assert.equal(parseDashboardSummary(payload), null);
+});
+
 test("confirmed KPI lower bounds stay qualified while exact values win", () => {
   const lowerBounds = parseDashboardSummary(
     summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } }),
