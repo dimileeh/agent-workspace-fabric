@@ -66,20 +66,15 @@ formatDateTime,
 lifecycleStages,
 recordedDurationLabel,
 relativeTime,
-toneClass,
-type StatusTone
+toneClass, type StatusTone
 } from "@/lib/format";
 import type { OperatorPreferences } from "@/lib/operator-preferences";
 import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
-import type {
-ConsoleDashboardCountEvidence,
-WorkspaceOverview
-} from "@/lib/types";
+import type { ConsoleDashboardCountEvidence, WorkspaceOverview } from "@/lib/types";
 import {
-Badge,
-KpiStat,
+Badge, KpiStat,
 SmallExternalAnchor,
 SortDirection,
 WorkspaceSortKey,
@@ -704,6 +699,7 @@ export const WORKSPACE_RENDER_WINDOW_SIZE = 100;
 export const WORKSPACE_RENDER_OVERSCAN_ROWS = 2;
 export const WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX = 240;
 const WORKSPACE_RENDER_ROW_HEIGHT_ESTIMATE_PX = 240;
+const WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX = 0.5;
 
 function workspaceRowAtOffset(rowOffsets: readonly number[], offset: number): number {
   let low = 0;
@@ -1016,6 +1012,7 @@ export function WorkspaceList({
   const nearBottomTriggeredRef = useRef(false);
   const previousSelectedIdRef = useRef<string | null>(null);
   const selectedWasLoadedRef = useRef(false);
+  const selectionOwnsScrollAnchorRef = useRef(false);
   const committedListGeometryRef = useRef<{
     workspaceIds: readonly string[];
     rowOffsets: readonly number[];
@@ -1064,6 +1061,12 @@ export function WorkspaceList({
       previous.workspaceIds.some((workspaceId, index) => workspaceId !== workspaceIds[index]);
     const scrollContainer = scrollContainerRef.current;
     if (!membershipChanged || !scrollContainer || previous.workspaceIds.length === 0) return;
+    if (scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX) {
+      setPageStart(0);
+      setWindowStart(0);
+      scrollWithoutLoading(0);
+      return;
+    }
 
     const previousAnchorIndex = workspaceRowAtOffset(
       previous.rowOffsets,
@@ -1114,6 +1117,7 @@ export function WorkspaceList({
     const selectedIndex = selectedId
       ? items.findIndex((item) => item.workspace_id === selectedId)
       : -1;
+    const selectionChanged = selectedId !== previousSelectedIdRef.current;
     const selectedBecameLoaded =
       selectedIndex >= 0 &&
       selectedId === previousSelectedIdRef.current &&
@@ -1121,6 +1125,9 @@ export function WorkspaceList({
     const shouldFollowSelection =
       selectedIndex >= 0 &&
       (selectedId !== previousSelectedIdRef.current || selectedBecameLoaded);
+    if (selectionChanged || selectedIndex < 0) {
+      selectionOwnsScrollAnchorRef.current = false;
+    }
     previousSelectedIdRef.current = selectedId;
     selectedWasLoadedRef.current = selectedIndex >= 0;
     const scrollContainer = scrollContainerRef.current;
@@ -1134,6 +1141,14 @@ export function WorkspaceList({
       const viewportEnd = viewportStart + scrollContainer.clientHeight - controlsHeight;
       return selectedRowEnd > viewportStart && selectedRowStart < viewportEnd;
     })();
+    if (shouldFollowSelection && scrollContainer) {
+      const selectionOwnsScrollAnchor = !selectedIsVisible ||
+        Math.abs(scrollContainer.scrollTop - selectedRowStart) <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+      selectionOwnsScrollAnchorRef.current = selectionOwnsScrollAnchor;
+      if (selectionOwnsScrollAnchor) {
+        preserveScrollTopRef.current = null;
+      }
+    }
     const selectedWindowStart = shouldFollowSelection && !selectedIsVisible
       ? Math.floor(selectedIndex / WORKSPACE_RENDER_WINDOW_SIZE) *
         WORKSPACE_RENDER_WINDOW_SIZE
@@ -1229,7 +1244,11 @@ export function WorkspaceList({
       preserveScrollTopRef.current;
     preserveScrollTopRef.current = null;
     if (scrollTop !== null) {
-      scrollWithoutLoading(scrollTop);
+      const scrollContainer = scrollContainerRef.current;
+      const atTop =
+        scrollContainer !== null &&
+        scrollContainer.scrollTop <= WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX;
+      scrollWithoutLoading(atTop ? 0 : scrollTop);
     }
   }, [items, rowOffsets, scrollWithoutLoading]);
 
@@ -1315,6 +1334,14 @@ export function WorkspaceList({
     );
 
     if (suppressScrollLoadRef.current) return;
+    selectionOwnsScrollAnchorRef.current = false;
+    if (
+      preserveScrollTopRef.current !== null &&
+      Math.abs(element.scrollTop - preserveScrollTopRef.current) >
+        WORKSPACE_LIST_TOP_EDGE_TOLERANCE_PX
+    ) {
+      preserveScrollTopRef.current = null;
+    }
     const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
     if (remaining > WORKSPACE_HISTORY_SCROLL_THRESHOLD_PX) {
       nearBottomTriggeredRef.current = false;
@@ -1341,10 +1368,12 @@ export function WorkspaceList({
         suppressNextButtonLoadRef.current = true;
       }
     }
-  }, [hasMore, items.length, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
+  }, [hasMore, items, loadingMore, maxPageStart, maxWindowStart, requestHistoryPage, rowOffsets]);
 
   const showWindow = useCallback((nextStart: number) => {
     const boundedStart = Math.max(0, Math.min(nextStart, maxPageStart));
+    selectionOwnsScrollAnchorRef.current = false;
+    preserveScrollTopRef.current = null;
     setPageStart(boundedStart);
     setWindowStart(Math.min(boundedStart, maxWindowStart));
     scrollWithoutLoading(rowOffsets[boundedStart] ?? 0);

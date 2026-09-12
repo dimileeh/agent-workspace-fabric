@@ -128,6 +128,7 @@ async def test_enveloped_list_preserves_representative_item_shape(
         "occurred_at",
     }
     assert isinstance(body["items"][0]["event_order"], int)
+    assert body["items"][0]["event_order"] > 0
 
 
 @pytest.mark.unit

@@ -169,6 +169,7 @@ class TestListEvents:
         assert body["items"][0]["event_type"] == "workspace.created"
         assert body["items"][0]["new_state"] == "requested"
         assert body["items"][0]["reason_code"] == "CREATED"
+        assert body["items"][0]["event_order"] == 1
 
     @pytest.mark.unit
     async def test_filters_by_workspace_id(self, client: AsyncClient) -> None:

@@ -175,7 +175,7 @@ for (const viewport of [
     await expect(coverage).toContainText("attention evidence unavailable");
     await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
 
-    for (const label of ["Running", "Monitoring PR", "Completed"]) {
+    for (const label of ["Active", "Running", "Monitoring PR", "Awaiting operator", "Completed"]) {
       const card = kpi(page, label);
       const valueBox = await card.locator(".kpi-value").boundingBox();
       const hintBox = await card.getByText(/exact metric count is incomplete/).boundingBox();

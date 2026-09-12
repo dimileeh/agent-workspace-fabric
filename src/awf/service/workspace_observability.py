@@ -31,6 +31,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_a
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
+from awf.service import workspace_overview_pagination as _overview_pagination
 from awf.service.bounded_list import (
     bounded_list_limit,
     decode_bounded_list_cursor,
@@ -65,24 +66,16 @@ from awf.service.workspace_observability_types import (
     LifecycleStageStatus as LifecycleStageStatus,
 )
 from awf.service.workspace_observability_types import LlmUsageStatus as LlmUsageStatus
-from awf.service.workspace_overview_pagination import (
-    InvalidWorkspaceOverviewCursorError as InvalidWorkspaceOverviewCursorError,
-)
-from awf.service.workspace_overview_pagination import (
-    _decode_overview_cursor as _decode_overview_cursor,
-)
-from awf.service.workspace_overview_pagination import (
-    _encode_overview_cursor as _encode_overview_cursor,
-)
-from awf.service.workspace_overview_pagination import (
-    _WorkspaceOverviewCursor as _WorkspaceOverviewCursor,
-)
+
+InvalidWorkspaceOverviewCursorError = _overview_pagination.InvalidWorkspaceOverviewCursorError
+_WorkspaceOverviewCursor = _overview_pagination._WorkspaceOverviewCursor
+_decode_overview_cursor = _overview_pagination._decode_overview_cursor
+_encode_overview_cursor = _overview_pagination._encode_overview_cursor
 
 _log = get_logger(__name__)
 
 DEFAULT_STALE_REASON_LIMIT = 50
 MAX_STALE_REASON_LIMIT = 500
-
 STALE_RUNNING_THRESHOLD_SECONDS = 600
 
 
@@ -147,9 +140,6 @@ _GENERIC_RECOVERY_REASON_CODES = frozenset(
         "OPERATOR_VALIDATE_REQUESTED",
     }
 )
-_MAX_RECOVERY_PAYLOAD_KEYS = 32
-_MAX_RECOVERY_PAYLOAD_DEPTH = 4
-_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS = 20
 
 
 async def list_workspace_overview_response(
@@ -268,13 +258,13 @@ def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
     }
 
 
+def _event_response(event: WorkspaceEvent | None) -> WorkspaceEventResponse | None:
+    return WorkspaceEventResponse.model_validate(event) if event is not None else None
+
+
 def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
     ordered_events = workspace_events_by_occurrence(ws)
-    observability = workspace_observability_payload(
-        ws,
-        ordered_events=ordered_events,
-    )
-    latest_event = ordered_events[-1] if ordered_events else None
+    observability = workspace_observability_payload(ws, ordered_events=ordered_events)
     latest_state_change = next(
         (
             event
@@ -314,14 +304,11 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
-    last_activity_at = getattr(ws, "last_activity_at", None)
-    is_stale_running = is_workspace_stale_running(ws)
-
     return WorkspaceOverviewResponse(
         subphase=getattr(ws, "subphase", None),
-        last_activity_at=last_activity_at,
+        last_activity_at=getattr(ws, "last_activity_at", None),
         last_log_at=getattr(ws, "last_log_at", None),
-        is_stale_running=is_stale_running,
+        is_stale_running=is_workspace_stale_running(ws),
         workspace_id=ws.id,
         task_id=ws.task_external_id or ws.id,
         task_key=ws.task_tag,
@@ -351,33 +338,17 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         status=WorkspaceStatus(ws.status),
         current_phase=ws.status,
         active_operation=active_operation.type if active_operation is not None else None,
-        last_event=(
-            WorkspaceEventResponse.model_validate(latest_event)
-            if latest_event is not None
-            else None
-        ),
-        latest_state_change=(
-            WorkspaceEventResponse.model_validate(latest_state_change)
-            if latest_state_change is not None
-            else None
-        ),
-        latest_destroying_state_change=(
-            WorkspaceEventResponse.model_validate(latest_destroying_state_change)
-            if latest_destroying_state_change is not None
-            else None
-        ),
-        latest_workflow_terminal_state_change=(
-            WorkspaceEventResponse.model_validate(latest_workflow_terminal_state_change)
-            if latest_workflow_terminal_state_change is not None
-            else None
+        last_event=_event_response(ordered_events[-1] if ordered_events else None),
+        latest_state_change=_event_response(latest_state_change),
+        latest_destroying_state_change=_event_response(latest_destroying_state_change),
+        latest_workflow_terminal_state_change=_event_response(
+            latest_workflow_terminal_state_change
         ),
         pr_url=ws.pr_url,
         pr_number=ws.pr_number,
         failure_reason=ws.failure_reason,
         failure_message=ws.failure_message,
-        # Only surface the authoritative pause start while actually blocked: the
-        # ``blocked_at`` column is not cleared on resume, so gating on live status
-        # keeps a resumed workspace from reporting a stale block time.
+        # ``blocked_at`` is not cleared on resume; surface it only while blocked.
         blocked_at=(
             getattr(ws, "blocked_at", None)
             if str(ws.status) == WorkspaceStatus.blocked.value
@@ -1230,13 +1201,7 @@ def _payload_string(payload: Mapping[str, object] | None, key: str) -> str | Non
 def _bounded_payload(payload: Mapping[str, object] | None) -> dict[str, Any] | None:
     if payload is None:
         return None
-    bounded: dict[str, Any] = {}
-    for index, (key, value) in enumerate(payload.items()):
-        if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
-            bounded["__truncated__"] = True
-            break
-        bounded[str(key)] = _json_safe_value(value)
-    return bounded
+    return cast(dict[str, Any], _json_safe_value(payload, depth=-1))
 
 
 def _json_safe_value(value: object, *, depth: int = 0) -> Any:
@@ -1244,24 +1209,19 @@ def _json_safe_value(value: object, *, depth: int = 0) -> Any:
         return value
     if isinstance(value, datetime):
         return _ensure_utc(value).isoformat()
-    if depth >= _MAX_RECOVERY_PAYLOAD_DEPTH:
+    if depth >= 4:
         return str(value)
     if isinstance(value, Mapping):
         safe: dict[str, Any] = {}
         for index, (key, nested_value) in enumerate(value.items()):
-            if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
+            if index >= 32:
                 safe["__truncated__"] = True
                 break
             safe[str(key)] = _json_safe_value(nested_value, depth=depth + 1)
         return safe
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        items = [
-            _json_safe_value(item, depth=depth + 1)
-            for item in list(value)[:_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS]
-        ]
-        if len(value) > _MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS:
-            items.append("__truncated__")
-        return items
+        items = [_json_safe_value(item, depth=depth + 1) for item in list(value)[:20]]
+        return items + ["__truncated__"] if len(value) > 20 else items
     return str(value)
 
 
@@ -1416,6 +1376,4 @@ def _duration_seconds(started_at: datetime, ended_at: datetime) -> int:
 
 
 def _ensure_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
