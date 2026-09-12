@@ -2024,6 +2024,69 @@ test("resolveWorkflowTiming requires terminal evidence after the latest represen
       `a ${cleanupStatus} cleanup must retain the resumed post-PR finish`,
     );
   }
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6hs6im: when the
+  // first cleanup fails, a retry replaces the retained cleanup entry with
+  // failed -> destroying. That retry must preserve an earlier resumed
+  // completed/cancelled finish through each retry outcome.
+  for (const [terminalStatus, terminalEvent, lifecycle] of [
+    [
+      "cancelled",
+      {
+        ...stateChanged("running", "cancelled", "2026-09-06T12:10:00Z"),
+        id: "event_resumed_cancelled_before_destroy_retry",
+      },
+      item.lifecycle,
+    ],
+    ["completed", postPrTerminalEvent, postPrLifecycle],
+  ]) {
+    const retryDestroyingEvent = stateChanged(
+      "failed",
+      "destroying",
+      "2026-09-06T12:40:00Z",
+    );
+    for (const [cleanupStatus, cleanupEvent] of [
+      ["destroying", retryDestroyingEvent],
+      [
+        "destroyed",
+        stateChanged("destroying", "destroyed", "2026-09-06T12:50:00Z"),
+      ],
+      ["failed", stateChanged("destroying", "failed", "2026-09-06T12:50:00Z")],
+    ]) {
+      assert.deepEqual(
+        resolveWorkflowTiming({
+          ...item,
+          status: cleanupStatus,
+          lifecycle,
+          latest_state_change: cleanupEvent,
+          latest_destroying_state_change: retryDestroyingEvent,
+          latest_workflow_terminal_state_change: terminalEvent,
+          last_event: cleanupEvent,
+        }),
+        { finishedAt: "2026-09-06T12:10:00Z", durationSeconds: null },
+        `a ${cleanupStatus} destroy retry must retain the resumed ${terminalStatus} finish`,
+      );
+    }
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        status: "destroyed",
+        lifecycle,
+        latest_state_change: stateChanged(
+          "destroying",
+          "destroyed",
+          "2026-09-06T12:30:00Z",
+        ),
+        latest_destroying_state_change: stateChanged(
+          "failed",
+          "destroying",
+          "2026-09-06T12:09:00Z",
+        ),
+        latest_workflow_terminal_state_change: terminalEvent,
+      }),
+      { finishedAt: null, durationSeconds: null },
+      `a destroy retry that predates the resumed ${terminalStatus} finish must not corroborate it`,
+    );
+  }
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
