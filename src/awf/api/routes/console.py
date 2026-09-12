@@ -623,7 +623,8 @@ class ConsoleDashboardCountEvidenceResponse(BaseModel):
 
     Known plus unknown equals total; every confirmed counter is at most the
     known population and follows the v1 count relationships. At the summary
-    level, every non-null exact counter equals its confirmed counterpart.
+    level, every non-null exact counter equals its confirmed counterpart, and
+    exact counters require every workspace workflow status to be known.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -746,6 +747,12 @@ class ConsoleDashboardSummaryResponse(BaseModel):
             if self.coverage.status == "complete" and evidence.status_unknown_workspaces != 0:
                 raise ValueError(
                     "coverage.status complete requires status_unknown_workspaces to be zero"
+                )
+            if evidence.status_unknown_workspaces > 0 and any(
+                exact[key] is not None for key in _DASHBOARD_COUNT_FIELDS
+            ):
+                raise ValueError(
+                    "status_unknown_workspaces must be zero when any exact count is non-null"
                 )
         return self
 

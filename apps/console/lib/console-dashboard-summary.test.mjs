@@ -316,6 +316,25 @@ test("parseDashboardSummary rejects every exact and confirmed count mismatch", (
   }
 });
 
+test("parseDashboardSummary rejects exact counts while any workflow status is unknown", () => {
+  for (const key of countKeys) {
+    const payload = summaryWithCountEvidence();
+    payload.counts[key] = payload.count_evidence.confirmed_counts[key];
+    assert.equal(parseDashboardSummary(payload), null, `unproven exact count at ${key}`);
+  }
+});
+
+test("parseDashboardSummary rejects a positive exact lower bound with one unknown status", () => {
+  const payload = summaryWithCountEvidence({
+    total: 30,
+    known: 29,
+    unknown: 1,
+    confirmed: { active: 8, executing: 8 },
+  });
+  payload.counts.active = 8;
+  assert.equal(parseDashboardSummary(payload), null);
+});
+
 test("confirmed KPI lower bounds stay qualified while exact values win", () => {
   const lowerBounds = parseDashboardSummary(
     summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } }),
@@ -345,7 +364,12 @@ test("confirmed KPI lower bounds stay qualified while exact values win", () => {
   assert.match(completed.hint, /exact metric count is incomplete/);
   assert.equal(lowerBounds.counts.active, null);
 
-  const exactPayload = summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } });
+  const exactPayload = summaryWithCountEvidence({
+    total: 1,
+    known: 1,
+    unknown: 0,
+    confirmed: { active: 1, executing: 1 },
+  });
   exactPayload.counts.active = 1;
   exactPayload.counts.monitoring_pr = 0;
   const exactSummary = parseDashboardSummary(exactPayload);
