@@ -190,6 +190,34 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   assert.equal(parseTelemetryPresentation(stringMem), null);
 });
 
+test("parseTelemetryPresentation rejects byte values outside the safe integer range", () => {
+  // Above MAX_SAFE_INTEGER: JS Number rounds, but fail-closed parse must reject.
+  const unsafeAdmitted = structuredClone(SUCCESS);
+  unsafeAdmitted.admitted.memory_request_bytes = 9007199254740993;
+  assert.equal(parseTelemetryPresentation(unsafeAdmitted), null);
+
+  const unsafeLimit = structuredClone(SUCCESS);
+  unsafeLimit.admitted.memory_limit_bytes = Number.MAX_SAFE_INTEGER + 1;
+  assert.equal(parseTelemetryPresentation(unsafeLimit), null);
+
+  const fractionalBytes = structuredClone(SUCCESS);
+  fractionalBytes.admitted.ephemeral_storage_request_bytes = 1024.5;
+  assert.equal(parseTelemetryPresentation(fractionalBytes), null);
+
+  const unsafeSample = structuredClone(SUCCESS);
+  unsafeSample.memory_bytes_samples[0].value = "9007199254740993";
+  assert.equal(parseTelemetryPresentation(unsafeSample), null);
+
+  const fractionalSample = structuredClone(SUCCESS);
+  fractionalSample.memory_bytes_samples[0].value = "1024.5";
+  assert.equal(parseTelemetryPresentation(fractionalSample), null);
+
+  const maxSafe = structuredClone(SUCCESS);
+  maxSafe.admitted.memory_limit_bytes = Number.MAX_SAFE_INTEGER;
+  maxSafe.memory_bytes_samples[0].value = String(Number.MAX_SAFE_INTEGER);
+  assert.ok(parseTelemetryPresentation(maxSafe));
+});
+
 test("container partition does not merge samples across different sample_time moments", () => {
   const multi = structuredClone(SUCCESS);
   multi.cpu_cores_samples = [

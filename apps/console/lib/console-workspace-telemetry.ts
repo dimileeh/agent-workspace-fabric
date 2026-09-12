@@ -26,8 +26,12 @@ export const COST_EXCLUSION_NOTE =
 
 /** Reject absurd magnitudes (CPU cores / USD) rather than accept scientific junk. */
 const MAX_DECIMAL_MAGNITUDE = 1e15;
-/** Memory / ephemeral bytes upper bound (~1 PiB). */
-const MAX_BYTES_MAGNITUDE = 1e18;
+/**
+ * Memory / ephemeral bytes upper bound.
+ * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
+ * in JS Number (above this, values round silently and must be rejected).
+ */
+const MAX_BYTES_MAGNITUDE = Number.MAX_SAFE_INTEGER;
 /**
  * Hard cap on samples retained per metric array from a telemetry payload.
  * Keeps the trailing (most recent) window when the producer sends more.
@@ -185,10 +189,12 @@ function isNullableTimestamp(value: unknown): value is string | null {
 /**
  * Strict nonnegative finite decimal string. Rejects NaN/Infinity tokens,
  * scientific notation, negatives, and oversized magnitudes.
+ * When requireSafeInteger is set (byte counts), also rejects fractions and
+ * values that lose precision under Number.
  */
 function parseDecimalString(
   value: unknown,
-  options: { allowNull?: boolean; max?: number } = {},
+  options: { allowNull?: boolean; max?: number; requireSafeInteger?: boolean } = {},
 ): number | null | undefined {
   const max = options.max ?? MAX_DECIMAL_MAGNITUDE;
   if (value === null && options.allowNull) {
@@ -205,6 +211,9 @@ function parseDecimalString(
   if (!Number.isFinite(n) || n < 0 || n > max) {
     return undefined;
   }
+  if (options.requireSafeInteger && !Number.isSafeInteger(n)) {
+    return undefined;
+  }
   return n;
 }
 
@@ -212,11 +221,18 @@ function isNonNegativeFiniteNumber(value: unknown, max = MAX_BYTES_MAGNITUDE): v
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= max;
 }
 
-function isNullableNonNegativeFiniteNumber(
-  value: unknown,
-  max = MAX_BYTES_MAGNITUDE,
-): value is number | null {
-  return value === null || isNonNegativeFiniteNumber(value, max);
+/** Admitted byte counts must be exact safe integers (no float rounding). */
+function isNonNegativeSafeByteCount(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= MAX_BYTES_MAGNITUDE
+  );
+}
+
+function isNullableNonNegativeSafeByteCount(value: unknown): value is number | null {
+  return value === null || isNonNegativeSafeByteCount(value);
 }
 
 function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value is T {
@@ -264,6 +280,7 @@ function parseSampleArray(
     }
     const parsedValue = parseDecimalString(item.value, {
       max: expectedUnit === "bytes" ? MAX_BYTES_MAGNITUDE : MAX_DECIMAL_MAGNITUDE,
+      requireSafeInteger: expectedUnit === "bytes",
     });
     if (parsedValue === undefined || parsedValue === null) {
       return null;
@@ -389,10 +406,10 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
     return undefined;
   }
   if (
-    !isNullableNonNegativeFiniteNumber(value.memory_request_bytes) ||
-    !isNullableNonNegativeFiniteNumber(value.memory_limit_bytes) ||
-    !isNullableNonNegativeFiniteNumber(value.ephemeral_storage_request_bytes) ||
-    !isNullableNonNegativeFiniteNumber(value.ephemeral_storage_limit_bytes)
+    !isNullableNonNegativeSafeByteCount(value.memory_request_bytes) ||
+    !isNullableNonNegativeSafeByteCount(value.memory_limit_bytes) ||
+    !isNullableNonNegativeSafeByteCount(value.ephemeral_storage_request_bytes) ||
+    !isNullableNonNegativeSafeByteCount(value.ephemeral_storage_limit_bytes)
   ) {
     return undefined;
   }
