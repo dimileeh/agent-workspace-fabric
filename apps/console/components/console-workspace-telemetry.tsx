@@ -299,6 +299,7 @@ export function ConsoleWorkspaceTelemetry({
         data-testid="console-workspace-telemetry"
         data-awf-telemetry-state={viewModel.state}
         data-awf-telemetry-mode={mode}
+        data-awf-sample-time-mixed={viewModel.sampleTimeMixed ? "true" : "false"}
         className="flex min-w-0 flex-col gap-3"
       >
         {(workspaceId || modelLabel) && (
@@ -332,7 +333,18 @@ export function ConsoleWorkspaceTelemetry({
           >
             {modeLabel}
           </span>
-          <span className="tnum" data-testid="telemetry-sample-time">
+          <span
+            className="tnum"
+            data-testid="telemetry-sample-time"
+            data-awf-sample-time-mixed={
+              viewModel.sampleTimeMixed ? "true" : "false"
+            }
+            title={
+              viewModel.sampleTimeMixed
+                ? "CPU and memory readings use different sample times"
+                : undefined
+            }
+          >
             {viewModel.sampleTimeMixed ? (
               <>
                 Sample (mixed) CPU{" "}

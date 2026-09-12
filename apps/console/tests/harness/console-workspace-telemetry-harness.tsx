@@ -43,6 +43,8 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const unknownLimits = searchParams.get("unknownLimits") === "1";
   const admittedPartial = searchParams.get("admittedPartial") === "1";
   const incompleteSeries = searchParams.get("incompleteSeries") === "1";
+  // Differing but fresh CPU vs memory sample times (mixed Sample label).
+  const mixedSampleTimes = searchParams.get("mixedSampleTimes") === "1";
   const nowMsParam = searchParams.get("nowMs");
   const nowMs = nowMsParam ? Number(nowMsParam) : Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -56,7 +58,10 @@ export function ConsoleWorkspaceTelemetryHarness() {
     }
     let raw = structuredClone(FIXTURES[fixtureName] ?? FIXTURES.success);
     if (
-      (unknownLimits || admittedPartial || incompleteSeries) &&
+      (unknownLimits ||
+        admittedPartial ||
+        incompleteSeries ||
+        mixedSampleTimes) &&
       raw &&
       typeof raw === "object" &&
       raw !== null
@@ -68,6 +73,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
           partial?: boolean;
         } | null;
         cpu_cores_samples?: Array<Record<string, unknown>>;
+        memory_bytes_samples?: Array<Record<string, unknown>>;
       };
       if (envelope.admitted) {
         if (unknownLimits) {
@@ -76,6 +82,26 @@ export function ConsoleWorkspaceTelemetryHarness() {
         }
         if (admittedPartial) {
           envelope.admitted.partial = true;
+        }
+      }
+      if (mixedSampleTimes) {
+        // Both meters stay within stale_after; only the timestamps differ so the
+        // panel must not attribute both readings to a single Sample time.
+        if (envelope.cpu_cores_samples?.[0]) {
+          envelope.cpu_cores_samples[0] = {
+            ...envelope.cpu_cores_samples[0],
+            sample_time: "2026-09-12T11:58:00+00:00",
+            interval_start: "2026-09-12T11:58:00+00:00",
+            interval_end: "2026-09-12T11:58:00+00:00",
+          };
+        }
+        if (envelope.memory_bytes_samples?.[0]) {
+          envelope.memory_bytes_samples[0] = {
+            ...envelope.memory_bytes_samples[0],
+            sample_time: "2026-09-12T12:00:00+00:00",
+            interval_start: "2026-09-12T12:00:00+00:00",
+            interval_end: "2026-09-12T12:00:00+00:00",
+          };
         }
       }
       if (incompleteSeries && envelope.cpu_cores_samples?.[0]) {
@@ -142,6 +168,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     unknownLimits,
     admittedPartial,
     incompleteSeries,
+    mixedSampleTimes,
     nowMs,
   ]);
 

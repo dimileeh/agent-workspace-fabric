@@ -151,6 +151,27 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByTestId("telemetry-series-cpu-marker-partial")).toBeVisible();
   });
 
+  test("mixed CPU/memory sample times show per-meter Sample times", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await openHarness(page, {
+      fixture: "success",
+      mixedSampleTimes: "1",
+      nowMs: String(Date.parse("2026-09-12T12:01:00+00:00")),
+    });
+
+    const root = page.getByTestId("console-workspace-telemetry");
+    await expect(root).toHaveAttribute("data-awf-sample-time-mixed", "true");
+    const sample = page.getByTestId("telemetry-sample-time");
+    await expect(sample).toHaveAttribute("data-awf-sample-time-mixed", "true");
+    await expect(sample).toContainText("Sample (mixed)");
+    await expect(sample).toContainText("CPU");
+    await expect(sample).toContainText("Mem");
+    await expect(sample).toHaveAttribute(
+      "title",
+      "CPU and memory readings use different sample times",
+    );
+  });
+
   test("unallocated cost is not fake zero", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, { fixture: "unallocated" });
