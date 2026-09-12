@@ -378,13 +378,13 @@ def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
     }
 
 
+def _event_response(event: WorkspaceEvent | None) -> WorkspaceEventResponse | None:
+    return WorkspaceEventResponse.model_validate(event) if event is not None else None
+
+
 def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
     ordered_events = workspace_events_by_occurrence(ws)
-    observability = workspace_observability_payload(
-        ws,
-        ordered_events=ordered_events,
-    )
-    latest_event = ordered_events[-1] if ordered_events else None
+    observability = workspace_observability_payload(ws, ordered_events=ordered_events)
     latest_state_change = next(
         (
             event
@@ -424,14 +424,11 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
-    last_activity_at = getattr(ws, "last_activity_at", None)
-    is_stale_running = is_workspace_stale_running(ws)
-
     return WorkspaceOverviewResponse(
         subphase=getattr(ws, "subphase", None),
-        last_activity_at=last_activity_at,
+        last_activity_at=getattr(ws, "last_activity_at", None),
         last_log_at=getattr(ws, "last_log_at", None),
-        is_stale_running=is_stale_running,
+        is_stale_running=is_workspace_stale_running(ws),
         workspace_id=ws.id,
         task_id=ws.task_external_id or ws.id,
         task_key=ws.task_tag,
@@ -461,33 +458,17 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         status=WorkspaceStatus(ws.status),
         current_phase=ws.status,
         active_operation=active_operation.type if active_operation is not None else None,
-        last_event=(
-            WorkspaceEventResponse.model_validate(latest_event)
-            if latest_event is not None
-            else None
-        ),
-        latest_state_change=(
-            WorkspaceEventResponse.model_validate(latest_state_change)
-            if latest_state_change is not None
-            else None
-        ),
-        latest_destroying_state_change=(
-            WorkspaceEventResponse.model_validate(latest_destroying_state_change)
-            if latest_destroying_state_change is not None
-            else None
-        ),
-        latest_workflow_terminal_state_change=(
-            WorkspaceEventResponse.model_validate(latest_workflow_terminal_state_change)
-            if latest_workflow_terminal_state_change is not None
-            else None
+        last_event=_event_response(ordered_events[-1] if ordered_events else None),
+        latest_state_change=_event_response(latest_state_change),
+        latest_destroying_state_change=_event_response(latest_destroying_state_change),
+        latest_workflow_terminal_state_change=_event_response(
+            latest_workflow_terminal_state_change
         ),
         pr_url=ws.pr_url,
         pr_number=ws.pr_number,
         failure_reason=ws.failure_reason,
         failure_message=ws.failure_message,
-        # Only surface the authoritative pause start while actually blocked: the
-        # ``blocked_at`` column is not cleared on resume, so gating on live status
-        # keeps a resumed workspace from reporting a stale block time.
+        # ``blocked_at`` is not cleared on resume; surface it only while blocked.
         blocked_at=(
             getattr(ws, "blocked_at", None)
             if str(ws.status) == WorkspaceStatus.blocked.value
