@@ -219,9 +219,10 @@ function terminalEventMatchesWorkflowStatus(
   item: WorkspaceOverview,
   terminalEvent: RetainedTerminalEvent,
 ): boolean {
-  const cleanupFailureConfirmsCancelledBoundary =
+  const cleanupFailureConfirmsEarlierTerminalBoundary =
     item.status === "failed" &&
-    terminalEvent.new_state === "cancelled" &&
+    (terminalEvent.new_state === "completed" ||
+      terminalEvent.new_state === "cancelled") &&
     item.latest_state_change?.event_type === "workspace.state_changed" &&
     item.latest_state_change.old_state === "destroying" &&
     item.latest_state_change.new_state === "failed";
@@ -231,7 +232,7 @@ function terminalEventMatchesWorkflowStatus(
       (terminalEvent.new_state === "completed" ||
         terminalEvent.new_state === "failed" ||
         terminalEvent.new_state === "cancelled")) ||
-    cleanupFailureConfirmsCancelledBoundary
+    cleanupFailureConfirmsEarlierTerminalBoundary
   );
 }
 

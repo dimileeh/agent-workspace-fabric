@@ -1152,7 +1152,19 @@ def _latest_reverse_state_event(
     events: Sequence[WorkspaceEvent],
 ) -> WorkspaceEvent | None:
     for event in reversed(events):
-        if getattr(event, "event_type", None) != "workspace.state_changed":
+        event_type = getattr(event, "event_type", None)
+        # Remonitor persists its failed -> monitoring reset on the request event
+        # instead of emitting a separate workspace.state_changed event.
+        if event_type == "workspace.remonitor_requested":
+            if (
+                _coerce_workspace_status(getattr(event, "old_state", None))
+                == WorkspaceStatus.failed
+                and _coerce_workspace_status(getattr(event, "new_state", None))
+                == WorkspaceStatus.monitoring_pr
+            ):
+                return event
+            continue
+        if event_type != "workspace.state_changed":
             continue
         if _is_reverse_lifecycle_transition(
             getattr(event, "old_state", None),
@@ -1177,6 +1189,8 @@ def _latest_recovery_event_after(
     events: Sequence[WorkspaceEvent],
     reverse_event: WorkspaceEvent,
 ) -> WorkspaceEvent | None:
+    if getattr(reverse_event, "event_type", None) == "workspace.remonitor_requested":
+        return reverse_event
     reverse_at = _ensure_utc(reverse_event.occurred_at)
     candidates = [
         event
