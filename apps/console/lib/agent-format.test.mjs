@@ -499,6 +499,10 @@ test("resolveWorkflowTiming preserves explicit duration without a terminal finis
     finishedAt: null,
     durationSeconds: null,
   });
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: 1.5 }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
   assert.deepEqual(
     resolveWorkflowTiming({
       ...item,
@@ -515,6 +519,34 @@ test("resolveWorkflowTiming preserves explicit duration without a terminal finis
     }),
     { finishedAt: null, durationSeconds: null },
   );
+});
+
+test("resolveWorkflowTiming validates explicit duration for non-terminal workspaces", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const item = {
+    status: "running",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    lifecycle: [],
+  };
+
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: 125 }), {
+    finishedAt: null,
+    durationSeconds: 125,
+  });
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: 0 }), {
+    finishedAt: null,
+    durationSeconds: 0,
+  });
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: -1 }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
+  assert.deepEqual(resolveWorkflowTiming({ ...item, duration_seconds: 1.5 }), {
+    finishedAt: null,
+    durationSeconds: null,
+  });
 });
 
 test("resolveWorkflowTiming preserves duration when an unused finished_at differs", async () => {

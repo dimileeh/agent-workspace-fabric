@@ -524,7 +524,9 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
 }
 
 function recordedDurationSeconds(value: number | null | undefined): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 function recordedIntervalDurationSeconds(
@@ -768,7 +770,7 @@ export function resolveWorkflowTiming(item: WorkspaceOverview): ResolvedWorkflow
   if (!hasTerminalWorkflowTiming(item)) {
     return {
       finishedAt: resolvedFinishedAt,
-      durationSeconds: item.duration_seconds ?? null,
+      durationSeconds: recordedDurationSeconds(item.duration_seconds),
     };
   }
 
