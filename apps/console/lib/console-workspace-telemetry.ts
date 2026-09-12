@@ -117,7 +117,13 @@ export type WorkspaceTelemetryView = {
   view: TelemetryViewWindow;
   staleAfterSeconds: number;
   observedAt: string | null;
+  /** Newest meter sample time (or envelope observedAt when no meters). */
   sampleTime: string | null;
+  /**
+   * True when CPU and memory aggregates have distinct sample times.
+   * The panel must not attribute both meters to a single Sample timestamp.
+   */
+  sampleTimeMixed: boolean;
   isStale: boolean;
   admitted: {
     cpuRequestCores: number | null;
@@ -132,12 +138,14 @@ export type WorkspaceTelemetryView = {
   cpu: {
     usedCores: number | null;
     usedPartial: boolean;
+    sampleTime: string | null;
     series: WorkspaceTelemetrySeriesPoint[];
     containerNamesAtSample: string[] | null;
   };
   memory: {
     usedBytes: number | null;
     usedPartial: boolean;
+    sampleTime: string | null;
     series: WorkspaceTelemetrySeriesPoint[];
     containerNamesAtSample: string[] | null;
   };
@@ -1122,6 +1130,15 @@ function resolveDisplaySampleTime(
   return observedAt;
 }
 
+function meterSampleTimesAreMixed(
+  meterSampleTimes: Array<string | null>,
+): boolean {
+  const distinct = new Set(
+    meterSampleTimes.filter((v): v is string => typeof v === "string"),
+  );
+  return distinct.size > 1;
+}
+
 /**
  * Project allowlisted UI fields from a parsed presentation.
  * Does not fetch; `nowMs` is injected for deterministic freshness tests.
@@ -1138,6 +1155,7 @@ export function projectWorkspaceTelemetryView(
     meterSampleTimes,
     presentation.observedAt,
   );
+  const sampleTimeMixed = meterSampleTimesAreMixed(meterSampleTimes);
 
   return {
     state: presentation.state,
@@ -1146,6 +1164,7 @@ export function projectWorkspaceTelemetryView(
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: presentation.observedAt,
     sampleTime,
+    sampleTimeMixed,
     isStale: computeIsStale(
       presentation,
       nowMs,
@@ -1168,12 +1187,14 @@ export function projectWorkspaceTelemetryView(
     cpu: {
       usedCores: cpuAgg.used,
       usedPartial: cpuAgg.usedPartial,
+      sampleTime: cpuAgg.sampleTime,
       series: cpuAgg.series,
       containerNamesAtSample: cpuAgg.containerNames,
     },
     memory: {
       usedBytes: memAgg.used,
       usedPartial: memAgg.usedPartial,
+      sampleTime: memAgg.sampleTime,
       series: memAgg.series,
       containerNamesAtSample: memAgg.containerNames,
     },

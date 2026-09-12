@@ -611,6 +611,38 @@ test("fresh envelope with aged meter samples is stale and Sample uses sample tim
   // Sample label must reflect meter times, not the newer envelope observed_at.
   assert.equal(view.sampleTime, "2026-09-12T11:51:00+00:00");
   assert.notEqual(view.sampleTime, agedMeters.observed_at);
+  assert.equal(view.sampleTimeMixed, true);
+  assert.equal(view.cpu.sampleTime, "2026-09-12T11:50:00+00:00");
+  assert.equal(view.memory.sampleTime, "2026-09-12T11:51:00+00:00");
+});
+
+test("differing but fresh CPU/memory sample times mark sampleTimeMixed", () => {
+  // Both meters are within stale_after; times differ so a single Sample label
+  // must not attribute the older reading to the newer timestamp alone.
+  const mixed = structuredClone(SUCCESS);
+  mixed.observed_at = "2026-09-12T12:00:00+00:00";
+  mixed.cpu_cores_samples[0].sample_time = "2026-09-12T11:58:00+00:00";
+  mixed.memory_bytes_samples[0].sample_time = "2026-09-12T12:00:00+00:00";
+  const parsed = parseTelemetryPresentation(mixed);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, {
+    nowMs: Date.parse("2026-09-12T12:01:00+00:00"),
+  });
+  assert.equal(view.isStale, false);
+  assert.equal(view.sampleTimeMixed, true);
+  assert.equal(view.cpu.sampleTime, "2026-09-12T11:58:00+00:00");
+  assert.equal(view.memory.sampleTime, "2026-09-12T12:00:00+00:00");
+  // Newest remains the panel reference time; UI must qualify as mixed.
+  assert.equal(view.sampleTime, "2026-09-12T12:00:00+00:00");
+});
+
+test("aligned CPU/memory sample times are not sampleTimeMixed", () => {
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.sampleTimeMixed, false);
+  assert.equal(view.cpu.sampleTime, "2026-09-12T12:00:00+00:00");
+  assert.equal(view.memory.sampleTime, "2026-09-12T12:00:00+00:00");
 });
 
 test("fresh envelope and meters with aged admitted observed_at is stale", () => {

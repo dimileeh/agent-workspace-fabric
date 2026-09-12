@@ -333,7 +333,15 @@ export function ConsoleWorkspaceTelemetry({
             {modeLabel}
           </span>
           <span className="tnum" data-testid="telemetry-sample-time">
-            Sample {formatDateTime(viewModel.sampleTime)}
+            {viewModel.sampleTimeMixed ? (
+              <>
+                Sample (mixed) CPU{" "}
+                {formatDateTime(viewModel.cpu.sampleTime)} · Mem{" "}
+                {formatDateTime(viewModel.memory.sampleTime)}
+              </>
+            ) : (
+              <>Sample {formatDateTime(viewModel.sampleTime)}</>
+            )}
           </span>
           {lastGoodAt ? (
             <span className="tnum" data-testid="telemetry-last-good">
