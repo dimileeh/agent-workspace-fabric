@@ -594,7 +594,9 @@ function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
 
 /**
  * Sum samples that share the exact same sample_time string identity.
- * Never merges across different moments.
+ * Never merges across different moments. If the latest partition is missing
+ * containers that appear elsewhere in the series, treat the sum as partial
+ * rather than a complete pod total.
  */
 function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   used: number | null;
@@ -641,6 +643,18 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
       usedPartial = true;
     }
     containerNames.push(sample.containerName);
+  }
+  // Staggered scrapes can leave the newest timestamp with only a subset of
+  // containers (e.g. agent@12:00, sidecar@11:59). Do not present that subset
+  // sum as a complete pod usage figure against requests/limits.
+  if (!usedPartial) {
+    const containersAtLatest = new Set(containerNames);
+    for (const sample of samples) {
+      if (!containersAtLatest.has(sample.containerName)) {
+        usedPartial = true;
+        break;
+      }
+    }
   }
   return {
     used,
