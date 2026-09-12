@@ -148,9 +148,12 @@ test.describe("console workspace telemetry harness", () => {
 
     const root = page.getByTestId("console-workspace-telemetry");
     await expect(root).toHaveAttribute("data-awf-telemetry-state", "partial");
-    await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
-    await expect(page.getByTestId("telemetry-partial-indicator")).toHaveText("partial");
-    // Nested meters/cost must not already qualify — panel indicator is the signal.
+    // Panel-header chip (glyph + label), not nested meter/cost badges.
+    const partial = page.getByTestId("telemetry-partial-indicator");
+    await expect(partial).toBeVisible();
+    await expect(partial).toContainText("partial");
+    await expect(partial).toContainText("⚠");
+    await expect(page.getByTestId("telemetry-view-selector")).toBeVisible();
     await expect(page.getByTestId("telemetry-meter-cpu")).not.toContainText("partial");
     await expect(page.getByTestId("telemetry-meter-memory")).not.toContainText("partial");
     await expect(page.getByTestId("telemetry-workload-cost-value")).not.toContainText(
@@ -159,6 +162,11 @@ test.describe("console workspace telemetry harness", () => {
 
     await openHarness(page, { fixture: "success" });
     await expect(page.getByTestId("telemetry-partial-indicator")).toHaveCount(0);
+
+    // quality:partial alone (state stays success) must still show the header chip.
+    await openHarness(page, { fixture: "success", envelopeQualityPartial: "1" });
+    await expect(root).toHaveAttribute("data-awf-telemetry-state", "success");
+    await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
   });
 
   test("incomplete historical partitions qualify sparkline history", async ({ page }) => {

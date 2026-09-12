@@ -258,7 +258,8 @@ export function ConsoleWorkspaceTelemetry({
   const stale = mode === "live" && viewModel.isStale;
   const modeLabel = mode === "historical" ? "Historical" : "Live";
   // Envelope-level partial is not implied by nested meter/cost badges; surface it
-  // when the producer marks state or quality partial (data_quality_notes stay hidden).
+  // in the panel header (glyph + label) when the producer marks state or quality
+  // partial — data_quality_notes stay hidden.
   const envelopePartial =
     viewModel.state === "partial" || viewModel.quality === "partial";
 
@@ -270,32 +271,44 @@ export function ConsoleWorkspaceTelemetry({
       staleLabel="stale"
       className="min-w-0"
       action={
-        <div
-          className="inline-flex rounded-[var(--radius-control)] border border-line p-0.5"
-          role="tablist"
-          aria-label="Telemetry window"
-          data-testid="telemetry-view-selector"
-        >
-          {TELEMETRY_VIEWS.map((view) => {
-            const selected = selectedView === view;
-            return (
-              <button
-                key={view}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                data-testid={`telemetry-view-${view}`}
-                className={`rounded-[var(--radius-control)] px-2 py-0.5 text-[11px] font-medium transition ${
-                  selected
-                    ? "bg-surface-2 text-fg"
-                    : "text-fg-muted hover:text-fg"
-                }`}
-                onClick={() => onViewChange(view)}
-              >
-                {view}
-              </button>
-            );
-          })}
+        <div className="flex min-w-0 items-center gap-2">
+          {envelopePartial ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 text-[10px] font-medium text-attention-text"
+              data-testid="telemetry-partial-indicator"
+              title="Producer reported incomplete telemetry for this window"
+            >
+              <span aria-hidden>⚠</span>
+              partial
+            </span>
+          ) : null}
+          <div
+            className="inline-flex rounded-[var(--radius-control)] border border-line p-0.5"
+            role="tablist"
+            aria-label="Telemetry window"
+            data-testid="telemetry-view-selector"
+          >
+            {TELEMETRY_VIEWS.map((view) => {
+              const selected = selectedView === view;
+              return (
+                <button
+                  key={view}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  data-testid={`telemetry-view-${view}`}
+                  className={`rounded-[var(--radius-control)] px-2 py-0.5 text-[11px] font-medium transition ${
+                    selected
+                      ? "bg-surface-2 text-fg"
+                      : "text-fg-muted hover:text-fg"
+                  }`}
+                  onClick={() => onViewChange(view)}
+                >
+                  {view}
+                </button>
+              );
+            })}
+          </div>
         </div>
       }
     >
@@ -337,15 +350,6 @@ export function ConsoleWorkspaceTelemetry({
           >
             {modeLabel}
           </span>
-          {envelopePartial ? (
-            <span
-              className="inline-flex items-center rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 font-medium text-attention-text"
-              data-testid="telemetry-partial-indicator"
-              title="Producer reported incomplete telemetry for this window"
-            >
-              partial
-            </span>
-          ) : null}
           <span
             className="tnum"
             data-testid="telemetry-sample-time"

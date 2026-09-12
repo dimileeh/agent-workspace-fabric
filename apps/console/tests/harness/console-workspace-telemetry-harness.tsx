@@ -46,7 +46,10 @@ export function ConsoleWorkspaceTelemetryHarness() {
   // Differing but fresh CPU vs memory sample times (mixed Sample label).
   const mixedSampleTimes = searchParams.get("mixedSampleTimes") === "1";
   // Envelope-level partial with complete nested fields (no meter/cost badges).
+  // envelopePartial=1 → state+quality; envelopeQualityPartial=1 → quality only.
   const envelopePartial = searchParams.get("envelopePartial") === "1";
+  const envelopeQualityPartial =
+    searchParams.get("envelopeQualityPartial") === "1";
   const nowMsParam = searchParams.get("nowMs");
   const nowMs = nowMsParam ? Number(nowMsParam) : Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -64,7 +67,8 @@ export function ConsoleWorkspaceTelemetryHarness() {
         admittedPartial ||
         incompleteSeries ||
         mixedSampleTimes ||
-        envelopePartial) &&
+        envelopePartial ||
+        envelopeQualityPartial) &&
       raw &&
       typeof raw === "object" &&
       raw !== null
@@ -82,6 +86,8 @@ export function ConsoleWorkspaceTelemetryHarness() {
       };
       if (envelopePartial) {
         envelope.state = "partial";
+        envelope.quality = "partial";
+      } else if (envelopeQualityPartial) {
         envelope.quality = "partial";
       }
       if (envelope.admitted) {
@@ -179,6 +185,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     incompleteSeries,
     mixedSampleTimes,
     envelopePartial,
+    envelopeQualityPartial,
     nowMs,
   ]);
 
