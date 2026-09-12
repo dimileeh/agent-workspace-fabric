@@ -206,6 +206,36 @@ test("hosted terminal cards use workflow finish and recorded duration for every 
   }
 });
 
+test("destroyed hosted or legacy cards honor explicit workflow timing", async ({ page }) => {
+  const items = [
+    overview("ws_hosted_destroyed_explicit", "destroyed", {
+      workflow_finished_at: "2026-09-06T12:20:00Z",
+      duration_seconds: 1200,
+    }),
+    overview("ws_legacy_destroyed_explicit", "destroyed", {
+      finished_at: "2026-09-06T12:21:00Z",
+      duration_seconds: 1260,
+    }),
+  ];
+  await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: items });
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  for (const [index, item] of items.entries()) {
+    const timing = page.getByTestId(`workspace-timing-${item.workspace_id}`);
+    await expect(timing).toContainText("Finished");
+    await expect(timing).toContainText("Duration");
+    await expect(timing).not.toContainText("Last activity");
+    await expect(
+      page.getByTestId(`workspace-finished-${item.workspace_id}`),
+    ).toContainText(formatDateTime(index === 0 ? item.workflow_finished_at : item.finished_at));
+    await expect(
+      page.getByTestId(`workspace-duration-${item.workspace_id}`),
+    ).toContainText(`${20 + index}m 0s`);
+  }
+});
+
 test("local terminal cards use one complete lifecycle interval", async ({ page }) => {
   const completed = overview("ws_local_completed", "completed", {
     lifecycle: [
@@ -347,12 +377,33 @@ test("destroy cleanup cards preserve terminal timing only after a workflow termi
       stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
     ],
   });
+  const cleanupFailedDirectly = overview("ws_cleanup_failed_direct", "failed", {
+    latest_state_change: stateChangedEvent(
+      "ws_cleanup_failed_direct",
+      "destroying",
+      "failed",
+      "2026-09-06T12:04:00Z",
+    ),
+    latest_destroying_state_change: stateChangedEvent(
+      "ws_cleanup_failed_direct",
+      "ready",
+      "destroying",
+      "2026-09-06T12:02:00Z",
+    ),
+    latest_workflow_terminal_state_change: null,
+    last_activity_at: "2026-09-06T12:04:00Z",
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
+    ],
+  });
   await mockAwfConsoleApi(page, {
     overviewItems: [
       postTerminal,
       directDestroy,
       retriedDirectDestroy,
       destroyedDirectly,
+      cleanupFailedDirectly,
     ],
   });
   await page.route(
@@ -401,6 +452,13 @@ test("destroy cleanup cards preserve terminal timing only after a workflow termi
   await expect(destroyedDirectTiming).toContainText("Last activity");
   await expect(destroyedDirectTiming).not.toContainText("Finished");
   await expect(destroyedDirectTiming).not.toContainText("Duration");
+
+  const cleanupFailedDirectTiming = page.getByTestId(
+    `workspace-timing-${cleanupFailedDirectly.workspace_id}`,
+  );
+  await expect(cleanupFailedDirectTiming).toContainText("Last activity");
+  await expect(cleanupFailedDirectTiming).not.toContainText("Finished");
+  await expect(cleanupFailedDirectTiming).not.toContainText("Duration");
 
   await terminalCard.click();
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();

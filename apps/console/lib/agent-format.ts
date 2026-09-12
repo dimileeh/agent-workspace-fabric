@@ -257,9 +257,11 @@ function terminalEventMatchesWorkflowStatus(
  * True when workflow timing should be presented as terminal. Destroy cleanup
  * is post-terminal only when its retained cleanup entry came from the retained
  * workflow terminal transition and a destroyed workspace retains the matching
- * cleanup exit. Retry history can retain an older terminal event, so its
- * presence alone does not prove the current attempt finished before a direct
- * destroy.
+ * cleanup exit. A valid explicit workflow finish also proves that a hosted or
+ * legacy destroyed row reached a workflow terminal boundary when those optional
+ * Core event projections are absent. Retry history can retain an older terminal
+ * event, so its presence alone does not prove the current attempt finished
+ * before a direct destroy.
  */
 export function hasTerminalWorkflowTiming(
   item: Pick<
@@ -268,14 +270,35 @@ export function hasTerminalWorkflowTiming(
     | "latest_destroying_state_change"
     | "latest_state_change"
     | "latest_workflow_terminal_state_change"
+    | "workflow_finished_at"
+    | "finished_at"
   >,
 ): boolean {
   const terminalTransition = item.latest_workflow_terminal_state_change;
   const cleanupTransition = item.latest_state_change;
+  const hasExplicitWorkflowFinish = resolveWorkflowFinishedAt(item) != null;
+  const isCleanupFailure =
+    item.status === "failed" &&
+    cleanupTransition?.event_type === "workspace.state_changed" &&
+    cleanupTransition.old_state === "destroying" &&
+    cleanupTransition.new_state === "failed";
+  const retainedCleanupEntry = item.latest_destroying_state_change;
+  const cleanupFailureHasTerminalBoundary =
+    !isCleanupFailure ||
+    (terminalTransition?.event_type === "workspace.state_changed" &&
+      TERMINAL_WORKFLOW_STATUSES.has(
+        terminalTransition.new_state as WorkspaceOverview["status"],
+      ) &&
+      // Legacy payloads can omit this field; current Core payloads must match it.
+      (retainedCleanupEntry == null ||
+        (retainedCleanupEntry.event_type === "workspace.state_changed" &&
+          retainedCleanupEntry.new_state === "destroying" &&
+          cleanupEntryMatchesRetainedTerminal(
+            retainedCleanupEntry,
+            terminalTransition,
+          ))));
   const cleanupEntryTransition =
-    item.status === "destroyed"
-      ? item.latest_destroying_state_change
-      : cleanupTransition;
+    item.status === "destroyed" ? retainedCleanupEntry : cleanupTransition;
   const cleanupExitMatchesStatus =
     item.status === "destroying" ||
     (item.status === "destroyed" &&
@@ -283,7 +306,9 @@ export function hasTerminalWorkflowTiming(
       cleanupTransition.old_state === "destroying" &&
       cleanupTransition.new_state === "destroyed");
   return (
-    TERMINAL_WORKFLOW_STATUSES.has(item.status) ||
+    (TERMINAL_WORKFLOW_STATUSES.has(item.status) &&
+      cleanupFailureHasTerminalBoundary) ||
+    (item.status === "destroyed" && hasExplicitWorkflowFinish) ||
     ((item.status === "destroying" || item.status === "destroyed") &&
       terminalTransition?.event_type === "workspace.state_changed" &&
       cleanupEntryTransition?.event_type === "workspace.state_changed" &&
