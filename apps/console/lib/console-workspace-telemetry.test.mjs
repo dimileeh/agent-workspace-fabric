@@ -219,6 +219,32 @@ test("parseTelemetryPresentation rejects byte values outside the safe integer ra
   assert.ok(parseTelemetryPresentation(maxSafe));
 });
 
+test("projectWorkspaceTelemetryView fails closed when byte aggregates exceed safe integer range", () => {
+  // Each sample is individually valid, but their same-timestamp sum is not exact.
+  const half = Math.floor(Number.MAX_SAFE_INTEGER / 2) + 1;
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.memory_bytes_samples[0];
+  multi.memory_bytes_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      value: String(half),
+    },
+    {
+      ...base,
+      container_name: "sidecar",
+      value: String(half),
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  assert.equal(parsed.memorySamples.length, 2);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.memory.usedBytes, null);
+  assert.equal(view.memory.usedPartial, true);
+  assert.equal(view.memory.series.length, 0);
+});
+
 test("container partition does not merge samples across different sample_time moments", () => {
   const multi = structuredClone(SUCCESS);
   multi.cpu_cores_samples = [

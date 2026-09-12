@@ -648,6 +648,24 @@ function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
 }
 
 /**
+ * Accumulate sample values. For byte meters, each running total must remain a
+ * safe integer — individually valid samples near MAX_SAFE_INTEGER can still
+ * sum past the exact Number range.
+ */
+function accumulateSampleTotal(
+  samples: ParsedTelemetrySample[],
+): number | null {
+  let total = 0;
+  for (const sample of samples) {
+    total += sample.value;
+    if (sample.unit === "bytes" && !Number.isSafeInteger(total)) {
+      return null;
+    }
+  }
+  return total;
+}
+
+/**
  * Build sparkline history as one pod-total point per sample_time.
  * Raw per-container rows must not be plotted as a single line — same-timestamp
  * containers would form a fake trend and disagree with meter totals.
@@ -669,11 +687,14 @@ function buildPodTotalSeries(
   }
   const points: WorkspaceTelemetrySeriesPoint[] = [];
   for (const [sampleTime, group] of byTime) {
-    let value = 0;
+    const value = accumulateSampleTotal(group);
+    // Fail closed: omit points whose byte pod-total is not an exact safe integer.
+    if (value === null) {
+      continue;
+    }
     let quality: TelemetryQuality = "ok";
     const names: string[] = [];
     for (const sample of group) {
-      value += sample.value;
       names.push(sample.containerName);
       if (sample.quality !== "ok") {
         // Prefer "stale" over "partial" when both appear; otherwise any non-ok.
@@ -728,12 +749,10 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
     };
   }
   const atLatest = samples.filter((s) => s.sampleTime === sampleTime);
-  let used = 0;
   let usedPartial = false;
   let incompletePartition = false;
   const containerNames: string[] = [];
   for (const sample of atLatest) {
-    used += sample.value;
     // Fail closed: only exact "ok" is complete usage. Parse rejects unknown
     // qualities; projection still treats any non-ok allowlisted quality
     // (partial, stale) as incomplete rather than appearing complete.
@@ -741,6 +760,12 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
       usedPartial = true;
     }
     containerNames.push(sample.containerName);
+  }
+  const used = accumulateSampleTotal(atLatest);
+  // Individually valid byte samples can still overflow Number's safe range when
+  // summed; treat that aggregate as unavailable rather than a rounded total.
+  if (used === null) {
+    usedPartial = true;
   }
   // Staggered scrapes can leave the newest timestamp with only a subset of
   // containers (e.g. agent@12:00, sidecar@11:59). Do not present that subset
@@ -756,7 +781,7 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
     }
   }
   return {
-    used: incompletePartition ? null : used,
+    used: incompletePartition || used === null ? null : used,
     usedPartial,
     containerNames,
     sampleTime,
