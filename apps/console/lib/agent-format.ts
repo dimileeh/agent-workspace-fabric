@@ -285,6 +285,7 @@ export function hasTerminalWorkflowTiming(
   const retainedCleanupEntry = item.latest_destroying_state_change;
   const cleanupFailureHasTerminalBoundary =
     !isCleanupFailure ||
+    hasExplicitWorkflowFinish ||
     (terminalTransition?.event_type === "workspace.state_changed" &&
       TERMINAL_WORKFLOW_STATUSES.has(
         terminalTransition.new_state as WorkspaceOverview["status"],

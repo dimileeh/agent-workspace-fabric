@@ -614,6 +614,33 @@ test("hasTerminalWorkflowTiming honors explicit workflow finishes while cleanup 
   }
 });
 
+test("hasTerminalWorkflowTiming honors explicit workflow finishes after cleanup failure", async () => {
+  const { hasTerminalWorkflowTiming } = await import("./agent-format.ts");
+  const cleanupFailure = {
+    event_type: "workspace.state_changed",
+    old_state: "destroying",
+    new_state: "failed",
+    occurred_at: "2026-09-06T12:30:00Z",
+  };
+
+  for (const timing of [
+    { workflow_finished_at: "2026-09-06T12:08:00Z" },
+    { finished_at: "2026-09-06T12:08:00Z" },
+  ]) {
+    assert.equal(
+      hasTerminalWorkflowTiming({
+        status: "failed",
+        latest_state_change: cleanupFailure,
+        latest_destroying_state_change: null,
+        latest_workflow_terminal_state_change: null,
+        ...timing,
+      }),
+      true,
+      "a documented workflow finish must replace optional cleanup provenance",
+    );
+  }
+});
+
 test("hasTerminalWorkflowTiming requires a workflow terminal boundary before cleanup failure", async () => {
   const { hasTerminalWorkflowTiming } = await import("./agent-format.ts");
   const cleanupFailure = {
