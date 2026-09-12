@@ -680,6 +680,33 @@ test("parseTelemetryPresentation rejects duplicate container samples at the same
   assert.equal(parseTelemetryPresentation(dup), null);
 });
 
+test("parseTelemetryPresentation rejects duplicate container at same instant with alternate RFC3339 spellings", () => {
+  // Projection partitions by epoch ms; identity must use the same key or Z vs
+  // +00:00 spellings of one container@instant would parse as distinct rows and
+  // inflate the pod total when summed.
+  const dup = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  dup.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00Z",
+      interval_start: "2026-09-12T11:59:00Z",
+      interval_end: "2026-09-12T12:00:00Z",
+      value: "0.10",
+    },
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.20",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(dup), null);
+});
+
 test("projectWorkspaceTelemetryView does not surface provider_resource_uid", () => {
   const parsed = parseTelemetryPresentation(SUCCESS);
   assert.ok(parsed);

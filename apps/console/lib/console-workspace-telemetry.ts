@@ -375,6 +375,8 @@ function resolvePresentationResourceUid(
 /**
  * Fail closed on cross-resource samples and duplicate container@time rows.
  * Distinct containers at the same timestamp remain valid (pod partition sum).
+ * Duplicate identity uses epoch ms (not raw RFC3339 spelling) so Z / offset
+ * forms of the same instant cannot slip through parse and inflate pod totals.
  * Every retained sample must carry a non-empty UID matching one presentation-wide
  * identity (admitted/ownership when present, else the shared sample series UID).
  */
@@ -386,7 +388,7 @@ function assertSampleIdentities(
   for (const samples of sampleGroups) {
     const seenContainerAtTime = new Set<string>();
     for (const sample of samples) {
-      const identityKey = `${sample.sampleTime}\0${sample.containerName}`;
+      const identityKey = `${timestampInstantMs(sample.sampleTime)}\0${sample.containerName}`;
       if (seenContainerAtTime.has(identityKey)) {
         return false;
       }
