@@ -1738,8 +1738,12 @@ test("height restore keeps the viewport covered across a virtual-window boundary
 
   await page.goto("/");
   await waitForConsoleReady(page);
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   for (const loaded of [PAGE_SIZE * 2, PAGE_SIZE * 3]) {
-    await page.getByRole("button", { name: "Load more workspaces" }).click();
+    // This setup needs one button-driven page at a time. Playwright's locator
+    // click can scroll the footer into the near-bottom autoload threshold and
+    // race that request with the button handler.
+    await loadMore.evaluate((button: HTMLButtonElement) => button.click());
     await expect(page.getByTestId("workspace-history-scope")).toContainText(`${loaded} loaded`);
   }
 
