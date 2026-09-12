@@ -39,10 +39,11 @@ WorkspaceOverview,
 WorkspaceReliabilitySummary,
 } from "@/lib/types";
 import { getWorkspaceOperatorControls } from "@/lib/workspace-operator-controls";
+import { type FleetKpi, FleetHealthStrip } from "./console-dashboard-fleet-health";
 import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
 import { ConsoleDashboardInspector } from "./console-dashboard-inspector";
 import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
-import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar } from "./console-dashboard-overview";
+import { SectionNav, TopBar } from "./console-dashboard-overview";
 import { ConsoleDashboardWorkspaceRail } from "./console-dashboard-workspace-rail";
 import {
   DROP_ALL_GATED_DETAIL_FEEDS,

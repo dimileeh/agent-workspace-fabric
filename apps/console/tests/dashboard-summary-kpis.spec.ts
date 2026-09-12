@@ -21,10 +21,10 @@ function hostedCountEvidenceSummary(): ConsoleDashboardSummary {
       notes: ["terminal_timestamp_unavailable", "attention_evidence_unavailable"],
     },
     counts: {
-      active: 1,
+      active: null,
       executing: null,
       monitoring_pr: null,
-      awaiting_operator: 0,
+      awaiting_operator: null,
       awaiting_human: null,
       retrying: null,
       queued: null,
@@ -158,10 +158,9 @@ for (const viewport of [
     await page.goto("/");
     await waitForConsoleReady(page);
 
-    // Exact values retain their existing naked rendering and win over matching evidence.
-    await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1");
-    await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0");
-    // Null exact values use explicit, visible lower-bound qualification, including zero.
+    // Unknown statuses preclude exact counts; visible lower bounds remain qualified, including zero.
+    await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1 confirmed");
+    await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0 confirmed");
     await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1 confirmed");
     await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0 confirmed");
     await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0 confirmed");
@@ -175,7 +174,7 @@ for (const viewport of [
     await expect(coverage).toContainText("attention evidence unavailable");
     await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
 
-    for (const label of ["Running", "Monitoring PR", "Completed"]) {
+    for (const label of ["Active", "Running", "Monitoring PR", "Awaiting operator", "Completed"]) {
       const card = kpi(page, label);
       const valueBox = await card.locator(".kpi-value").boundingBox();
       const hintBox = await card.getByText(/exact metric count is incomplete/).boundingBox();
