@@ -1420,6 +1420,62 @@ test("resolveWorkflowTiming rejects completed lifecycle timing contradicted by t
   );
 });
 
+test("resolveWorkflowTiming infers destroyed timing without a retained completed transition", async () => {
+  const { resolveWorkflowTiming } = await import("./agent-format.ts");
+  const lifecycle = [
+    {
+      stage: "requested",
+      started_at: "2026-09-06T12:00:00Z",
+      ended_at: "2026-09-06T12:01:00Z",
+      duration_seconds: 60,
+      status: "completed",
+    },
+    {
+      stage: "running",
+      started_at: "2026-09-06T12:01:00Z",
+      ended_at: "2026-09-06T12:15:00Z",
+      duration_seconds: 840,
+      status: "completed",
+    },
+    {
+      stage: "completed",
+      started_at: "2026-09-06T12:15:00Z",
+      ended_at: "2026-09-06T12:20:00Z",
+      duration_seconds: 300,
+      status: "completed",
+    },
+  ];
+  const item = {
+    status: "destroyed",
+    recovery: null,
+    workflow_finished_at: null,
+    finished_at: null,
+    duration_seconds: null,
+    lifecycle,
+  };
+
+  assert.deepEqual(resolveWorkflowTiming(item), {
+    finishedAt: "2026-09-06T12:15:00Z",
+    durationSeconds: 900,
+  });
+
+  for (const terminalStatus of ["failed", "cancelled"]) {
+    assert.deepEqual(
+      resolveWorkflowTiming({
+        ...item,
+        latest_workflow_terminal_state_change: {
+          event_type: "workspace.state_changed",
+          old_state: "running",
+          new_state: terminalStatus,
+          occurred_at: "2026-09-06T12:15:00Z",
+        },
+      }),
+      { finishedAt: null, durationSeconds: null },
+      `a retained ${terminalStatus} transition must override a contradictory completed stage`,
+    );
+  }
+});
+
 test("resolveWorkflowTiming rejects tied latest lifecycle stages in either array order", async () => {
   const { resolveWorkflowTiming } = await import("./agent-format.ts");
   const requested = {

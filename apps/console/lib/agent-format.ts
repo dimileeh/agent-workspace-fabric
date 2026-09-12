@@ -556,11 +556,12 @@ function lifecycleWorkflowTiming(item: WorkspaceOverview): {
     }
     finishedAt = latestEntered.startedAt;
     finishedMs = latestEntered.startedMs;
-    // A completed status can corroborate legacy payloads that predate retained
-    // state-change fields. Every other current status must retain the transition
-    // into completed, including the supported completed -> cleanup failure path.
+    // A completed or destroyed status can corroborate legacy payloads that
+    // predate retained state-change fields. Other current statuses must retain
+    // the transition into completed, including the supported completed ->
+    // cleanup failure path. Any retained state transition must still agree.
     const requiresCompletedTransition =
-      item.status !== "completed" ||
+      (item.status !== "completed" && item.status !== "destroyed") ||
       terminalEvent?.event_type === "workspace.state_changed";
     if (
       requiresCompletedTransition &&
