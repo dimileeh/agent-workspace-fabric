@@ -50,6 +50,8 @@ export type ParsedTelemetrySample = {
   unit: "cores" | "bytes";
   value: number;
   quality: string;
+  /** Retained for identity checks; never projected into WorkspaceTelemetryView. */
+  providerResourceUid: string | null;
 };
 
 export type ParsedAdmittedResources = {
@@ -283,9 +285,63 @@ function parseSampleArray(
       unit: expectedUnit,
       value: parsedValue,
       quality: item.quality,
+      providerResourceUid:
+        typeof item.provider_resource_uid === "string" ? item.provider_resource_uid : null,
     });
   }
   return samples;
+}
+
+/**
+ * Resolve the presentation's resource identity when the producer supplies one.
+ * Prefer admitted, then ownership — both are schema-compatible ownership fields.
+ */
+function resolvePresentationResourceUid(payload: Record<string, unknown>): string | null {
+  if (isPlainObject(payload.admitted)) {
+    const admittedUid = payload.admitted.provider_resource_uid;
+    if (typeof admittedUid === "string" && admittedUid.length > 0) {
+      return admittedUid;
+    }
+  }
+  if (isPlainObject(payload.ownership)) {
+    const ownershipUid = payload.ownership.provider_resource_uid;
+    if (typeof ownershipUid === "string" && ownershipUid.length > 0) {
+      return ownershipUid;
+    }
+  }
+  return null;
+}
+
+/**
+ * Fail closed on cross-resource samples and duplicate container@time rows.
+ * Distinct containers at the same timestamp remain valid (pod partition sum).
+ */
+function assertSampleIdentities(
+  samples: ParsedTelemetrySample[],
+  expectedResourceUid: string | null,
+): boolean {
+  const seenContainerAtTime = new Set<string>();
+  let seriesUid: string | null = null;
+  for (const sample of samples) {
+    const identityKey = `${sample.sampleTime}\0${sample.containerName}`;
+    if (seenContainerAtTime.has(identityKey)) {
+      return false;
+    }
+    seenContainerAtTime.add(identityKey);
+
+    if (sample.providerResourceUid === null) {
+      continue;
+    }
+    if (expectedResourceUid !== null && sample.providerResourceUid !== expectedResourceUid) {
+      return false;
+    }
+    if (seriesUid === null) {
+      seriesUid = sample.providerResourceUid;
+    } else if (sample.providerResourceUid !== seriesUid) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -478,6 +534,13 @@ export function parseTelemetryPresentation(
   }
   const memorySamples = parseSampleArray(payload.memory_bytes_samples, "bytes");
   if (memorySamples === null) {
+    return null;
+  }
+  const expectedResourceUid = resolvePresentationResourceUid(payload);
+  if (
+    !assertSampleIdentities(cpuSamples, expectedResourceUid) ||
+    !assertSampleIdentities(memorySamples, expectedResourceUid)
+  ) {
     return null;
   }
   const estimate = parseEstimate(payload.estimate);

@@ -210,6 +210,42 @@ test("same-timestamp multi-container samples may sum within that timestamp only"
   assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
 });
 
+test("parseTelemetryPresentation rejects mismatched sample provider_resource_uid", () => {
+  const mismatched = structuredClone(SUCCESS);
+  mismatched.cpu_cores_samples[0].provider_resource_uid = "other-pod-uid";
+  assert.equal(parseTelemetryPresentation(mismatched), null);
+
+  const mixedSeries = structuredClone(SUCCESS);
+  mixedSeries.cpu_cores_samples = [
+    { ...SUCCESS.cpu_cores_samples[0], container_name: "agent", value: "0.10" },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      value: "0.15",
+      provider_resource_uid: "other-pod-uid",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(mixedSeries), null);
+});
+
+test("parseTelemetryPresentation rejects duplicate container samples at the same timestamp", () => {
+  const dup = structuredClone(SUCCESS);
+  dup.cpu_cores_samples = [
+    { ...SUCCESS.cpu_cores_samples[0], container_name: "agent", value: "0.10" },
+    { ...SUCCESS.cpu_cores_samples[0], container_name: "agent", value: "0.20" },
+  ];
+  assert.equal(parseTelemetryPresentation(dup), null);
+});
+
+test("projectWorkspaceTelemetryView does not surface provider_resource_uid", () => {
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  assert.equal(parsed.cpuSamples[0].providerResourceUid, "pod-uid-example");
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(JSON.stringify(view).includes("pod-uid-example"), false);
+  assert.equal(JSON.stringify(view).includes("providerResourceUid"), false);
+});
+
 test("stale fixture and clock-based freshness", () => {
   const staleParsed = parseTelemetryPresentation(STALE);
   assert.ok(staleParsed);
@@ -269,13 +305,21 @@ test("parseSampleArray keeps only the most recent MAX_TELEMETRY_SAMPLES", () => 
   const oversized = structuredClone(SUCCESS);
   const template = SUCCESS.cpu_cores_samples[0];
   const total = MAX_TELEMETRY_SAMPLES + 50;
-  oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => ({
-    ...template,
-    sample_time: `2026-09-12T${String(Math.floor(i / 60) % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00+00:00`,
-    interval_start: `2026-09-12T${String(Math.floor(i / 60) % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00+00:00`,
-    interval_end: `2026-09-12T${String(Math.floor(i / 60) % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00+00:00`,
-    value: String(i),
-  }));
+  oversized.cpu_cores_samples = Array.from({ length: total }, (_, i) => {
+    const day = String(1 + Math.floor(i / 86400)).padStart(2, "0");
+    const tod = i % 86400;
+    const hour = String(Math.floor(tod / 3600)).padStart(2, "0");
+    const minute = String(Math.floor((tod % 3600) / 60)).padStart(2, "0");
+    const second = String(tod % 60).padStart(2, "0");
+    const ts = `2026-09-${day}T${hour}:${minute}:${second}+00:00`;
+    return {
+      ...template,
+      sample_time: ts,
+      interval_start: ts,
+      interval_end: ts,
+      value: String(i),
+    };
+  });
   const parsed = parseTelemetryPresentation(oversized);
   assert.ok(parsed);
   assert.equal(parsed.cpuSamples.length, MAX_TELEMETRY_SAMPLES);
