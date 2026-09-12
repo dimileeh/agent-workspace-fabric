@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -349,6 +350,7 @@ async def test_pre_push_validation_fix_pass_timeout_head_probe_is_bounded_best_e
         message="tagged process still running",
     )
     cleanup_error.agent_reason_code = "AGENT_TIMEOUT"
+    probe_started = asyncio.Event()
 
     async def _run_agent_with_recovery(**_kwargs: object) -> None:
         raise cleanup_error
@@ -357,6 +359,7 @@ async def test_pre_push_validation_fix_pass_timeout_head_probe_is_bounded_best_e
         return fix_start_head
 
     async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        probe_started.set()
         if probe_failure == "raises":
             raise OSError("cannot spawn git")
         if probe_failure == "cancels":
@@ -386,27 +389,60 @@ async def test_pre_push_validation_fix_pass_timeout_head_probe_is_bounded_best_e
     expected_exception = (
         asyncio.CancelledError if probe_failure == "cancels" else ComposeExecCleanupError
     )
-    with pytest.raises(expected_exception) as raised:
-        await asyncio.wait_for(
-            pre_push_validation._run_pre_push_validation_fix_pass(
-                runner,
-                workspace_id=workspace_id,
-                compose_project="proj",
-                compose_file=tmp_path / "compose.yml",
-                remote_branch="codex/pr",
-                remote_url=None,
-                state=None,
-                validation_result=_failed_validation_result(
-                    pre_push_validation,
-                    tmp_path,
-                    workspace_head_sha=fix_start_head,
-                ),
-                pass_number=1,
-                total_passes=1,
-                validation_commands=("pytest -q",),
+    fix_pass_task = asyncio.create_task(
+        pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=_failed_validation_result(
+                pre_push_validation,
+                tmp_path,
+                workspace_head_sha=fix_start_head,
             ),
-            timeout=0.5,
+            pass_number=1,
+            total_passes=1,
+            validation_commands=("pytest -q",),
         )
+    )
+    probe_started_task: asyncio.Task[bool] | None = None
+    fix_pass_result_consumed = False
+    # Give unrelated setup and database scheduling their own generous guard.
+    # The tight bound below begins only when the preservation probe actually
+    # starts, which keeps this assertion meaningful under loaded CI shards.
+    try:
+        probe_started_task = asyncio.create_task(probe_started.wait())
+        started, _pending = await asyncio.wait(
+            {probe_started_task, fix_pass_task},
+            timeout=5.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if probe_started_task not in started:
+            if fix_pass_task in started:
+                await fix_pass_task
+                fix_pass_result_consumed = True
+            pytest.fail("preservation probe did not start within 5 seconds")
+
+        with pytest.raises(expected_exception) as raised:
+            await asyncio.wait_for(fix_pass_task, timeout=0.5)
+        fix_pass_result_consumed = True
+    finally:
+        for task in (fix_pass_task, probe_started_task):
+            if task is None:
+                continue
+            if not task.done():
+                task.cancel()
+        try:
+            if not fix_pass_result_consumed:
+                with suppress(asyncio.CancelledError):
+                    await fix_pass_task
+        finally:
+            if probe_started_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await probe_started_task
 
     if probe_failure != "cancels":
         assert raised.value is cleanup_error

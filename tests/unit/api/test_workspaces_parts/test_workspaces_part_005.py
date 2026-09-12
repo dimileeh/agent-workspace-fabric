@@ -1083,6 +1083,11 @@ class TestCreateWorkspacePolicyMetadata:
                 for event in workspace.events
                 if event.event_type in {"workspace.created", "workspace.state_changed"}
             ]
+            requested_end_order = next(
+                event.event_order
+                for event in state_events
+                if event.old_state == WorkspaceStatus.requested.value
+            )
             for event, occurred_at in zip(
                 sorted(state_events, key=lambda item: item.occurred_at),
                 [
@@ -1107,12 +1112,14 @@ class TestCreateWorkspacePolicyMetadata:
             assert stages["requested"]["ended_at"] == (
                 base + timedelta(seconds=10)
             ).isoformat().replace("+00:00", "Z")
+            assert stages["requested"]["ended_event_order"] == requested_end_order
             assert stages["requested"]["duration_seconds"] == 10
             assert stages["requested"]["status"] == "completed"
             assert stages["running"]["started_at"] == (
                 base + timedelta(seconds=40)
             ).isoformat().replace("+00:00", "Z")
             assert stages["running"]["ended_at"] is None
+            assert stages["running"]["ended_event_order"] is None
             assert stages["running"]["duration_seconds"] >= 0
             assert stages["running"]["status"] == "active"
 

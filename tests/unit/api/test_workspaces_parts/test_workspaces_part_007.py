@@ -711,10 +711,94 @@ class TestWorkspaceDirectRoutes:
         assert item.title == "overview direct"
         assert item.active_operation is None
         assert item.last_event is not None
+        assert item.latest_state_change is None
         assert response.next_cursor is None
         assert response.has_more is False
         assert response.limit == 50
         assert response.cursor is None
+
+    @pytest.mark.unit
+    async def test_overview_retains_workflow_terminal_transition_after_destroy(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="destroyed failure")
+        await _transition_workspace(
+            engine,
+            workspace_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.destroying,
+            WorkspaceStatus.destroyed,
+        )
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            response = await workspaces_route.list_workspace_overview(session=session)
+
+        item = next(item for item in response.items if item.workspace_id == workspace_id)
+        assert item.latest_state_change is not None
+        assert item.latest_state_change.old_state == WorkspaceStatus.destroying.value
+        assert item.latest_state_change.new_state == WorkspaceStatus.destroyed.value
+        assert item.latest_destroying_state_change is not None
+        assert item.latest_destroying_state_change.old_state == WorkspaceStatus.failed.value
+        assert item.latest_destroying_state_change.new_state == WorkspaceStatus.destroying.value
+        assert item.latest_workflow_terminal_state_change is not None
+        assert item.latest_workflow_terminal_state_change.old_state == WorkspaceStatus.running.value
+        assert item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.failed.value
+
+    @pytest.mark.unit
+    async def test_overview_reports_remonitor_reset_as_latest_state_change(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="remonitored failure")
+        await _transition_workspace(
+            engine,
+            workspace_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.failed,
+        )
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            workspace.status = WorkspaceStatus.monitoring_pr.value
+            await repo.add_event_with_states(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                old_state=WorkspaceStatus.failed,
+                new_state=WorkspaceStatus.monitoring_pr,
+                reason_code="OPERATOR_REMONITOR",
+                payload={"state_reset": {"from": "failed", "to": "monitoring_pr"}},
+            )
+            await repo.add_event(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                reason_code="OPERATOR_REMONITOR",
+                payload={"reason": "refresh the active monitor"},
+            )
+            await session.commit()
+
+        async with factory() as session:
+            response = await workspaces_route.list_workspace_overview(session=session)
+
+        item = next(item for item in response.items if item.workspace_id == workspace_id)
+        assert item.latest_state_change is not None
+        assert item.latest_state_change.event_type == "workspace.remonitor_requested"
+        assert item.latest_state_change.old_state == WorkspaceStatus.failed.value
+        assert item.latest_state_change.new_state == WorkspaceStatus.monitoring_pr.value
+        assert item.latest_state_change.event_order is not None
+        assert item.recovery is not None
+        assert item.recovery.started_event_order == item.latest_state_change.event_order
 
     @pytest.mark.unit
     @pytest.mark.parametrize("task_tag", [None, "AIRA-T109"])
@@ -744,7 +828,54 @@ class TestWorkspaceDirectRoutes:
             new_state=WorkspaceStatus.requested.value,
             reason_code="CREATED",
             payload=None,
+            event_order=1,
             occurred_at=base,
+        )
+        # The same-tick terminal IDs deliberately sort opposite to append order
+        # so both reverse scans must use persisted event_order.
+        older_state_changed_event = SimpleNamespace(
+            id="evt_state_changed_ready",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.requested.value,
+            new_state=WorkspaceStatus.ready.value,
+            reason_code="READY",
+            payload=None,
+            event_order=2,
+            occurred_at=base + timedelta(seconds=3),
+        )
+        state_changed_event = SimpleNamespace(
+            id="evt_state_changed_running",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.ready.value,
+            new_state=WorkspaceStatus.running.value,
+            reason_code="STARTED",
+            payload=None,
+            event_order=3,
+            occurred_at=base + timedelta(seconds=3),
+        )
+        older_terminal_event = SimpleNamespace(
+            id="evt_terminal_z",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.running.value,
+            new_state=WorkspaceStatus.failed.value,
+            reason_code="FAILED",
+            payload=None,
+            event_order=4,
+            occurred_at=base + timedelta(seconds=4),
+        )
+        latest_terminal_event = SimpleNamespace(
+            id="evt_terminal_a",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state=WorkspaceStatus.failed.value,
+            new_state=WorkspaceStatus.cancelled.value,
+            reason_code="CANCELLED",
+            payload=None,
+            event_order=5,
+            occurred_at=base + timedelta(seconds=4),
         )
         latest_event = SimpleNamespace(
             id="evt_latest",
@@ -754,9 +885,19 @@ class TestWorkspaceDirectRoutes:
             new_state=None,
             reason_code="TEST",
             payload={"source": "unit"},
+            event_order=6,
             occurred_at=base + timedelta(seconds=5),
         )
-        events = SinglePassEvents([latest_event, created_event])
+        events = SinglePassEvents(
+            [
+                latest_event,
+                latest_terminal_event,
+                state_changed_event,
+                created_event,
+                older_terminal_event,
+                older_state_changed_event,
+            ]
+        )
         workspace = SimpleNamespace(
             id=workspace_id,
             task_external_id=None,
@@ -771,7 +912,7 @@ class TestWorkspaceDirectRoutes:
             task_policy={},
             events=events,
             operations=[],
-            status=WorkspaceStatus.requested.value,
+            status=WorkspaceStatus.cancelled.value,
             pr_url="https://github.com/example/app/pull/7",
             pr_number=7,
             failure_reason=None,
@@ -801,6 +942,16 @@ class TestWorkspaceDirectRoutes:
         item = response.items[0]
         assert item.last_event is not None
         assert item.last_event.event_type == "workspace.test_marker"
+        assert item.last_event.event_order == 6
+        assert item.latest_state_change is not None
+        assert item.latest_state_change.event_type == "workspace.state_changed"
+        assert item.latest_state_change.new_state == WorkspaceStatus.cancelled.value
+        assert item.latest_state_change.event_order == 5
+        assert item.latest_workflow_terminal_state_change is not None
+        assert (
+            item.latest_workflow_terminal_state_change.new_state == WorkspaceStatus.cancelled.value
+        )
+        assert item.latest_workflow_terminal_state_change.event_order == 5
         assert events.iterations == 1
         assert item.pr_number == 7
         assert item.pr_url == "https://github.com/example/app/pull/7"

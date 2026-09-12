@@ -42,7 +42,7 @@ import { getWorkspaceOperatorControls } from "@/lib/workspace-operator-controls"
 import { ConsoleDashboardFleetPanels } from "./console-dashboard-fleet-panels";
 import { ConsoleDashboardInspector } from "./console-dashboard-inspector";
 import { ConsoleDashboardOverlays } from "./console-dashboard-overlays";
-import { type FleetKpi,FleetHealthStrip,SectionNav,TopBar } from "./console-dashboard-overview";
+import { type FleetKpi, FleetHealthStrip, SectionNav, TopBar } from "./console-dashboard-overview";
 import { ConsoleDashboardWorkspaceRail } from "./console-dashboard-workspace-rail";
 import {
   DROP_ALL_GATED_DETAIL_FEEDS,
@@ -1181,6 +1181,9 @@ export function ConsoleDashboard() {
           }
           coverageNotes={
             fleetSummaryAvailable ? (dashboardSummary?.coverage.notes ?? null) : null
+          }
+          countEvidence={
+            fleetSummaryAvailable ? (dashboardSummary?.count_evidence ?? null) : null
           }
         />
       ) : null}

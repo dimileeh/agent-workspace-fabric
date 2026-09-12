@@ -117,18 +117,42 @@ test("workspace summary does not embed effort in the Agent fact", () => {
   assert.doesNotMatch(summarySource, /formatAgentLabel\(/);
 });
 
-test("task details modal shows duration when duration_seconds is recorded", () => {
+test("task details modal uses resolved workflow timing", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
 
   assert.match(
     modalSource,
-    /recordedDurationLabel\(workspace\.duration_seconds\)/,
-    "Expected TaskDetailsModal to read duration_seconds from the hosted overview",
+    /resolveWorkflowTiming\(workspace\)/,
+    "Expected TaskDetailsModal to share the card workflow timing resolver",
+  );
+  assert.match(
+    modalSource,
+    /recordedDurationLabel\(workflowTiming\.durationSeconds\)/,
+    "Expected TaskDetailsModal to format resolved explicit or lifecycle duration",
   );
   assert.match(
     modalSource,
     /recordedDuration != null \? \(\s*<Fact label="Duration" value=\{recordedDuration\} \/>\s*\) : null/,
     "Expected TaskDetailsModal to render a Duration fact when duration_seconds is recorded",
+  );
+});
+
+test("workspace summary uses resolved workflow timing", () => {
+  // Regression for PR #964 review thread PRRT_kwDOSJAM6s6hlFuW: local terminal
+  // cards infer timing from one complete lifecycle interval, and the inspector
+  // must use the same resolver rather than dropping back to explicit fields.
+  const summarySource = extractFunctionSource("WorkspaceSummary");
+
+  assert.match(
+    summarySource,
+    /resolveWorkflowTiming\(overview\)/,
+    "Expected WorkspaceSummary to share the card workflow timing resolver",
+  );
+  assert.match(summarySource, /workflowFinishedAt = workflowTiming\.finishedAt/);
+  assert.match(
+    summarySource,
+    /workflowTiming\.durationSeconds != null \? \([\s\S]*?compactDuration\(workflowTiming\.durationSeconds\)/,
+    "Expected WorkspaceSummary to render resolved explicit or lifecycle duration",
   );
 });
 

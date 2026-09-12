@@ -12,6 +12,14 @@ async function clickWorkspaceTitle(page: Page, workspaceId: string) {
   await page.mouse.click(titleBox.x + titleBox.width / 2, titleBox.y + titleBox.height / 2);
 }
 
+async function expectInsideViewport(locator: ReturnType<Page["locator"]>, width: number) {
+  await expect(locator).toBeVisible();
+  const box = await locator.boundingBox();
+  expect(box, `expected a box at ${width}px`).not.toBeNull();
+  expect(box!.x, `left edge at ${width}px`).toBeGreaterThanOrEqual(-1);
+  expect(box!.x + box!.width, `right edge at ${width}px`).toBeLessThanOrEqual(width + 1);
+}
+
 // Since we don't have a real API running in the CI for this test, we need to mock it.
 test.describe("Dashboard Workspace Inspector", () => {
   test.beforeEach(async ({ page }) => {
@@ -320,6 +328,140 @@ test.describe("Dashboard Workspace Inspector", () => {
     const overlay = page.locator(".fixed.inset-0.z-40").first();
     await expect(overlay).toBeVisible();
     await expect(inspectorDrawer).toHaveClass(/w-full/);
+  });
+
+  test("long workspace summary stays inside the inspector at supported widths", async ({ page }) => {
+    const workspaceId = "ws_layout_overflow";
+    const longToken = "pathological-unbroken-workspace-value-".repeat(18);
+    const layoutWorkspace = {
+      workspace_id: workspaceId,
+      task_id: `task_${workspaceId}`,
+      task_key: `AWF-${longToken}`,
+      title: `Inspector layout ${longToken}`,
+      task_prompt: "Verify the workspace inspector layout.",
+      repo_url: `https://github.com/example/${longToken}.git`,
+      base_branch: `base/${longToken}`,
+      branch_name: `awf/${longToken}`,
+      agent: "codex",
+      agent_model: `gpt-${longToken}`,
+      agent_effort: "high",
+      agent_model_source: "task_policy",
+      agent_effort_source: "default",
+      requested_model: `requested-${longToken}`,
+      requested_model_source: "task_policy",
+      confirmed_execution_model: `confirmed-${longToken}`,
+      confirmed_execution_model_source: "execution_evidence",
+      status: "running",
+      subphase: null,
+      current_phase: "running",
+      active_operation: null,
+      created_at: "2026-09-11T12:00:00Z",
+      updated_at: "2026-09-11T12:05:00Z",
+      last_activity_at: "2026-09-11T12:05:00Z",
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+      coordination_warnings: [],
+      is_stale_running: false,
+      pr_url: "https://github.com/example/repo/pull/963",
+      pr_number: 963,
+    };
+
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await fulfillJson(route, { items: [layoutWorkspace], next_cursor: null, has_more: false });
+    });
+    await page.route(/\/api\/awf\/workspaces\/ws_layout_overflow(?:\/.*)?(?:\?.*)?$/, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === `/api/awf/workspaces/${workspaceId}`) {
+        await fulfillJson(route, { ...layoutWorkspace, id: workspaceId, version: 1 });
+      } else if (path.endsWith("/runtime")) {
+        await fulfillJson(route, { status: "running" });
+      } else if (path.endsWith("/stream")) {
+        await route.fulfill({
+          status: 200,
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+          body: `data: ${JSON.stringify({ type: "connected", workspace_id: workspaceId })}\n\n`,
+        });
+      } else {
+        await fulfillJson(route, { items: [], next_cursor: null, has_more: false });
+      }
+    });
+
+    await page.goto(`/?workspaceId=${workspaceId}`);
+    const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+    await expect(inspector).toHaveClass(/translate-x-0/);
+    await inspector.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
+    });
+    const summary = inspector
+      .locator("section")
+      .filter({ has: page.getByRole("heading", { name: "Workspace", exact: true }) })
+      .first();
+    await expect(summary).toBeVisible();
+
+    const viewports = [
+      { width: 320, columns: 1 },
+      { width: 375, columns: 1 },
+      { width: 390, columns: 1 },
+      { width: 430, columns: 1 },
+      { width: 768, columns: 2 },
+      { width: 1280, columns: 4 },
+      { width: 1720, columns: 4 },
+    ];
+    for (const viewport of viewports) {
+      await page.setViewportSize({ width: viewport.width, height: 1000 });
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+      const overflowingDescendants = await summary.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return Array.from(element.querySelectorAll<HTMLElement>("*"))
+          .filter((descendant) => {
+            const style = getComputedStyle(descendant);
+            const box = descendant.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              box.width > 1 &&
+              box.height > 1 &&
+              (box.left < bounds.left - 1 || box.right > bounds.right + 1)
+            );
+          })
+          .map((descendant) => ({
+            tag: descendant.tagName,
+            className: descendant.className,
+            left: descendant.getBoundingClientRect().left,
+            right: descendant.getBoundingClientRect().right,
+            summaryLeft: bounds.left,
+            summaryRight: bounds.right,
+          }));
+      });
+      expect(overflowingDescendants, `summary descendants at ${viewport.width}px`).toEqual([]);
+
+      const status = summary.getByText("running", { exact: true }).first();
+      const pullRequest = summary.getByRole("link", { name: "PR #963", exact: true });
+      const reload = inspector.getByRole("button", { name: "Reload workspace", exact: true });
+      const close = inspector.getByRole("button", { name: "Close inspector", exact: true });
+      for (const reachable of [status, pullRequest, reload, close]) {
+        await expectInsideViewport(reachable, viewport.width);
+      }
+
+      const factColumns = await Promise.all(
+        ["Workspace", "Task key", "Agent", "Requested model"].map(async (label) => {
+          const fact = summary.locator(".label-caps", { hasText: label }).first().locator("..");
+          const box = await fact.boundingBox();
+          expect(box, `${label} fact at ${viewport.width}px`).not.toBeNull();
+          return Math.round(box!.x);
+        }),
+      );
+      expect(new Set(factColumns).size, `fact columns at ${viewport.width}px`).toBe(
+        viewport.columns,
+      );
+    }
+
+    await inspector.getByRole("button", { name: "Reload workspace", exact: true }).click();
+    await expect(summary.getByText("running", { exact: true }).first()).toBeVisible();
+    await inspector.getByRole("button", { name: "Close inspector", exact: true }).click();
+    await expect(inspector).toHaveClass(/translate-x-full/);
   });
 });
 

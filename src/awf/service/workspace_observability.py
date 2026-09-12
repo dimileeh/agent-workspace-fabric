@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
-import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, TypedDict, cast
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +31,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus, parse_a
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.profiles.pricing import PRICING_MAX_AGE_DAYS, PricingMetadata
+from awf.service import workspace_overview_pagination as _overview_pagination
 from awf.service.bounded_list import (
     bounded_list_limit,
     decode_bounded_list_cursor,
@@ -42,25 +39,43 @@ from awf.service.bounded_list import (
 )
 from awf.service.coordination import coordination_warnings_from_task_policy
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
-from awf.service.provider_recovery import (
-    ProviderRecoveryStateView,
-    provider_recovery_state_for_workspace,
-)
+from awf.service.provider_recovery import provider_recovery_state_for_workspace
 from awf.service.usage_store import (
     USAGE_SOURCE,
     UsageSnapshot,
     read_latest_usage_snapshot,
     read_latest_usage_snapshots,
 )
+from awf.service.workspace_observability_types import (
+    AgentIdentity,
+    AgentIdentityPayload,
+    AgentIdentitySource,
+    LifecycleStagePayload,
+    LifecycleStageSummary,
+    LlmUsagePayload,
+    LlmUsageSummary,
+    WorkspaceIdentityUsagePayload,
+    WorkspaceObservabilityPayload,
+    WorkspaceRecoveryCurrentOperation,
+    WorkspaceRecoveryPayload,
+    WorkspaceRecoverySummary,
+    _LifecycleAccumulator,
+    _RecoveryOperationLike,
+)
+from awf.service.workspace_observability_types import (
+    LifecycleStageStatus as LifecycleStageStatus,
+)
+from awf.service.workspace_observability_types import LlmUsageStatus as LlmUsageStatus
 
-AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
-LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
-LlmUsageStatus = Literal["available", "unavailable"]
+InvalidWorkspaceOverviewCursorError = _overview_pagination.InvalidWorkspaceOverviewCursorError
+_WorkspaceOverviewCursor = _overview_pagination._WorkspaceOverviewCursor
+_decode_overview_cursor = _overview_pagination._decode_overview_cursor
+_encode_overview_cursor = _overview_pagination._encode_overview_cursor
+
 _log = get_logger(__name__)
 
 DEFAULT_STALE_REASON_LIMIT = 50
 MAX_STALE_REASON_LIMIT = 500
-
 STALE_RUNNING_THRESHOLD_SECONDS = 600
 
 
@@ -96,6 +111,13 @@ _TERMINAL_SKIP_STATUSES = frozenset(
         WorkspaceStatus.cancelled,
     }
 )
+_WORKFLOW_TERMINAL_STATUSES = frozenset(
+    {
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+    }
+)
 _RECOVERY_EVENT_TYPES = frozenset(
     {
         "monitor.recovery_dispatched",
@@ -118,150 +140,6 @@ _GENERIC_RECOVERY_REASON_CODES = frozenset(
         "OPERATOR_VALIDATE_REQUESTED",
     }
 )
-_MAX_RECOVERY_PAYLOAD_KEYS = 32
-_MAX_RECOVERY_PAYLOAD_DEPTH = 4
-_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS = 20
-
-
-@dataclass(frozen=True)
-class _WorkspaceOverviewCursor:
-    created_at: datetime
-    workspace_id: str
-
-
-class InvalidWorkspaceOverviewCursorError(ValueError):
-    """Raised when a workspace overview pagination cursor cannot be decoded."""
-
-
-@dataclass(frozen=True)
-class AgentIdentity:
-    model: str | None
-    effort: str | None
-    model_source: AgentIdentitySource
-    effort_source: AgentIdentitySource
-
-
-@dataclass(frozen=True)
-class LifecycleStageSummary:
-    stage: str
-    started_at: datetime | None
-    ended_at: datetime | None
-    duration_seconds: int | None
-    status: LifecycleStageStatus
-
-
-@dataclass(frozen=True)
-class LlmUsageSummary:
-    input_tokens: int | None
-    output_tokens: int | None
-    total_tokens: int | None
-    cost_estimate: float | None
-    currency: str | None
-    status: LlmUsageStatus
-    source: str
-    reason: str | None
-    cached_input_tokens: int | None = None
-    reasoning_output_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class WorkspaceRecoveryCurrentOperation:
-    id: str
-    type: str
-    status: str
-    created_at: datetime
-    started_at: datetime | None
-    payload: dict[str, Any] | None
-
-
-@dataclass(frozen=True)
-class WorkspaceRecoverySummary:
-    from_state: str | None
-    to_state: str | None
-    reason_code: str | None
-    action: str | None
-    recovery_mode: str | None
-    started_at: datetime
-    current_operation: WorkspaceRecoveryCurrentOperation | None
-    summary: str
-    payload: dict[str, Any] | None
-    provider_recovery: ProviderRecoveryStateView | None = None
-
-
-class AgentIdentityPayload(TypedDict):
-    agent_model: str | None
-    agent_effort: str | None
-    cursor_auto_mode: str | None
-    agent_model_source: AgentIdentitySource
-    agent_effort_source: AgentIdentitySource
-
-
-class LifecycleStagePayload(TypedDict):
-    stage: str
-    started_at: datetime | None
-    ended_at: datetime | None
-    duration_seconds: int | None
-    status: LifecycleStageStatus
-
-
-class LlmUsagePayload(TypedDict):
-    input_tokens: int | None
-    cached_input_tokens: int | None
-    output_tokens: int | None
-    reasoning_output_tokens: int | None
-    total_tokens: int | None
-    cost_estimate: float | None
-    currency: str | None
-    status: LlmUsageStatus
-    source: str
-    reason: str | None
-
-
-class WorkspaceRecoveryCurrentOperationPayload(TypedDict):
-    id: str
-    type: str
-    status: str
-    created_at: datetime
-    started_at: datetime | None
-    payload: dict[str, Any] | None
-
-
-class WorkspaceRecoveryPayload(TypedDict):
-    from_state: str | None
-    to_state: str | None
-    reason_code: str | None
-    action: str | None
-    recovery_mode: str | None
-    started_at: datetime
-    current_operation: WorkspaceRecoveryCurrentOperationPayload | None
-    summary: str
-    payload: dict[str, Any] | None
-    provider_recovery: dict[str, Any] | None
-
-
-class WorkspaceObservabilityPayload(AgentIdentityPayload):
-    lifecycle: list[LifecycleStagePayload]
-    llm_usage: LlmUsagePayload
-    recovery: WorkspaceRecoveryPayload | None
-
-
-class WorkspaceIdentityUsagePayload(AgentIdentityPayload):
-    llm_usage: LlmUsagePayload
-
-
-class _RecoveryOperationLike(Protocol):
-    id: object
-    type: object
-    status: object
-    payload: object
-    created_at: datetime
-    started_at: datetime | None
-
-
-@dataclass
-class _LifecycleAccumulator:
-    started_at: datetime | None = None
-    ended_at: datetime | None = None
 
 
 async def list_workspace_overview_response(
@@ -380,13 +258,44 @@ def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
     }
 
 
+def _event_response(event: WorkspaceEvent | None) -> WorkspaceEventResponse | None:
+    return WorkspaceEventResponse.model_validate(event) if event is not None else None
+
+
 def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
     ordered_events = workspace_events_by_occurrence(ws)
-    observability = workspace_observability_payload(
-        ws,
-        ordered_events=ordered_events,
+    observability = workspace_observability_payload(ws, ordered_events=ordered_events)
+    latest_state_change = next(
+        (
+            event
+            for event in reversed(ordered_events)
+            if event.event_type == "workspace.state_changed"
+            or (
+                event.event_type == "workspace.remonitor_requested"
+                and event.old_state != event.new_state
+            )
+        ),
+        None,
     )
-    latest_event = ordered_events[-1] if ordered_events else None
+    latest_destroying_state_change = next(
+        (
+            event
+            for event in reversed(ordered_events)
+            if event.event_type == "workspace.state_changed"
+            and _coerce_workspace_status(event.new_state) == WorkspaceStatus.destroying
+        ),
+        None,
+    )
+    latest_workflow_terminal_state_change = next(
+        (
+            event
+            for event in reversed(ordered_events)
+            if event.event_type == "workspace.state_changed"
+            and _coerce_workspace_status(event.new_state) in _WORKFLOW_TERMINAL_STATUSES
+            and _coerce_workspace_status(event.old_state) != WorkspaceStatus.destroying
+        ),
+        None,
+    )
     active_operation = next(
         (
             op
@@ -395,14 +304,11 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         ),
         None,
     )
-    last_activity_at = getattr(ws, "last_activity_at", None)
-    is_stale_running = is_workspace_stale_running(ws)
-
     return WorkspaceOverviewResponse(
         subphase=getattr(ws, "subphase", None),
-        last_activity_at=last_activity_at,
+        last_activity_at=getattr(ws, "last_activity_at", None),
         last_log_at=getattr(ws, "last_log_at", None),
-        is_stale_running=is_stale_running,
+        is_stale_running=is_workspace_stale_running(ws),
         workspace_id=ws.id,
         task_id=ws.task_external_id or ws.id,
         task_key=ws.task_tag,
@@ -432,18 +338,17 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         status=WorkspaceStatus(ws.status),
         current_phase=ws.status,
         active_operation=active_operation.type if active_operation is not None else None,
-        last_event=(
-            WorkspaceEventResponse.model_validate(latest_event)
-            if latest_event is not None
-            else None
+        last_event=_event_response(ordered_events[-1] if ordered_events else None),
+        latest_state_change=_event_response(latest_state_change),
+        latest_destroying_state_change=_event_response(latest_destroying_state_change),
+        latest_workflow_terminal_state_change=_event_response(
+            latest_workflow_terminal_state_change
         ),
         pr_url=ws.pr_url,
         pr_number=ws.pr_number,
         failure_reason=ws.failure_reason,
         failure_message=ws.failure_message,
-        # Only surface the authoritative pause start while actually blocked: the
-        # ``blocked_at`` column is not cleared on resume, so gating on live status
-        # keeps a resumed workspace from reporting a stale block time.
+        # ``blocked_at`` is not cleared on resume; surface it only while blocked.
         blocked_at=(
             getattr(ws, "blocked_at", None)
             if str(ws.status) == WorkspaceStatus.blocked.value
@@ -478,40 +383,6 @@ def _provider_readiness_preflight_from_task_policy(
         return None
     value = task_policy.get("provider_readiness_preflight")
     return dict(value) if isinstance(value, Mapping) else None
-
-
-def _encode_overview_cursor(workspace: Workspace) -> str:
-    payload = {
-        "t": workspace.created_at.isoformat(),
-        "id": workspace.id,
-    }
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    return encoded.decode("ascii").rstrip("=")
-
-
-def _decode_overview_cursor(cursor: str | None) -> _WorkspaceOverviewCursor | None:
-    if cursor is None:
-        return None
-    try:
-        padded_cursor = cursor + ("=" * (-len(cursor) % 4))
-        decoded = base64.urlsafe_b64decode(padded_cursor.encode("ascii"))
-        payload = json.loads(decoded.decode("utf-8"))
-        created_at = datetime.fromisoformat(
-            payload["t"] if "t" in payload else payload["created_at"]
-        )
-        workspace_id = payload["id"] if "id" in payload else payload["workspace_id"]
-    except (
-        binascii.Error,
-        KeyError,
-        TypeError,
-        UnicodeDecodeError,
-        ValueError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise InvalidWorkspaceOverviewCursorError("Invalid workspace overview cursor") from exc
-    if not isinstance(workspace_id, str) or workspace_id == "":
-        raise InvalidWorkspaceOverviewCursorError("Invalid workspace overview cursor")
-    return _WorkspaceOverviewCursor(created_at=created_at, workspace_id=workspace_id)
 
 
 def effective_agent_identity(
@@ -609,6 +480,10 @@ def workspace_lifecycle_summary(
                 old_accumulator.started_at = occurred_at
             if old_accumulator.ended_at is None:
                 old_accumulator.ended_at = occurred_at
+                raw_event_order = getattr(event, "event_order", None)
+                old_accumulator.ended_event_order = (
+                    raw_event_order if isinstance(raw_event_order, int) else None
+                )
         if new_status is not None and new_status in accumulators:
             new_accumulator = accumulators[new_status]
             if new_accumulator.started_at is None:
@@ -948,6 +823,7 @@ def lifecycle_payload(
             "stage": item.stage,
             "started_at": item.started_at,
             "ended_at": item.ended_at,
+            "ended_event_order": item.ended_event_order,
             "duration_seconds": item.duration_seconds,
             "status": item.status,
         }
@@ -997,11 +873,15 @@ def workspace_recovery_summary(
         return None
 
     recovery_event = _latest_recovery_event_after(events, reverse_event)
-    active_operation = _latest_recovery_operation(workspace, active_only=True)
-    relevant_operation = active_operation or _latest_recovery_operation(
-        workspace,
-        active_only=False,
-    )
+    if getattr(reverse_event, "event_type", None) == "workspace.remonitor_requested":
+        active_operation = None
+        relevant_operation = None
+    else:
+        active_operation = _latest_recovery_operation(workspace, active_only=True)
+        relevant_operation = active_operation or _latest_recovery_operation(
+            workspace,
+            active_only=False,
+        )
     operation_payload = _payload_mapping(getattr(relevant_operation, "payload", None))
     event_payload = _payload_mapping(
         getattr(recovery_event, "payload", None) if recovery_event is not None else None
@@ -1020,6 +900,10 @@ def workspace_recovery_summary(
     )
     payload = _bounded_payload(operation_payload or event_payload or reverse_payload)
     provider_recovery_view = provider_recovery_state_for_workspace(workspace)
+    raw_started_event_order = getattr(reverse_event, "event_order", None)
+    started_event_order = (
+        raw_started_event_order if isinstance(raw_started_event_order, int) else None
+    )
 
     return WorkspaceRecoverySummary(
         from_state=getattr(reverse_event, "old_state", None),
@@ -1028,6 +912,7 @@ def workspace_recovery_summary(
         action=action,
         recovery_mode=recovery_mode,
         started_at=_ensure_utc(reverse_event.occurred_at),
+        started_event_order=started_event_order,
         current_operation=current_operation,
         summary=_recovery_summary_text(
             workspace=workspace,
@@ -1058,6 +943,7 @@ def recovery_payload(
         "action": summary.action,
         "recovery_mode": summary.recovery_mode,
         "started_at": summary.started_at,
+        "started_event_order": summary.started_event_order,
         "current_operation": (
             {
                 "id": current_operation.id,
@@ -1145,7 +1031,19 @@ def _latest_reverse_state_event(
     events: Sequence[WorkspaceEvent],
 ) -> WorkspaceEvent | None:
     for event in reversed(events):
-        if getattr(event, "event_type", None) != "workspace.state_changed":
+        event_type = getattr(event, "event_type", None)
+        # Remonitor persists its failed -> monitoring reset on the request event
+        # instead of emitting a separate workspace.state_changed event.
+        if event_type == "workspace.remonitor_requested":
+            if (
+                _coerce_workspace_status(getattr(event, "old_state", None))
+                == WorkspaceStatus.failed
+                and _coerce_workspace_status(getattr(event, "new_state", None))
+                == WorkspaceStatus.monitoring_pr
+            ):
+                return event
+            continue
+        if event_type != "workspace.state_changed":
             continue
         if _is_reverse_lifecycle_transition(
             getattr(event, "old_state", None),
@@ -1170,6 +1068,8 @@ def _latest_recovery_event_after(
     events: Sequence[WorkspaceEvent],
     reverse_event: WorkspaceEvent,
 ) -> WorkspaceEvent | None:
+    if getattr(reverse_event, "event_type", None) == "workspace.remonitor_requested":
+        return reverse_event
     reverse_at = _ensure_utc(reverse_event.occurred_at)
     candidates = [
         event
@@ -1306,13 +1206,7 @@ def _payload_string(payload: Mapping[str, object] | None, key: str) -> str | Non
 def _bounded_payload(payload: Mapping[str, object] | None) -> dict[str, Any] | None:
     if payload is None:
         return None
-    bounded: dict[str, Any] = {}
-    for index, (key, value) in enumerate(payload.items()):
-        if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
-            bounded["__truncated__"] = True
-            break
-        bounded[str(key)] = _json_safe_value(value)
-    return bounded
+    return cast(dict[str, Any], _json_safe_value(payload, depth=-1))
 
 
 def _json_safe_value(value: object, *, depth: int = 0) -> Any:
@@ -1320,24 +1214,19 @@ def _json_safe_value(value: object, *, depth: int = 0) -> Any:
         return value
     if isinstance(value, datetime):
         return _ensure_utc(value).isoformat()
-    if depth >= _MAX_RECOVERY_PAYLOAD_DEPTH:
+    if depth >= 4:
         return str(value)
     if isinstance(value, Mapping):
         safe: dict[str, Any] = {}
         for index, (key, nested_value) in enumerate(value.items()):
-            if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
+            if index >= 32:
                 safe["__truncated__"] = True
                 break
             safe[str(key)] = _json_safe_value(nested_value, depth=depth + 1)
         return safe
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        items = [
-            _json_safe_value(item, depth=depth + 1)
-            for item in list(value)[:_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS]
-        ]
-        if len(value) > _MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS:
-            items.append("__truncated__")
-        return items
+        items = [_json_safe_value(item, depth=depth + 1) for item in list(value)[:20]]
+        return items + ["__truncated__"] if len(value) > 20 else items
     return str(value)
 
 
@@ -1409,9 +1298,18 @@ def _created_at(workspace: Workspace) -> datetime:
     return _ensure_utc(workspace.created_at)
 
 
-def _event_sort_key(event: WorkspaceEvent) -> tuple[datetime, str]:
+def _event_sort_key(event: WorkspaceEvent) -> tuple[datetime, int, int, str]:
     event_id = getattr(event, "id", "")
-    return _ensure_utc(event.occurred_at), event_id if isinstance(event_id, str) else ""
+    raw_event_order = getattr(event, "event_order", None)
+    event_order = raw_event_order if isinstance(raw_event_order, int) else None
+    # Null-first ascending order makes reverse scans match the authoritative
+    # SQL ordering: event_order DESC NULLS LAST, then ID as a final fallback.
+    return (
+        _ensure_utc(event.occurred_at),
+        int(event_order is not None),
+        event_order if event_order is not None else 0,
+        event_id if isinstance(event_id, str) else "",
+    )
 
 
 def _latest_started_stage(
@@ -1442,6 +1340,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=None,
             ended_at=None,
+            ended_event_order=None,
             duration_seconds=None,
             status="terminal_skipped",
         )
@@ -1450,6 +1349,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=None,
             ended_at=None,
+            ended_event_order=None,
             duration_seconds=None,
             status="pending",
         )
@@ -1458,6 +1358,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=accumulator.started_at,
             ended_at=accumulator.ended_at,
+            ended_event_order=accumulator.ended_event_order,
             duration_seconds=_duration_seconds(accumulator.started_at, accumulator.ended_at),
             status="completed",
         )
@@ -1466,6 +1367,7 @@ def _stage_summary(
             stage=stage.value,
             started_at=accumulator.started_at,
             ended_at=None,
+            ended_event_order=None,
             duration_seconds=_duration_seconds(accumulator.started_at, now),
             status="active",
         )
@@ -1473,6 +1375,7 @@ def _stage_summary(
         stage=stage.value,
         started_at=accumulator.started_at,
         ended_at=None,
+        ended_event_order=None,
         duration_seconds=None,
         status="completed",
     )
@@ -1483,6 +1386,4 @@ def _duration_seconds(started_at: datetime, ended_at: datetime) -> int:
 
 
 def _ensure_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

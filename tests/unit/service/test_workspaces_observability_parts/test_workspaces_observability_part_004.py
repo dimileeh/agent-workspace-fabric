@@ -38,6 +38,7 @@ def _recovery_event(
     reason_code: str | None = "RECOVERY_DISPATCH",
     payload: dict[str, object] | None = None,
     event_id: str = "evt_recovery",
+    event_order: int | None = None,
 ) -> object:
     return SimpleNamespace(
         id=event_id,
@@ -47,6 +48,7 @@ def _recovery_event(
         new_state=new_state,
         reason_code=reason_code,
         payload=payload,
+        event_order=event_order,
         occurred_at=occurred_at,
     )
 
@@ -516,6 +518,80 @@ def test_recovery_summary_is_none_without_reverse_transition() -> None:
     )
 
     assert workspace_recovery_summary(workspace) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_recovery_summary_uses_failed_remonitor_reset_as_latest_boundary() -> None:
+    base = datetime(2026, 4, 27, 20, 15, tzinfo=UTC)
+    failed_at = base + timedelta(seconds=30)
+    remonitor_at = base + timedelta(seconds=60)
+    remonitor_payload: dict[str, object] = {
+        "reason": "resume the PR monitor",
+        "state_reset": {
+            "from": WorkspaceStatus.failed.value,
+            "to": WorkspaceStatus.monitoring_pr.value,
+        },
+    }
+    stale_operation_payload: dict[str, object] = {
+        "source": "pr_monitor",
+        "reason": "stale recovery from the previous monitor episode",
+        "requested_action": "rebase",
+        "recovery_mode": "rebase_only",
+    }
+    workspace = _workspace_for_recovery(
+        status=WorkspaceStatus.destroyed,
+        created_at=base,
+        operations=[
+            _recovery_operation(
+                operation_id="op_old_recovery",
+                operation_type=OperationType.rebase.value,
+                status=OperationStatus.succeeded.value,
+                created_at=failed_at - timedelta(seconds=5),
+                payload=stale_operation_payload,
+            )
+        ],
+        events=[
+            _recovery_event(
+                event_id="evt_earlier_recovery",
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="STALE_TARGET_ADVANCED",
+            ),
+            _recovery_event(
+                event_id="evt_failed",
+                event_type="workspace.state_changed",
+                occurred_at=failed_at,
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.failed.value,
+                reason_code="AGENT_FAILED",
+            ),
+            _recovery_event(
+                event_id="evt_remonitor",
+                event_type="workspace.remonitor_requested",
+                occurred_at=remonitor_at,
+                event_order=17,
+                old_state=WorkspaceStatus.failed.value,
+                new_state=WorkspaceStatus.monitoring_pr.value,
+                reason_code="OPERATOR_REMONITOR",
+                payload=remonitor_payload,
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.from_state == WorkspaceStatus.failed.value
+    assert summary.to_state == WorkspaceStatus.monitoring_pr.value
+    assert summary.started_at == remonitor_at
+    assert summary.started_event_order == 17
+    assert summary.reason_code == "resume the PR monitor"
+    assert summary.action is None
+    assert summary.recovery_mode is None
+    assert summary.current_operation is None
+    assert summary.payload == remonitor_payload
 
 
 @pytest.mark.unit
