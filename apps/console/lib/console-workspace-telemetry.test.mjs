@@ -1060,3 +1060,13 @@ test("formatCores preserves millicore readings below the toFixed(2) floor", () =
   assert.equal(formatCores(0.0000004), "0.0004 millicores");
   assert.equal(formatCores(-0.000001), "-0.001 millicores");
 });
+
+test("formatCores does not throw for decimals below the toFixed fixed-point range", () => {
+  // fractionDigits = ceil(-log10(abs))+1 exceeds 100 for abs ≲ 1e-102;
+  // uncapped toFixed throws RangeError and crashes the resource meter.
+  assert.doesNotThrow(() => formatCores(1e-106));
+  const text = formatCores(1e-106);
+  assert.match(text, /millicores$/);
+  assert.ok(!/^0(\.0+)? millicores$/.test(text), `nonzero sample must not collapse: ${text}`);
+  assert.doesNotThrow(() => formatCores(-1e-106));
+});

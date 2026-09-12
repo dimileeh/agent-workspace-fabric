@@ -1295,7 +1295,12 @@ function formatScaledDecimal(value: number): string {
   }
   // toFixed(2) collapsed a nonzero reading (e.g. 0.001 → "0.00").
   // Keep enough fractional digits that the display stays nonzero.
+  // toFixed rejects digits > 100; values below that fixed-point range
+  // need an exponential fallback so the meter does not throw.
   const abs = Math.abs(value);
   const fractionDigits = Math.max(2, Math.ceil(-Math.log10(abs)) + 1);
+  if (fractionDigits > 100) {
+    return value.toExponential(2).replace(/\.?0+e/, "e");
+  }
   return value.toFixed(fractionDigits).replace(/\.?0+$/, "");
 }
