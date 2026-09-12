@@ -262,6 +262,10 @@ export function ConsoleWorkspaceTelemetry({
   // partial — data_quality_notes stay hidden.
   const envelopePartial =
     viewModel.state === "partial" || viewModel.quality === "partial";
+  // Highlight the window whose meters/history/cost are on screen. selectedView may
+  // diverge while a request is in flight or after a failed window change retains
+  // the prior payload — never imply the requested tab owns the displayed data.
+  const displayedView = viewModel.view;
 
   return (
     <Panel
@@ -287,9 +291,12 @@ export function ConsoleWorkspaceTelemetry({
             role="tablist"
             aria-label="Telemetry window"
             data-testid="telemetry-view-selector"
+            data-awf-displayed-view={displayedView}
+            data-awf-requested-view={selectedView}
           >
             {TELEMETRY_VIEWS.map((view) => {
-              const selected = selectedView === view;
+              const selected = displayedView === view;
+              const requested = selectedView === view && !selected;
               return (
                 <button
                   key={view}
@@ -297,6 +304,12 @@ export function ConsoleWorkspaceTelemetry({
                   role="tab"
                   aria-selected={selected}
                   data-testid={`telemetry-view-${view}`}
+                  data-awf-view-pending={requested ? "true" : undefined}
+                  title={
+                    requested
+                      ? `Requested ${view}; showing ${displayedView}`
+                      : undefined
+                  }
                   className={`rounded-[var(--radius-control)] px-2 py-0.5 text-[11px] font-medium transition ${
                     selected
                       ? "bg-surface-2 text-fg"

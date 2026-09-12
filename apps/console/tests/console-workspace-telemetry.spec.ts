@@ -114,6 +114,64 @@ test.describe("console workspace telemetry harness", () => {
     await expect(harness).toHaveAttribute("data-last-view", "24h");
   });
 
+  test("view tab selection follows displayed telemetry window", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+
+    // Harness selection starts at 1h; partial fixture payload is 6h.
+    await openHarness(page, { fixture: "partial" });
+    const selector = page.getByTestId("telemetry-view-selector");
+    await expect(selector).toHaveAttribute("data-awf-displayed-view", "6h");
+    await expect(selector).toHaveAttribute("data-awf-requested-view", "1h");
+    await expect(page.getByTestId("telemetry-view-6h")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByTestId("telemetry-view-1h")).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+
+    // Stale fixture payload is 24h while selection still starts at 1h.
+    await openHarness(page, { fixture: "stale" });
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveAttribute(
+      "data-awf-displayed-view",
+      "24h",
+    );
+    await expect(page.getByTestId("telemetry-view-24h")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByTestId("telemetry-view-1h")).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+
+    // After requesting a new window while retained data stays on the prior view,
+    // keep the active tab aligned with what is shown (not the pending request).
+    await openHarness(page, { fixture: "success" });
+    await page.getByTestId("telemetry-view-6h").click();
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveAttribute(
+      "data-awf-displayed-view",
+      "1h",
+    );
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveAttribute(
+      "data-awf-requested-view",
+      "6h",
+    );
+    await expect(page.getByTestId("telemetry-view-1h")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByTestId("telemetry-view-6h")).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    await expect(page.getByTestId("telemetry-view-6h")).toHaveAttribute(
+      "data-awf-view-pending",
+      "true",
+    );
+  });
+
   test("unknown limits and missing history render clearly", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, { fixture: "partial", unknownLimits: "1" });
