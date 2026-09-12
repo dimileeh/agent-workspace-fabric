@@ -1271,6 +1271,7 @@ export function projectWorkspaceTelemetryView(
 /**
  * Format CPU cores for the resource meter.
  * Sub-centicore samples (e.g. 0.004) must not collapse to "0 cores" via toFixed(2).
+ * Sub-0.005 millicore samples must not collapse to "0 millicores" either.
  */
 export function formatCores(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
@@ -1278,12 +1279,23 @@ export function formatCores(value: number | null | undefined): string {
   }
   const abs = Math.abs(value);
   if (abs > 0 && abs < 0.01) {
-    const millicores = value * 1000;
-    const text = Number.isInteger(millicores)
-      ? String(millicores)
-      : millicores.toFixed(2).replace(/\.?0+$/, "");
-    return `${text} millicores`;
+    return `${formatScaledDecimal(value * 1000)} millicores`;
   }
-  const text = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, "");
-  return `${text} cores`;
+  return `${formatScaledDecimal(value)} cores`;
+}
+
+/** Compact decimal text; never round a nonzero finite value to a literal "0". */
+function formatScaledDecimal(value: number): string {
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+  const fixed2 = value.toFixed(2).replace(/\.?0+$/, "");
+  if (fixed2 !== "" && Number(fixed2) !== 0) {
+    return fixed2;
+  }
+  // toFixed(2) collapsed a nonzero reading (e.g. 0.001 → "0.00").
+  // Keep enough fractional digits that the display stays nonzero.
+  const abs = Math.abs(value);
+  const fractionDigits = Math.max(2, Math.ceil(-Math.log10(abs)) + 1);
+  return value.toFixed(fractionDigits).replace(/\.?0+$/, "");
 }

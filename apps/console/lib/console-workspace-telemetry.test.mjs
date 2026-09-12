@@ -1053,3 +1053,10 @@ test("formatCores preserves sub-centicore readings as millicores", () => {
   assert.equal(formatCores(undefined), "—");
   assert.equal(formatCores(Number.NaN), "—");
 });
+
+test("formatCores preserves millicore readings below the toFixed(2) floor", () => {
+  // 0.000001 cores → 0.001 millicores; toFixed(2) would collapse to "0 millicores".
+  assert.equal(formatCores(0.000001), "0.001 millicores");
+  assert.equal(formatCores(0.0000004), "0.0004 millicores");
+  assert.equal(formatCores(-0.000001), "-0.001 millicores");
+});
