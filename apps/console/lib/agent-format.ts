@@ -258,7 +258,7 @@ function terminalEventMatchesWorkflowStatus(
  * is post-terminal only when its retained cleanup entry came from the retained
  * workflow terminal transition and a destroyed workspace retains the matching
  * cleanup exit. A valid explicit workflow finish also proves that a hosted or
- * legacy destroyed row reached a workflow terminal boundary when those optional
+ * legacy cleanup row reached a workflow terminal boundary when those optional
  * Core event projections are absent. Retry history can retain an older terminal
  * event, so its presence alone does not prove the current attempt finished
  * before a direct destroy.
@@ -308,7 +308,8 @@ export function hasTerminalWorkflowTiming(
   return (
     (TERMINAL_WORKFLOW_STATUSES.has(item.status) &&
       cleanupFailureHasTerminalBoundary) ||
-    (item.status === "destroyed" && hasExplicitWorkflowFinish) ||
+    ((item.status === "destroying" || item.status === "destroyed") &&
+      hasExplicitWorkflowFinish) ||
     ((item.status === "destroying" || item.status === "destroyed") &&
       terminalTransition?.event_type === "workspace.state_changed" &&
       cleanupEntryTransition?.event_type === "workspace.state_changed" &&

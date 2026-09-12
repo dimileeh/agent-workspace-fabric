@@ -576,6 +576,44 @@ test("hasTerminalWorkflowTiming honors explicit workflow finishes for destroyed 
   );
 });
 
+test("hasTerminalWorkflowTiming honors explicit workflow finishes while cleanup is destroying", async () => {
+  const { hasTerminalWorkflowTiming } = await import("./agent-format.ts");
+
+  for (const timing of [
+    { workflow_finished_at: "2026-09-06T12:08:00Z" },
+    { finished_at: "2026-09-06T12:08:00Z" },
+  ]) {
+    assert.equal(
+      hasTerminalWorkflowTiming({
+        status: "destroying",
+        latest_state_change: null,
+        latest_destroying_state_change: null,
+        latest_workflow_terminal_state_change: null,
+        ...timing,
+      }),
+      true,
+      "a documented workflow finish must remain terminal during cleanup",
+    );
+  }
+
+  for (const timing of [
+    {},
+    { workflow_finished_at: "not-a-timestamp", finished_at: null },
+  ]) {
+    assert.equal(
+      hasTerminalWorkflowTiming({
+        status: "destroying",
+        latest_state_change: null,
+        latest_destroying_state_change: null,
+        latest_workflow_terminal_state_change: null,
+        ...timing,
+      }),
+      false,
+      "cleanup without a valid explicit finish must not appear terminal",
+    );
+  }
+});
+
 test("hasTerminalWorkflowTiming requires a workflow terminal boundary before cleanup failure", async () => {
   const { hasTerminalWorkflowTiming } = await import("./agent-format.ts");
   const cleanupFailure = {
