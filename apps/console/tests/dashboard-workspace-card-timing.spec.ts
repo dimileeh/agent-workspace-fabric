@@ -374,6 +374,57 @@ test("local terminal inspector uses the card lifecycle timing", async ({ page })
   await expect(duration).toContainText("10m 0s");
 });
 
+test("inspector keeps timing on the overview snapshot when detail is newer", async ({
+  page,
+}) => {
+  const running = overview("ws_detail_ahead_of_overview", "running", {
+    latest_state_change: stateChangedEvent(
+      "ws_detail_ahead_of_overview",
+      "ready",
+      "running",
+      "2026-09-06T12:02:00Z",
+    ),
+    lifecycle: [
+      stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+      stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
+      {
+        ...stage("running", "2026-09-06T12:02:00Z", null, null),
+        status: "active",
+      },
+    ],
+  });
+  await mockAwfConsoleApi(page, { overviewItems: [running] });
+  await page.route(
+    `**/api/awf/workspaces/${running.workspace_id}`,
+    async (route) => {
+      await fulfillJson(route, {
+        ...running,
+        id: running.workspace_id,
+        status: "failed",
+        workflow_finished_at: "2026-09-06T12:10:00Z",
+        duration_seconds: 600,
+        lifecycle: [
+          stage("requested", "2026-09-06T12:00:00Z", "2026-09-06T12:01:00Z", 60),
+          stage("ready", "2026-09-06T12:01:00Z", "2026-09-06T12:02:00Z", 60),
+          stage("running", "2026-09-06T12:02:00Z", "2026-09-06T12:10:00Z", 480),
+        ],
+        version: 2,
+      });
+    },
+  );
+
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  await page.getByTestId(`workspace-card-${running.workspace_id}`).click();
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  await expect(inspector.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  await expect(
+    inspector.getByText("Workflow finished", { exact: true }).locator(".."),
+  ).toContainText("not recorded");
+  await expect(inspector.getByText("Duration", { exact: true })).toHaveCount(0);
+});
+
 test("local terminal task details use the card lifecycle timing", async ({ page }) => {
   const completed = overview("ws_local_details_timing", "completed", {
     lifecycle: [
