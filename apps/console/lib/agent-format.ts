@@ -392,12 +392,43 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
           retainedSourceStage.started_at,
         )
       : null;
+  const latestStateChange = item.latest_state_change;
+  const cleanupOrder =
+    latestStateChange != null && terminalEvent != null
+      ? compareRecordedInstants(
+          latestStateChange.occurred_at,
+          terminalEvent.occurred_at,
+        )
+      : null;
+  const cleanupEventOrder = latestStateChange?.event_order;
+  const terminalEventOrder = terminalEvent?.event_order;
+  const hasCleanupEventOrderProof =
+    typeof cleanupEventOrder === "number" &&
+    Number.isSafeInteger(cleanupEventOrder) &&
+    typeof terminalEventOrder === "number" &&
+    Number.isSafeInteger(terminalEventOrder);
+  const cleanupFollowsTerminalEvent =
+    cleanupOrder != null &&
+    cleanupOrder !== -1 &&
+    (hasCleanupEventOrderProof
+      ? cleanupEventOrder > terminalEventOrder
+      : cleanupOrder === 1);
+  const subsequentCleanupCorroboratesTerminal =
+    terminalEvent != null &&
+    latestStateChange?.event_type === "workspace.state_changed" &&
+    latestStateChange.new_state === item.status &&
+    ((latestStateChange.old_state === terminalEvent.new_state &&
+      latestStateChange.new_state === "destroying") ||
+      (latestStateChange.old_state === "destroying" &&
+        latestStateChange.new_state === "destroyed")) &&
+    cleanupFollowsTerminalEvent;
   const isRetainedResumeExit =
     recoveryStartedAt == null &&
     terminalEvent != null &&
     typeof terminalEvent.id === "string" &&
     terminalEvent.id.length > 0 &&
-    item.latest_state_change?.id === terminalEvent.id &&
+    (latestStateChange?.id === terminalEvent.id ||
+      subsequentCleanupCorroboratesTerminal) &&
     terminalEvent.old_state != null &&
     RESUMED_TERMINAL_SOURCE_STAGES.has(terminalEvent.old_state) &&
     retainedSourceStage?.status === "completed" &&
@@ -413,8 +444,9 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
   // are themselves omitted from that lifecycle and recovery summary; a direct
   // terminal exit from either pause is authoritative without that boundary.
   // After a pause resumes, the lifecycle retains the first interval for the
-  // re-entered stage; the matching current state transition can prove the later
-  // finish, but not a duration that spans the omitted pause.
+  // re-entered stage. The matching current state transition, or a subsequent
+  // cleanup transition that follows it, can prove the later finish, but not a
+  // duration that spans the omitted pause.
   if (
     (recoveryStartedAt == null &&
       !isDirectPauseExit &&
@@ -433,7 +465,6 @@ function retainedTerminalEventTiming(item: WorkspaceOverview): {
     recoveryStartedAt == null
       ? null
       : compareRecordedInstants(terminalEvent.occurred_at, recoveryStartedAt);
-  const terminalEventOrder = terminalEvent.event_order;
   const recoveryStartedEventOrder = item.recovery?.started_event_order;
   const explicitEventOrderProof =
     typeof terminalEventOrder === "number" &&
