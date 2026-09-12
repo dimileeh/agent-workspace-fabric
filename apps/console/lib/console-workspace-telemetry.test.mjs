@@ -425,6 +425,43 @@ test("same-timestamp multi-container samples may sum within that timestamp only"
   assert.deepEqual(view.cpu.containerNamesAtSample?.sort(), ["agent", "sidecar"]);
 });
 
+test("same sample_time with mismatched intervals is partial, not a complete pod total", () => {
+  const multi = structuredClone(SUCCESS);
+  const base = SUCCESS.cpu_cores_samples[0];
+  multi.cpu_cores_samples = [
+    {
+      ...base,
+      container_name: "agent",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T11:59:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.10",
+    },
+    {
+      ...base,
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T11:58:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.15",
+    },
+  ];
+  const parsed = parseTelemetryPresentation(multi);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  // Different measurement windows must not be compared as a whole-pod total.
+  assert.equal(view.cpu.usedCores, null);
+  assert.equal(view.cpu.usedPartial, true);
+  assert.deepEqual(
+    view.cpu.series.map((p) => ({
+      sampleTime: p.sampleTime,
+      value: p.value,
+      quality: p.quality,
+    })),
+    [{ sampleTime: "2026-09-12T12:00:00+00:00", value: 0.25, quality: "partial" }],
+  );
+});
+
 test("sparkline series uses pod totals per timestamp, not raw per-container points", () => {
   const multi = structuredClone(SUCCESS);
   const base = SUCCESS.cpu_cores_samples[0];

@@ -906,11 +906,34 @@ function accumulateSampleTotal(
 }
 
 /**
+ * True when every sample shares the same interval_start/interval_end string
+ * identity. Samples that only share sample_time may still cover different
+ * measurement windows and must not be treated as one complete pod reading.
+ */
+function samplesShareIntervalTuple(samples: ParsedTelemetrySample[]): boolean {
+  if (samples.length <= 1) {
+    return true;
+  }
+  const first = samples[0];
+  for (let i = 1; i < samples.length; i++) {
+    const sample = samples[i];
+    if (
+      sample.intervalStart !== first.intervalStart ||
+      sample.intervalEnd !== first.intervalEnd
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Build sparkline history as one pod-total point per sample_time.
  * Raw per-container rows must not be plotted as a single line — same-timestamp
  * containers would form a fake trend and disagree with meter totals.
  * Staggered scrapes that leave a timestamp missing containers seen elsewhere
  * in the series are marked partial (same completeness rule as the latest meter).
+ * Same-timestamp samples with mismatched interval windows are also partial.
  */
 function buildPodTotalSeries(
   samples: ParsedTelemetrySample[],
@@ -950,11 +973,16 @@ function buildPodTotalSeries(
       }
     }
     // Incomplete partition vs containers seen in the series: do not present as ok.
+    // Mismatched measurement windows at the same sample_time are also partial.
     if (quality !== "stale") {
-      for (const name of seriesContainers) {
-        if (!groupContainers.has(name)) {
-          quality = "partial";
-          break;
+      if (!samplesShareIntervalTuple(group)) {
+        quality = "partial";
+      } else {
+        for (const name of seriesContainers) {
+          if (!groupContainers.has(name)) {
+            quality = "partial";
+            break;
+          }
         }
       }
     }
@@ -973,8 +1001,9 @@ function buildPodTotalSeries(
 /**
  * Sum samples that share the exact same sample_time string identity.
  * Never merges across different moments. If the latest partition is missing
- * containers that appear elsewhere in the series, treat usage as partial and
- * unavailable (null) rather than presenting the subset as a complete pod total.
+ * containers that appear elsewhere in the series, or containers disagree on
+ * interval windows, treat usage as partial and unavailable (null) rather than
+ * presenting the subset / mismatched windows as a complete pod total.
  */
 function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
   used: number | null;
@@ -1042,6 +1071,11 @@ function aggregateAtTimestamp(samples: ParsedTelemetrySample[]): {
       usedPartial = true;
       break;
     }
+  }
+  // Same sample_time with different interval windows is not one pod reading.
+  if (!samplesShareIntervalTuple(atLatest)) {
+    incompletePartition = true;
+    usedPartial = true;
   }
   return {
     used: incompletePartition || used === null ? null : used,
