@@ -313,21 +313,29 @@ function parseSampleArray(
 /**
  * Resolve the presentation's resource identity when the producer supplies one.
  * Prefer admitted, then ownership — both are schema-compatible ownership fields.
+ * Returns undefined when both are present and disagree (fail closed).
  */
-function resolvePresentationResourceUid(payload: Record<string, unknown>): string | null {
+function resolvePresentationResourceUid(
+  payload: Record<string, unknown>,
+): string | null | undefined {
+  let admittedUid: string | null = null;
+  let ownershipUid: string | null = null;
   if (isPlainObject(payload.admitted)) {
-    const admittedUid = payload.admitted.provider_resource_uid;
-    if (typeof admittedUid === "string" && admittedUid.length > 0) {
-      return admittedUid;
+    const uid = payload.admitted.provider_resource_uid;
+    if (typeof uid === "string" && uid.length > 0) {
+      admittedUid = uid;
     }
   }
   if (isPlainObject(payload.ownership)) {
-    const ownershipUid = payload.ownership.provider_resource_uid;
-    if (typeof ownershipUid === "string" && ownershipUid.length > 0) {
-      return ownershipUid;
+    const uid = payload.ownership.provider_resource_uid;
+    if (typeof uid === "string" && uid.length > 0) {
+      ownershipUid = uid;
     }
   }
-  return null;
+  if (admittedUid !== null && ownershipUid !== null && admittedUid !== ownershipUid) {
+    return undefined;
+  }
+  return admittedUid ?? ownershipUid;
 }
 
 /**
@@ -610,6 +618,9 @@ export function parseTelemetryPresentation(
     return null;
   }
   const expectedResourceUid = resolvePresentationResourceUid(payload);
+  if (expectedResourceUid === undefined) {
+    return null;
+  }
   if (
     !assertSampleIdentities(cpuSamples, expectedResourceUid) ||
     !assertSampleIdentities(memorySamples, expectedResourceUid)

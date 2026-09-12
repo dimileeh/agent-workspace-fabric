@@ -378,6 +378,23 @@ test("parseTelemetryPresentation rejects mismatched sample provider_resource_uid
   assert.equal(parseTelemetryPresentation(mixedSeries), null);
 });
 
+test("parseTelemetryPresentation rejects conflicting admitted vs ownership provider_resource_uid", () => {
+  const conflict = structuredClone(SUCCESS);
+  conflict.admitted.provider_resource_uid = "pod-uid-admitted";
+  conflict.ownership.provider_resource_uid = "pod-uid-ownership";
+  // Samples match admitted — must still reject so ownership B cannot display A's samples.
+  conflict.cpu_cores_samples[0].provider_resource_uid = "pod-uid-admitted";
+  conflict.memory_bytes_samples[0].provider_resource_uid = "pod-uid-admitted";
+  assert.equal(parseTelemetryPresentation(conflict), null);
+
+  const matching = structuredClone(SUCCESS);
+  matching.admitted.provider_resource_uid = "pod-uid-shared";
+  matching.ownership.provider_resource_uid = "pod-uid-shared";
+  matching.cpu_cores_samples[0].provider_resource_uid = "pod-uid-shared";
+  matching.memory_bytes_samples[0].provider_resource_uid = "pod-uid-shared";
+  assert.ok(parseTelemetryPresentation(matching));
+});
+
 test("parseTelemetryPresentation rejects duplicate container samples at the same timestamp", () => {
   const dup = structuredClone(SUCCESS);
   dup.cpu_cores_samples = [
