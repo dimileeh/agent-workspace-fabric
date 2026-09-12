@@ -56,6 +56,62 @@ function hostedCountEvidenceSummary(): ConsoleDashboardSummary {
   };
 }
 
+function localExactCountSummary(): ConsoleDashboardSummary {
+  return localDashboardSummary({
+    counts: {
+      active: 9,
+      executing: 3,
+      monitoring_pr: 2,
+      awaiting_operator: 1,
+      awaiting_human: 1,
+      retrying: 1,
+      queued: 2,
+      completed_last_window: 3,
+      cancelled_last_window: 1,
+      failed_last_window: 2,
+    },
+  });
+}
+
+/** Exact counts win; confirmed evidence fills only null exact fields. */
+function mixedExactAndConfirmedSummary(): ConsoleDashboardSummary {
+  return localDashboardSummary({
+    coverage: {
+      status: "partial",
+      notes: ["some_statuses_unknown"],
+    },
+    counts: {
+      active: 5,
+      executing: null,
+      monitoring_pr: 2,
+      awaiting_operator: null,
+      awaiting_human: 0,
+      retrying: null,
+      queued: 1,
+      completed_last_window: null,
+      cancelled_last_window: null,
+      failed_last_window: 0,
+    },
+    count_evidence: {
+      total_workspaces: 12,
+      status_known_workspaces: 8,
+      status_unknown_workspaces: 4,
+      confirmed_counts: {
+        active: 99,
+        executing: 3,
+        monitoring_pr: 99,
+        awaiting_operator: 1,
+        awaiting_human: 99,
+        retrying: 0,
+        queued: 99,
+        completed_last_window: 4,
+        cancelled_last_window: 0,
+        failed_last_window: 99,
+      },
+    },
+  });
+}
+
 async function assertNoCoverageChrome(page: Page) {
   await expect(page.getByTestId("dashboard-summary-coverage")).toHaveCount(0);
   await expect(page.getByTestId("dashboard-summary-error")).toHaveCount(0);
@@ -146,44 +202,104 @@ test("unknown dashboard coverage stays silent without a request error", async ({
   await assertNoCoverageChrome(page);
 });
 
-for (const viewport of [
+const VIEWPORTS = [
   { name: "desktop", width: 1280, height: 900 },
   { name: "mobile-390", width: 390, height: 844 },
   { name: "mobile-375", width: 375, height: 812 },
-]) {
-  test(`count evidence renders plain numbers on ${viewport.name}`, async ({ page }) => {
-    await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await mockAwfConsoleApi(page, {
-      mode: "hosted",
-      dashboardSummary: hostedCountEvidenceSummary(),
+] as const;
+
+type CountScenario = {
+  name: string;
+  mode: "local" | "hosted";
+  summary: () => ConsoleDashboardSummary;
+  assertKpis: (page: Page) => Promise<void>;
+};
+
+const COUNT_SCENARIOS: CountScenario[] = [
+  {
+    name: "hosted-confirmed",
+    mode: "hosted",
+    summary: hostedCountEvidenceSummary,
+    assertKpis: async (page) => {
+      // Unknown workflow statuses leave exact counts null; confirmed evidence still shows
+      // plain numbers (including evidenced zeros) — never "N confirmed" or lower-bound copy.
+      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Completed")).toContainText("last 24h");
+      await expect(kpi(page, "Completed")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+      await expect(kpi(page, "Running")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+    },
+  },
+  {
+    name: "local-exact",
+    mode: "local",
+    summary: localExactCountSummary,
+    assertKpis: async (page) => {
+      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("9");
+      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("3");
+      await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("2");
+      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Awaiting human").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Auto-retrying").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Queued").locator(".kpi-value")).toHaveText("2");
+      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("3");
+      await expect(kpi(page, "Cancelled").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Failed").locator(".kpi-value")).toHaveText("2");
+      await expect(kpi(page, "Completed")).toContainText("last 24h");
+      await expect(kpi(page, "Completed")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+    },
+  },
+  {
+    name: "mixed-exact-confirmed",
+    mode: "local",
+    summary: mixedExactAndConfirmedSummary,
+    assertKpis: async (page) => {
+      // Exact wins when both present; confirmed fills nulls; evidenced zeros stay plain.
+      await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("5");
+      await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("3");
+      await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("2");
+      await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Awaiting human").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Auto-retrying").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Queued").locator(".kpi-value")).toHaveText("1");
+      await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("4");
+      await expect(kpi(page, "Cancelled").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Failed").locator(".kpi-value")).toHaveText("0");
+      await expect(kpi(page, "Completed")).toContainText("last 24h");
+      await expect(kpi(page, "Active")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+      await expect(kpi(page, "Running")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
+    },
+  },
+];
+
+for (const viewport of VIEWPORTS) {
+  for (const scenario of COUNT_SCENARIOS) {
+    test(`${scenario.name} renders plain numbers on ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await mockAwfConsoleApi(page, {
+        mode: scenario.mode,
+        dashboardSummary: scenario.summary(),
+      });
+
+      await page.goto("/");
+      await waitForConsoleReady(page);
+      await scenario.assertKpis(page);
+      await assertNoCoverageChrome(page);
+
+      const hasHorizontalOverflow = await page.evaluate(
+        () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      );
+      expect(hasHorizontalOverflow).toBe(false);
+
+      await page.screenshot({
+        path: `test-results/dashboard-summary-kpis-${scenario.name}-${viewport.name}.png`,
+        fullPage: true,
+      });
     });
-
-    await page.goto("/");
-    await waitForConsoleReady(page);
-
-    // Unknown workflow statuses leave exact counts null; confirmed evidence still shows
-    // plain numbers (including evidenced zeros) — never "N confirmed" or lower-bound copy.
-    await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1");
-    await expect(kpi(page, "Awaiting operator").locator(".kpi-value")).toHaveText("0");
-    await expect(kpi(page, "Running").locator(".kpi-value")).toHaveText("1");
-    await expect(kpi(page, "Monitoring PR").locator(".kpi-value")).toHaveText("0");
-    await expect(kpi(page, "Completed").locator(".kpi-value")).toHaveText("0");
-    await expect(kpi(page, "Completed")).toContainText("last 24h");
-    await expect(kpi(page, "Completed")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
-    await expect(kpi(page, "Running")).not.toContainText(COVERAGE_OR_CONFIRMED_COPY);
-
-    await assertNoCoverageChrome(page);
-
-    const hasHorizontalOverflow = await page.evaluate(
-      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
-    );
-    expect(hasHorizontalOverflow).toBe(false);
-
-    await page.screenshot({
-      path: `test-results/dashboard-summary-kpis-count-evidence-${viewport.name}.png`,
-      fullPage: true,
-    });
-  });
+  }
 }
 
 test("status counters stay consistent for escalation/retry/terminal fixtures", async ({ page }) => {
