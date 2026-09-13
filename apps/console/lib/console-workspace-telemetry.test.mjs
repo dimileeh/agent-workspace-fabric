@@ -420,19 +420,24 @@ test("partial fixture keeps missing memory used and partial cost without fabrica
   assert.equal(view.estimate.pricedIntervalSeconds, 1800);
 });
 
-test("parseTelemetryPresentation rejects stale_after_seconds that overflow thresholdMs", () => {
+test("parseTelemetryPresentation rejects stale_after_seconds above the 5m live cap", () => {
   // Number.MAX_VALUE is finite and integer-ish, but * 1000 => Infinity and
   // would make age-based freshness always false.
   const maxValue = structuredClone(SUCCESS);
   maxValue.stale_after_seconds = Number.MAX_VALUE;
   assert.equal(parseTelemetryPresentation(maxValue), null);
 
-  const aboveCap = structuredClone(SUCCESS);
-  aboveCap.stale_after_seconds = MAX_STALE_AFTER_SECONDS + 1;
-  assert.equal(parseTelemetryPresentation(aboveCap), null);
+  // Slice requires live stale status at >5m; a 7d producer value would leave
+  // hour-old success fixtures fresh.
+  assert.equal(MAX_STALE_AFTER_SECONDS, 300);
 
-  // Operational 7d cap (not MAX_SAFE_INTEGER/1000).
-  assert.equal(MAX_STALE_AFTER_SECONDS, 7 * 24 * 60 * 60);
+  const aboveFiveMinutes = structuredClone(SUCCESS);
+  aboveFiveMinutes.stale_after_seconds = 301;
+  assert.equal(parseTelemetryPresentation(aboveFiveMinutes), null);
+
+  const sevenDayCap = structuredClone(SUCCESS);
+  sevenDayCap.stale_after_seconds = 7 * 24 * 60 * 60;
+  assert.equal(parseTelemetryPresentation(sevenDayCap), null);
 
   const atCap = structuredClone(SUCCESS);
   atCap.stale_after_seconds = MAX_STALE_AFTER_SECONDS;

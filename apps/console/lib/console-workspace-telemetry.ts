@@ -76,12 +76,13 @@ export const MAX_DATA_QUALITY_NOTES = 64;
 /** Max SVG points drawn for a telemetry sparkline after downsampling. */
 export const MAX_SPARKLINE_POINTS = 64;
 /**
- * Operational cap for stale_after_seconds (7d). Rejects absurd finite values
- * (e.g. Number.MAX_VALUE) that would make thresholdMs = seconds * 1000 become
- * Infinity and treat arbitrarily old telemetry as fresh. Also stays far below
- * Number.MAX_SAFE_INTEGER / 1000 so the ms conversion remains a safe integer.
+ * Live freshness cap for stale_after_seconds (5m). The Stage3 UI contract marks
+ * live telemetry stale when sample/envelope/admitted times exceed five minutes;
+ * accepting a larger producer threshold would leave hour-old readings fresh.
+ * Also rejects absurd finite values (e.g. Number.MAX_VALUE) that would make
+ * thresholdMs = seconds * 1000 become Infinity.
  */
-export const MAX_STALE_AFTER_SECONDS = 7 * 24 * 60 * 60;
+export const MAX_STALE_AFTER_SECONDS = 5 * 60;
 
 const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
