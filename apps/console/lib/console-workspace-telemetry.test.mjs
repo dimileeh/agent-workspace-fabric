@@ -466,6 +466,63 @@ test("parseTelemetryPresentation rejects sample or interval spans beyond the sel
   assert.equal(parseTelemetryPresentation(crossSeries), null);
 });
 
+test("parseTelemetryPresentation rejects samples clustered outside the observed_at view window", () => {
+  // Span ≤ 1h but entirely before the window ending at observed_at — e.g. a
+  // historical 1h tab must not render two-day-old points as that window.
+  const offsetCluster = structuredClone(SUCCESS);
+  offsetCluster.view = "1h";
+  offsetCluster.observed_at = "2026-09-12T12:00:00+00:00";
+  offsetCluster.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      sample_time: "2026-09-10T10:00:00+00:00",
+      interval_start: "2026-09-10T10:00:00+00:00",
+      interval_end: "2026-09-10T10:00:00+00:00",
+      value: "0.10",
+    },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-10T10:45:00+00:00",
+      interval_start: "2026-09-10T10:45:00+00:00",
+      interval_end: "2026-09-10T10:45:00+00:00",
+      value: "0.20",
+    },
+  ];
+  offsetCluster.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-10T10:15:00+00:00",
+      interval_start: "2026-09-10T10:15:00+00:00",
+      interval_end: "2026-09-10T10:15:00+00:00",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(offsetCluster), null);
+
+  // Samples after observed_at are also outside the window ending at observed_at.
+  const afterObserved = structuredClone(SUCCESS);
+  afterObserved.view = "1h";
+  afterObserved.observed_at = "2026-09-12T12:00:00+00:00";
+  afterObserved.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      sample_time: "2026-09-12T12:30:00+00:00",
+      interval_start: "2026-09-12T12:30:00+00:00",
+      interval_end: "2026-09-12T12:30:00+00:00",
+      value: "0.10",
+    },
+  ];
+  afterObserved.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T12:30:00+00:00",
+      interval_start: "2026-09-12T12:30:00+00:00",
+      interval_end: "2026-09-12T12:30:00+00:00",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(afterObserved), null);
+});
+
 test("parseTelemetryPresentation rejects estimate coverage beyond the selected view window", () => {
   // A 1h selector must not accept a 2h priced interval as that window's cost.
   const overWindow = structuredClone(SUCCESS);
@@ -1696,8 +1753,8 @@ test("implausibly future meter sample times fail closed as stale", () => {
   // A future sample_time wins latestTimestamp over legitimate readings; without
   // a closed freshness check, nowMs - ms is negative so isStale stays false
   // indefinitely (malformed producer timestamp or collector clock skew).
-  // Keep the series within the 1h view window so parse accepts it; only the
-  // freshness check should fail closed on the future reading.
+  // Keep timestamps inside the observed_at-anchored 1h window so parse accepts
+  // it; only the freshness check should fail closed on the future reading.
   const future = structuredClone(SUCCESS);
   future.cpu_cores_samples = [
     {
@@ -1725,7 +1782,8 @@ test("implausibly future meter sample times fail closed as stale", () => {
       interval_end: "2026-09-12T12:00:00+00:00",
     },
   ];
-  future.observed_at = "2026-09-12T12:00:00+00:00";
+  // Envelope must end the selected window at/after the newest meter time.
+  future.observed_at = "2026-09-12T12:30:00+00:00";
   const parsed = parseTelemetryPresentation(future);
   assert.ok(parsed);
   const view = projectWorkspaceTelemetryView(parsed, {

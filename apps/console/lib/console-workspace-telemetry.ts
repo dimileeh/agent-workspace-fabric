@@ -481,14 +481,19 @@ function parseSampleArray(
 
 /**
  * True when every sample_time / interval_start / interval_end across the
- * given series falls within a wall-clock span of at most `viewDurationSeconds`.
- * Empty input is vacuously valid. Prevents plotting a multi-hour series under
- * a shorter view selector (mirrors estimate interval coverage bounds). CPU and
- * memory are checked together because both series share one plotted window.
+ * given series falls inside the selected view window ending at `observedAt`
+ * (`[observedAt - viewDuration, observedAt]` inclusive). Empty input is
+ * vacuously valid. Samples without an envelope `observed_at` cannot be
+ * anchored and fail closed. Prevents plotting a multi-hour series under a
+ * shorter view selector, and prevents clustered-but-offset timestamps (e.g.
+ * a 1h cluster two days before observed_at) from rendering as that window.
+ * CPU and memory are checked together because both series share one plotted
+ * window.
  */
 function samplesFitViewWindow(
   seriesList: readonly ParsedTelemetrySample[][],
   viewDurationSeconds: number,
+  observedAt: string | null,
 ): boolean {
   let minMs = Infinity;
   let maxMs = -Infinity;
@@ -514,7 +519,15 @@ function samplesFitViewWindow(
   if (!sawTimestamp) {
     return true;
   }
-  return maxMs - minMs <= viewDurationSeconds * 1000;
+  if (observedAt === null) {
+    return false;
+  }
+  const observedAtMs = timestampInstantMs(observedAt);
+  if (!Number.isFinite(observedAtMs)) {
+    return false;
+  }
+  const windowStartMs = observedAtMs - viewDurationSeconds * 1000;
+  return minMs >= windowStartMs && maxMs <= observedAtMs;
 }
 
 /**
@@ -1156,10 +1169,12 @@ export function parseTelemetryPresentation(
   if (memorySamples === null) {
     return null;
   }
-  // Sample/interval wall-clock span cannot exceed the selected view window, or
-  // a multi-hour series would render under a shorter selector (e.g. 2h under "1h").
+  // Sample/interval times must fall inside the selected view window ending at
+  // observed_at, or a shorter selector could render offset/multi-hour series.
   const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[payload.view];
-  if (!samplesFitViewWindow([cpuSamples, memorySamples], viewDurationSeconds)) {
+  const observedAt =
+    typeof payload.observed_at === "string" ? payload.observed_at : null;
+  if (!samplesFitViewWindow([cpuSamples, memorySamples], viewDurationSeconds, observedAt)) {
     return null;
   }
   const expectedResourceUid = resolvePresentationResourceUid(payload);
