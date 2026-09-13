@@ -1,3 +1,8 @@
+/**
+ * Lives under lib/ so `npm test` (`lib/*.test.mjs` in package.json) executes it.
+ * Do not move this file back to the console package root — that path is outside
+ * the unit-test glob and would leave route-graph guarantees unenforced.
+ */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -11,6 +16,14 @@ import {
 test("harness route build is disabled by default", () => {
   assert.equal(isConsoleTestHarnessRouteBuildEnabled({}), false);
   assert.deepEqual(resolveConsolePageExtensions({}), [...DEFAULT_PAGE_EXTENSIONS]);
+});
+
+test("harness route build ignores non-exact flag values", () => {
+  for (const value of ["0", "true", "yes", ""]) {
+    const env = { AWF_CONSOLE_TEST_HARNESS: value, NODE_ENV: "development" };
+    assert.equal(isConsoleTestHarnessRouteBuildEnabled(env), false);
+    assert.deepEqual(resolveConsolePageExtensions(env), [...DEFAULT_PAGE_EXTENSIONS]);
+  }
 });
 
 test("harness route build stays disabled in production even when the flag is set", () => {
