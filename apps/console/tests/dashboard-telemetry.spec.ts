@@ -2,6 +2,10 @@ import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fulfillJson, hostedTelemetryCapabilities, localCapabilities, mockAwfConsoleApi } from "./fixtures/console-api";
 
+// Each case owns its page, clock, and API mocks. Share the existing worker pool
+// so this polling-heavy spec does not leave one worker idle at the end of CI.
+test.describe.configure({ mode: "parallel" });
+
 const fixture = (name = "unpriced_allocation") => JSON.parse(readFileSync(`${process.cwd()}/lib/fixtures/console-workspace-telemetry/persisted_${name}.json`, "utf8"));
 const overview = (id: string) => ({ workspace_id: id, title: id, repo_url: "https://github.com/test/repo", base_branch: "main", agent: "test", status: "running", created_at: "2026-09-12T12:00:00Z", updated_at: "2026-09-12T12:00:00Z", lifecycle: [], llm_usage: null, recovery: null });
 function enabled() {
