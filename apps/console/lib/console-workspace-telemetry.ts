@@ -276,6 +276,14 @@ function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value
   return typeof value === "string" && (allowed as readonly string[]).includes(value);
 }
 
+/** True when metric_type is the fixture type for this series unit (exact tuple). */
+function isSeriesMetricType(
+  metricType: unknown,
+  expectedUnit: "cores" | "bytes",
+): metricType is (typeof TELEMETRY_METRIC_TYPE_BY_UNIT)[typeof expectedUnit] {
+  return metricType === TELEMETRY_METRIC_TYPE_BY_UNIT[expectedUnit];
+}
+
 function parseSampleArray(
   value: unknown,
   expectedUnit: "cores" | "bytes",
@@ -330,7 +338,7 @@ function parseSampleArray(
     // Fail closed: metric_type must match the series unit so memory meters
     // cannot land in cpu_cores_samples (or vice versa) and render mislabeled.
     // CPU fixtures use core_usage_time with unit cores (producer naming quirk).
-    if (item.metric_type !== TELEMETRY_METRIC_TYPE_BY_UNIT[expectedUnit]) {
+    if (!isSeriesMetricType(item.metric_type, expectedUnit)) {
       return null;
     }
     const parsedValue = parseDecimalString(item.value, {
@@ -341,8 +349,17 @@ function parseSampleArray(
       return null;
     }
     // Accept known evidence object for schema compatibility; never project it.
-    if (item.evidence !== undefined && item.evidence !== null && !isPlainObject(item.evidence)) {
-      return null;
+    // When evidence declares metric_type, it must match the same series tuple.
+    if (item.evidence !== undefined && item.evidence !== null) {
+      if (!isPlainObject(item.evidence)) {
+        return null;
+      }
+      if (
+        item.evidence.metric_type !== undefined &&
+        !isSeriesMetricType(item.evidence.metric_type, expectedUnit)
+      ) {
+        return null;
+      }
     }
     if (
       item.provider_resource_uid !== undefined &&

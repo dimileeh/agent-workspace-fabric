@@ -122,6 +122,21 @@ test("parseTelemetryPresentation rejects metric_type that does not match its ser
   const nonString = structuredClone(SUCCESS);
   nonString.memory_bytes_samples[0].metric_type = 1;
   assert.equal(parseTelemetryPresentation(nonString), null);
+
+  const empty = structuredClone(SUCCESS);
+  empty.cpu_cores_samples[0].metric_type = "";
+  assert.equal(parseTelemetryPresentation(empty), null);
+
+  // Top-level type matches series but evidence.metric_type contradicts — fail closed.
+  const evidenceMismatch = structuredClone(SUCCESS);
+  evidenceMismatch.cpu_cores_samples[0].evidence = {
+    metric_type: "kubernetes.io/container/memory/used_bytes",
+  };
+  assert.equal(parseTelemetryPresentation(evidenceMismatch), null);
+
+  const evidenceNonString = structuredClone(SUCCESS);
+  evidenceNonString.memory_bytes_samples[0].evidence = { metric_type: 1 };
+  assert.equal(parseTelemetryPresentation(evidenceNonString), null);
 });
 
 test("parseTelemetryPresentation rejects samples with reversed interval windows", () => {
