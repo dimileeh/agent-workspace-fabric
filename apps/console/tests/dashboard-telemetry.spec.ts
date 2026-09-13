@@ -437,9 +437,17 @@ test("parent refreshes and unrelated capability revisions preserve telemetry cad
   let negotiations = 0;
   await page.route("**/console/capabilities", async route => { negotiations++; await fulfillJson(route, caps); });
   await page.route("**/telemetry?*", async route => { reads++; await fulfillJson(route, fixture()); });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  const start = new Date("2026-09-12T12:01:00Z");
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Open workspace details for ws_unpriced_allocation", exact: true })).toBeVisible();
+  await page.clock.install({ time: start });
+  // Pause after dashboard initialization, before mounting the telemetry reader.
+  // Installation alone still advances with wall time during UI interactions.
+  await page.clock.pauseAt(start);
+  await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   for (let revision = 0; revision < 4; revision++) {
+    await page.clock.runFor(10_000);
     // Identical refresh, timestamp-only refresh, then unrelated inventory edits.
     if (revision === 1) caps.generated_at = "2026-09-12T12:01:00Z";
     if (revision >= 2) caps.widgets = caps.widgets.map(widget => widget.id === "cloud_runtime"
@@ -450,8 +458,9 @@ test("parent refreshes and unrelated capability revisions preserve telemetry cad
     await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
     expect(reads).toBe(1);
   }
-  await page.clock.runFor(59_000); expect(reads).toBe(1);
-  await page.clock.runFor(1_100); await expect.poll(() => reads).toBe(2);
+  // Forty seconds elapsed across revisions; the original deadline must survive.
+  await page.clock.runFor(19_999); expect(reads).toBe(1);
+  await page.clock.runFor(1); await expect.poll(() => reads).toBe(2);
 });
 
 test("delayed telemetry and dense 24h preserve scroll, selection and bounded history", async ({ page }) => {
