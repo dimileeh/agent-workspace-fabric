@@ -45,6 +45,16 @@ const MAX_DECIMAL_MAGNITUDE = 1e15;
  */
 export const MAX_DECIMAL_STRING_LENGTH = 64;
 /**
+ * Lexical length cap for RFC3339 timestamp strings before regex / Date.parse.
+ * Legitimate producer timestamps fit well under this (date-time + optional
+ * nanosecond fraction + offset ≈ 35 chars). Without the cap, a syntactically
+ * valid but arbitrarily long fractional-second portion forces unbounded
+ * regex/parse work and later slice/pad/embed work across up to
+ * MAX_TELEMETRY_SAMPLES rows — defeating the sample-count and decimal-string
+ * bounds on the console thread.
+ */
+export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
+/**
  * Memory / ephemeral bytes upper bound.
  * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
  * in JS Number (above this, values round silently and must be rejected).
@@ -195,6 +205,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isFiniteTimestampString(value: string): boolean {
+  // Reject before regex/Date.parse so a single overlong fractional-second
+  // field cannot burn UI-thread time scanning an unbounded producer string.
+  if (value.length > MAX_RFC3339_TIMESTAMP_LENGTH) {
+    return false;
+  }
   const match = RFC3339_DATE_TIME.exec(value);
   if (!match) {
     return false;

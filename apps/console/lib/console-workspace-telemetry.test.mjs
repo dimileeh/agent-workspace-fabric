@@ -8,6 +8,7 @@ import {
   COST_EXCLUSION_NOTE,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
+  MAX_RFC3339_TIMESTAMP_LENGTH,
   MAX_SPARKLINE_POINTS,
   MAX_STALE_AFTER_SECONDS,
   MAX_TELEMETRY_SAMPLES,
@@ -542,6 +543,48 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   const stringMem = structuredClone(SUCCESS);
   stringMem.admitted.memory_limit_bytes = "4294967296";
   assert.equal(parseTelemetryPresentation(stringMem), null);
+});
+
+test("parseTelemetryPresentation rejects overlong RFC3339 timestamp strings", () => {
+  // Decimal length cap does not cover timestamps. A syntactically valid but
+  // arbitrarily long fractional-second portion would otherwise pass the regex
+  // and Date.parse, then be sliced/padded repeatedly across sample grouping.
+  const prefix = "2026-09-12T12:00:00.";
+  const suffix = "Z";
+  const overlongFracDigits =
+    MAX_RFC3339_TIMESTAMP_LENGTH - prefix.length - suffix.length + 1;
+  const overlongTs = `${prefix}${"1".repeat(overlongFracDigits)}${suffix}`;
+  assert.ok(overlongTs.length > MAX_RFC3339_TIMESTAMP_LENGTH);
+
+  const overlongSample = structuredClone(SUCCESS);
+  overlongSample.cpu_cores_samples[0].sample_time = overlongTs;
+  overlongSample.cpu_cores_samples[0].interval_start = overlongTs;
+  overlongSample.cpu_cores_samples[0].interval_end = overlongTs;
+  assert.equal(parseTelemetryPresentation(overlongSample), null, "sample overlong timestamp");
+
+  const overlongObserved = structuredClone(SUCCESS);
+  overlongObserved.observed_at = overlongTs;
+  assert.equal(parseTelemetryPresentation(overlongObserved), null, "envelope overlong timestamp");
+
+  const overlongAdmitted = structuredClone(SUCCESS);
+  overlongAdmitted.admitted.observed_at = overlongTs;
+  assert.equal(parseTelemetryPresentation(overlongAdmitted), null, "admitted overlong timestamp");
+
+  // Boundary-length valid timestamps still parse (cap is lexical).
+  const atCapFracDigits =
+    MAX_RFC3339_TIMESTAMP_LENGTH - prefix.length - suffix.length;
+  const atCapTs = `${prefix}${"1".repeat(atCapFracDigits)}${suffix}`;
+  assert.equal(atCapTs.length, MAX_RFC3339_TIMESTAMP_LENGTH);
+  const atCap = structuredClone(SUCCESS);
+  atCap.cpu_cores_samples[0].sample_time = atCapTs;
+  atCap.cpu_cores_samples[0].interval_start = atCapTs;
+  atCap.cpu_cores_samples[0].interval_end = atCapTs;
+  atCap.memory_bytes_samples[0].sample_time = atCapTs;
+  atCap.memory_bytes_samples[0].interval_start = atCapTs;
+  atCap.memory_bytes_samples[0].interval_end = atCapTs;
+  atCap.observed_at = atCapTs;
+  atCap.admitted.observed_at = atCapTs;
+  assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap timestamp ok");
 });
 
 test("parseTelemetryPresentation rejects byte values outside the safe integer range", () => {
