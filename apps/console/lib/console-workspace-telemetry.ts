@@ -846,6 +846,9 @@ function parseEstimate(
   }
   const rateTableVersion =
     value.rate_table_version.trim() === "" ? null : value.rate_table_version;
+  if (rateTableVersion === null && value.estimate_state !== "unallocated") {
+    return null;
+  }
   return {
     currency: "USD",
     estimateState: value.estimate_state,

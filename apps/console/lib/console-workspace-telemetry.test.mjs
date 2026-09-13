@@ -589,6 +589,25 @@ test("parseTelemetryPresentation rejects estimate coverage beyond the selected v
   assert.ok(parseTelemetryPresentation(SUCCESS));
 });
 
+test("parseTelemetryPresentation requires nonblank rate-table versions for allocated estimates", () => {
+  for (const fixture of [SUCCESS, PARTIAL, UNALLOCATED]) {
+    for (const version of ["", " \t\n "]) {
+      for (const duplicate of [false, true]) {
+        const payload = structuredClone(fixture);
+        payload.estimate.rate_table_version = version;
+        payload.estimate.evidence = duplicate ? { rate_table_version: version } : {};
+        const parsed = parseTelemetryPresentation(payload);
+        if (fixture === UNALLOCATED) {
+          assert.ok(parsed);
+          assert.equal(parsed.estimate.rateTableVersion, null);
+        } else {
+          assert.equal(parsed, null, `${fixture.estimate.estimate_state}: blank rate table`);
+        }
+      }
+    }
+  }
+});
+
 test("parseTelemetryPresentation rejects malformed or conflicting estimate evidence", () => {
   // Non-string source must fail closed — not silently render as missing provenance.
   const nonStringSource = structuredClone(SUCCESS);
