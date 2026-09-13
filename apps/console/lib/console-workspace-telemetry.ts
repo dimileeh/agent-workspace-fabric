@@ -410,7 +410,7 @@ function parseSampleArray(
     if (item.container_name.length > MAX_CONTAINER_NAME_LENGTH) {
       return null;
     }
-    if (item.container_name.trim().length === 0) {
+    if (item.container_name !== item.container_name.trim()) {
       return null;
     }
     if (item.unit !== expectedUnit) {
