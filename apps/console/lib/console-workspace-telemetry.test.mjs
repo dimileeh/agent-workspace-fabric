@@ -523,6 +523,37 @@ test("parseTelemetryPresentation rejects samples clustered outside the observed_
   assert.equal(parseTelemetryPresentation(afterObserved), null);
 });
 
+for (const series of ["cpu_cores_samples", "memory_bytes_samples"]) {
+  for (const [label, observed, start, sample, end, accepted] of [
+    ["future sample", "12:00:00.000000Z", "12:00:00.000001Z", "12:00:00.000001Z", "12:00:00.000001Z", false],
+    ["future interval end", "12:00:00.000000Z", "11:59:00Z", "12:00:00Z", "12:00:00.000001Z", false],
+    ["early sample", "12:00:00.000001Z", "11:00:00.000000Z", "11:00:00.000000Z", "11:00:00.000000Z", false],
+    ["early interval start", "12:00:00.000001Z", "11:00:00.000000Z", "11:00:00.000001Z", "11:00:00.000001Z", false],
+    ["inclusive bounds with offset", "12:00:00.000001Z", "13:00:00.000001000+02:00", "14:00:00.000001000+02:00", "14:00:00.000001000+02:00", true],
+    ["inside bounds", "12:00:00.000002Z", "11:00:00.000003Z", "12:00:00.000001Z", "12:00:00.000001Z", true],
+  ]) {
+    test(`parseTelemetryPresentation checks exact view bounds: ${series} ${label}`, () => {
+      const raw = structuredClone(SUCCESS);
+      raw.view = "1h";
+      raw.observed_at = `2026-09-12T${observed}`;
+      raw.cpu_cores_samples = [];
+      raw.memory_bytes_samples = [];
+      raw[series] = [{
+        ...SUCCESS[series][0],
+        interval_start: `2026-09-12T${start}`,
+        sample_time: `2026-09-12T${sample}`,
+        interval_end: `2026-09-12T${end}`,
+      }];
+      const parsed = parseTelemetryPresentation(raw);
+      if (accepted) {
+        assert.ok(parsed);
+      } else {
+        assert.equal(parsed, null);
+      }
+    });
+  }
+}
+
 test("parseTelemetryPresentation rejects estimate coverage beyond the selected view window", () => {
   // A 1h selector must not accept a 2h priced interval as that window's cost.
   const overWindow = structuredClone(SUCCESS);
@@ -1324,6 +1355,8 @@ test("distinct sub-millisecond sample_times stay separate partitions", () => {
   // Identity must retain sub-ms fraction or two same-container readings of 1
   // and 2 become a current usage of 3 and a single history point.
   const multi = structuredClone(SUCCESS);
+  // Anchor the view at the newest sample while retaining the identity assertions.
+  multi.observed_at = "2026-09-12T12:00:00.000002Z";
   const base = SUCCESS.cpu_cores_samples[0];
   multi.cpu_cores_samples = [
     {
@@ -1363,6 +1396,8 @@ test("same sub-millisecond instant keeps identity across RFC3339 spellings", () 
   // sub-ms moment (agent-format style) while still not collapsing distinct
   // fractions — otherwise pod totals stay split or inflate incorrectly.
   const multi = structuredClone(SUCCESS);
+  // Anchor the view at the newest sample while retaining the identity assertions.
+  multi.observed_at = "2026-09-12T12:00:00.000001Z";
   const base = SUCCESS.cpu_cores_samples[0];
   multi.cpu_cores_samples = [
     {

@@ -505,9 +505,8 @@ function samplesFitViewWindow(
   viewDurationSeconds: number,
   observedAt: string | null,
 ): boolean {
-  let minMs = Infinity;
-  let maxMs = -Infinity;
-  let sawTimestamp = false;
+  let earliest: string | null = null;
+  let latest: string | null = null;
   for (const samples of seriesList) {
     for (const sample of samples) {
       for (const timestamp of [
@@ -515,18 +514,16 @@ function samplesFitViewWindow(
         sample.intervalStart,
         sample.intervalEnd,
       ]) {
-        const ms = timestampInstantMs(timestamp);
-        sawTimestamp = true;
-        if (ms < minMs) {
-          minMs = ms;
+        if (earliest === null || compareTimestampInstants(timestamp, earliest) < 0) {
+          earliest = timestamp;
         }
-        if (ms > maxMs) {
-          maxMs = ms;
+        if (latest === null || compareTimestampInstants(timestamp, latest) > 0) {
+          latest = timestamp;
         }
       }
     }
   }
-  if (!sawTimestamp) {
+  if (earliest === null || latest === null) {
     return true;
   }
   if (observedAt === null) {
@@ -536,8 +533,10 @@ function samplesFitViewWindow(
   if (!Number.isFinite(observedAtMs)) {
     return false;
   }
-  const windowStartMs = observedAtMs - viewDurationSeconds * 1000;
-  return minMs >= windowStartMs && maxMs <= observedAtMs;
+  return (
+    compareTimestampInstants(earliest, observedAt, -viewDurationSeconds * 1000) >= 0 &&
+    compareTimestampInstants(latest, observedAt) <= 0
+  );
 }
 
 /**
@@ -966,10 +965,17 @@ function timestampInstantKey(value: string): string {
   return `${timestampInstantMs(value)}\0${submillisecondFraction(value)}`;
 }
 
-/** Order two validated RFC3339 instants, including sub-millisecond fraction. */
-function compareTimestampInstants(left: string, right: string): number {
+/**
+ * Order two validated RFC3339 instants, including sub-millisecond fraction.
+ * An optional integer-ms shift of the right instant preserves its fraction.
+ */
+function compareTimestampInstants(
+  left: string,
+  right: string,
+  rightOffsetMs = 0,
+): number {
   const leftMs = timestampInstantMs(left);
-  const rightMs = timestampInstantMs(right);
+  const rightMs = timestampInstantMs(right) + rightOffsetMs;
   if (leftMs !== rightMs) {
     return leftMs < rightMs ? -1 : 1;
   }
