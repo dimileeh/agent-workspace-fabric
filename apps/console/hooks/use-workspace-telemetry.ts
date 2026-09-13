@@ -12,13 +12,12 @@ export type TelemetryReadState = {
 };
 
 /** Mounted for exactly one authorized workspace/view/gate identity. No response cache. */
-export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epochRef, onDenied }: {
+export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epochRef }: {
   workspaceId: string;
   view: TelemetryViewWindow;
   url: string;
   authEpoch: number;
   epochRef: MutableRefObject<number>;
-  onDenied: () => void;
 }) {
   const [state, setState] = useState<TelemetryReadState>({ data: null, error: null, lastGoodAt: null });
   useEffect(() => {
@@ -35,11 +34,11 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
       try {
         const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
         if (!current()) return;
-        // Denial invalidates retained data even if reading the error body fails.
+        // Denial is feed-local: clear retained telemetry and stop this reader,
+        // even if reading the error body fails. Other console access may remain valid.
         if (response.status === 401 || response.status === 403) {
           denied = true;
           setState({ data: null, error: "Telemetry access denied", lastGoodAt: null });
-          onDenied();
           return;
         }
         const result = await parseApiResponse<unknown>(response);
@@ -77,6 +76,6 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
     // Let effect replay/cleanup invalidate the first setup before any network read.
     void Promise.resolve().then(read);
     return () => { disposed = true; window.clearTimeout(timer); controller?.abort(); };
-  }, [workspaceId, view, url, authEpoch, epochRef, onDenied]);
+  }, [workspaceId, view, url, authEpoch, epochRef]);
   return state;
 }

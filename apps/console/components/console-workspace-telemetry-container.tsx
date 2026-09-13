@@ -20,7 +20,6 @@ type Props = {
   ready: boolean;
   authEpoch: number;
   epochRef: MutableRefObject<number>;
-  onDenied: () => void;
 };
 
 export function ConsoleWorkspaceTelemetryContainer(props: Props) {
@@ -41,14 +40,14 @@ function SelectedTelemetry(props: Props & { gates: boolean[] }) {
 }
 
 function TelemetryRead({
-  workspaceId, authEpoch, epochRef, onDenied, gates, view, onViewChange,
+  workspaceId, authEpoch, epochRef, gates, view, onViewChange,
 }: Props & {
   gates: boolean[];
   view: TelemetryViewWindow;
   onViewChange: (view: TelemetryViewWindow) => void;
 }) {
   const url = workspaceTelemetryPath(workspaceId, view);
-  const state = useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epochRef, onDenied });
+  const state = useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epochRef });
   const [now, setNow] = useState(() => Date.now());
   // Age last-success data independently of network success, without extra reads.
   useEffect(() => {

@@ -35,7 +35,6 @@ type ConsoleDashboardInspectorProps = {
   telemetryCapabilities: ConsoleCapabilities | null;
   telemetryAuthEpoch: number;
   telemetryEpochRef: MutableRefObject<number>;
-  onTelemetryDenied: () => void;
   selectedId: string | null;
   selectedOverview: WorkspaceOverview | null;
   selectedMergeQueueItem: MergeQueueItem | null;
@@ -129,7 +128,6 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
                 ready={capabilitiesReady}
                 authEpoch={props.telemetryAuthEpoch}
                 epochRef={props.telemetryEpochRef}
-                onDenied={props.onTelemetryDenied}
               />
               <LifecycleRail
                 status={selectedOverview.status}

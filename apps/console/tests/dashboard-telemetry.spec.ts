@@ -57,8 +57,8 @@ test("one selected read for all gates; minute cadence and distinct views", async
 
 for (const deniedStatus of [401, 403]) {
 test(`transient error retains same identity; ${deniedStatus} revocation clears`, async ({ page }) => {
-  await setup(page); let status = 200;
-  await page.route("**/telemetry?*", async route => { await fulfillJson(route, status === 200 ? fixture() : { detail: { error_code: "TEST_ERROR", message: "Unavailable" } }, status); });
+  const caps = await setup(page); let status = 200; let reads = 0;
+  await page.route("**/telemetry?*", async route => { reads++; await fulfillJson(route, status === 200 ? fixture() : { detail: { error_code: "TEST_ERROR", message: "Unavailable" } }, status); });
   await page.clock.install(); await page.goto("/"); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   status = 503; await page.clock.runFor(61_000);
@@ -66,6 +66,20 @@ test(`transient error retains same identity; ${deniedStatus} revocation clears`,
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   status = deniedStatus; await page.clock.runFor(61_000);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry access denied");
+  await expect(page.getByTestId("workspace-card-ws_unpriced_allocation")).toBeAttached();
+  await expect(page.getByTestId("workspace-card-ws_other")).toBeAttached();
+  await expect(page).toHaveURL(/workspaceId=ws_unpriced_allocation/);
+  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
+  const deniedReads = reads;
+  let negotiations = 0;
+  await page.route("**/console/capabilities", async route => { negotiations++; await fulfillJson(route, caps); });
+  await page.getByRole("button", { name: "Reload workspace" }).click();
+  await expect.poll(() => negotiations).toBe(1);
+  await page.clock.runFor(121_000);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry access denied");
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
+  expect(reads).toBe(deniedReads);
 });
 
 }

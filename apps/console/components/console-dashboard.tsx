@@ -692,10 +692,6 @@ export function ConsoleDashboard() {
     setCapabilitiesReady,
   });
 
-  const handleTelemetryDenied = useCallback(() => {
-    clearAuthorizedConsoleFeeds({ clearCapabilities: true, authDenied: true });
-  }, [clearAuthorizedConsoleFeeds]);
-
   const renegotiateAfterMutationAuthorizationDenied = useCallback((message: string) => {
     // A mutation route can observe revoked operator permissions before the
     // capabilities poll. Latch the denial into the mutating-capability gate
@@ -1265,7 +1261,6 @@ export function ConsoleDashboard() {
         telemetryCapabilities={capabilities}
         telemetryAuthEpoch={telemetryAuthEpoch}
         telemetryEpochRef={authorizedFeedEpochRef}
-        onTelemetryDenied={handleTelemetryDenied}
         selectedId={selectedId}
         selectedOverview={selectedOverview}
         selectedMergeQueueItem={selectedMergeQueueItem}
