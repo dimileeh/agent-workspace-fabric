@@ -928,7 +928,11 @@ test("virtualization keeps the viewport covered while crossing a row-window boun
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
 
   const list = page.getByTestId("workspace-list-scroll");
@@ -1854,7 +1858,11 @@ test("routine refresh updates and removes retained workspaces outside page one",
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
   ).toBeVisible();

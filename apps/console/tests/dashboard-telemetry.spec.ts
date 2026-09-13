@@ -26,6 +26,25 @@ async function open(page: Page, id = "ws_unpriced_allocation") {
   await page.getByRole("button", { name: `Open workspace details for ${id}`, exact: true }).click();
 }
 
+// Install before navigation to capture every timer, but let hydration finish
+// before pausing. Freeze before opening telemetry so UI/network waits cannot
+// consume part of its polling interval.
+async function gotoWithClock(page: Page, time = new Date("2026-09-12T12:01:00Z")) {
+  await page.clock.install({ time });
+  await page.goto("/");
+  await expect(page.locator('[data-testid^="workspace-card-"]').first()).toBeAttached();
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+}
+
+// Cross one telemetry deadline, skipping unrelated dashboard/animation ticks.
+// Await the actual response before advancing again: the next minute starts only
+// after the reader settles, and identical retained text is not a read barrier.
+async function pollTelemetry(page: Page, milliseconds = 60_000) {
+  const response = page.waitForResponse(response => response.url().includes("/telemetry?"));
+  await page.clock.fastForward(milliseconds);
+  await (await response).finished();
+}
+
 test("local unsupported inspector never fetches telemetry", async ({ page }) => {
   await setup(page, false);
   let reads = 0;
@@ -44,19 +63,18 @@ test("one selected read for all gates; minute cadence and distinct views", async
     reads.push(view); const body = fixture(); body.view = view;
     await fulfillJson(route, body);
   });
-  await page.clock.install({ time: new Date("2026-09-12T12:01:00Z") });
-  await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   expect(reads).toEqual(["1h"]);
-  await page.clock.runFor(59_000); expect(reads).toHaveLength(1);
-  await page.clock.runFor(1_100); await expect.poll(() => reads.length).toBe(2);
+  await page.clock.fastForward(59_999); expect(reads).toHaveLength(1);
+  await pollTelemetry(page, 1); await expect.poll(() => reads.length).toBe(2);
   await page.getByTestId("telemetry-view-6h").click();
   await expect.poll(() => reads.at(-1)).toBe("6h");
   await expect(page.getByTestId("telemetry-view-24h")).toBeVisible();
   await page.getByTestId("telemetry-view-24h").click();
   await expect.poll(() => reads.at(-1)).toBe("24h");
   await page.getByRole("button", { name: "Close inspector" }).click();
-  const count = reads.length; await page.clock.runFor(61_000); expect(reads).toHaveLength(count);
+  const count = reads.length; await page.clock.fastForward(61_000); expect(reads).toHaveLength(count);
 });
 
 test("telemetry timeout reason retains data until the minute retry recovers", async ({ page }) => {
@@ -67,17 +85,17 @@ test("telemetry timeout reason retains data until the minute retry recovers", as
     if (reads === 2) return; // Hold the second fetch until its deadline aborts it.
     await fulfillJson(route, fixture());
   });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-  await page.clock.runFor(60_000);
+  await page.clock.fastForward(60_000);
   await expect.poll(() => reads).toBe(2);
-  await page.clock.runFor(30_000);
+  await page.clock.fastForward(30_000);
   await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry request timed out after 30000ms");
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-  await page.clock.runFor(59_000);
+  await page.clock.fastForward(59_000);
   expect(reads).toBe(2);
   await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry request timed out after 30000ms");
-  await page.clock.runFor(1_000);
+  await pollTelemetry(page, 1_000);
   await expect.poll(() => reads).toBe(3);
   await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
@@ -92,21 +110,21 @@ test("telemetry error codes survive polling retries and clear on recovery", asyn
     reads++;
     await fulfillJson(route, status === 200 ? fixture() : { detail: { error_code: errorCode, message: "Unavailable" } }, status);
   });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   for (const failureStatus of [503, 429]) {
     status = failureStatus;
     errorCode = status === 503 ? "TELEMETRY_UNAVAILABLE" : "RATE_LIMITED";
     for (let retry = 0; retry < 2; retry++) {
       const previousReads = reads;
-      await page.clock.runFor(61_000);
+      await pollTelemetry(page);
       await expect.poll(() => reads).toBe(previousReads + 1);
       await expect(page.getByTestId("telemetry-request-error")).toHaveText(`${errorCode}: Unavailable`);
       await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
     }
   }
   status = 200;
-  await page.clock.runFor(61_000);
+  await pollTelemetry(page);
   await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
 });
@@ -115,12 +133,12 @@ for (const deniedStatus of [401, 403]) {
 test(`transient error retains same identity; ${deniedStatus} revocation clears`, async ({ page }) => {
   const caps = await setup(page); let status = 200; let reads = 0;
   await page.route("**/telemetry?*", async route => { reads++; await fulfillJson(route, status === 200 ? fixture() : { detail: { error_code: "TEST_ERROR", message: "Unavailable" } }, status); });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-  status = 503; await page.clock.runFor(61_000);
+  status = 503; await pollTelemetry(page);
   await expect(page.getByTestId("telemetry-request-error")).toContainText("Unavailable");
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-  status = deniedStatus; await page.clock.runFor(61_000);
+  status = deniedStatus; await pollTelemetry(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
   await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry access denied");
   await expect(page.getByTestId("workspace-card-ws_unpriced_allocation")).toBeAttached();
@@ -132,7 +150,7 @@ test(`transient error retains same identity; ${deniedStatus} revocation clears`,
   await page.route("**/console/capabilities", async route => { negotiations++; await fulfillJson(route, caps); });
   await page.getByRole("button", { name: "Reload workspace" }).click();
   await expect.poll(() => negotiations).toBe(1);
-  await page.clock.runFor(121_000);
+  await page.clock.fastForward(121_000);
   await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry access denied");
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
   expect(reads).toBe(deniedReads);
@@ -209,7 +227,7 @@ test("individual gates withdraw and stop unsupported polling", async ({ page }) 
   const caps = await setup(page) as ReturnType<typeof enabled>;
   let reads = 0;
   await page.route("**/telemetry?*", async route => { reads++; await fulfillJson(route, fixture()); });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost")).toBeVisible();
   caps.widgets = caps.widgets.map(w => w.id === "cost" ? { id: "cost", availability: "unsupported", reason_code: "policy_disabled", message: "Disabled by policy", semantics: "disabled" } : w);
   await page.route("**/console/capabilities", route => fulfillJson(route, caps));
@@ -219,7 +237,7 @@ test("individual gates withdraw and stop unsupported polling", async ({ page }) 
   caps.widgets = caps.widgets.map(w => ["telemetry", "allocation"].includes(String(w.id)) ? { id: w.id, availability: "unsupported", reason_code: "policy_disabled", message: "Disabled by policy", semantics: "disabled" } : w);
   await page.getByRole("button", { name: "Reload workspace" }).click();
   await expect(page.getByTestId("console-workspace-telemetry")).toHaveCount(0);
-  const count = reads; await page.clock.runFor(61_000); expect(reads).toBe(count);
+  const count = reads; await page.clock.fastForward(61_000); expect(reads).toBe(count);
 });
 
 test("provider age advances past five minutes while malformed poll retains data", async ({ page }) => {
@@ -230,12 +248,11 @@ test("provider age advances past five minutes while malformed poll retains data"
     if (malformed) body.estimate.estimated_usd = "garbage";
     return fulfillJson(route, body);
   });
-  await page.clock.install({ time: new Date("2026-09-12T12:04:00Z") });
-  await page.goto("/"); await open(page);
+  await gotoWithClock(page, new Date("2026-09-12T12:04:00Z")); await open(page);
   await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
   const panel = page.getByTestId("console-workspace-telemetry").locator("xpath=ancestor::section[1]");
   await expect(panel.getByTitle("Showing the last snapshot — live data may be stale")).toHaveCount(0);
-  malformed = true; await page.clock.runFor(61_000);
+  malformed = true; await pollTelemetry(page, 61_000);
   await expect(page.getByTestId("telemetry-request-error")).toContainText("Malformed");
   await expect(panel.getByTitle("Showing the last snapshot — live data may be stale")).toBeVisible();
 });
@@ -291,13 +308,13 @@ test("slow requests time out without overlap and recover on the next minute", as
   await setup(page); let reads = 0; let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   await page.route("**/telemetry?*", async route => { reads++; if (reads === 1) await held; await fulfillJson(route, fixture()); });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect.poll(() => reads).toBe(1);
-  await page.clock.runFor(29_000); expect(reads).toBe(1);
-  await page.clock.runFor(2_000);
+  await page.clock.fastForward(29_000); expect(reads).toBe(1);
+  await page.clock.fastForward(2_000);
   await expect(page.getByTestId("telemetry-request-error")).toBeVisible();
-  await page.clock.runFor(58_000); expect(reads).toBe(1);
-  await page.clock.runFor(2_000);
+  await page.clock.fastForward(58_000); expect(reads).toBe(1);
+  await pollTelemetry(page, 2_000);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   expect(reads).toBe(2); release();
 });
@@ -313,15 +330,15 @@ for (const ownership of [undefined, null, false, 0, "", [], {}, { workspace_reco
       if (invalid) body.ownership = ownership;
       return fulfillJson(route, body);
     });
-    await page.clock.install(); await page.goto("/"); await open(page);
+    await gotoWithClock(page); await open(page);
     await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry ownership mismatch");
     await expect(page.getByTestId("console-workspace-telemetry")).toHaveCount(0);
-    invalid = false; await page.clock.runFor(61_000);
+    invalid = false; await pollTelemetry(page);
     await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-    invalid = true; await page.clock.runFor(61_000);
+    invalid = true; await pollTelemetry(page);
     await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry ownership mismatch");
     await expect(page.getByTestId("console-workspace-telemetry")).toHaveCount(0);
-    invalid = false; await page.clock.runFor(61_000);
+    invalid = false; await pollTelemetry(page);
     await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   });
 }
@@ -332,9 +349,9 @@ test("new attempt evidence clears last-success even when its body is malformed",
     const body = fixture(); if (replace) { body.ownership.placement_attempt = 2; body.estimate.estimated_usd = "garbage"; }
     await fulfillJson(route, body);
   });
-  await page.clock.install(); await page.goto("/"); await open(page);
+  await gotoWithClock(page); await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-  replace = true; await page.clock.runFor(61_000);
+  replace = true; await pollTelemetry(page);
   await expect(page.getByTestId("telemetry-request-error")).toContainText("Malformed");
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
 });
@@ -347,8 +364,7 @@ for (const gate of ["telemetry", "allocation", "cost"]) {
     await mockAwfConsoleApi(page, { capabilities: caps, overviewItems: [overview("ws_unpriced_allocation")] });
     const held: import("@playwright/test").Route[] = [];
     await page.route("**/telemetry?*", async route => { held.push(route); });
-    await page.clock.install({ time: new Date("2026-09-12T12:10:00Z") });
-    await page.goto("/"); await open(page);
+    await gotoWithClock(page, new Date("2026-09-12T12:10:00Z")); await open(page);
     await expect(page.getByTestId("telemetry-loading")).toBeVisible();
     const tabs = page.getByRole("tablist", { name: "Telemetry window" });
     await expect(tabs).toHaveCount(gate === "telemetry" ? 1 : 0);
@@ -356,7 +372,7 @@ for (const gate of ["telemetry", "allocation", "cost"]) {
     await fulfillJson(held[0], { detail: { message: "Unavailable" } }, 503);
     await expect(page.getByTestId("telemetry-request-error")).toContainText("Unavailable");
     await expect(tabs).toHaveCount(gate === "telemetry" ? 1 : 0);
-    await page.clock.runFor(61_000);
+    await page.clock.fastForward(61_000);
     await expect.poll(() => held.length).toBe(2);
     const body = fixture(); body.state = "partial"; body.quality = "partial";
     body.cpu_cores_samples[0].quality = "partial";
@@ -397,10 +413,9 @@ for (const transition of ["withdrawal", "pending", "malformed", "missing", "outa
       if (reads === 1) await fulfillJson(route, fixture());
       else held.push(route);
     });
-    await page.clock.install();
-    await page.goto("/"); await open(page);
+    await gotoWithClock(page); await open(page);
     await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
-    await page.clock.runFor(61_000);
+    await page.clock.fastForward(61_000);
     await expect.poll(() => held.length).toBe(1);
     let capabilityRead: import("@playwright/test").Route | undefined;
     await page.route("**/console/capabilities", async route => { capabilityRead = route; });
@@ -431,7 +446,7 @@ for (const transition of ["withdrawal", "pending", "malformed", "missing", "outa
       await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
       await expect.poll(() => cancelled.length).toBe(1);
       await fulfillJson(held[0], fixture());
-      await page.clock.runFor(1_000);
+      await page.clock.fastForward(1_000);
       await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
     }
     const recovered = structuredClone(caps) as Record<string, unknown>;
@@ -452,7 +467,7 @@ for (const transition of ["withdrawal", "pending", "malformed", "missing", "outa
     }
     await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
     expect(reads).toBe(retainsNegotiation ? 2 : 3);
-    await page.clock.runFor(59_000);
+    await page.clock.fastForward(59_000);
     expect(reads).toBe(retainsNegotiation ? 2 : 3);
   });
 }
@@ -463,18 +478,12 @@ test("parent refreshes and unrelated capability revisions preserve telemetry cad
   let negotiations = 0;
   await page.route("**/console/capabilities", async route => { negotiations++; await fulfillJson(route, caps); });
   await page.route("**/telemetry?*", async route => { reads++; await fulfillJson(route, fixture()); });
-  const start = new Date("2026-09-12T12:01:00Z");
-  await page.goto("/");
+  await gotoWithClock(page);
   await expect(page.getByRole("button", { name: "Open workspace details for ws_unpriced_allocation", exact: true })).toBeVisible();
-  await page.clock.install({ time: start });
-  // Pause after dashboard initialization, before mounting the telemetry reader.
-  // Installation alone still advances with wall time during UI interactions.
-  // Use a future timestamp so time spent installing cannot put it in the past.
-  await page.clock.pauseAt(new Date(start.getTime() + 60_000));
   await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   for (let revision = 0; revision < 4; revision++) {
-    await page.clock.runFor(10_000);
+    await page.clock.fastForward(10_000);
     // Identical refresh, timestamp-only refresh, then unrelated inventory edits.
     if (revision === 1) caps.generated_at = "2026-09-12T12:01:00Z";
     if (revision >= 2) caps.widgets = caps.widgets.map(widget => widget.id === "cloud_runtime"
@@ -486,8 +495,8 @@ test("parent refreshes and unrelated capability revisions preserve telemetry cad
     expect(reads).toBe(1);
   }
   // Forty seconds elapsed across revisions; the original deadline must survive.
-  await page.clock.runFor(19_999); expect(reads).toBe(1);
-  await page.clock.runFor(1); await expect.poll(() => reads).toBe(2);
+  await page.clock.fastForward(19_999); expect(reads).toBe(1);
+  await pollTelemetry(page, 1); await expect.poll(() => reads).toBe(2);
 });
 
 test("delayed telemetry and dense 24h preserve scroll, selection and bounded history", async ({ page }) => {
@@ -513,7 +522,7 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   });
   const held: import("@playwright/test").Route[] = [];
   await page.route("**/telemetry?*", async route => { held.push(route); });
-  await page.goto("/");
+  await gotoWithClock(page);
   await expect(page.getByTestId("workspace-card-ws_interaction_75")).toBeAttached();
   expect(cursors).toEqual([null]);
   const list = page.getByTestId("workspace-list-scroll");
@@ -570,7 +579,12 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   // Near-bottom scrolling may advance the virtual window as the page appends.
   await expect(page.getByText(/^(1–100|101–200) of 200 loaded$/)).toBeVisible();
   // Cover a routine parent poll after dense rendering without eager history.
-  await page.waitForTimeout(5_500);
+  const parentPoll = page.waitForResponse(response =>
+    response.url().includes("/workspaces/overview?") &&
+    !new URL(response.url()).searchParams.has("cursor"));
+  await page.clock.fastForward(5_000);
+  await (await parentPoll).finished();
+  await expect.poll(() => batches.length).toBeGreaterThan(0);
   expect(cursors.filter(cursor => cursor !== null)).toEqual(["100"]);
   expect(batches.every(ids => ids.length <= 100)).toBe(true);
   expect(held).toHaveLength(4);
