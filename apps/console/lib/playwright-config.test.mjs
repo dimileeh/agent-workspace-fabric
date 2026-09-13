@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
+import { ESLint } from "eslint";
+
+test("harness build output is ignored by ESLint while source remains lintable", async () => {
+  const eslint = new ESLint({ cwd: new URL("../", import.meta.url).pathname });
+  assert.equal(await eslint.isPathIgnored(".next-harness/server/app/page.js"), true);
+  assert.equal(await eslint.isPathIgnored("playwright.config.ts"), false);
+});
 
 test("harness servers isolate build artifacts from ordinary development", () => {
   const config = JSON.parse(execFileSync(process.execPath, [
