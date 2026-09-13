@@ -7,12 +7,14 @@
  */
 
 import {
-  RFC3339_DATE_TIME,
+  isFiniteTimestampString,
   compareTimestampInstants,
   isSampleTimeWithinMeasurementInterval,
   timestampInstantKey,
   timestampInstantMs,
 } from "./console-workspace-telemetry-timestamps.ts";
+
+export { MAX_RFC3339_TIMESTAMP_LENGTH } from "./console-workspace-telemetry-timestamps.ts";
 
 export {
   MAX_SPARKLINE_POINTS,
@@ -71,12 +73,6 @@ const MAX_DECIMAL_MAGNITUDE = 1e15;
  * before regex/Number so a single field cannot force unbounded scanning.
  */
 export const MAX_DECIMAL_STRING_LENGTH = 64;
-/**
- * Bound timestamps before regex/Date.parse and fractional-second processing.
- * Nanosecond timestamps with offsets need ~35 chars; unlimited fractions would
- * multiply parsing and identity-key work across MAX_TELEMETRY_SAMPLES rows.
- */
-export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
 /**
  * Bound container_name before retention, identity keys, sorting and partition
  * joins. DNS labels fit in 63 chars; profile service names fit in 64.
@@ -240,44 +236,6 @@ export type WorkspaceTelemetryView = {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isFiniteTimestampString(value: string): boolean {
-  // Reject before regex/Date.parse so a single overlong fractional-second
-  // field cannot burn UI-thread time scanning an unbounded producer string.
-  if (value.length > MAX_RFC3339_TIMESTAMP_LENGTH) {
-    return false;
-  }
-  const match = RFC3339_DATE_TIME.exec(value);
-  if (!match) {
-    return false;
-  }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-  if (
-    dt.getUTCFullYear() !== year ||
-    dt.getUTCMonth() !== month - 1 ||
-    dt.getUTCDate() !== day ||
-    dt.getUTCHours() !== hour ||
-    dt.getUTCMinutes() !== minute ||
-    dt.getUTCSeconds() !== second
-  ) {
-    return false;
-  }
-  const tzDesignator = match[8];
-  if (tzDesignator !== "Z" && tzDesignator !== "z") {
-    const tzHour = Number(match[9]);
-    const tzMinute = Number(match[10]);
-    if (tzHour > 23 || tzMinute > 59) {
-      return false;
-    }
-  }
-  return Number.isFinite(Date.parse(value));
 }
 
 function isNullableTimestamp(value: unknown): value is string | null {
