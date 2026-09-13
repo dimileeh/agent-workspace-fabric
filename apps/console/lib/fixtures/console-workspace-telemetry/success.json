@@ -1,0 +1,86 @@
+{
+  "admitted": {
+    "billable": true,
+    "compute_class": "autopilot",
+    "container_creating": false,
+    "cpu_limit_cores": "1",
+    "cpu_request_cores": "0.5",
+    "ephemeral_storage_limit_bytes": null,
+    "ephemeral_storage_request_bytes": 1073741824,
+    "evidence": {
+      "owner_job_uid": "job-uid-example",
+      "pod_uid": "pod-uid-example"
+    },
+    "memory_limit_bytes": 4294967296,
+    "memory_request_bytes": 2147483648,
+    "observed_at": "2026-09-12T12:00:00+00:00",
+    "owner_job_name": "job-example",
+    "owner_job_uid": "job-uid-example",
+    "partial": false,
+    "pod_phase": "Running",
+    "provider_resource_uid": "pod-uid-example",
+    "region": "us-central1"
+  },
+  "cpu_cores_samples": [
+    {
+      "container_name": "agent",
+      "evidence": {
+        "metric_type": "kubernetes.io/container/cpu/core_usage_time"
+      },
+      "interval_end": "2026-09-12T12:00:00+00:00",
+      "interval_start": "2026-09-12T12:00:00+00:00",
+      "metric_type": "kubernetes.io/container/cpu/core_usage_time",
+      "provider_resource_uid": "pod-uid-example",
+      "quality": "ok",
+      "sample_time": "2026-09-12T12:00:00+00:00",
+      "unit": "cores",
+      "value": "0.25"
+    }
+  ],
+  "data_quality_notes": [],
+  "estimate": {
+    "currency": "USD",
+    "estimate_state": "complete",
+    "estimated_usd": "0.0123456",
+    "evidence": {
+      "rate_table_version": "gke-autopilot-pod-2026-09-12",
+      "source": "https://cloud.google.com/kubernetes-engine/pricing"
+    },
+    "priced_interval_seconds": 3600,
+    "rate_table_version": "gke-autopilot-pod-2026-09-12",
+    "unpriced_interval_seconds": 0
+  },
+  "memory_bytes_samples": [
+    {
+      "container_name": "agent",
+      "evidence": {
+        "metric_type": "kubernetes.io/container/memory/used_bytes"
+      },
+      "interval_end": "2026-09-12T12:00:00+00:00",
+      "interval_start": "2026-09-12T12:00:00+00:00",
+      "metric_type": "kubernetes.io/container/memory/used_bytes",
+      "provider_resource_uid": "pod-uid-example",
+      "quality": "ok",
+      "sample_time": "2026-09-12T12:00:00+00:00",
+      "unit": "bytes",
+      "value": "1073741824"
+    }
+  ],
+  "observed_at": "2026-09-12T12:00:00+00:00",
+  "ownership": {
+    "cell_id": "cell_example",
+    "cloud_resource_owner_id": "owner_pod_example",
+    "org_id": "org_example",
+    "placement_attempt": 1,
+    "project_id": "project_example",
+    "provider_resource_uid": "pod-uid-example",
+    "resource_name": "pod-example",
+    "resource_namespace": "ns-example",
+    "workspace_placement_id": "place_example",
+    "workspace_record_id": "ws_example"
+  },
+  "quality": "ok",
+  "stale_after_seconds": 300,
+  "state": "success",
+  "view": "1h"
+}

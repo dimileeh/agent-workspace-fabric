@@ -3150,7 +3150,7 @@ test("desktop and mobile screenshots for capability error", async ({ page }) => 
 });
 
 test.describe("hosted context query carry", () => {
-  test.use({ baseURL: "http://127.0.0.1:3101" });
+  test.use({ baseURL: "http://127.0.0.1:3191" });
 
   test("overview request rebuilds context query after client-side tenant switch", async ({ page }) => {
     const apiPrefix = "/api/core-console";

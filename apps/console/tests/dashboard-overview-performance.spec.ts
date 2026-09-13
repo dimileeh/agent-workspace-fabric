@@ -1010,7 +1010,11 @@ test("explicit page navigation clears selection-owned refresh anchoring", async 
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load the second page without scrolling to the footer: locator.click()
+  // can trigger scroll loading before its click and advance history twice.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
     .toBeVisible();
   await page.getByRole("button", { name: "Next workspace results" }).click();
