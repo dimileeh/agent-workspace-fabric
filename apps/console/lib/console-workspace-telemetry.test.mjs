@@ -423,7 +423,45 @@ test("parseTelemetryPresentation rejects sample or interval spans beyond the sel
       value: "0.20",
     },
   ];
+  exactSpan.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T11:00:00+00:00",
+      interval_start: "2026-09-12T11:00:00+00:00",
+      interval_end: "2026-09-12T11:00:00+00:00",
+    },
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+    },
+  ];
   assert.ok(parseTelemetryPresentation(exactSpan));
+
+  // CPU and memory share one plotted window: each series alone can fit 1h while
+  // the combined timestamps span >1h — reject that too.
+  const crossSeries = structuredClone(SUCCESS);
+  crossSeries.view = "1h";
+  crossSeries.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      sample_time: "2026-09-12T10:00:00+00:00",
+      interval_start: "2026-09-12T10:00:00+00:00",
+      interval_end: "2026-09-12T10:00:00+00:00",
+      value: "0.10",
+    },
+  ];
+  crossSeries.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T12:00:01+00:00",
+      interval_start: "2026-09-12T12:00:01+00:00",
+      interval_end: "2026-09-12T12:00:01+00:00",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(crossSeries), null);
 });
 
 test("parseTelemetryPresentation rejects estimate coverage beyond the selected view window", () => {
@@ -1642,13 +1680,12 @@ test("parseTelemetryPresentation rejects admitted requests that exceed their lim
   assert.ok(parseTelemetryPresentation(nullLimit), "null limits skip invariant");
 });
 
+/** Unique RFC3339 instants packed into the SUCCESS fixture's 1h view window. */
 function sampleTimestampForIndex(i) {
-  const day = String(1 + Math.floor(i / 86400)).padStart(2, "0");
-  const tod = i % 86400;
-  const hour = String(Math.floor(tod / 3600)).padStart(2, "0");
-  const minute = String(Math.floor((tod % 3600) / 60)).padStart(2, "0");
-  const second = String(tod % 60).padStart(2, "0");
-  return `2026-09-${day}T${hour}:${minute}:${second}+00:00`;
+  // End at the fixture meter time; 2048 samples at 1s spacing span 2047s < 1h.
+  const endMs = Date.parse("2026-09-12T12:00:00+00:00");
+  const ms = endMs - (MAX_TELEMETRY_SAMPLES - 1 - i) * 1000;
+  return new Date(ms).toISOString().replace(".000Z", "+00:00");
 }
 
 test("parseTelemetryPresentation accepts exactly MAX_DATA_QUALITY_NOTES", () => {

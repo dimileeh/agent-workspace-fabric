@@ -451,34 +451,39 @@ function parseSampleArray(
 }
 
 /**
- * True when every sample_time / interval_start / interval_end in the series
- * falls within a wall-clock span of at most `viewDurationSeconds`. Empty
- * series are vacuously valid. Prevents plotting a multi-hour series under a
- * shorter view selector (mirrors estimate interval coverage bounds).
+ * True when every sample_time / interval_start / interval_end across the
+ * given series falls within a wall-clock span of at most `viewDurationSeconds`.
+ * Empty input is vacuously valid. Prevents plotting a multi-hour series under
+ * a shorter view selector (mirrors estimate interval coverage bounds). CPU and
+ * memory are checked together because both series share one plotted window.
  */
 function samplesFitViewWindow(
-  samples: ParsedTelemetrySample[],
+  seriesList: readonly ParsedTelemetrySample[][],
   viewDurationSeconds: number,
 ): boolean {
-  if (samples.length === 0) {
-    return true;
-  }
   let minMs = Infinity;
   let maxMs = -Infinity;
-  for (const sample of samples) {
-    for (const timestamp of [
-      sample.sampleTime,
-      sample.intervalStart,
-      sample.intervalEnd,
-    ]) {
-      const ms = timestampInstantMs(timestamp);
-      if (ms < minMs) {
-        minMs = ms;
-      }
-      if (ms > maxMs) {
-        maxMs = ms;
+  let sawTimestamp = false;
+  for (const samples of seriesList) {
+    for (const sample of samples) {
+      for (const timestamp of [
+        sample.sampleTime,
+        sample.intervalStart,
+        sample.intervalEnd,
+      ]) {
+        const ms = timestampInstantMs(timestamp);
+        sawTimestamp = true;
+        if (ms < minMs) {
+          minMs = ms;
+        }
+        if (ms > maxMs) {
+          maxMs = ms;
+        }
       }
     }
+  }
+  if (!sawTimestamp) {
+    return true;
   }
   return maxMs - minMs <= viewDurationSeconds * 1000;
 }
@@ -1112,10 +1117,7 @@ export function parseTelemetryPresentation(
   // Sample/interval wall-clock span cannot exceed the selected view window, or
   // a multi-hour series would render under a shorter selector (e.g. 2h under "1h").
   const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[payload.view];
-  if (
-    !samplesFitViewWindow(cpuSamples, viewDurationSeconds) ||
-    !samplesFitViewWindow(memorySamples, viewDurationSeconds)
-  ) {
+  if (!samplesFitViewWindow([cpuSamples, memorySamples], viewDurationSeconds)) {
     return null;
   }
   const expectedResourceUid = resolvePresentationResourceUid(payload);
