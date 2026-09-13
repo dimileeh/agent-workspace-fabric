@@ -142,6 +142,22 @@ use `cache: no-store`. Provider sample age advances independently of request suc
 a longer view does not turn live data into historical data. Cost remains the
 resource-attempt estimate, independently of chart selection and LLM cost.
 
+A pending same-context capability refresh or transient capability-endpoint outage
+retains the last valid negotiation; an outage does not withdraw available telemetry.
+Malformed/missing capability contracts and explicit withdrawal cancel selected reads
+and clear their retained metrics. Backend replacement and authorization denial also
+invalidate prior-context work. Recovery after invalidation starts a fresh authorized read;
+late successes from invalidated requests cannot restore the old metrics.
+
+`tests/dashboard-telemetry.spec.ts` exercises these transitions with a telemetry
+poll held after an initial success, including 401/403 recovery. It also checks
+unchanged, timestamp-only and unrelated capability refreshes against the minute
+cadence, plus delayed reads and the dense 24h export with a paginated list. The
+interaction checks retain the existing 1,000ms pane threshold, assert stable user
+scroll and selection through dense rendering, and allow only one requested history
+page after scrolling to the end. These are synthetic browser checks, not hosted
+production acceptance.
+
 For an unpriced estimate with no amount and zero priced seconds, absent or null
 `estimate.evidence.source` means unknown. Malformed non-null provenance, conflicting
 rate versions/resource attribution and priced contradictions remain rejected.

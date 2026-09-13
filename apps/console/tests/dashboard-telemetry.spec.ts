@@ -254,3 +254,190 @@ for (const gate of ["telemetry", "allocation", "cost"]) {
     await expect(page.getByText("Compute class", { exact: true })).toHaveCount(gate === "allocation" ? 1 : 0);
   });
 }
+
+// Hold actual dashboard fetches so cancellation and late delivery are exercised
+// independently of the reusable component harness.
+for (const transition of ["withdrawal", "pending", "malformed", "missing", "outage", "backend", "401", "403"] as const) {
+  test(`in-flight telemetry across capability ${transition} and recovery`, async ({ page }) => {
+    const caps = await setup(page);
+    const held: import("@playwright/test").Route[] = [];
+    const cancelled: string[] = [];
+    let reads = 0;
+    page.on("requestfailed", request => {
+      if (request.url().includes("/telemetry?")) cancelled.push(request.url());
+    });
+    await page.route("**/telemetry?*", async route => {
+      reads++;
+      if (reads === 1) await fulfillJson(route, fixture());
+      else held.push(route);
+    });
+    await page.clock.install();
+    await page.goto("/"); await open(page);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+    await page.clock.runFor(61_000);
+    await expect.poll(() => held.length).toBe(1);
+    let capabilityRead: import("@playwright/test").Route | undefined;
+    await page.route("**/console/capabilities", async route => { capabilityRead = route; });
+    await page.getByRole("button", { name: "Reload workspace" }).click();
+    await expect.poll(() => capabilityRead !== undefined).toBe(true);
+    if (transition === "pending") {
+      // Pending same-context refresh does not withdraw the last negotiation.
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+      expect(cancelled).toHaveLength(0);
+    } else {
+      const next = structuredClone(caps) as Record<string, unknown>;
+      if (transition === "withdrawal") next.widgets = (localCapabilities() as { widgets: unknown }).widgets;
+      if (transition === "malformed") next.widgets = [];
+      if (transition === "backend") next.identity = { ...(next.identity as object), backend_id: "replacement-backend" };
+      const status = transition === "missing" ? 404 : transition === "outage" ? 503 : Number(transition) || 200;
+      await fulfillJson(capabilityRead!, status === 200 ? next : { detail: { message: `capability ${transition}` } }, status);
+    }
+    const retainsNegotiation = transition === "pending" || transition === "outage";
+    if (retainsNegotiation) {
+      if (transition === "outage") await expect(page.getByText("capability outage", { exact: true })).toBeVisible();
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+      expect(cancelled).toHaveLength(0);
+      const fresh = fixture(); fresh.estimate = null;
+      await fulfillJson(held[0], fresh);
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+      if (transition === "pending") await fulfillJson(capabilityRead!, caps);
+    } else {
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
+      await expect.poll(() => cancelled.length).toBe(1);
+      await fulfillJson(held[0], fixture());
+      await page.clock.runFor(1_000);
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
+    }
+    const recovered = structuredClone(caps) as Record<string, unknown>;
+    if (transition === "backend") recovered.identity = { ...(recovered.identity as object), backend_id: "replacement-backend" };
+    let recoveries = 0;
+    await page.route("**/console/capabilities", async route => { recoveries++; await fulfillJson(route, recovered); });
+    // Keep the inspector mounted; its overlay can cover the header button.
+    await page.locator("header").getByRole("button", { name: "Refresh", exact: true })
+      .evaluate((button: HTMLButtonElement) => button.click());
+    await expect.poll(() => recoveries).toBe(1);
+    if (!retainsNegotiation) {
+      if (transition === "backend" || transition === "401" || transition === "403") await open(page);
+      await expect(page.getByTestId("telemetry-loading")).toBeVisible();
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveCount(0);
+      await expect.poll(() => held.length).toBe(2);
+      const fresh = fixture(); fresh.estimate = null;
+      await fulfillJson(held[1], fresh);
+    }
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+    expect(reads).toBe(retainsNegotiation ? 2 : 3);
+    await page.clock.runFor(59_000);
+    expect(reads).toBe(retainsNegotiation ? 2 : 3);
+  });
+}
+
+test("parent refreshes and unrelated capability revisions preserve telemetry cadence", async ({ page }) => {
+  const caps = await setup(page) as Record<string, unknown> & { widgets: Array<Record<string, unknown>> };
+  let reads = 0;
+  let negotiations = 0;
+  await page.route("**/console/capabilities", async route => { negotiations++; await fulfillJson(route, caps); });
+  await page.route("**/telemetry?*", async route => { reads++; await fulfillJson(route, fixture()); });
+  await page.clock.install(); await page.goto("/"); await open(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  for (let revision = 0; revision < 4; revision++) {
+    // Identical refresh, timestamp-only refresh, then unrelated inventory edits.
+    if (revision === 1) caps.generated_at = "2026-09-12T12:01:00Z";
+    if (revision >= 2) caps.widgets = caps.widgets.map(widget => widget.id === "cloud_runtime"
+      ? { ...widget, semantics: `Unrelated revision ${revision}` } : widget);
+    const before = negotiations;
+    await page.getByRole("button", { name: "Reload workspace" }).click();
+    await expect.poll(() => negotiations).toBe(before + 1);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+    expect(reads).toBe(1);
+  }
+  await page.clock.runFor(59_000); expect(reads).toBe(1);
+  await page.clock.runFor(1_100); await expect.poll(() => reads).toBe(2);
+});
+
+test("delayed telemetry and dense 24h preserve scroll, selection and bounded history", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const rows = Array.from({ length: 301 }, (_, index) => overview(`ws_interaction_${index}`));
+  await mockAwfConsoleApi(page, { capabilities: enabled(), overviewItems: rows.slice(0, 100) });
+  const cursors: Array<string | null> = [];
+  const batches: string[][] = [];
+  await page.route("**/api/awf/workspaces/overview?*", async route => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    const offset = Number(cursor ?? 0);
+    await fulfillJson(route, { items: rows.slice(offset, offset + 100), has_more: offset + 100 < rows.length, next_cursor: String(offset + 100) });
+  });
+  await page.route("**/api/awf/workspaces/overview/batch", async route => {
+    const ids = route.request().postDataJSON().workspace_ids as string[];
+    batches.push(ids);
+    await fulfillJson(route, { items: rows.filter(row => ids.includes(row.workspace_id)), missing_workspace_ids: [] });
+  });
+  await page.route(/\/api\/awf\/workspaces\/ws_interaction_\d+$/, route => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1)!;
+    return fulfillJson(route, overview(id));
+  });
+  const held: import("@playwright/test").Route[] = [];
+  await page.route("**/telemetry?*", async route => { held.push(route); });
+  await page.goto("/");
+  await expect(page.getByTestId("workspace-card-ws_interaction_75")).toBeAttached();
+  expect(cursors).toEqual([null]);
+  const list = page.getByTestId("workspace-list-scroll");
+  const selected = page.getByTestId("workspace-card-ws_interaction_75");
+  await selected.evaluate(element => {
+    const list = element.closest<HTMLElement>('[data-testid="workspace-list-scroll"]')!;
+    const controlsHeight = list.querySelector<HTMLElement>(":scope > .sticky")?.offsetHeight ?? 0;
+    list.scrollTo({ top: list.scrollTop + element.getBoundingClientRect().top - list.getBoundingClientRect().top - controlsHeight });
+  });
+  await page.getByLabel("Select ws_interaction_75 for fullscreen logs").check();
+  const scrollBefore = await list.evaluate(element => element.scrollTop);
+  expect(scrollBefore).toBeGreaterThan(0);
+  const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  const started = Date.now();
+  await open(page, "ws_interaction_75");
+  await expect(page.getByTestId("telemetry-loading")).toBeVisible();
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  await expect(inspector).toHaveClass(/translate-x-full/);
+  const delayedPaneMs = Date.now() - started;
+  expect(delayedPaneMs).toBeLessThan(1_000);
+  await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(scrollBefore);
+  await expect(page.getByLabel("Select ws_interaction_75 for fullscreen logs")).toBeChecked();
+  await open(page, "ws_interaction_75");
+  await page.getByTestId("telemetry-view-24h").click();
+  await expect.poll(() => held.filter(route => new URL(route.request().url()).searchParams.get("view") === "24h").length).toBe(1);
+  // A user scroll during the delayed request must survive projection/rendering.
+  await list.evaluate(element => element.scrollTo({ top: element.scrollTop + 120 }));
+  const duringRead = await list.evaluate(element => element.scrollTop);
+  expect(duringRead).toBeGreaterThan(scrollBefore);
+  const dense = fixture("day_two_containers");
+  expect(dense.cpu_cores_samples).toHaveLength(2048);
+  expect(dense.memory_bytes_samples).toHaveLength(2048);
+  // Only routing ownership changes in this consumer interaction scenario.
+  dense.ownership.workspace_record_id = "ws_interaction_75";
+  const dayRead = held.find(route => new URL(route.request().url()).searchParams.get("view") === "24h")!;
+  await fulfillJson(dayRead, dense);
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toBeVisible();
+  await expect(page.getByTestId("telemetry-view-selector")).toHaveAttribute("data-awf-displayed-view", "24h");
+  await expect(page).toHaveURL(/workspaceId=ws_interaction_75/);
+  await expect(page.getByLabel("Select ws_interaction_75 for fullscreen logs")).toBeChecked();
+  await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(duringRead);
+  expect(cursors.filter(cursor => cursor !== null)).toEqual([]);
+  const denseStarted = Date.now();
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  await expect(inspector).toHaveClass(/translate-x-full/);
+  await open(page, "ws_interaction_75");
+  await expect(page.getByTestId("telemetry-loading")).toBeVisible();
+  const densePaneMs = Date.now() - denseStarted;
+  expect(densePaneMs).toBeLessThan(1_000);
+  console.info(`[telemetry-interaction] delayed-open-close=${delayedPaneMs}ms dense-close-open=${densePaneMs}ms`);
+  await page.getByRole("button", { name: "Close inspector" }).click();
+  await list.evaluate(element => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => cursors.filter(cursor => cursor !== null)).toEqual(["100"]);
+  // Near-bottom scrolling may advance the virtual window as the page appends.
+  await expect(page.getByText(/^(1–100|101–200) of 200 loaded$/)).toBeVisible();
+  // Cover a routine parent poll after dense rendering without eager history.
+  await page.waitForTimeout(5_500);
+  expect(cursors.filter(cursor => cursor !== null)).toEqual(["100"]);
+  expect(batches.every(ids => ids.length <= 100)).toBe(true);
+  expect(held).toHaveLength(4);
+  expect(held.every(route => new URL(route.request().url()).pathname.endsWith("/ws_interaction_75/telemetry"))).toBe(true);
+  await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(100);
+});
