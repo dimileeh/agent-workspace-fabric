@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   COST_EXCLUSION_NOTE,
+  MAX_DECIMAL_STRING_LENGTH,
   MAX_SPARKLINE_POINTS,
   MAX_STALE_AFTER_SECONDS,
   MAX_TELEMETRY_SAMPLES,
@@ -467,8 +468,13 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
     assert.equal(parseTelemetryPresentation(badEst), null, `estimate ${bad}`);
   }
   // Lexical nonzero below Number's range underflows to 0; must not become fake zero.
+  // Extreme underflows exceed MAX_DECIMAL_STRING_LENGTH and fail closed on the
+  // length gate (which also stops unbounded trim/regex/Number work). Shorter
+  // lexical nonzeros that still collapse to 0 are covered when representable
+  // within the length cap — keep a canonical-zero positive control below.
   const underflow = `0.${"0".repeat(400)}1`;
   assert.equal(Number(underflow), 0);
+  assert.ok(underflow.length > MAX_DECIMAL_STRING_LENGTH);
   const underflowCpu = structuredClone(SUCCESS);
   underflowCpu.cpu_cores_samples[0].value = underflow;
   assert.equal(parseTelemetryPresentation(underflowCpu), null, "cpu underflow");
@@ -482,6 +488,23 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   const underflowAdmitted = structuredClone(SUCCESS);
   underflowAdmitted.admitted.cpu_request_cores = underflow;
   assert.equal(parseTelemetryPresentation(underflowAdmitted), null, "admitted underflow");
+  // Overlong decimal strings must be rejected before trim/regex/Number scanning.
+  const overlong = `${"9".repeat(MAX_DECIMAL_STRING_LENGTH + 1)}`;
+  assert.equal(overlong.length, MAX_DECIMAL_STRING_LENGTH + 1);
+  const overlongCpu = structuredClone(SUCCESS);
+  overlongCpu.cpu_cores_samples[0].value = overlong;
+  assert.equal(parseTelemetryPresentation(overlongCpu), null, "cpu overlong decimal");
+  const overlongEst = structuredClone(SUCCESS);
+  overlongEst.estimate.estimated_usd = overlong;
+  assert.equal(parseTelemetryPresentation(overlongEst), null, "estimate overlong decimal");
+  const overlongAdmitted = structuredClone(SUCCESS);
+  overlongAdmitted.admitted.cpu_request_cores = overlong;
+  assert.equal(parseTelemetryPresentation(overlongAdmitted), null, "admitted overlong decimal");
+  // Boundary-length valid magnitudes still parse (cap is lexical, not magnitude).
+  const atLengthCap = structuredClone(SUCCESS);
+  atLengthCap.cpu_cores_samples[0].value = "0." + "1".repeat(MAX_DECIMAL_STRING_LENGTH - 2);
+  assert.equal(atLengthCap.cpu_cores_samples[0].value.length, MAX_DECIMAL_STRING_LENGTH);
+  assert.notEqual(parseTelemetryPresentation(atLengthCap), null, "length-cap decimal ok");
   // Canonical lexical zeros must still parse as real zero (not rejected as underflow).
   const exactZero = structuredClone(SUCCESS);
   exactZero.cpu_cores_samples[0].value = "0.000";

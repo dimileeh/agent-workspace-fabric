@@ -37,6 +37,14 @@ export const COST_EXCLUSION_NOTE =
 /** Reject absurd magnitudes (CPU cores / USD) rather than accept scientific junk. */
 const MAX_DECIMAL_MAGNITUDE = 1e15;
 /**
+ * Lexical length cap for decimal strings before trim / regex / Number.
+ * Legitimate cores/USD/bytes values fit in well under this (≤16 integer digits
+ * for MAX_SAFE_INTEGER / 1e15, plus a short fraction). Without the cap, one
+ * pathological field can force unbounded scan/parse work on the UI thread;
+ * sample-count caps do not protect CPU or cost scalar paths.
+ */
+export const MAX_DECIMAL_STRING_LENGTH = 64;
+/**
  * Memory / ephemeral bytes upper bound.
  * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
  * in JS Number (above this, values round silently and must be rejected).
@@ -232,6 +240,11 @@ function parseDecimalString(
     return null;
   }
   if (typeof value !== "string") {
+    return undefined;
+  }
+  // Reject before trim/regex/Number so a single overlong field cannot burn
+  // memory or UI-thread time scanning an unbounded producer string.
+  if (value.length > MAX_DECIMAL_STRING_LENGTH) {
     return undefined;
   }
   const trimmed = value.trim();
