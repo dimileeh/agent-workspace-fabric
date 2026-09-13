@@ -687,6 +687,31 @@ test("parseTelemetryPresentation rejects estimate_state that contradicts amount 
   assert.equal(parseTelemetryPresentation(partialFullyPriced), null);
 });
 
+test("partial estimates require priced coverage for a non-null amount, including zero", () => {
+  const raw = structuredClone(PARTIAL);
+  raw.estimate.priced_interval_seconds = 0;
+  raw.estimate.unpriced_interval_seconds = 600;
+  for (const amount of ["0", "0.0040000"]) {
+    raw.estimate.estimated_usd = amount;
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+
+  raw.estimate.estimated_usd = null;
+  const unpriced = parseTelemetryPresentation(raw);
+  assert.ok(unpriced);
+  const view = projectWorkspaceTelemetryView(unpriced, { nowMs: FIXED_NOW });
+  assert.equal(view.estimate.displayState, "unpriced");
+  assert.equal(view.estimate.estimatedUsd, null);
+
+  raw.estimate.priced_interval_seconds = 60;
+  raw.estimate.estimated_usd = "0";
+  const priced = parseTelemetryPresentation(raw);
+  assert.ok(priced);
+  const pricedView = projectWorkspaceTelemetryView(priced, { nowMs: FIXED_NOW });
+  assert.equal(pricedView.estimate.displayState, "partial");
+  assert.equal(pricedView.estimate.estimatedUsd, 0);
+});
+
 test("parseTelemetryPresentation rejects unallocated state that disagrees with allocation or estimate", () => {
   // Envelope claims unallocated while retaining admitted resources, samples,
   // and a complete dollar estimate — would render a contradictory operator view.

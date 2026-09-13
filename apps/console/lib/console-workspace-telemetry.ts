@@ -759,8 +759,12 @@ function parseEstimate(
       return null;
     }
   } else if (value.estimate_state === "partial") {
-    // Partial means some coverage is explicitly unpriced.
-    if (value.unpriced_interval_seconds === 0) {
+    // Partial means some coverage is explicitly unpriced. Any amount, even
+    // zero, requires priced coverage; otherwise the amount must be unknown.
+    if (
+      value.unpriced_interval_seconds === 0 ||
+      (value.priced_interval_seconds === 0 && estimatedUsd !== null)
+    ) {
       return null;
     }
   }
