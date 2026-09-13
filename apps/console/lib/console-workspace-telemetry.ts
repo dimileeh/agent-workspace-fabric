@@ -81,6 +81,17 @@ export const MAX_CONTAINER_NAME_LENGTH = 64;
  */
 export const MAX_ALLOCATION_LABEL_LENGTH = 64;
 /**
+ * Lexical length cap for estimate rate provenance strings
+ * (rate_table_version, evidence.source, evidence.rate_table_version) before
+ * trimming or retaining them.
+ * Legitimate rate-table ids and pricing-source URLs fit well under this
+ * (fixtures use ~28–52 chars). Without the cap, a malformed producer can
+ * supply arbitrarily long strings that pass the type-only check, are scanned
+ * by trim(), retained, and projected into Fact DOM nodes — defeating the
+ * numeric, timestamp, and allocation-label bounds on the console thread.
+ */
+export const MAX_RATE_PROVENANCE_LENGTH = 64;
+/**
  * Lexical length cap for provider_resource_uid before retaining samples or
  * resolving presentation identity.
  * Legitimate K8s ObjectMeta UIDs are UUIDs (36 chars). Without the cap, a
@@ -1022,6 +1033,11 @@ function parseEstimate(
   if (typeof value.rate_table_version !== "string") {
     return null;
   }
+  // Bound before trim/retain so a pathological version cannot force unbounded
+  // scan work or an overlong Fact projection.
+  if (value.rate_table_version.length > MAX_RATE_PROVENANCE_LENGTH) {
+    return null;
+  }
   let rateSource: string | null = null;
   if (value.evidence !== undefined && value.evidence !== null) {
     if (!isPlainObject(value.evidence)) {
@@ -1032,6 +1048,7 @@ function parseEstimate(
     if ("source" in value.evidence && value.evidence.source !== undefined) {
       if (
         typeof value.evidence.source !== "string" ||
+        value.evidence.source.length > MAX_RATE_PROVENANCE_LENGTH ||
         value.evidence.source.trim() === ""
       ) {
         return null;
@@ -1045,6 +1062,9 @@ function parseEstimate(
       value.evidence.rate_table_version !== undefined
     ) {
       if (typeof value.evidence.rate_table_version !== "string") {
+        return null;
+      }
+      if (value.evidence.rate_table_version.length > MAX_RATE_PROVENANCE_LENGTH) {
         return null;
       }
       // Compare the same empty→null normalization used for display so a blank

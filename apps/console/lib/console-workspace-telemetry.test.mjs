@@ -11,6 +11,7 @@ import {
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
   MAX_PROVIDER_RESOURCE_UID_LENGTH,
+  MAX_RATE_PROVENANCE_LENGTH,
   MAX_RFC3339_TIMESTAMP_LENGTH,
   MAX_SPARKLINE_POINTS,
   MAX_STALE_AFTER_SECONDS,
@@ -863,6 +864,75 @@ test("parseTelemetryPresentation rejects overlong provider_resource_uid strings"
   atCap.cpu_cores_samples[0].provider_resource_uid = atCapUid;
   atCap.memory_bytes_samples[0].provider_resource_uid = atCapUid;
   assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap provider_resource_uid ok");
+});
+
+test("parseTelemetryPresentation rejects overlong rate provenance strings", () => {
+  // Numeric/timestamp/allocation caps do not bound rate_table_version or
+  // evidence.source. Overlong strings are trimmed, retained, and projected.
+  const overlong = "r".repeat(MAX_RATE_PROVENANCE_LENGTH + 1);
+  assert.equal(overlong.length, MAX_RATE_PROVENANCE_LENGTH + 1);
+
+  const overlongTopLevel = structuredClone(SUCCESS);
+  overlongTopLevel.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    rate_table_version: overlong,
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      rate_table_version: overlong,
+    },
+  };
+  assert.equal(
+    parseTelemetryPresentation(overlongTopLevel),
+    null,
+    "overlong rate_table_version",
+  );
+
+  const overlongSource = structuredClone(SUCCESS);
+  overlongSource.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      source: overlong,
+    },
+  };
+  assert.equal(
+    parseTelemetryPresentation(overlongSource),
+    null,
+    "overlong evidence.source",
+  );
+
+  // Evidence-only overlong version (top-level still short) fails before compare.
+  const overlongEvidenceVersion = structuredClone(SUCCESS);
+  overlongEvidenceVersion.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      rate_table_version: overlong,
+    },
+  };
+  assert.equal(
+    parseTelemetryPresentation(overlongEvidenceVersion),
+    null,
+    "overlong evidence.rate_table_version",
+  );
+
+  // Boundary-length matching provenance still parses (cap is lexical).
+  const atCap = "r".repeat(MAX_RATE_PROVENANCE_LENGTH);
+  assert.equal(atCap.length, MAX_RATE_PROVENANCE_LENGTH);
+  const atCapEstimate = structuredClone(SUCCESS);
+  atCapEstimate.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    rate_table_version: atCap,
+    evidence: {
+      source: atCap,
+      rate_table_version: atCap,
+    },
+  };
+  assert.notEqual(
+    parseTelemetryPresentation(atCapEstimate),
+    null,
+    "length-cap rate provenance ok",
+  );
 });
 
 test("parseTelemetryPresentation rejects overlong allocation presentation strings", () => {
