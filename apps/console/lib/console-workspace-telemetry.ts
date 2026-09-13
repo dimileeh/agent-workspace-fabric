@@ -9,6 +9,13 @@
 export const TELEMETRY_VIEWS = ["1h", "6h", "24h"] as const;
 export type TelemetryViewWindow = (typeof TELEMETRY_VIEWS)[number];
 
+/** Wall-clock duration each `view` selector represents (seconds). */
+const TELEMETRY_VIEW_DURATION_SECONDS: Record<TelemetryViewWindow, number> = {
+  "1h": 3600,
+  "6h": 21600,
+  "24h": 86400,
+};
+
 export const TELEMETRY_STATES = ["success", "partial", "stale", "unallocated"] as const;
 export type TelemetryPresentationState = (typeof TELEMETRY_STATES)[number];
 
@@ -1019,6 +1026,15 @@ export function parseTelemetryPresentation(
   }
   const estimate = parseEstimate(payload.estimate);
   if (estimate === null) {
+    return null;
+  }
+  // Interval coverage cannot exceed the selected view window, or a multi-hour
+  // charge would display under a shorter selector (e.g. 7200s under "1h").
+  const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[payload.view];
+  if (
+    estimate.pricedIntervalSeconds + estimate.unpricedIntervalSeconds >
+    viewDurationSeconds
+  ) {
     return null;
   }
 

@@ -341,6 +341,30 @@ test("parseTelemetryPresentation rejects estimate_state that contradicts interva
   assert.equal(parseTelemetryPresentation(unallocatedUnpriced), null);
 });
 
+test("parseTelemetryPresentation rejects estimate coverage beyond the selected view window", () => {
+  // A 1h selector must not accept a 2h priced interval as that window's cost.
+  const overWindow = structuredClone(SUCCESS);
+  overWindow.view = "1h";
+  overWindow.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    priced_interval_seconds: 7200,
+    unpriced_interval_seconds: 0,
+  };
+  assert.equal(parseTelemetryPresentation(overWindow), null);
+
+  // Combined priced + unpriced coverage also cannot exceed the view duration.
+  const overPartial = structuredClone(PARTIAL);
+  overPartial.view = "1h";
+  overPartial.estimate = {
+    ...structuredClone(PARTIAL.estimate),
+    priced_interval_seconds: 3000,
+    unpriced_interval_seconds: 1200,
+  };
+  assert.equal(parseTelemetryPresentation(overPartial), null);
+
+  // Exact window duration remains valid (success fixture: 1h / 3600s).
+  assert.ok(parseTelemetryPresentation(SUCCESS));
+});
 test("parseTelemetryPresentation rejects estimate_state that contradicts amount fields", () => {
   // complete with a null amount would surface as unpriced despite estimate_state.
   const completeNullAmount = structuredClone(SUCCESS);
