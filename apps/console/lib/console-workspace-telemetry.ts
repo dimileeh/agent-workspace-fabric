@@ -37,7 +37,7 @@ export const COST_EXCLUSION_NOTE =
 /** Reject absurd magnitudes (CPU cores / USD) rather than accept scientific junk. */
 const MAX_DECIMAL_MAGNITUDE = 1e15;
 /**
- * Lexical length cap for decimal strings before trim / regex / Number.
+ * Lexical length cap for decimal strings before regex / Number.
  * Legitimate cores/USD/bytes values fit in well under this (≤16 integer digits
  * for MAX_SAFE_INTEGER / 1e15, plus a short fraction). Without the cap, one
  * pathological field can force unbounded scan/parse work on the UI thread;
@@ -249,23 +249,24 @@ function parseDecimalString(
   if (typeof value !== "string") {
     return undefined;
   }
-  // Reject before trim/regex/Number so a single overlong field cannot burn
+  // Reject before regex/Number so a single overlong field cannot burn
   // memory or UI-thread time scanning an unbounded producer string.
   if (value.length > MAX_DECIMAL_STRING_LENGTH) {
     return undefined;
   }
-  const trimmed = value.trim();
-  if (!DECIMAL_STRING.test(trimmed)) {
+  // Validate the original string — never trim. Whitespace-padded values
+  // (" 0.25 ") are producer serialization drift and must fail closed.
+  if (!DECIMAL_STRING.test(value)) {
     return undefined;
   }
-  const n = Number(trimmed);
+  const n = Number(value);
   if (!Number.isFinite(n) || n < 0 || n > max) {
     return undefined;
   }
   // Lexical nonzero that underflows to 0 (below Number.MIN_VALUE) must not be
   // accepted as literal zero — CPU/USD would otherwise project fake-zero usage.
   // Only canonical lexical zeros ("0", "0.0", …) may parse as numeric 0.
-  if (n === 0 && !/^0(?:\.0+)?$/.test(trimmed)) {
+  if (n === 0 && !/^0(?:\.0+)?$/.test(value)) {
     return undefined;
   }
   if (options.requireSafeInteger && !Number.isSafeInteger(n)) {

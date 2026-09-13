@@ -468,9 +468,25 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
     badEst.estimate.estimated_usd = bad;
     assert.equal(parseTelemetryPresentation(badEst), null, `estimate ${bad}`);
   }
+  // Whitespace-padded decimals are producer contract drift — do not trim/accept.
+  for (const bad of [" 0.25", "0.25 ", " 0.25 ", "\t0.25", "0.25\n"]) {
+    const badCpu = structuredClone(SUCCESS);
+    badCpu.cpu_cores_samples[0].value = bad;
+    assert.equal(parseTelemetryPresentation(badCpu), null, `cpu padded ${JSON.stringify(bad)}`);
+    const badEst = structuredClone(SUCCESS);
+    badEst.estimate.estimated_usd = bad;
+    assert.equal(parseTelemetryPresentation(badEst), null, `estimate padded ${JSON.stringify(bad)}`);
+    const badAdmitted = structuredClone(SUCCESS);
+    badAdmitted.admitted.cpu_request_cores = bad;
+    assert.equal(
+      parseTelemetryPresentation(badAdmitted),
+      null,
+      `admitted padded ${JSON.stringify(bad)}`,
+    );
+  }
   // Lexical nonzero below Number's range underflows to 0; must not become fake zero.
   // Extreme underflows exceed MAX_DECIMAL_STRING_LENGTH and fail closed on the
-  // length gate (which also stops unbounded trim/regex/Number work). Shorter
+  // length gate (which also stops unbounded regex/Number work). Shorter
   // lexical nonzeros that still collapse to 0 are covered when representable
   // within the length cap — keep a canonical-zero positive control below.
   const underflow = `0.${"0".repeat(400)}1`;
@@ -489,7 +505,7 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   const underflowAdmitted = structuredClone(SUCCESS);
   underflowAdmitted.admitted.cpu_request_cores = underflow;
   assert.equal(parseTelemetryPresentation(underflowAdmitted), null, "admitted underflow");
-  // Overlong decimal strings must be rejected before trim/regex/Number scanning.
+  // Overlong decimal strings must be rejected before regex/Number scanning.
   const overlong = `${"9".repeat(MAX_DECIMAL_STRING_LENGTH + 1)}`;
   assert.equal(overlong.length, MAX_DECIMAL_STRING_LENGTH + 1);
   const overlongCpu = structuredClone(SUCCESS);
