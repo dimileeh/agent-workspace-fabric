@@ -629,7 +629,7 @@ function assertSampleIdentities(
       seenContainerAtTime.add(identityKey);
 
       const uid = sample.providerResourceUid;
-      if (uid === null || uid.length === 0) {
+      if (uid === null || uid.trim().length === 0) {
         return false;
       }
       if (seriesUid === null) {

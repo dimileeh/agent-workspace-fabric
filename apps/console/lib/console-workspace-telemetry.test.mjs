@@ -1726,6 +1726,19 @@ test("parseTelemetryPresentation rejects samples without provider_resource_uid",
   assert.equal(parseTelemetryPresentation(empty), null);
 });
 
+test("parseTelemetryPresentation rejects whitespace-only sample UIDs without presentation UID", () => {
+  for (const uid of ["   ", "\t\n", "\u00a0"]) {
+    const raw = structuredClone(SUCCESS);
+    delete raw.admitted.provider_resource_uid;
+    delete raw.ownership.provider_resource_uid;
+    delete raw.admitted.evidence.pod_uid;
+    for (const sample of [...raw.cpu_cores_samples, ...raw.memory_bytes_samples]) {
+      sample.provider_resource_uid = uid;
+    }
+    assert.equal(parseTelemetryPresentation(raw), null, JSON.stringify(uid));
+  }
+});
+
 test("parseTelemetryPresentation rejects cross-metric sample UID mismatch without presentation UID", () => {
   const cross = structuredClone(SUCCESS);
   delete cross.admitted.provider_resource_uid;
