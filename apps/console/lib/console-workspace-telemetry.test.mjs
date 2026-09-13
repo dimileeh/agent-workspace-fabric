@@ -2409,6 +2409,32 @@ test("formatCores does not throw for decimals below the toFixed fixed-point rang
 });
 
 for (const source of ["envelope", "allocation", "cpu", "memory"]) {
+  test(`projection preserves sub-millisecond clock skew for ${source}`, () => {
+    for (const timestamp of [
+      "2026-09-12T12:01:00.000001Z",
+      "2026-09-12T14:01:00.000001000+02:00",
+      "2026-09-12T12:01:00.000000Z",
+    ]) {
+      const raw = structuredClone(SUCCESS);
+      raw.view = "1h";
+      if (source === "envelope") raw.observed_at = timestamp;
+      const parsed = parseTelemetryPresentation(raw);
+      assert.ok(parsed);
+      if (source === "allocation") parsed.admitted.observedAt = timestamp;
+      if (source === "cpu" || source === "memory") {
+        const samples = source === "cpu" ? parsed.cpuSamples : parsed.memorySamples;
+        for (const sample of samples) sample.sampleTime = timestamp;
+      }
+      const future = !timestamp.endsWith(".000000Z");
+      for (const nowMs of [FIXED_NOW, FIXED_NOW + 1]) {
+        const view = projectWorkspaceTelemetryView(parsed, { nowMs });
+        const expected = future && nowMs === FIXED_NOW;
+        assert.equal(view.hasFutureTimestamp, expected, `${timestamp} clock-skew flag at ${nowMs}`);
+        assert.equal(view.isStale, expected, `${timestamp} freshness at ${nowMs}`);
+      }
+    }
+  });
+
   test(`projection preserves future-clock-skew signal for ${source}`, () => {
     const parsed = parseTelemetryPresentation(SUCCESS);
     const future = "2026-09-12T12:30:00+00:00";

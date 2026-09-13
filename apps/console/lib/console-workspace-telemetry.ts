@@ -1346,7 +1346,9 @@ function isTimestampOlderThanStaleThreshold(
   // Fail closed: a future timestamp yields a negative age and would otherwise
   // win latestTimestamp while staying isStale:false indefinitely (malformed
   // producer time or severe collector clock skew).
-  if (ms > nowMs) {
+  // Shift the epoch by nowMs to compare against the clock without discarding
+  // producer sub-millisecond digits.
+  if (compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0) {
     return true;
   }
   const thresholdMs = staleAfterSeconds * 1000;
@@ -1485,7 +1487,11 @@ export function projectWorkspaceTelemetryView(
       presentation.observedAt,
       presentation.admitted?.observedAt ?? null,
       ...meterSampleTimes,
-    ].some((timestamp) => timestamp !== null && Date.parse(timestamp) > nowMs),
+    ].some(
+      (timestamp) =>
+        timestamp !== null &&
+        compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0,
+    ),
     isStale: computeIsStale(
       presentation,
       nowMs,
