@@ -951,9 +951,12 @@ function parseEstimate(
       return null;
     }
     // Known evidence fields must keep their types; do not silently drop a
-    // malformed source while still displaying the estimate as complete.
+    // malformed or blank source while still displaying the estimate as complete.
     if ("source" in value.evidence && value.evidence.source !== undefined) {
-      if (typeof value.evidence.source !== "string") {
+      if (
+        typeof value.evidence.source !== "string" ||
+        value.evidence.source.trim() === ""
+      ) {
         return null;
       }
       rateSource = value.evidence.source;
@@ -964,10 +967,19 @@ function parseEstimate(
       "rate_table_version" in value.evidence &&
       value.evidence.rate_table_version !== undefined
     ) {
-      if (
-        typeof value.evidence.rate_table_version !== "string" ||
-        value.evidence.rate_table_version !== value.rate_table_version
-      ) {
+      if (typeof value.evidence.rate_table_version !== "string") {
+        return null;
+      }
+      // Compare the same empty→null normalization used for display so a blank
+      // evidence version cannot disagree with a blank top-level identity, and a
+      // non-blank pair must match exactly.
+      const evidenceVersion =
+        value.evidence.rate_table_version.trim() === ""
+          ? null
+          : value.evidence.rate_table_version;
+      const topLevelVersion =
+        value.rate_table_version.trim() === "" ? null : value.rate_table_version;
+      if (evidenceVersion !== topLevelVersion) {
         return null;
       }
     }

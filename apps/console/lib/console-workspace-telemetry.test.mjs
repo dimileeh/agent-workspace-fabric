@@ -398,6 +398,17 @@ test("parseTelemetryPresentation rejects malformed or conflicting estimate evide
   };
   assert.equal(parseTelemetryPresentation(nullSource), null);
 
+  // Blank / whitespace-only source is also discarded provenance — fail closed.
+  const blankSource = structuredClone(SUCCESS);
+  blankSource.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      source: "   ",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(blankSource), null);
+
   // Evidence rate_table_version that disagrees with the displayed top-level version.
   const conflictingVersion = structuredClone(SUCCESS);
   conflictingVersion.estimate = {
@@ -419,6 +430,17 @@ test("parseTelemetryPresentation rejects malformed or conflicting estimate evide
     },
   };
   assert.equal(parseTelemetryPresentation(nonStringVersion), null);
+
+  // Blank evidence rate_table_version vs non-blank top-level is contradictory.
+  const blankEvidenceVersion = structuredClone(SUCCESS);
+  blankEvidenceVersion.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      rate_table_version: "  ",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(blankEvidenceVersion), null);
 
   // Matching duplicated identities remain valid (success fixture).
   assert.ok(parseTelemetryPresentation(SUCCESS));
