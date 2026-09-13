@@ -52,10 +52,12 @@ export const TELEMETRY_METRIC_TYPE_BY_UNIT = {
   bytes: "kubernetes.io/container/memory/used_bytes",
 } as const;
 
-export const ESTIMATE_STATES = ["complete", "partial", "unallocated"] as const;
+export const ESTIMATE_STATES = ["complete", "partial", "unpriced", "unallocated"] as const;
 export type EstimateState = (typeof ESTIMATE_STATES)[number];
 
-export type CostDisplayState = "complete" | "partial" | "unpriced" | "unallocated";
+export type EstimateScope = "view" | "resource_attempt";
+
+export type CostDisplayState = "not_recorded" | "complete" | "partial" | "unpriced" | "unallocated";
 
 /** Operator-facing exclusion copy (not producer data_quality_notes). */
 export const COST_EXCLUSION_NOTE =
@@ -166,7 +168,7 @@ export type ParsedTelemetrySample = {
 
 export type ParsedAdmittedResources = {
   billable: boolean;
-  computeClass: string;
+  computeClass: string | null;
   containerCreating: boolean;
   cpuRequestCores: number | null;
   cpuLimitCores: number | null;
@@ -199,7 +201,9 @@ export type ParsedTelemetryPresentation = {
   admitted: ParsedAdmittedResources | null;
   cpuSamples: ParsedTelemetrySample[];
   memorySamples: ParsedTelemetrySample[];
-  estimate: ParsedEstimate;
+  windowEndAt: string | null;
+  estimateScope: EstimateScope;
+  estimate: ParsedEstimate | null;
 };
 
 export type WorkspaceTelemetrySeriesPoint = {
@@ -255,12 +259,13 @@ export type WorkspaceTelemetryView = {
   };
   estimate: {
     displayState: CostDisplayState;
+    scope: EstimateScope;
     currency: "USD";
     estimatedUsd: number | null;
     rateTableVersion: string | null;
     rateSource: string | null;
-    pricedIntervalSeconds: number;
-    unpricedIntervalSeconds: number;
+    pricedIntervalSeconds: number | null;
+    unpricedIntervalSeconds: number | null;
   };
   exclusionNote: string;
 };
@@ -416,25 +421,36 @@ function parseSampleArray(
     if (item.unit !== expectedUnit) {
       return null;
     }
+    // Cloud memory gauges have no measurement start; normalize only internally.
+    const intervalStart =
+      expectedUnit === "bytes" && item.interval_start === null
+        ? item.sample_time
+        : item.interval_start;
     if (
       typeof item.sample_time !== "string" ||
       !isFiniteTimestampString(item.sample_time) ||
-      typeof item.interval_start !== "string" ||
-      !isFiniteTimestampString(item.interval_start) ||
+      typeof intervalStart !== "string" ||
+      !isFiniteTimestampString(intervalStart) ||
       typeof item.interval_end !== "string" ||
       !isFiniteTimestampString(item.interval_end)
     ) {
       return null;
     }
+    if (
+      expectedUnit === "bytes" && item.interval_start === null &&
+      compareTimestampInstants(item.sample_time, item.interval_end) !== 0
+    ) {
+      return null;
+    }
     // Reject reversed measurement windows (equal start/end remain valid).
-    if (compareTimestampInstants(item.interval_start, item.interval_end) > 0) {
+    if (compareTimestampInstants(intervalStart, item.interval_end) > 0) {
       return null;
     }
     // Out-of-window sample_time would skew partition selection, ordering, and freshness.
     if (
       !isSampleTimeWithinMeasurementInterval(
         item.sample_time,
-        item.interval_start,
+        intervalStart,
         item.interval_end,
       )
     ) {
@@ -487,7 +503,7 @@ function parseSampleArray(
     samples.push({
       containerName: item.container_name,
       sampleTime: item.sample_time,
-      intervalStart: item.interval_start,
+      intervalStart,
       intervalEnd: item.interval_end,
       unit: expectedUnit,
       value: parsedValue,
@@ -500,11 +516,12 @@ function parseSampleArray(
 }
 
 /**
- * True when every sample_time / interval_start / interval_end across the
- * given series falls inside the selected view window ending at `observedAt`
+ * True when every sample_time / interval_end across the
+ * given series falls inside the selected view window ending at the chart anchor
  * (`[observedAt - viewDuration, observedAt]` inclusive). Empty input is
- * vacuously valid. Samples without an envelope `observed_at` cannot be
- * anchored and fail closed. Prevents plotting a multi-hour series under a
+ * vacuously valid. Samples without a chart anchor fail closed. CPU rate
+ * starts can precede the left edge; legacy memory intervals keep their guard.
+ * Prevents plotting a multi-hour series under a
  * shorter view selector, and prevents clustered-but-offset timestamps (e.g.
  * a 1h cluster two days before observed_at) from rendering as that window.
  * CPU and memory are checked together because both series share one plotted
@@ -521,7 +538,7 @@ function samplesFitViewWindow(
     for (const sample of samples) {
       for (const timestamp of [
         sample.sampleTime,
-        sample.intervalStart,
+        ...(sample.unit === "bytes" ? [sample.intervalStart] : []),
         sample.intervalEnd,
       ]) {
         if (earliest === null || compareTimestampInstants(timestamp, earliest) < 0) {
@@ -695,7 +712,7 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
   }
   if (
     typeof value.billable !== "boolean" ||
-    typeof value.compute_class !== "string" ||
+    (value.compute_class !== null && typeof value.compute_class !== "string") ||
     typeof value.container_creating !== "boolean" ||
     typeof value.partial !== "boolean" ||
     typeof value.pod_phase !== "string" ||
@@ -704,13 +721,13 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
     return undefined;
   }
   if (
-    value.compute_class.length > MAX_ALLOCATION_LABEL_LENGTH ||
+    (value.compute_class !== null && value.compute_class.length > MAX_ALLOCATION_LABEL_LENGTH) ||
     value.pod_phase.length > MAX_ALLOCATION_LABEL_LENGTH ||
     value.region.length > MAX_ALLOCATION_LABEL_LENGTH
   ) {
     return undefined;
   }
-  if (value.compute_class.trim() === "" || value.region.trim() === "") {
+  if ((value.compute_class !== null && value.compute_class.trim() === "") || value.region.trim() === "") {
     return undefined;
   }
   // Validate known allocation provenance without projecting it.
@@ -732,9 +749,14 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
       }
     }
   }
+  // Unknown bounded metadata is not an invented compute identity.
+  const computeClass = isOneOf(value.compute_class, [
+    "autopilot", "autopilot-spot", "general-purpose", "balanced",
+    "scale-out", "scale-out-arm", "scale-out-x86",
+  ]) ? value.compute_class : null;
   return {
     billable: value.billable,
-    computeClass: value.compute_class,
+    computeClass,
     containerCreating: value.container_creating,
     cpuRequestCores,
     cpuLimitCores,
@@ -743,7 +765,7 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
     ephemeralStorageRequestBytes: value.ephemeral_storage_request_bytes,
     ephemeralStorageLimitBytes: value.ephemeral_storage_limit_bytes,
     observedAt: value.observed_at,
-    partial: value.partial,
+    partial: value.partial || computeClass === null,
     podPhase: value.pod_phase,
     region: value.region,
   };
@@ -752,6 +774,7 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
 function parseEstimate(
   value: unknown,
   view: TelemetryViewWindow,
+  scope: EstimateScope,
 ): ParsedEstimate | null {
   if (!isPlainObject(value)) {
     return null;
@@ -774,12 +797,13 @@ function parseEstimate(
   ) {
     return null;
   }
-  // Interval coverage cannot exceed the selected view window, or a multi-hour
-  // charge would display under a shorter selector (e.g. 7200s under "1h").
+  // Each integer duration is bounded by 1e15 above, so their combined duration
+  // is finite and exact (<= 2e15 < Number.MAX_SAFE_INTEGER), even for attempts.
+  // Legacy/view estimates cover the chart; retained attempt estimates do not.
   const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[view];
   if (
-    value.priced_interval_seconds + value.unpriced_interval_seconds >
-    viewDurationSeconds
+    scope === "view" &&
+    value.priced_interval_seconds + value.unpriced_interval_seconds > viewDurationSeconds
   ) {
     return null;
   }
@@ -799,6 +823,10 @@ function parseEstimate(
       value.unpriced_interval_seconds !== 0 ||
       estimatedUsd !== null
     ) {
+      return null;
+    }
+  } else if (value.estimate_state === "unpriced") {
+    if (value.priced_interval_seconds !== 0 || estimatedUsd !== null) {
       return null;
     }
   } else if (value.estimate_state === "partial") {
@@ -908,6 +936,19 @@ export function parseTelemetryPresentation(
   if (!isNullableTimestamp(payload.observed_at)) {
     return null;
   }
+  const windowEndAt = "window_end_at" in payload ? payload.window_end_at : payload.observed_at;
+  if (!isNullableTimestamp(windowEndAt) ||
+      ("window_end_at" in payload && windowEndAt === null)) {
+    return null;
+  }
+  if (payload.observed_at !== null && windowEndAt !== null &&
+      compareTimestampInstants(payload.observed_at, windowEndAt) > 0) {
+    return null;
+  }
+  const estimateScope = "estimate_scope" in payload ? payload.estimate_scope : "view";
+  if (!isOneOf(estimateScope, ["view", "resource_attempt"])) {
+    return null;
+  }
   // Accept machine notes for schema compatibility; never surface as UI copy.
   if (payload.data_quality_notes !== undefined) {
     if (!Array.isArray(payload.data_quality_notes)) {
@@ -941,12 +982,9 @@ export function parseTelemetryPresentation(
   if (memorySamples === null) {
     return null;
   }
-  // Sample/interval times must fall inside the selected view window ending at
-  // observed_at, or a shorter selector could render offset/multi-hour series.
+  // Select by sample/end time. A CPU rate may start before the left chart edge.
   const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[payload.view];
-  const observedAt =
-    typeof payload.observed_at === "string" ? payload.observed_at : null;
-  if (!samplesFitViewWindow([cpuSamples, memorySamples], viewDurationSeconds, observedAt)) {
+  if (!samplesFitViewWindow([cpuSamples, memorySamples], viewDurationSeconds, windowEndAt)) {
     return null;
   }
   const expectedResourceUid = resolvePresentationResourceUid(payload);
@@ -956,8 +994,8 @@ export function parseTelemetryPresentation(
   if (!assertSampleIdentities([cpuSamples, memorySamples], expectedResourceUid)) {
     return null;
   }
-  const estimate = parseEstimate(payload.estimate, payload.view);
-  if (estimate === null) {
+  const estimate = payload.estimate === null ? null : parseEstimate(payload.estimate, payload.view, estimateScope);
+  if (estimate === null && payload.estimate !== null) {
     return null;
   }
 
@@ -965,7 +1003,7 @@ export function parseTelemetryPresentation(
   // notice with admitted resources, usage samples, or a dollar cost is a
   // contradictory operator view — fail closed rather than render it.
   const envelopeUnallocated = payload.state === "unallocated";
-  if (envelopeUnallocated !== (estimate.estimateState === "unallocated")) {
+  if (envelopeUnallocated !== (estimate?.estimateState === "unallocated")) {
     return null;
   }
   if (envelopeUnallocated) {
@@ -975,11 +1013,9 @@ export function parseTelemetryPresentation(
     if (cpuSamples.length > 0 || memorySamples.length > 0) {
       return null;
     }
-    if (estimate.estimatedUsd !== null) {
+    if (estimate?.estimatedUsd !== null) {
       return null;
     }
-  } else if (admitted === null) {
-    return null;
   }
 
   return {
@@ -988,6 +1024,8 @@ export function parseTelemetryPresentation(
     view: payload.view,
     staleAfterSeconds: payload.stale_after_seconds,
     observedAt: payload.observed_at,
+    windowEndAt,
+    estimateScope,
     admitted,
     cpuSamples,
     memorySamples,
@@ -1266,7 +1304,10 @@ function aggregateAtTimestamp(
   };
 }
 
-function resolveCostDisplayState(estimate: ParsedEstimate): CostDisplayState {
+function resolveCostDisplayState(estimate: ParsedEstimate | null): CostDisplayState {
+  if (estimate === null) {
+    return "not_recorded";
+  }
   if (estimate.estimateState === "unallocated") {
     return "unallocated";
   }
@@ -1420,24 +1461,27 @@ export function projectWorkspaceTelemetryView(
   );
   const sampleTimeMixed = meterSampleTimesAreMixed(meterSampleTimes);
 
+  const missingAllocationEvidence = presentation.state !== "unallocated" &&
+    (presentation.admitted === null || presentation.admitted.partial ||
+      presentation.estimate === null || presentation.estimate.estimateState === "unpriced");
+  const hasFutureTimestamp = [
+    presentation.windowEndAt,
+    presentation.observedAt,
+    presentation.admitted?.observedAt ?? null,
+    ...meterSampleTimes,
+  ].some(timestamp => timestamp != null &&
+    compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0);
+
   return {
-    state: presentation.state,
-    quality: presentation.quality,
+    state: missingAllocationEvidence && presentation.state === "success" ? "partial" : presentation.state,
+    quality: missingAllocationEvidence && presentation.quality === "ok" ? "partial" : presentation.quality,
     view: presentation.view,
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: presentation.observedAt,
     sampleTime,
     sampleTimeMixed,
-    hasFutureTimestamp: [
-      presentation.observedAt,
-      presentation.admitted?.observedAt ?? null,
-      ...meterSampleTimes,
-    ].some(
-      (timestamp) =>
-        timestamp !== null &&
-        compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0,
-    ),
-    isStale: computeIsStale(
+    hasFutureTimestamp,
+    isStale: hasFutureTimestamp || computeIsStale(
       presentation,
       nowMs,
       meterSampleTimes,
@@ -1474,12 +1518,13 @@ export function projectWorkspaceTelemetryView(
     },
     estimate: {
       displayState: resolveCostDisplayState(presentation.estimate),
+      scope: presentation.estimateScope,
       currency: "USD",
-      estimatedUsd: presentation.estimate.estimatedUsd,
-      rateTableVersion: presentation.estimate.rateTableVersion,
-      rateSource: presentation.estimate.rateSource,
-      pricedIntervalSeconds: presentation.estimate.pricedIntervalSeconds,
-      unpricedIntervalSeconds: presentation.estimate.unpricedIntervalSeconds,
+      estimatedUsd: presentation.estimate?.estimatedUsd ?? null,
+      rateTableVersion: presentation.estimate?.rateTableVersion ?? null,
+      rateSource: presentation.estimate?.rateSource ?? null,
+      pricedIntervalSeconds: presentation.estimate?.pricedIntervalSeconds ?? null,
+      unpricedIntervalSeconds: presentation.estimate?.unpricedIntervalSeconds ?? null,
     },
     exclusionNote: COST_EXCLUSION_NOTE,
   };

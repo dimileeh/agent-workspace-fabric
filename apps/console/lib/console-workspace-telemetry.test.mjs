@@ -95,7 +95,8 @@ test("parseTelemetryPresentation rejects non-objects and malformed envelopes", (
   assert.equal(parseTelemetryPresentation({ ...SUCCESS, state: "nope" }), null);
   assert.equal(parseTelemetryPresentation({ ...SUCCESS, view: "2h" }), null);
   assert.equal(parseTelemetryPresentation({ ...SUCCESS, quality: 1 }), null);
-  assert.equal(parseTelemetryPresentation({ ...SUCCESS, estimate: null }), null);
+  // Null is not recorded; malformed non-null still fails closed.
+  assert.equal(parseTelemetryPresentation({ ...SUCCESS, estimate: false }), null);
   const { state: _s, ...missingState } = SUCCESS;
   assert.equal(parseTelemetryPresentation(missingState), null);
 });
@@ -545,7 +546,8 @@ for (const series of ["cpu_cores_samples", "memory_bytes_samples"]) {
         interval_end: `2026-09-12T${end}`,
       }];
       const parsed = parseTelemetryPresentation(raw);
-      if (accepted) {
+      // Only CPU rate starts may precede the chart left edge.
+      if (accepted || (series === "cpu_cores_samples" && label === "early interval start")) {
         assert.ok(parsed);
       } else {
         assert.equal(parsed, null);
@@ -793,6 +795,9 @@ test("parseTelemetryPresentation rejects unallocated state that disagrees with a
 
   const nullAdmittedAllocated = structuredClone(SUCCESS);
   nullAdmittedAllocated.admitted = null;
+  // Missing admission is partial allocated data, not an unallocated contradiction.
+  assert.ok(parseTelemetryPresentation(nullAdmittedAllocated));
+  nullAdmittedAllocated.admitted = false;
   assert.equal(parseTelemetryPresentation(nullAdmittedAllocated), null);
 });
 
@@ -1145,13 +1150,15 @@ for (const field of ["compute_class", "region"]) {
   }
 }
 
-test("parseTelemetryPresentation preserves nonblank allocation labels verbatim", () => {
+test("parseTelemetryPresentation preserves region but leaves unknown class unidentified", () => {
   const raw = structuredClone(SUCCESS);
   raw.admitted.compute_class = " Balanced ";
   raw.admitted.region = " us-central1\t";
   const parsed = parseTelemetryPresentation(raw);
   assert.ok(parsed);
-  assert.equal(parsed.admitted.computeClass, raw.admitted.compute_class);
+  // Do not turn an unknown class spelling into a known pricing identity.
+  assert.equal(parsed.admitted.computeClass, null);
+  assert.equal(parsed.admitted.partial, true);
   assert.equal(parsed.admitted.region, raw.admitted.region);
 });
 
@@ -2557,4 +2564,271 @@ test("buildSparklineGeometry centers coincident timestamps", () => {
     sampleTime: "2026-09-13T12:00:00Z", value,
   })));
   assert.equal(geom.paths[0].d, "M 60.0,26.0 L 60.0,2.0");
+});
+
+// Paired contract probes: mutations of verbatim canonical evidence, NOT exports
+// from the PostgreSQL query. See fixture PROVENANCE.md for the pending sync.
+test("paired missing records stay not recorded and allocated partial", () => {
+  for (const scenario of ["cold", "checkpoint", "active", "retained"]) {
+    const raw = structuredClone(SUCCESS);
+    if (scenario !== "retained") raw.estimate = null;
+    if (scenario === "cold" || scenario === "retained") raw.admitted = null;
+    if (scenario !== "active") {
+      raw.cpu_cores_samples = [];
+      raw.memory_bytes_samples = [];
+      raw.observed_at = null;
+    }
+    const parsed = parseTelemetryPresentation(raw);
+    assert.ok(parsed, scenario);
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+    assert.equal(view.state, "partial", scenario);
+    assert.equal(view.quality, "partial", scenario);
+    if (scenario !== "retained") {
+      assert.equal(parsed.estimate, null);
+      assert.equal(view.estimate.displayState, "not_recorded");
+      for (const field of ["estimatedUsd", "pricedIntervalSeconds", "unpricedIntervalSeconds",
+        "rateTableVersion", "rateSource"]) assert.equal(view.estimate[field], null, field);
+    } else {
+      assert.equal(view.estimate.estimatedUsd, Number(SUCCESS.estimate.estimated_usd));
+    }
+    assert.equal(view.cpu.usedCores, scenario === "active" ? 0.25 : null);
+  }
+  const stale = structuredClone(STALE);
+  stale.admitted = null;
+  stale.estimate = null;
+  const view = projectWorkspaceTelemetryView(parseTelemetryPresentation(stale), { nowMs: FIXED_NOW });
+  assert.equal(view.state, "stale");
+  assert.equal(view.quality, "stale");
+  assert.equal(view.isStale, true);
+});
+
+test("paired nullable and unknown compute class preserves resources without inventing a class", () => {
+  for (const compute_class of [null, "custom-future-class"]) {
+    const parsed = parseTelemetryPresentation({
+      ...SUCCESS, admitted: { ...SUCCESS.admitted, compute_class },
+    });
+    assert.ok(parsed);
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+    assert.equal(view.admitted.computeClass, null);
+    assert.equal(view.admitted.cpuRequestCores, 0.5);
+    assert.equal(view.state, "partial");
+    assert.equal(view.admitted.partial, true);
+  }
+  for (const compute_class of [false, {}, 42, "", " ", "x".repeat(65)]) {
+    assert.equal(parseTelemetryPresentation({
+      ...SUCCESS, admitted: { ...SUCCESS.admitted, compute_class },
+    }), null);
+  }
+});
+
+test("paired recorded unpriced is distinct from missing and unallocated", () => {
+  const raw = structuredClone(SUCCESS);
+  Object.assign(raw.estimate, {
+    estimate_state: "unpriced", estimated_usd: null, priced_interval_seconds: 0,
+    unpriced_interval_seconds: 3600,
+  });
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.estimate.displayState, "unpriced");
+  assert.equal(view.estimate.unpricedIntervalSeconds, 3600);
+  assert.equal(view.state, "partial");
+  for (const patch of [{ estimated_usd: "0" }, { priced_interval_seconds: 1 }]) {
+    assert.equal(parseTelemetryPresentation({ ...raw, estimate: { ...raw.estimate, ...patch } }), null);
+  }
+  for (const estimate of [undefined, false, {}, 0, "missing"]) {
+    assert.equal(parseTelemetryPresentation({ ...SUCCESS, estimate }), null);
+  }
+  assert.equal(parseTelemetryPresentation({ ...UNALLOCATED, estimate: null }), null);
+});
+
+test("paired memory gauges normalize only internal starts and keep complete container partitions", () => {
+  const raw = structuredClone(SUCCESS);
+  for (const family of ["cpu_cores_samples", "memory_bytes_samples"]) {
+    raw[family].push({ ...raw[family][0], container_name: "sidecar" });
+  }
+  raw.memory_bytes_samples[0].interval_start = null;
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.memorySamples[0].intervalStart, raw.memory_bytes_samples[0].sample_time);
+  assert.equal(raw.memory_bytes_samples[0].interval_start, null);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.memory.usedBytes, 2147483648);
+  assert.equal(view.memory.usedPartial, false);
+  raw.memory_bytes_samples[1].interval_start = null;
+  assert.ok(parseTelemetryPresentation(raw));
+  for (const bad of [undefined, false, "", "invalid"]) {
+    raw.memory_bytes_samples[0].interval_start = bad;
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+  raw.memory_bytes_samples[0].interval_start = null;
+  raw.memory_bytes_samples[0].interval_end = "2026-09-12T12:00:01Z";
+  raw.window_end_at = "2026-09-12T12:00:01Z";
+  assert.equal(parseTelemetryPresentation(raw), null);
+  for (const bad of [null, undefined, "invalid", "2026-09-12T12:00:01Z"]) {
+    const cpu = structuredClone(SUCCESS);
+    cpu.cpu_cores_samples[0].interval_start = bad;
+    assert.equal(parseTelemetryPresentation(cpu), null);
+  }
+});
+
+test("paired chart clock allows CPU lag without refreshing oldest-series freshness", () => {
+  const raw = structuredClone(SUCCESS);
+  raw.window_end_at = raw.observed_at;
+  raw.observed_at = "2026-09-12T11:59:00Z";
+  Object.assign(raw.cpu_cores_samples[0], {
+    sample_time: raw.observed_at, interval_end: raw.observed_at,
+    interval_start: "2026-09-12T11:58:00Z",
+  });
+  raw.memory_bytes_samples[0].interval_start = null;
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.windowEndAt, raw.window_end_at);
+  const fresh = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(fresh.sampleTimeMixed, true);
+  assert.equal(fresh.observedAt, raw.observed_at);
+  assert.equal(fresh.isStale, false);
+  const aged = projectWorkspaceTelemetryView(parsed, { nowMs: Date.parse("2026-09-12T12:04:01Z") });
+  assert.equal(aged.isStale, true);
+  delete raw.window_end_at;
+  assert.equal(parseTelemetryPresentation(raw), null, "legacy still anchors on observed_at");
+});
+
+test("paired explicit window bounds preserve precision, CPU start exception and legacy fallback", () => {
+  for (const [view, hours] of [["1h", 1], ["6h", 6], ["24h", 24]]) {
+    const raw = structuredClone(SUCCESS);
+    raw.view = view;
+    raw.window_end_at = "2026-09-12T12:00:00.000001Z";
+    const left = new Date(Date.parse("2026-09-12T12:00:00Z") - hours * 3600000).toISOString().replace(".000Z", ".000001Z");
+    Object.assign(raw.cpu_cores_samples[0], {
+      sample_time: left, interval_end: left,
+      interval_start: new Date(Date.parse(left) - 60000).toISOString(),
+    });
+    assert.ok(parseTelemetryPresentation(raw), view);
+    raw.cpu_cores_samples[0].sample_time = left.replace("000001Z", "000000Z");
+    assert.equal(parseTelemetryPresentation(raw), null, "sub-ms before left");
+    raw.cpu_cores_samples[0].sample_time = left;
+    raw.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00.000002Z";
+    assert.equal(parseTelemetryPresentation(raw), null, "interval end after right");
+  }
+  for (const window_end_at of [null, undefined, false, 12, "bad",
+    "2026-09-12T12:00:00." + "0".repeat(65) + "Z",
+    "2026-09-12T11:59:59.999999Z"]) {
+    assert.equal(parseTelemetryPresentation({ ...SUCCESS, window_end_at }), null);
+  }
+  assert.ok(parseTelemetryPresentation({ ...SUCCESS, window_end_at: "2026-09-12T14:00:00+02:00" }));
+  const raw = { ...SUCCESS, window_end_at: "2026-09-12T12:02:00Z" };
+  const view = projectWorkspaceTelemetryView(parseTelemetryPresentation(raw), { nowMs: FIXED_NOW });
+  assert.equal(view.hasFutureTimestamp, true);
+  assert.equal(view.isStale, true);
+  assert.ok(parseTelemetryPresentation({ ...raw, observed_at: null }));
+  assert.equal(parseTelemetryPresentation({ ...SUCCESS, observed_at: null }), null);
+  assert.ok(parseTelemetryPresentation({
+    ...raw, observed_at: "2026-09-10T12:00:00Z",
+  }), "old freshness may predate chart");
+});
+
+test("paired allocation-attempt estimates retain lifetime amounts under every chart selector", () => {
+  for (const view of ["1h", "6h", "24h"]) {
+    for (const duration of [3600, 7200]) {
+      const raw = structuredClone(SUCCESS);
+      raw.view = view;
+      raw.estimate_scope = "resource_attempt";
+      raw.estimate.priced_interval_seconds = duration;
+      raw.admitted = null; // retained cleaned terminal summary
+      const parsed = parseTelemetryPresentation(raw);
+      assert.ok(parsed);
+      const projection = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+      assert.equal(projection.estimate.scope, "resource_attempt");
+      assert.equal(projection.estimate.pricedIntervalSeconds, duration);
+      assert.equal(projection.estimate.estimatedUsd, Number(raw.estimate.estimated_usd));
+    }
+  }
+  for (const estimate_scope of ["view", undefined]) {
+    const raw = structuredClone(SUCCESS);
+    if (estimate_scope) raw.estimate_scope = estimate_scope;
+    assert.equal(parseTelemetryPresentation(raw).estimateScope, "view");
+    raw.estimate.priced_interval_seconds = 7200;
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+  for (const estimate_scope of [null, undefined, false, "workspace", ""]) {
+    assert.equal(parseTelemetryPresentation({ ...SUCCESS, estimate_scope }), null);
+  }
+  for (const scope of ["view", "resource_attempt"]) {
+    for (const patch of [
+      { priced_interval_seconds: Infinity }, { priced_interval_seconds: 1e15 + 1 },
+      { priced_interval_seconds: 1.5 }, { unpriced_interval_seconds: -1 },
+      { currency: "EUR" }, { estimated_usd: "NaN" }, { estimated_usd: null },
+    ]) {
+      assert.equal(parseTelemetryPresentation({
+        ...SUCCESS, estimate_scope: scope, estimate: { ...SUCCESS.estimate, ...patch },
+      }), null);
+    }
+  }
+});
+
+test("paired family cap accepts whole-container full-range partitions and rejects 2049/2880", () => {
+  const raw = structuredClone(SUCCESS);
+  raw.view = "24h";
+  raw.window_end_at = raw.observed_at;
+  for (const family of ["cpu_cores_samples", "memory_bytes_samples"]) {
+    const base = raw[family][0];
+    raw[family] = Array.from({ length: 1024 }, (_, index) => {
+      const time = new Date(Date.parse(raw.observed_at) - Math.round((1023 - index) * 86400000 / 1023)).toISOString();
+      return ["agent", "sidecar"].map(container_name => ({
+        ...base, container_name, sample_time: time, interval_start: family === "memory_bytes_samples" ? null : time,
+        interval_end: time,
+      }));
+    }).flat();
+  }
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(view.cpu.series.length, 1024);
+  assert.equal(view.cpu.series[0].sampleTime, "2026-09-11T12:00:00.000Z");
+  assert.equal(view.cpu.series.at(-1).sampleTime, "2026-09-12T12:00:00.000Z");
+  assert.equal(view.cpu.usedCores, 0.5);
+  assert.equal(view.memory.usedBytes, 2147483648);
+  for (const family of ["cpu_cores_samples", "memory_bytes_samples"]) {
+    for (const count of [2049, 2880]) {
+      assert.equal(parseTelemetryPresentation({
+        ...raw, [family]: Array.from({ length: count }, (_, i) => raw[family][i % 2048]),
+      }), null);
+    }
+  }
+  raw.memory_bytes_samples.pop();
+  const incomplete = projectWorkspaceTelemetryView(parseTelemetryPresentation(raw), { nowMs: FIXED_NOW });
+  assert.equal(incomplete.memory.usedBytes, null);
+  assert.equal(incomplete.memory.usedPartial, true);
+  raw.memory_bytes_samples = [];
+  assert.equal(projectWorkspaceTelemetryView(parseTelemetryPresentation(raw), { nowMs: FIXED_NOW }).memory.usedBytes, null);
+});
+
+test("paired nullable evidence retains resource identity and malformed non-null guards", () => {
+  const raw = { ...structuredClone(SUCCESS), admitted: null, estimate: null };
+  raw.cpu_cores_samples[0].provider_resource_uid = "other-resource";
+  assert.equal(parseTelemetryPresentation(raw), null);
+  raw.cpu_cores_samples[0].provider_resource_uid = SUCCESS.ownership.provider_resource_uid;
+  assert.ok(parseTelemetryPresentation(raw));
+  for (const admitted of [false, 0, "", {}, undefined]) {
+    assert.equal(parseTelemetryPresentation({ ...raw, admitted }), null);
+  }
+  for (const field of ["cpu_request_cores", "memory_request_bytes", "observed_at", "billable"]) {
+    assert.equal(parseTelemetryPresentation({
+      ...raw, admitted: { ...SUCCESS.admitted, [field]: "malformed" },
+    }), null, field);
+  }
+});
+
+test("paired attempt duration sum stays exact at existing scalar limits", () => {
+  const raw = {
+    ...structuredClone(PARTIAL), estimate_scope: "resource_attempt",
+    estimate: {
+      ...PARTIAL.estimate, priced_interval_seconds: 1e15, unpriced_interval_seconds: 1e15,
+    },
+  };
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.estimate.pricedIntervalSeconds + parsed.estimate.unpricedIntervalSeconds, 2e15);
+  assert.equal(Number.isSafeInteger(parsed.estimate.pricedIntervalSeconds + parsed.estimate.unpricedIntervalSeconds), true);
 });
