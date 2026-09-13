@@ -687,6 +687,24 @@ test("parseTelemetryPresentation rejects estimate_state that contradicts amount 
   assert.equal(parseTelemetryPresentation(partialFullyPriced), null);
 });
 
+test("complete estimates require positive priced coverage, including for zero amounts", () => {
+  const raw = structuredClone(SUCCESS);
+  raw.estimate.priced_interval_seconds = 0;
+  raw.estimate.unpriced_interval_seconds = 0;
+  for (const amount of ["0", "0.0040000"]) {
+    raw.estimate.estimated_usd = amount;
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+
+  raw.estimate.priced_interval_seconds = 60;
+  raw.estimate.estimated_usd = "0";
+  const priced = parseTelemetryPresentation(raw);
+  assert.ok(priced);
+  const view = projectWorkspaceTelemetryView(priced, { nowMs: FIXED_NOW });
+  assert.equal(view.estimate.displayState, "complete");
+  assert.equal(view.estimate.estimatedUsd, 0);
+});
+
 test("partial estimates require priced coverage for a non-null amount, including zero", () => {
   const raw = structuredClone(PARTIAL);
   raw.estimate.priced_interval_seconds = 0;

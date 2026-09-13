@@ -747,7 +747,11 @@ function parseEstimate(
   // Fail closed on estimate_state vs amount/interval contradictions so
   // resolveCostDisplayState cannot present contradictory pricing as complete.
   if (value.estimate_state === "complete") {
-    if (value.unpriced_interval_seconds !== 0 || estimatedUsd === null) {
+    if (
+      value.priced_interval_seconds === 0 ||
+      value.unpriced_interval_seconds !== 0 ||
+      estimatedUsd === null
+    ) {
       return null;
     }
   } else if (value.estimate_state === "unallocated") {
