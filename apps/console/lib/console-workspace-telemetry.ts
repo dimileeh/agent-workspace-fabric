@@ -66,67 +66,39 @@ export const COST_EXCLUSION_NOTE =
 /** Reject absurd magnitudes (CPU cores / USD) rather than accept scientific junk. */
 const MAX_DECIMAL_MAGNITUDE = 1e15;
 /**
- * Lexical length cap for decimal strings before regex / Number.
- * Legitimate cores/USD/bytes values fit in well under this (≤16 integer digits
- * for MAX_SAFE_INTEGER / 1e15, plus a short fraction). Without the cap, one
- * pathological field can force unbounded scan/parse work on the UI thread;
- * sample-count caps do not protect CPU or cost scalar paths.
+ * Bound scalar strings independently of sample counts to limit UI-thread work.
+ * Cores/USD/bytes need ≤16 integer digits plus a short fraction; check length
+ * before regex/Number so a single field cannot force unbounded scanning.
  */
 export const MAX_DECIMAL_STRING_LENGTH = 64;
 /**
- * Lexical length cap for RFC3339 timestamp strings before regex / Date.parse.
- * Legitimate producer timestamps fit well under this (date-time + optional
- * nanosecond fraction + offset ≈ 35 chars). Without the cap, a syntactically
- * valid but arbitrarily long fractional-second portion forces unbounded
- * regex/parse work and later slice/pad/embed work across up to
- * MAX_TELEMETRY_SAMPLES rows — defeating the sample-count and decimal-string
- * bounds on the console thread.
+ * Bound timestamps before regex/Date.parse and fractional-second processing.
+ * Nanosecond timestamps with offsets need ~35 chars; unlimited fractions would
+ * multiply parsing and identity-key work across MAX_TELEMETRY_SAMPLES rows.
  */
 export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
 /**
- * Lexical length cap for container_name before retaining a sample.
- * Legitimate compose/K8s container names fit well under this (DNS labels ≤63;
- * profile service names ≤64). Without the cap, a malformed producer can supply
- * arbitrarily long names that are copied into identity keys, sets, sorts, and
- * partition joins across up to MAX_TELEMETRY_SAMPLES rows — defeating the
- * sample-count bound on the console thread.
+ * Bound container_name before retention, identity keys, sorting and partition
+ * joins. DNS labels fit in 63 chars; profile service names fit in 64.
  */
 export const MAX_CONTAINER_NAME_LENGTH = 64;
 /**
- * Lexical length cap for admitted allocation presentation labels
- * (compute_class, region, pod_phase) before retaining the snapshot.
- * Legitimate GKE/autopilot class names, region codes, and pod phases fit well
- * under this. Without the cap, a malformed producer can supply arbitrarily
- * long strings that pass the type-only check and are retained, projected, and
- * rendered into Fact DOM nodes — defeating the numeric, timestamp,
- * sample-count, and container-name bounds on the console thread.
+ * Bound compute_class, region and pod_phase before snapshot retention and DOM
+ * projection; type checks and numeric/sample caps do not limit label sizes.
  */
 export const MAX_ALLOCATION_LABEL_LENGTH = 64;
 /**
- * Lexical length cap for estimate rate provenance strings
- * (rate_table_version, evidence.source, evidence.rate_table_version) before
- * trimming or retaining them.
- * Legitimate rate-table ids and pricing-source URLs fit well under this
- * (fixtures use ~28–52 chars). Without the cap, a malformed producer can
- * supply arbitrarily long strings that pass the type-only check, are scanned
- * by trim(), retained, and projected into Fact DOM nodes — defeating the
- * numeric, timestamp, and allocation-label bounds on the console thread.
+ * Bound rate_table_version, evidence.source and evidence.rate_table_version
+ * before trim/retention/DOM projection; fixture IDs and URLs use ~28–52 chars.
  */
 export const MAX_RATE_PROVENANCE_LENGTH = 64;
 /**
- * Lexical length cap for provider_resource_uid before retaining samples or
- * resolving presentation identity.
- * Legitimate K8s ObjectMeta UIDs are UUIDs (36 chars). Without the cap, a
- * malformed producer can supply arbitrarily long UID strings that pass the
- * type-only check, are retained across up to MAX_TELEMETRY_SAMPLES rows, and
- * are repeatedly compared during identity validation — defeating the
- * sample-count bound on the console thread.
+ * Bound provider_resource_uid before retention and repeated identity checks
+ * across samples. K8s UUIDs use 36 chars; sample caps alone cannot bound strings.
  */
 export const MAX_PROVIDER_RESOURCE_UID_LENGTH = 64;
 /**
- * Memory / ephemeral bytes upper bound.
- * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
- * in JS Number (above this, values round silently and must be rejected).
+ * Reject memory/ephemeral byte counts above MAX_SAFE_INTEGER to prevent rounding.
  */
 const MAX_BYTES_MAGNITUDE = Number.MAX_SAFE_INTEGER;
 /**
@@ -136,18 +108,14 @@ const MAX_BYTES_MAGNITUDE = Number.MAX_SAFE_INTEGER;
  */
 export const MAX_TELEMETRY_SAMPLES = 2048;
 /**
- * Hard cap on data_quality_notes accepted for schema compatibility.
- * Notes are discarded (never projected into UI), but the reader still validates
- * each element is a string — reject oversized arrays before that scan so a
- * malformed producer cannot force unbounded work on the console thread.
+ * Bound data_quality_notes before scanning for strings, even though notes are
+ * discarded rather than projected, to prevent unbounded UI-thread work.
  */
 export const MAX_DATA_QUALITY_NOTES = 64;
 /**
- * Live freshness cap for stale_after_seconds (5m). The Stage3 UI contract marks
- * live telemetry stale when sample/envelope/admitted times exceed five minutes;
- * accepting a larger producer threshold would leave hour-old readings fresh.
- * Also rejects absurd finite values (e.g. Number.MAX_VALUE) that would make
- * thresholdMs = seconds * 1000 become Infinity.
+ * Stage3 live freshness cap: sample/envelope/admitted times expire after 5m.
+ * Reject larger thresholds that would keep old readings fresh or overflow
+ * seconds * 1000 to Infinity.
  */
 export const MAX_STALE_AFTER_SECONDS = 5 * 60;
 
