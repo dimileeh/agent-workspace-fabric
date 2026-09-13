@@ -257,13 +257,17 @@ export function ConsoleWorkspaceTelemetry({
 
   // Historical mode suppresses wall-clock aging only; producer stale
   // (envelope state/quality or current sample quality) must still dim/flag
-  // the panel. Age-only isStale must not surface in historical mode.
+  // the panel, as must future producer time relative to the projection clock.
+  // Age-only isStale must not surface in historical mode.
   const producerStale =
     viewModel.state === "stale" ||
     viewModel.quality === "stale" ||
     viewModel.cpu.usedStale ||
     viewModel.memory.usedStale;
-  const stale = mode === "live" ? viewModel.isStale : producerStale;
+  const stale =
+    mode === "live"
+      ? viewModel.isStale
+      : producerStale || viewModel.hasFutureTimestamp;
   const modeLabel = mode === "historical" ? "Historical" : "Live";
   // Envelope-level partial is not implied by nested meter/cost badges; surface it
   // in the panel header (glyph + label) when the producer marks state or quality

@@ -317,6 +317,16 @@ test.describe("console workspace telemetry harness", () => {
       page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']"),
     ).toHaveCount(0);
 
+    // Future producer time must fail closed even with a success/ok envelope.
+    await openHarness(page, {
+      fixture: "success",
+      mode: "historical",
+      nowMs: String(Date.parse("2026-09-12T11:59:00+00:00")),
+    });
+    await expect(
+      page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']").first(),
+    ).toBeVisible();
+
     // Producer envelope state/quality "stale" must still surface in historical mode.
     await openHarness(page, {
       fixture: "stale",

@@ -218,6 +218,8 @@ export type WorkspaceTelemetryView = {
    */
   sampleTimeMixed: boolean;
   isStale: boolean;
+  /** Future producer time relative to the projection clock, independent of aging. */
+  hasFutureTimestamp: boolean;
   admitted: {
     cpuRequestCores: number | null;
     cpuLimitCores: number | null;
@@ -1437,6 +1439,11 @@ export function projectWorkspaceTelemetryView(
     observedAt: presentation.observedAt,
     sampleTime,
     sampleTimeMixed,
+    hasFutureTimestamp: [
+      presentation.observedAt,
+      presentation.admitted?.observedAt ?? null,
+      ...meterSampleTimes,
+    ].some((timestamp) => timestamp !== null && Date.parse(timestamp) > nowMs),
     isStale: computeIsStale(
       presentation,
       nowMs,

@@ -2255,3 +2255,31 @@ test("formatCores does not throw for decimals below the toFixed fixed-point rang
   assert.ok(!/^0(\.0+)? millicores$/.test(text), `nonzero sample must not collapse: ${text}`);
   assert.doesNotThrow(() => formatCores(-1e-106));
 });
+
+for (const source of ["envelope", "allocation", "cpu", "memory"]) {
+  test(`projection preserves future-clock-skew signal for ${source}`, () => {
+    const parsed = parseTelemetryPresentation(SUCCESS);
+    const future = "2026-09-12T12:30:00+00:00";
+    if (source === "envelope") parsed.observedAt = future;
+    if (source === "allocation") parsed.admitted.observedAt = future;
+    if (source === "cpu" || source === "memory") {
+      const samples = source === "cpu" ? parsed.cpuSamples : parsed.memorySamples;
+      for (const sample of samples) sample.sampleTime = future;
+    }
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+    assert.equal(view.hasFutureTimestamp, true);
+    assert.equal(view.isStale, true);
+    // Once the projection clock catches up, only ordinary aging remains.
+    const aged = projectWorkspaceTelemetryView(parsed, {
+      nowMs: Date.parse(future) + 3600000,
+    });
+    assert.equal(aged.hasFutureTimestamp, false);
+    assert.equal(aged.isStale, true);
+  });
+}
+
+test("missing telemetry timestamps do not imply clock skew", () => {
+  const parsed = parseTelemetryPresentation(UNALLOCATED);
+  parsed.observedAt = null;
+  assert.equal(projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW }).hasFutureTimestamp, false);
+});
