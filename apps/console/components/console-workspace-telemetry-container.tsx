@@ -5,6 +5,7 @@ import { capabilityIdentityKey, isWidgetAvailable } from "@/lib/console-capabili
 import { workspaceTelemetryPath } from "@/lib/console-urls";
 import {
   projectWorkspaceTelemetryView,
+  projectWorkspaceTelemetryFreshness,
   TELEMETRY_VIEWS,
   type TelemetryViewWindow,
 } from "@/lib/console-workspace-telemetry";
@@ -54,10 +55,15 @@ function TelemetryRead({
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
-  const model = useMemo(
-    () => state.data ? projectWorkspaceTelemetryView(state.data, { nowMs: now }) : null,
-    [state.data, now],
+  // Dense series depend only on the response; clock ticks age metadata alone.
+  const projected = useMemo(
+    () => state.data ? projectWorkspaceTelemetryView(state.data) : null,
+    [state.data],
   );
+  const model = projected && state.data ? {
+    ...projected,
+    ...projectWorkspaceTelemetryFreshness(state.data, projected, now),
+  } : null;
   if (!model) {
     return (
       <Panel

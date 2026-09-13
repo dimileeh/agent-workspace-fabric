@@ -21,6 +21,7 @@ import {
   formatCores,
   parseTelemetryPresentation,
   projectWorkspaceTelemetryView,
+  projectWorkspaceTelemetryFreshness,
 } from "./console-workspace-telemetry.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -2894,5 +2895,40 @@ test("persisted exports match unchanged producer SHA-256 provenance", async () =
   assert.equal(Object.keys(provenance.sha256).length, 13);
   for (const [name, digest] of Object.entries(provenance.sha256)) {
     assert.equal(createHash("sha256").update(readFileSync(join(FIXTURE_DIR, name))).digest("hex"), digest, name);
+  }
+});
+
+test("freshness ticks use projected meter metadata without reading sample arrays", () => {
+  for (const raw of [SUCCESS, PARTIAL, STALE, UNALLOCATED]) {
+    const parsed = parseTelemetryPresentation(raw);
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+    const times = [FIXED_NOW - 120_000, FIXED_NOW, FIXED_NOW + 300_001];
+    const expected = times.map(nowMs => {
+      const projected = projectWorkspaceTelemetryView(parsed, { nowMs });
+      return { isStale: projected.isStale, hasFutureTimestamp: projected.hasFutureTimestamp };
+    });
+    for (const key of ["cpuSamples", "memorySamples"]) {
+      Object.defineProperty(parsed, key, { get() { assert.fail("freshness must not read raw series"); } });
+    }
+    for (const [index, nowMs] of times.entries()) {
+      assert.deepEqual(projectWorkspaceTelemetryFreshness(parsed, view, nowMs), expected[index]);
+    }
+  }
+});
+
+
+test("cached readings cross future and stale boundaries without a new response", () => {
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  const sampledAt = Date.parse(view.cpu.sampleTime);
+  for (const [offset, isStale, hasFutureTimestamp] of [
+    [-1, true, true],
+    [0, false, false],
+    [300_000, false, false],
+    [300_001, true, false],
+  ]) {
+    assert.deepEqual(projectWorkspaceTelemetryFreshness(parsed, view, sampledAt + offset), {
+      isStale, hasFutureTimestamp,
+    });
   }
 });

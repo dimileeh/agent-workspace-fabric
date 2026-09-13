@@ -1400,6 +1400,34 @@ function meterSampleTimesAreMixed(
   return distinct.size > 1;
 }
 
+/** Age projected readings without regrouping or rebuilding telemetry series. */
+export function projectWorkspaceTelemetryFreshness(
+  presentation: ParsedTelemetryPresentation,
+  readings: {
+    cpu: Pick<WorkspaceTelemetryView["cpu"], "sampleTime" | "usedStale">;
+    memory: Pick<WorkspaceTelemetryView["memory"], "sampleTime" | "usedStale">;
+  },
+  nowMs: number,
+): Pick<WorkspaceTelemetryView, "isStale" | "hasFutureTimestamp"> {
+  const meterSampleTimes = [readings.cpu.sampleTime, readings.memory.sampleTime];
+  const hasFutureTimestamp = [
+    presentation.windowEndAt,
+    presentation.observedAt,
+    presentation.admitted?.observedAt ?? null,
+    ...meterSampleTimes,
+  ].some(timestamp => timestamp != null &&
+    compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0);
+  return {
+    hasFutureTimestamp,
+    isStale: hasFutureTimestamp || computeIsStale(
+      presentation,
+      nowMs,
+      meterSampleTimes,
+      readings.cpu.usedStale || readings.memory.usedStale,
+    ),
+  };
+}
+
 /**
  * Project allowlisted UI fields from a parsed presentation.
  * Does not fetch; `nowMs` is injected for deterministic freshness tests.
@@ -1433,13 +1461,6 @@ export function projectWorkspaceTelemetryView(
   const missingAllocationEvidence = presentation.state !== "unallocated" &&
     (presentation.admitted === null || presentation.admitted.partial ||
       presentation.estimate === null || presentation.estimate.estimateState === "unpriced");
-  const hasFutureTimestamp = [
-    presentation.windowEndAt,
-    presentation.observedAt,
-    presentation.admitted?.observedAt ?? null,
-    ...meterSampleTimes,
-  ].some(timestamp => timestamp != null &&
-    compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0);
 
   return {
     state: missingAllocationEvidence && presentation.state === "success" ? "partial" : presentation.state,
@@ -1449,13 +1470,7 @@ export function projectWorkspaceTelemetryView(
     observedAt: presentation.observedAt,
     sampleTime,
     sampleTimeMixed,
-    hasFutureTimestamp,
-    isStale: hasFutureTimestamp || computeIsStale(
-      presentation,
-      nowMs,
-      meterSampleTimes,
-      cpuAgg.usedStale || memAgg.usedStale,
-    ),
+    ...projectWorkspaceTelemetryFreshness(presentation, { cpu: cpuAgg, memory: memAgg }, nowMs),
     admitted:
       presentation.admitted === null
         ? null
