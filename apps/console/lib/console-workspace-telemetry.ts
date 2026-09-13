@@ -542,19 +542,20 @@ function samplesFitViewWindow(
 }
 
 /**
- * Read provider_resource_uid from an admitted/ownership object.
+ * Read a resource UID from an admitted/ownership/evidence object.
  * null = field absent; undefined = present but not a non-empty string (fail closed).
  */
 function readPresentationResourceUidField(
   container: Record<string, unknown> | null,
+  field = "provider_resource_uid",
 ): string | null | undefined {
   if (container === null) {
     return null;
   }
-  if (!("provider_resource_uid" in container) || container.provider_resource_uid === undefined) {
+  if (!(field in container) || container[field] === undefined) {
     return null;
   }
-  const uid = container.provider_resource_uid;
+  const uid = container[field];
   if (typeof uid !== "string" || uid.length === 0) {
     return undefined;
   }
@@ -567,8 +568,8 @@ function readPresentationResourceUidField(
 
 /**
  * Resolve the presentation's resource identity when the producer supplies one.
- * Prefer admitted, then ownership — both are schema-compatible ownership fields.
- * Returns undefined when either field is malformed, or both are present and disagree
+ * Include allocation evidence alongside admitted and ownership identities.
+ * Returns undefined when any field is malformed, or present identities disagree
  * (fail closed so Pod A samples cannot render under Pod B ownership).
  */
 function resolvePresentationResourceUid(
@@ -580,13 +581,25 @@ function resolvePresentationResourceUid(
   const ownershipUid = readPresentationResourceUidField(
     isPlainObject(payload.ownership) ? payload.ownership : null,
   );
-  if (admittedUid === undefined || ownershipUid === undefined) {
-    return undefined;
+  const evidenceUid = readPresentationResourceUidField(
+    isPlainObject(payload.admitted) && isPlainObject(payload.admitted.evidence)
+      ? payload.admitted.evidence
+      : null,
+    "pod_uid",
+  );
+  let resourceUid: string | null = null;
+  for (const uid of [admittedUid, ownershipUid, evidenceUid]) {
+    if (uid === undefined) {
+      return undefined;
+    }
+    if (uid !== null) {
+      if (resourceUid !== null && uid !== resourceUid) {
+        return undefined;
+      }
+      resourceUid = uid;
+    }
   }
-  if (admittedUid !== null && ownershipUid !== null && admittedUid !== ownershipUid) {
-    return undefined;
-  }
-  return admittedUid ?? ownershipUid;
+  return resourceUid;
 }
 
 /**
@@ -689,9 +702,17 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
   ) {
     return undefined;
   }
-  // Accept ownership-ish / evidence fields without projecting them.
-  if (value.evidence !== undefined && value.evidence !== null && !isPlainObject(value.evidence)) {
-    return undefined;
+  // Validate known allocation provenance without projecting it.
+  if (value.evidence !== undefined && value.evidence !== null) {
+    if (!isPlainObject(value.evidence)) {
+      return undefined;
+    }
+    for (const field of ["pod_uid", "owner_job_uid"]) {
+      const uid = readPresentationResourceUidField(value.evidence, field);
+      if (uid === undefined || (uid !== null && uid.trim() === "")) {
+        return undefined;
+      }
+    }
   }
   return {
     billable: value.billable,

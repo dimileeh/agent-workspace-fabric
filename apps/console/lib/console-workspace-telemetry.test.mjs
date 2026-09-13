@@ -991,6 +991,7 @@ test("parseTelemetryPresentation rejects overlong provider_resource_uid strings"
   assert.equal(atCapUid.length, MAX_PROVIDER_RESOURCE_UID_LENGTH);
   const atCap = structuredClone(SUCCESS);
   atCap.admitted.provider_resource_uid = atCapUid;
+  atCap.admitted.evidence.pod_uid = atCapUid;
   atCap.ownership.provider_resource_uid = atCapUid;
   atCap.cpu_cores_samples[0].provider_resource_uid = atCapUid;
   atCap.memory_bytes_samples[0].provider_resource_uid = atCapUid;
@@ -1572,6 +1573,45 @@ test("incomplete historical partitions keep stale over forced partial", () => {
   );
 });
 
+test("parseTelemetryPresentation rejects contradictory allocation evidence Pod identity", () => {
+  for (const identitySource of ["admitted", "ownership", "samples"]) {
+    const raw = structuredClone(SUCCESS);
+    raw.admitted.evidence.pod_uid = "other-pod-uid";
+    if (identitySource !== "admitted") delete raw.admitted.provider_resource_uid;
+    if (identitySource === "samples") delete raw.ownership.provider_resource_uid;
+    assert.equal(parseTelemetryPresentation(raw), null, identitySource);
+  }
+});
+
+test("parseTelemetryPresentation validates known allocation evidence UID fields", () => {
+  for (const evidence of [[], "invalid", 42]) {
+    const raw = structuredClone(SUCCESS);
+    raw.admitted.evidence = evidence;
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+  for (const field of ["pod_uid", "owner_job_uid"]) {
+    for (const invalid of [null, 42, {}, "", " ", "u".repeat(MAX_PROVIDER_RESOURCE_UID_LENGTH + 1)]) {
+      const raw = structuredClone(SUCCESS);
+      raw.admitted.evidence[field] = invalid;
+      assert.equal(parseTelemetryPresentation(raw), null, field);
+    }
+  }
+});
+
+test("parseTelemetryPresentation accepts optional and unprojected allocation evidence", () => {
+  for (const evidence of [undefined, null, {}, { future_field: { opaque: true } },
+    { pod_uid: undefined, owner_job_uid: undefined },
+    { owner_job_uid: "u".repeat(MAX_PROVIDER_RESOURCE_UID_LENGTH) }]) {
+    const raw = structuredClone(SUCCESS);
+    raw.admitted.evidence = evidence;
+    assert.ok(parseTelemetryPresentation(raw));
+  }
+  const raw = structuredClone(SUCCESS);
+  delete raw.admitted.provider_resource_uid;
+  delete raw.ownership.provider_resource_uid;
+  assert.ok(parseTelemetryPresentation(raw), "evidence agrees with sample identity");
+});
+
 test("parseTelemetryPresentation rejects mismatched sample provider_resource_uid", () => {
   const mismatched = structuredClone(SUCCESS);
   mismatched.cpu_cores_samples[0].provider_resource_uid = "other-pod-uid";
@@ -1604,6 +1644,7 @@ test("parseTelemetryPresentation rejects cross-metric sample UID mismatch withou
   const cross = structuredClone(SUCCESS);
   delete cross.admitted.provider_resource_uid;
   delete cross.ownership.provider_resource_uid;
+  delete cross.admitted.evidence.pod_uid;
   cross.cpu_cores_samples[0].provider_resource_uid = "pod-uid-cpu";
   cross.memory_bytes_samples[0].provider_resource_uid = "pod-uid-memory";
   assert.equal(parseTelemetryPresentation(cross), null);
@@ -1611,6 +1652,7 @@ test("parseTelemetryPresentation rejects cross-metric sample UID mismatch withou
   const aligned = structuredClone(SUCCESS);
   delete aligned.admitted.provider_resource_uid;
   delete aligned.ownership.provider_resource_uid;
+  delete aligned.admitted.evidence.pod_uid;
   aligned.cpu_cores_samples[0].provider_resource_uid = "pod-uid-shared";
   aligned.memory_bytes_samples[0].provider_resource_uid = "pod-uid-shared";
   assert.ok(parseTelemetryPresentation(aligned));
@@ -1643,6 +1685,7 @@ test("parseTelemetryPresentation rejects conflicting admitted vs ownership provi
 
   const matching = structuredClone(SUCCESS);
   matching.admitted.provider_resource_uid = "pod-uid-shared";
+  matching.admitted.evidence.pod_uid = "pod-uid-shared";
   matching.ownership.provider_resource_uid = "pod-uid-shared";
   matching.cpu_cores_samples[0].provider_resource_uid = "pod-uid-shared";
   matching.memory_bytes_samples[0].provider_resource_uid = "pod-uid-shared";
