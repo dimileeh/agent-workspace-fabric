@@ -15,6 +15,16 @@ export type TelemetryPresentationState = (typeof TELEMETRY_STATES)[number];
 export const TELEMETRY_QUALITIES = ["ok", "partial", "stale"] as const;
 export type TelemetryQuality = (typeof TELEMETRY_QUALITIES)[number];
 
+/**
+ * Fixture-backed metric_type per sample series unit.
+ * Enforced so a memory meter cannot land in cpu_cores_samples (or vice versa)
+ * and render under the wrong label when unit alone happens to match.
+ */
+export const TELEMETRY_METRIC_TYPE_BY_UNIT = {
+  cores: "kubernetes.io/container/cpu/core_usage_time",
+  bytes: "kubernetes.io/container/memory/used_bytes",
+} as const;
+
 export const ESTIMATE_STATES = ["complete", "partial", "unallocated"] as const;
 export type EstimateState = (typeof ESTIMATE_STATES)[number];
 
@@ -317,8 +327,10 @@ function parseSampleArray(
     if (!isOneOf(item.quality, TELEMETRY_QUALITIES)) {
       return null;
     }
-    // Producer metric_type may say core_usage_time while unit is cores — accept as naming quirk.
-    if (typeof item.metric_type !== "string") {
+    // Fail closed: metric_type must match the series unit so memory meters
+    // cannot land in cpu_cores_samples (or vice versa) and render mislabeled.
+    // CPU fixtures use core_usage_time with unit cores (producer naming quirk).
+    if (item.metric_type !== TELEMETRY_METRIC_TYPE_BY_UNIT[expectedUnit]) {
       return null;
     }
     const parsedValue = parseDecimalString(item.value, {

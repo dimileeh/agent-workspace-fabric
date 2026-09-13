@@ -103,6 +103,27 @@ test("parseTelemetryPresentation rejects mixed-unit sample series", () => {
   assert.equal(parseTelemetryPresentation(memCores), null);
 });
 
+test("parseTelemetryPresentation rejects metric_type that does not match its series", () => {
+  // Memory meter in the CPU series (even with unit: cores) must fail closed —
+  // otherwise values render under the CPU label.
+  const memInCpu = structuredClone(SUCCESS);
+  memInCpu.cpu_cores_samples[0].metric_type = "kubernetes.io/container/memory/used_bytes";
+  assert.equal(parseTelemetryPresentation(memInCpu), null);
+
+  const cpuInMem = structuredClone(SUCCESS);
+  cpuInMem.memory_bytes_samples[0].metric_type =
+    "kubernetes.io/container/cpu/core_usage_time";
+  assert.equal(parseTelemetryPresentation(cpuInMem), null);
+
+  const unknownCpu = structuredClone(SUCCESS);
+  unknownCpu.cpu_cores_samples[0].metric_type = "custom.metric/cpu";
+  assert.equal(parseTelemetryPresentation(unknownCpu), null);
+
+  const nonString = structuredClone(SUCCESS);
+  nonString.memory_bytes_samples[0].metric_type = 1;
+  assert.equal(parseTelemetryPresentation(nonString), null);
+});
+
 test("parseTelemetryPresentation rejects samples with reversed interval windows", () => {
   const reversedCpu = structuredClone(SUCCESS);
   reversedCpu.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
