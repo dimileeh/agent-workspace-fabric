@@ -30,7 +30,7 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
     const read = async () => {
       if (!current()) return;
       controller = new AbortController();
-      const timeout = window.setTimeout(() => controller?.abort(), 30_000);
+      const timeout = window.setTimeout(() => controller?.abort(new Error("Telemetry request timed out after 30000ms")), 30_000);
       try {
         const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
         if (!current()) return;

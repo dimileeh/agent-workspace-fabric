@@ -59,6 +59,30 @@ test("one selected read for all gates; minute cadence and distinct views", async
   const count = reads.length; await page.clock.runFor(61_000); expect(reads).toHaveLength(count);
 });
 
+test("telemetry timeout reason retains data until the minute retry recovers", async ({ page }) => {
+  await setup(page);
+  let reads = 0;
+  await page.route("**/telemetry?*", async route => {
+    reads++;
+    if (reads === 2) return; // Hold the second fetch until its deadline aborts it.
+    await fulfillJson(route, fixture());
+  });
+  await page.clock.install(); await page.goto("/"); await open(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await page.clock.runFor(60_000);
+  await expect.poll(() => reads).toBe(2);
+  await page.clock.runFor(30_000);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry request timed out after 30000ms");
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await page.clock.runFor(59_000);
+  expect(reads).toBe(2);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry request timed out after 30000ms");
+  await page.clock.runFor(1_000);
+  await expect.poll(() => reads).toBe(3);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+});
+
 test("telemetry error codes survive polling retries and clear on recovery", async ({ page }) => {
   await setup(page);
   let status = 200;
