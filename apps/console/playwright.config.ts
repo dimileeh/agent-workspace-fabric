@@ -36,6 +36,7 @@ export default defineConfig({
       // Registers page.harness.tsx via next.config pageExtensions for /test-harness/*.
       env: {
         ...process.env,
+        AWF_CONSOLE_DIST_DIR: ".next-harness",
         AWF_CONSOLE_TEST_HARNESS: "1",
       },
     },
