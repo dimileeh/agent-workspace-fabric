@@ -443,7 +443,8 @@ test("parent refreshes and unrelated capability revisions preserve telemetry cad
   await page.clock.install({ time: start });
   // Pause after dashboard initialization, before mounting the telemetry reader.
   // Installation alone still advances with wall time during UI interactions.
-  await page.clock.pauseAt(start);
+  // Use a future timestamp so time spent installing cannot put it in the past.
+  await page.clock.pauseAt(new Date(start.getTime() + 60_000));
   await open(page);
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   for (let revision = 0; revision < 4; revision++) {
