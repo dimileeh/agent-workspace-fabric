@@ -2832,3 +2832,67 @@ test("paired attempt duration sum stays exact at existing scalar limits", () => 
   assert.equal(parsed.estimate.pricedIntervalSeconds + parsed.estimate.unpricedIntervalSeconds, 2e15);
   assert.equal(Number.isSafeInteger(parsed.estimate.pricedIntervalSeconds + parsed.estimate.unpricedIntervalSeconds), true);
 });
+
+test("PR643 persisted unpriced null/absent source remains unknown", () => {
+  for (const omitted of [false, true]) {
+    const raw = loadFixture("persisted_unpriced_allocation");
+    if (omitted) delete raw.estimate.evidence.source;
+    const parsed = parseTelemetryPresentation(raw);
+    assert.ok(parsed);
+    const projected = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+    assert.equal(projected.estimate.displayState, "unpriced");
+    assert.equal(projected.estimate.estimatedUsd, null);
+    assert.equal(projected.estimate.rateSource, null);
+    assert.equal(projected.estimate.pricedIntervalSeconds, 0);
+    assert.equal(projected.estimate.unpricedIntervalSeconds, 3600);
+  }
+});
+
+test("PR643 unpriced allowance preserves malformed provenance and pricing guards", () => {
+  for (const source of ["", " ", 1, false, [], {}, "x".repeat(65)]) {
+    const raw = loadFixture("persisted_unpriced_allocation");
+    raw.estimate.evidence.source = source;
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+  for (const mutate of [
+    r => { r.estimate.evidence.rate_table_version = "conflicting"; },
+    r => { r.ownership.provider_resource_uid = "other"; },
+    r => { r.estimate.estimated_usd = "0"; },
+    r => { r.estimate.priced_interval_seconds = 1; },
+    r => { r.estimate.estimate_state = "complete"; r.estimate.estimated_usd = "1"; r.estimate.priced_interval_seconds = 3600; r.estimate.unpriced_interval_seconds = 0; },
+  ]) {
+    const raw = loadFixture("persisted_unpriced_allocation");
+    mutate(raw);
+    assert.equal(parseTelemetryPresentation(raw), null);
+  }
+});
+
+test("all 13 exact persisted exports project with bounded resource-attempt semantics", () => {
+  const names = ["active_no_estimate", "checkpoint_no_samples", "cold_absent", "cpu_lagging_memory", "day_two_containers", "estimate_no_checkpoint", "missing_family", "retained_cleaned_terminal", "shared_unallocated", "stale_series", "terminal_1h", "terminal_2h_under_1h", "unpriced_allocation"];
+  for (const name of names) {
+    const raw = loadFixture(`persisted_${name}`);
+    const parsed = parseTelemetryPresentation(raw);
+    assert.ok(parsed, name);
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs: Date.parse(raw.window_end_at) });
+    assert.equal(view.estimate.scope, "resource_attempt", name);
+    assert.equal(view.estimate.estimatedUsd, raw.estimate?.estimated_usd == null ? null : Number(raw.estimate.estimated_usd));
+    assert.equal(view.admitted === null, raw.admitted === null);
+    if (name === "day_two_containers") {
+      assert.equal(raw.cpu_cores_samples.length, 2048);
+      assert.equal(raw.memory_bytes_samples.length, 2048);
+      assert.equal(new Set(raw.cpu_cores_samples.map(s => s.container_name)).size, 2);
+      assert.ok(view.cpu.series.length > 1);
+      assert.equal(view.view, "24h");
+    }
+    if (name === "stale_series") assert.equal(view.isStale, true);
+  }
+});
+
+test("persisted exports match unchanged producer SHA-256 provenance", async () => {
+  const { createHash } = await import("node:crypto");
+  const provenance = loadFixture("persisted_provenance");
+  assert.equal(Object.keys(provenance.sha256).length, 13);
+  for (const [name, digest] of Object.entries(provenance.sha256)) {
+    assert.equal(createHash("sha256").update(readFileSync(join(FIXTURE_DIR, name))).digest("hex"), digest, name);
+  }
+});

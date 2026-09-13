@@ -28,6 +28,9 @@ export type ConsoleWorkspaceTelemetryProps = {
    * capabilities lack telemetry/allocation/cost — not show an unsupported widget.
    */
   available?: boolean;
+  showTelemetry?: boolean;
+  showAllocation?: boolean;
+  showCost?: boolean;
   workspaceId?: string;
   modelLabel?: string;
 };
@@ -78,6 +81,7 @@ function ResourceMeter({
   limitLabel,
   fillPct,
   partial,
+  showAllocation,
 }: {
   label: string;
   icon: ReactNode;
@@ -86,6 +90,7 @@ function ResourceMeter({
   limitLabel: string;
   fillPct: number | null;
   partial: boolean;
+  showAllocation: boolean;
 }) {
   const width = fillPct == null ? 0 : Math.min(100, Math.max(0, fillPct));
   return (
@@ -110,10 +115,10 @@ function ResourceMeter({
           data-testid={`telemetry-meter-${label.toLowerCase()}-fill`}
         />
       </div>
-      <div className="mt-2 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-fg-muted">
+      {showAllocation ? <div className="mt-2 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-fg-muted">
         <span className="tnum truncate">req {requestLabel}</span>
         <span className="tnum truncate">lim {limitLabel}</span>
-      </div>
+      </div> : null}
     </div>
   );
 }
@@ -237,6 +242,9 @@ export function ConsoleWorkspaceTelemetry({
   lastGoodAt = null,
   requestError = null,
   available = true,
+  showTelemetry = true,
+  showAllocation = true,
+  showCost = true,
   workspaceId,
   modelLabel,
 }: ConsoleWorkspaceTelemetryProps) {
@@ -244,7 +252,7 @@ export function ConsoleWorkspaceTelemetry({
     return null;
   }
 
-  const admitted = viewModel.admitted;
+  const admitted = showAllocation ? viewModel.admitted : null;
   const cpuLimitLabel =
     admitted?.cpuLimitCores === null || admitted?.cpuLimitCores === undefined
       ? "unknown"
@@ -407,13 +415,13 @@ export function ConsoleWorkspaceTelemetry({
           ) : null}
         </div>
 
-        {admitted === null && viewModel.state !== "unallocated" ? (
+        {showAllocation && admitted === null && viewModel.state !== "unallocated" ? (
           <div data-testid="telemetry-admission-missing" className="text-xs text-fg-muted">
             Admission not recorded
           </div>
         ) : null}
 
-        {viewModel.state === "unallocated" ? (
+        {(showTelemetry || showAllocation) && (viewModel.state === "unallocated" ? (
           <div
             data-testid="telemetry-unallocated"
             className="rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2 text-xs text-fg-muted"
@@ -423,13 +431,14 @@ export function ConsoleWorkspaceTelemetry({
         ) : (
           <div className="grid min-w-0 gap-2 sm:grid-cols-2">
             <ResourceMeter
+              showAllocation={showAllocation}
               label="CPU"
               icon={<Cpu size={13} aria-hidden />}
-              usedLabel={formatCores(viewModel.cpu.usedCores)}
+              usedLabel={formatCores(showTelemetry ? viewModel.cpu.usedCores : null)}
               requestLabel={cpuRequestLabel}
               limitLabel={cpuLimitLabel}
               fillPct={fillAgainstLimit(
-                viewModel.cpu.usedCores,
+                showTelemetry ? viewModel.cpu.usedCores : null,
                 admitted?.cpuLimitCores ?? null,
               )}
               partial={
@@ -437,17 +446,18 @@ export function ConsoleWorkspaceTelemetry({
               }
             />
             <ResourceMeter
+              showAllocation={showAllocation}
               label="Memory"
               icon={<HardDrive size={13} aria-hidden />}
               usedLabel={
-                viewModel.memory.usedBytes == null
+                !showTelemetry || viewModel.memory.usedBytes == null
                   ? "—"
                   : formatBytesOrUnknown(viewModel.memory.usedBytes)
               }
               requestLabel={memRequestLabel}
               limitLabel={memLimitLabel}
               fillPct={fillAgainstLimit(
-                viewModel.memory.usedBytes,
+                showTelemetry ? viewModel.memory.usedBytes : null,
                 admitted?.memoryLimitBytes ?? null,
               )}
               partial={
@@ -455,9 +465,9 @@ export function ConsoleWorkspaceTelemetry({
               }
             />
           </div>
-        )}
+        ))}
 
-        <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+        {showTelemetry ? <div className="grid min-w-0 gap-2 sm:grid-cols-2">
           <div className="min-w-0">
             <div className="label-caps mb-1">CPU samples</div>
             <SeriesSparkline points={viewModel.cpu.series} label="cpu" />
@@ -466,9 +476,9 @@ export function ConsoleWorkspaceTelemetry({
             <div className="label-caps mb-1">Memory samples</div>
             <SeriesSparkline points={viewModel.memory.series} label="memory" />
           </div>
-        </div>
+        </div> : null}
 
-        <div
+        {showCost ? <div
           data-testid="telemetry-workload-cost"
           className="rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2 text-xs"
         >
@@ -490,9 +500,10 @@ export function ConsoleWorkspaceTelemetry({
               : "Allocation estimate for the displayed chart window."}
           </div>
           <div className="mt-1 text-[11px] text-fg-muted">{viewModel.exclusionNote}</div>
-        </div>
+        </div> : null}
 
         <div className="grid min-w-0 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {showCost ? <>
           <Fact
             label="Rate table"
             value={viewModel.estimate.rateTableVersion ?? "—"}
@@ -516,6 +527,7 @@ export function ConsoleWorkspaceTelemetry({
             mono
             stale={stale}
           />
+          </> : null}
           {admitted ? (
             <>
               <Fact

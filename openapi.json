@@ -1399,9 +1399,12 @@
                     "properties": {
                       "id": {
                         "enum": [
+                          "allocation",
                           "cloud_runtime",
+                          "cost",
                           "fleet_summary",
-                          "resource_capacity"
+                          "resource_capacity",
+                          "telemetry"
                         ]
                       },
                       "route": {
@@ -1500,6 +1503,32 @@
                         "const": "available"
                       },
                       "id": {
+                        "const": "telemetry"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "availability"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/telemetry"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "availability": {
+                        "const": "available"
+                      },
+                      "id": {
                         "const": "allocation"
                       }
                     },
@@ -1508,7 +1537,16 @@
                       "availability"
                     ]
                   },
-                  "then": false
+                  "then": {
+                    "properties": {
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/telemetry"
+                      }
+                    },
+                    "required": [
+                      "route"
+                    ]
+                  }
                 },
                 {
                   "if": {
@@ -1525,24 +1563,16 @@
                       "availability"
                     ]
                   },
-                  "then": false
-                },
-                {
-                  "if": {
+                  "then": {
                     "properties": {
-                      "availability": {
-                        "const": "available"
-                      },
-                      "id": {
-                        "const": "telemetry"
+                      "route": {
+                        "const": "/v1/workspaces/{workspace_id}/telemetry"
                       }
                     },
                     "required": [
-                      "id",
-                      "availability"
+                      "route"
                     ]
-                  },
-                  "then": false
+                  }
                 }
               ]
             },

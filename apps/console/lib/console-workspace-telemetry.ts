@@ -823,7 +823,8 @@ function parseEstimate(
     }
     // Known evidence fields must keep their types; do not silently drop a
     // malformed or blank source while still displaying the estimate as complete.
-    if ("source" in value.evidence && value.evidence.source !== undefined) {
+    if (value.evidence.source === null && value.estimate_state !== "unpriced") return null;
+    if (value.evidence.source !== undefined && value.evidence.source !== null) {
       if (
         typeof value.evidence.source !== "string" ||
         value.evidence.source.length > MAX_RATE_PROVENANCE_LENGTH ||

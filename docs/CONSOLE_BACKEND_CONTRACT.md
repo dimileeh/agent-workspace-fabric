@@ -259,8 +259,10 @@ feeds.
   id — see `console/fixtures/v1/capabilities.route-matrix.json`; may include
   `{workspace_id}`), `semantics`. Unknown inventory id, or missing/null/
   non-inventory route (e.g. `/v1/wrong-route`) ⇒ malformed (fail closed).
-  Widgets without an inventory route (`telemetry`, `allocation`, `cost`) cannot
-  be `available`.
+  `telemetry`, `allocation`, and `cost` share the selected-workspace template
+  `/v1/workspaces/{workspace_id}/telemetry` (one read, not three polls). Query
+  `view=1h|6h|24h` is supplied separately and defaults to `1h`; query-bearing
+  advertised routes are invalid. Local/default-off hosted payloads stay unsupported.
 - Unsupported: `id`, `availability=unsupported`, `reason_code`, `message` (`route` omitted)
 - Controls: `id`, `availability`, `semantics` required; available controls omit route.
 
@@ -277,3 +279,6 @@ a timestamp.
 Each count key is required on the object; values are strict nonnegative
 `integer | null`. The ten exact fields and their meanings are unchanged by the
 optional evidence extension.
+
+Stage 3 selected-workspace telemetry routing, cancellation, polling and exact
+producer evidence are specified in [the telemetry contract](CONSOLE_WORKSPACE_TELEMETRY_CONTRACT.md#stage-3-selected-workspace-integration). This consumer change does not activate production.

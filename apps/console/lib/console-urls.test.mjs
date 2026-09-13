@@ -373,3 +373,21 @@ function restoreEnvSnapshot(previous) {
     }
   }
 }
+
+test("telemetry selected URL carries only configured context and bounded views", async () => {
+  const { workspaceTelemetryPath } = await import("./console-urls.ts");
+  assert.equal(workspaceTelemetryPath("ws/a"), "/api/awf/workspaces/ws%2Fa/telemetry?view=1h");
+  const oldBase = process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE;
+  const oldKeys = process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS;
+  try {
+    process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE = "/api/core-console";
+    process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS = "org_id,project_id";
+    for (const view of ["1h", "6h", "24h"]) {
+      assert.equal(workspaceTelemetryPath("a/b", view, "?org_id=o&project_id=p&namespace=evil&upstream=bad"), `/api/core-console/workspaces/a%2Fb/telemetry?view=${view}&org_id=o&project_id=p`);
+    }
+    assert.throws(() => workspaceTelemetryPath("a", "7d"));
+  } finally {
+    if (oldBase === undefined) delete process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE; else process.env.NEXT_PUBLIC_AWF_CONSOLE_API_BASE = oldBase;
+    if (oldKeys === undefined) delete process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS; else process.env.NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS = oldKeys;
+  }
+});

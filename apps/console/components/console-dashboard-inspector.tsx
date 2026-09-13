@@ -1,5 +1,8 @@
 "use client";
 
+import type { MutableRefObject } from "react";
+import { ConsoleWorkspaceTelemetryContainer } from "./console-workspace-telemetry-container";
+
 import type {
   ConsoleCapabilities,
   MergeQueueItem,
@@ -29,6 +32,10 @@ import {
 } from "./console-dashboard-shared";
 
 type ConsoleDashboardInspectorProps = {
+  telemetryCapabilities: ConsoleCapabilities | null;
+  telemetryAuthEpoch: number;
+  telemetryEpochRef: MutableRefObject<number>;
+  onTelemetryDenied: () => void;
   selectedId: string | null;
   selectedOverview: WorkspaceOverview | null;
   selectedMergeQueueItem: MergeQueueItem | null;
@@ -115,6 +122,14 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
                 capabilitiesReady={capabilitiesReady}
                 onRetry={props.onRetry}
                 onOperatorAction={props.onOperatorAction}
+              />
+              <ConsoleWorkspaceTelemetryContainer
+                workspaceId={selectedId}
+                capabilities={props.telemetryCapabilities}
+                ready={capabilitiesReady}
+                authEpoch={props.telemetryAuthEpoch}
+                epochRef={props.telemetryEpochRef}
+                onDenied={props.onTelemetryDenied}
               />
               <LifecycleRail
                 status={selectedOverview.status}
