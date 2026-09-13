@@ -46,7 +46,7 @@ COPY migrations ./migrations
 COPY docker/agent-runtime.Dockerfile docker/control-plane.Dockerfile ./docker/
 COPY docker/compose/local-service.yml ./docker/compose/local-service.yml
 COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2
-COPY apps/console/Dockerfile apps/console/next.config.ts apps/console/package-lock.json apps/console/package.json apps/console/postcss.config.mjs apps/console/tsconfig.json ./apps/console/
+COPY apps/console/Dockerfile apps/console/next.config.ts apps/console/console-test-harness-routes.ts apps/console/package-lock.json apps/console/package.json apps/console/postcss.config.mjs apps/console/tsconfig.json ./apps/console/
 COPY apps/console/app ./apps/console/app
 COPY apps/console/components ./apps/console/components
 COPY apps/console/hooks ./apps/console/hooks
