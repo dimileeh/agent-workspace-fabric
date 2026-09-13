@@ -1617,12 +1617,39 @@ test("parseTelemetryPresentation validates known allocation evidence UID fields"
   }
 });
 
+test("parseTelemetryPresentation validates admitted owner Job identity", () => {
+  for (const evidence of [undefined, null, {}, SUCCESS.admitted.evidence]) {
+    for (const invalid of [null, 42, {}, "", " ", "u".repeat(MAX_PROVIDER_RESOURCE_UID_LENGTH + 1)]) {
+      const raw = structuredClone(SUCCESS);
+      raw.admitted.evidence = evidence;
+      raw.admitted.owner_job_uid = invalid;
+      assert.equal(parseTelemetryPresentation(raw), null);
+    }
+  }
+});
+
+test("parseTelemetryPresentation compares duplicated owner Job identities", () => {
+  const raw = structuredClone(SUCCESS);
+  raw.admitted.owner_job_uid = "different-job-uid";
+  assert.equal(parseTelemetryPresentation(raw), null);
+
+  raw.admitted.evidence.owner_job_uid = raw.admitted.owner_job_uid;
+  assert.ok(parseTelemetryPresentation(raw), "matching owner Job identities");
+  delete raw.admitted.owner_job_uid;
+  assert.ok(parseTelemetryPresentation(raw), "evidence-only owner Job identity");
+  raw.admitted.owner_job_uid = undefined;
+  assert.ok(parseTelemetryPresentation(raw), "undefined optional owner Job identity");
+  delete raw.admitted.evidence.owner_job_uid;
+  assert.ok(parseTelemetryPresentation(raw), "both owner Job identities absent");
+});
+
 test("parseTelemetryPresentation accepts optional and unprojected allocation evidence", () => {
   for (const evidence of [undefined, null, {}, { future_field: { opaque: true } },
     { pod_uid: undefined, owner_job_uid: undefined },
     { owner_job_uid: "u".repeat(MAX_PROVIDER_RESOURCE_UID_LENGTH) }]) {
     const raw = structuredClone(SUCCESS);
     raw.admitted.evidence = evidence;
+    if (evidence?.owner_job_uid) raw.admitted.owner_job_uid = evidence.owner_job_uid;
     assert.ok(parseTelemetryPresentation(raw));
   }
   const raw = structuredClone(SUCCESS);

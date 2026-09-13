@@ -703,6 +703,10 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
     return undefined;
   }
   // Validate known allocation provenance without projecting it.
+  const ownerJobUid = readPresentationResourceUidField(value, "owner_job_uid");
+  if (ownerJobUid === undefined || (ownerJobUid !== null && ownerJobUid.trim() === "")) {
+    return undefined;
+  }
   if (value.evidence !== undefined && value.evidence !== null) {
     if (!isPlainObject(value.evidence)) {
       return undefined;
@@ -710,6 +714,9 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
     for (const field of ["pod_uid", "owner_job_uid"]) {
       const uid = readPresentationResourceUidField(value.evidence, field);
       if (uid === undefined || (uid !== null && uid.trim() === "")) {
+        return undefined;
+      }
+      if (field === "owner_job_uid" && ownerJobUid !== null && uid !== null && uid !== ownerJobUid) {
         return undefined;
       }
     }
