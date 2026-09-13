@@ -168,7 +168,12 @@ test("individual gates withdraw and stop unsupported polling", async ({ page }) 
 
 test("provider age advances past five minutes while malformed poll retains data", async ({ page }) => {
   await setup(page); let malformed = false;
-  await page.route("**/telemetry?*", route => fulfillJson(route, malformed ? { invalid: true } : fixture()));
+  await page.route("**/telemetry?*", route => {
+    const body = fixture();
+    // Retention requires verified ownership even when presentation parsing fails.
+    if (malformed) body.estimate.estimated_usd = "garbage";
+    return fulfillJson(route, body);
+  });
   await page.clock.install({ time: new Date("2026-09-12T12:04:00Z") });
   await page.goto("/"); await open(page);
   await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
@@ -240,6 +245,28 @@ test("slow requests time out without overlap and recover on the next minute", as
   await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
   expect(reads).toBe(2); release();
 });
+
+for (const ownership of [undefined, null, false, 0, "", [], {}, { workspace_record_id: "ws_other" }]) {
+  test(`invalid ownership ${JSON.stringify(ownership)} rejects initial data and clears last-success`, async ({ page }) => {
+    await setup(page);
+    let invalid = true;
+    await page.route("**/telemetry?*", route => {
+      const body = fixture();
+      if (invalid) body.ownership = ownership;
+      return fulfillJson(route, body);
+    });
+    await page.clock.install(); await page.goto("/"); await open(page);
+    await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry ownership mismatch");
+    await expect(page.getByTestId("console-workspace-telemetry")).toHaveCount(0);
+    invalid = false; await page.clock.runFor(61_000);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+    invalid = true; await page.clock.runFor(61_000);
+    await expect(page.getByTestId("telemetry-request-error")).toHaveText("Telemetry ownership mismatch");
+    await expect(page.getByTestId("console-workspace-telemetry")).toHaveCount(0);
+    invalid = false; await page.clock.runFor(61_000);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  });
+}
 
 test("new attempt evidence clears last-success even when its body is malformed", async ({ page }) => {
   await setup(page); let replace = false;

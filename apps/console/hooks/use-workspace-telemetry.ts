@@ -50,16 +50,16 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
         // Ownership is private validation evidence, never UI text or routing authority.
         const owner = raw?.ownership as Record<string, unknown> | null | undefined;
         const query = new URL(url, window.location.origin).searchParams;
-        if (owner && (typeof owner !== "object" || Array.isArray(owner) ||
+        if (!owner || typeof owner !== "object" || Array.isArray(owner) ||
           owner.workspace_record_id !== workspaceId ||
           !Number.isSafeInteger(owner.placement_attempt) || Number(owner.placement_attempt) < 0 ||
           typeof owner.provider_resource_uid !== "string" || !owner.provider_resource_uid || owner.provider_resource_uid.length > 64 ||
-          ["org_id", "project_id"].some(key => query.has(key) && owner[key] !== query.get(key)))) {
+          ["org_id", "project_id"].some(key => query.has(key) && owner[key] !== query.get(key))) {
           setState({ data: null, error: "Telemetry ownership mismatch", lastGoodAt: null });
           return;
         }
-        const nextIdentity = owner ? JSON.stringify([owner.provider_resource_uid, owner.placement_attempt]) : null;
-        if (owner && nextIdentity !== resourceIdentity) {
+        const nextIdentity = JSON.stringify([owner.provider_resource_uid, owner.placement_attempt]);
+        if (nextIdentity !== resourceIdentity) {
           resourceIdentity = nextIdentity;
           setState({ data: null, error: null, lastGoodAt: null });
         }
