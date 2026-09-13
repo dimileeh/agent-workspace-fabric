@@ -1086,6 +1086,26 @@ test("parseTelemetryPresentation rejects overlong rate provenance strings", () =
   );
 });
 
+for (const field of ["compute_class", "region"]) {
+  for (const blank of ["", " ", "\t\n", "\u00a0"]) {
+    test(`parseTelemetryPresentation rejects blank ${field}: ${JSON.stringify(blank)}`, () => {
+      const raw = structuredClone(SUCCESS);
+      raw.admitted[field] = blank;
+      assert.equal(parseTelemetryPresentation(raw), null);
+    });
+  }
+}
+
+test("parseTelemetryPresentation preserves nonblank allocation labels verbatim", () => {
+  const raw = structuredClone(SUCCESS);
+  raw.admitted.compute_class = " Balanced ";
+  raw.admitted.region = " us-central1\t";
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.admitted.computeClass, raw.admitted.compute_class);
+  assert.equal(parsed.admitted.region, raw.admitted.region);
+});
+
 test("parseTelemetryPresentation rejects overlong allocation presentation strings", () => {
   // Numeric/timestamp/sample/container caps do not bound compute_class, region,
   // or pod_phase. Overlong labels are retained and projected into Fact nodes.

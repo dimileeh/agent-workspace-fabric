@@ -702,6 +702,9 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
   ) {
     return undefined;
   }
+  if (value.compute_class.trim() === "" || value.region.trim() === "") {
+    return undefined;
+  }
   // Validate known allocation provenance without projecting it.
   const ownerJobUid = readPresentationResourceUidField(value, "owner_job_uid");
   if (ownerJobUid === undefined || (ownerJobUid !== null && ownerJobUid.trim() === "")) {
