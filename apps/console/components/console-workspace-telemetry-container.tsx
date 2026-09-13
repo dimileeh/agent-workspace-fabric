@@ -68,7 +68,7 @@ function TelemetryRead({
       <Panel
         icon={null}
         title="Workspace resources"
-        action={
+        action={gates[0] ? (
           <div role="tablist" aria-label="Telemetry window">
             {TELEMETRY_VIEWS.map(v => (
               <button
@@ -83,7 +83,7 @@ function TelemetryRead({
               </button>
             ))}
           </div>
-        }
+        ) : null}
       >
         <div
           className="text-xs text-fg-muted"

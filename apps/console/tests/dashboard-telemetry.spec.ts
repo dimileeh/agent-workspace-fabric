@@ -260,9 +260,36 @@ for (const gate of ["telemetry", "allocation", "cost"]) {
     caps.widgets = caps.widgets.map(w => ["telemetry", "allocation", "cost"].includes(String(w.id)) && w.id !== gate
       ? { id: w.id, availability: "unsupported", reason_code: "policy_disabled", message: "Disabled", semantics: "disabled" } : w);
     await mockAwfConsoleApi(page, { capabilities: caps, overviewItems: [overview("ws_unpriced_allocation")] });
-    await page.route("**/telemetry?*", route => fulfillJson(route, fixture()));
+    const held: import("@playwright/test").Route[] = [];
+    await page.route("**/telemetry?*", async route => { held.push(route); });
+    await page.clock.install({ time: new Date("2026-09-12T12:10:00Z") });
     await page.goto("/"); await open(page);
+    await expect(page.getByTestId("telemetry-loading")).toBeVisible();
+    const tabs = page.getByRole("tablist", { name: "Telemetry window" });
+    await expect(tabs).toHaveCount(gate === "telemetry" ? 1 : 0);
+    await expect.poll(() => held.length).toBe(1);
+    await fulfillJson(held[0], { detail: { message: "Unavailable" } }, 503);
+    await expect(page.getByTestId("telemetry-request-error")).toContainText("Unavailable");
+    await expect(tabs).toHaveCount(gate === "telemetry" ? 1 : 0);
+    await page.clock.runFor(61_000);
+    await expect.poll(() => held.length).toBe(2);
+    const body = fixture(); body.state = "partial"; body.quality = "partial";
+    body.cpu_cores_samples[0].quality = "partial";
+    body.memory_bytes_samples[0].quality = "partial";
+    await fulfillJson(held[1], body);
     await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(tabs).toHaveCount(gate === "telemetry" ? 1 : 0);
+    for (const id of ["telemetry-mode-label", "telemetry-sample-time", "telemetry-partial-indicator"]) {
+      await expect(page.getByTestId(id)).toHaveCount(gate === "telemetry" ? 1 : 0);
+    }
+    const panel = page.getByTestId("console-workspace-telemetry").locator("xpath=ancestor::section[1]");
+    await expect(panel.getByTitle("Showing the last snapshot — live data may be stale"))
+      .toHaveCount(gate === "telemetry" ? 1 : 0);
+    if (gate === "allocation") {
+      await expect(page.getByTestId("telemetry-meter-cpu")).not.toContainText("partial");
+      await expect(page.getByTestId("telemetry-meter-memory")).not.toContainText("partial");
+    }
+    expect(held.map(route => new URL(route.request().url()).searchParams.get("view"))).toEqual(["1h", "1h"]);
     await expect(page.getByTestId("telemetry-series-cpu")).toHaveCount(gate === "telemetry" ? 1 : 0);
     await expect(page.getByTestId("telemetry-workload-cost")).toHaveCount(gate === "cost" ? 1 : 0);
     await expect(page.getByText("Compute class", { exact: true })).toHaveCount(gate === "allocation" ? 1 : 0);

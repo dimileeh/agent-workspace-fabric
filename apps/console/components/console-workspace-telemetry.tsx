@@ -294,10 +294,10 @@ export function ConsoleWorkspaceTelemetry({
     <Panel
       title="Workspace resources"
       icon={<Cpu size={16} aria-hidden />}
-      stale={stale}
+      stale={showTelemetry && stale}
       staleLabel="stale"
       className="min-w-0"
-      action={
+      action={showTelemetry ? (
         <div className="flex min-w-0 items-center gap-2">
           {envelopePartial ? (
             <span
@@ -346,7 +346,7 @@ export function ConsoleWorkspaceTelemetry({
             })}
           </div>
         </div>
-      }
+      ) : null}
     >
       <div
         data-testid="console-workspace-telemetry"
@@ -379,7 +379,7 @@ export function ConsoleWorkspaceTelemetry({
           </div>
         ) : null}
 
-        <div className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+        {showTelemetry ? <div className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-fg-muted">
           <span
             className="inline-flex items-center rounded-[var(--radius-control)] border border-line bg-surface px-1.5 py-0.5 font-medium text-fg"
             data-testid="telemetry-mode-label"
@@ -413,7 +413,7 @@ export function ConsoleWorkspaceTelemetry({
               Last good {formatDateTime(lastGoodAt)}
             </span>
           ) : null}
-        </div>
+        </div> : null}
 
         {showAllocation && admitted === null && viewModel.state !== "unallocated" ? (
           <div data-testid="telemetry-admission-missing" className="text-xs text-fg-muted">
@@ -442,7 +442,7 @@ export function ConsoleWorkspaceTelemetry({
                 admitted?.cpuLimitCores ?? null,
               )}
               partial={
-                viewModel.cpu.usedPartial || Boolean(admitted?.partial)
+                (showTelemetry && viewModel.cpu.usedPartial) || Boolean(admitted?.partial)
               }
             />
             <ResourceMeter
@@ -461,7 +461,7 @@ export function ConsoleWorkspaceTelemetry({
                 admitted?.memoryLimitBytes ?? null,
               )}
               partial={
-                viewModel.memory.usedPartial || Boolean(admitted?.partial)
+                (showTelemetry && viewModel.memory.usedPartial) || Boolean(admitted?.partial)
               }
             />
           </div>
@@ -508,13 +508,13 @@ export function ConsoleWorkspaceTelemetry({
             label="Rate table"
             value={viewModel.estimate.rateTableVersion ?? "—"}
             mono
-            stale={stale}
+            stale={showTelemetry && stale}
           />
           <Fact
             label="Rate source"
             value={viewModel.estimate.rateSource ?? "—"}
             mono
-            stale={stale}
+            stale={showTelemetry && stale}
           />
           <Fact
             label="Priced / unpriced"
@@ -525,7 +525,7 @@ export function ConsoleWorkspaceTelemetry({
                 : `${viewModel.estimate.pricedIntervalSeconds}s / ${viewModel.estimate.unpricedIntervalSeconds}s`
             }
             mono
-            stale={stale}
+            stale={showTelemetry && stale}
           />
           </> : null}
           {admitted ? (
@@ -533,13 +533,13 @@ export function ConsoleWorkspaceTelemetry({
               <Fact
                 label="Compute class"
                 value={admitted.computeClass ?? "—"}
-                stale={stale}
+                stale={showTelemetry && stale}
               />
-              <Fact label="Region" value={admitted.region ?? "—"} stale={stale} />
+              <Fact label="Region" value={admitted.region ?? "—"} stale={showTelemetry && stale} />
               <Fact
                 label="Billable"
                 value={admitted.billable == null ? "—" : admitted.billable ? "yes" : "no"}
-                stale={stale}
+                stale={showTelemetry && stale}
               />
             </>
           ) : null}
