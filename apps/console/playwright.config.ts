@@ -19,9 +19,9 @@ const hostedHarnessOrigin = "http://127.0.0.1:3191";
 export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
-  // Cap local workers; default half-CPU can contend with both harness Next.js servers.
-  // CI already defaults to 1 when CI is set — keep that explicit.
-  workers: process.env.CI ? 1 : 2,
+  // Bound concurrency for both harness servers: tests use isolated pages/API mocks.
+  // Keep default within-file ordering and explicit serial suites intact.
+  workers: 2,
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
   use: {
     baseURL: localHarnessOrigin,
