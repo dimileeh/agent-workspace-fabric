@@ -63,7 +63,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     if (capabilitiesAbsent) {
       return null;
     }
-    let raw = structuredClone(FIXTURES[fixtureName] ?? FIXTURES.success);
+    const raw = structuredClone(FIXTURES[fixtureName] ?? FIXTURES.success);
     if (
       (unknownLimits ||
         admittedPartial ||
