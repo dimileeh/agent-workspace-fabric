@@ -451,6 +451,39 @@ function parseSampleArray(
 }
 
 /**
+ * True when every sample_time / interval_start / interval_end in the series
+ * falls within a wall-clock span of at most `viewDurationSeconds`. Empty
+ * series are vacuously valid. Prevents plotting a multi-hour series under a
+ * shorter view selector (mirrors estimate interval coverage bounds).
+ */
+function samplesFitViewWindow(
+  samples: ParsedTelemetrySample[],
+  viewDurationSeconds: number,
+): boolean {
+  if (samples.length === 0) {
+    return true;
+  }
+  let minMs = Infinity;
+  let maxMs = -Infinity;
+  for (const sample of samples) {
+    for (const timestamp of [
+      sample.sampleTime,
+      sample.intervalStart,
+      sample.intervalEnd,
+    ]) {
+      const ms = timestampInstantMs(timestamp);
+      if (ms < minMs) {
+        minMs = ms;
+      }
+      if (ms > maxMs) {
+        maxMs = ms;
+      }
+    }
+  }
+  return maxMs - minMs <= viewDurationSeconds * 1000;
+}
+
+/**
  * Read provider_resource_uid from an admitted/ownership object.
  * null = field absent; undefined = present but not a non-empty string (fail closed).
  */
@@ -1074,6 +1107,15 @@ export function parseTelemetryPresentation(
   }
   const memorySamples = parseSampleArray(payload.memory_bytes_samples, "bytes");
   if (memorySamples === null) {
+    return null;
+  }
+  // Sample/interval wall-clock span cannot exceed the selected view window, or
+  // a multi-hour series would render under a shorter selector (e.g. 2h under "1h").
+  const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[payload.view];
+  if (
+    !samplesFitViewWindow(cpuSamples, viewDurationSeconds) ||
+    !samplesFitViewWindow(memorySamples, viewDurationSeconds)
+  ) {
     return null;
   }
   const expectedResourceUid = resolvePresentationResourceUid(payload);

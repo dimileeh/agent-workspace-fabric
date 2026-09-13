@@ -342,6 +342,90 @@ test("parseTelemetryPresentation rejects estimate_state that contradicts interva
   assert.equal(parseTelemetryPresentation(unallocatedUnpriced), null);
 });
 
+test("parseTelemetryPresentation rejects sample or interval spans beyond the selected view window", () => {
+  // A 1h selector must not plot a series whose samples are more than 1h apart.
+  const overSampleSpan = structuredClone(SUCCESS);
+  overSampleSpan.view = "1h";
+  overSampleSpan.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      sample_time: "2026-09-12T10:00:00+00:00",
+      interval_start: "2026-09-12T10:00:00+00:00",
+      interval_end: "2026-09-12T10:00:00+00:00",
+      value: "0.10",
+    },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:01+00:00",
+      interval_start: "2026-09-12T12:00:01+00:00",
+      interval_end: "2026-09-12T12:00:01+00:00",
+      value: "0.20",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(overSampleSpan), null);
+
+  // A single measurement interval longer than the view must also fail closed.
+  const overInterval = structuredClone(SUCCESS);
+  overInterval.view = "1h";
+  overInterval.memory_bytes_samples = [
+    {
+      ...SUCCESS.memory_bytes_samples[0],
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T10:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(overInterval), null);
+
+  // Same bound for longer selectors (6h = 21600s).
+  const overSixHour = structuredClone(SUCCESS);
+  overSixHour.view = "6h";
+  overSixHour.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    priced_interval_seconds: 21600,
+    unpriced_interval_seconds: 0,
+  };
+  overSixHour.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      sample_time: "2026-09-12T06:00:00+00:00",
+      interval_start: "2026-09-12T06:00:00+00:00",
+      interval_end: "2026-09-12T06:00:00+00:00",
+    },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:01+00:00",
+      interval_start: "2026-09-12T12:00:01+00:00",
+      interval_end: "2026-09-12T12:00:01+00:00",
+    },
+  ];
+  assert.equal(parseTelemetryPresentation(overSixHour), null);
+
+  // Exact view duration remains valid (1h span under view "1h").
+  const exactSpan = structuredClone(SUCCESS);
+  exactSpan.view = "1h";
+  exactSpan.cpu_cores_samples = [
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      sample_time: "2026-09-12T11:00:00+00:00",
+      interval_start: "2026-09-12T11:00:00+00:00",
+      interval_end: "2026-09-12T11:00:00+00:00",
+      value: "0.10",
+    },
+    {
+      ...SUCCESS.cpu_cores_samples[0],
+      container_name: "sidecar",
+      sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
+      value: "0.20",
+    },
+  ];
+  assert.ok(parseTelemetryPresentation(exactSpan));
+});
+
 test("parseTelemetryPresentation rejects estimate coverage beyond the selected view window", () => {
   // A 1h selector must not accept a 2h priced interval as that window's cost.
   const overWindow = structuredClone(SUCCESS);
@@ -1454,6 +1538,8 @@ test("implausibly future meter sample times fail closed as stale", () => {
   // A future sample_time wins latestTimestamp over legitimate readings; without
   // a closed freshness check, nowMs - ms is negative so isStale stays false
   // indefinitely (malformed producer timestamp or collector clock skew).
+  // Keep the series within the 1h view window so parse accepts it; only the
+  // freshness check should fail closed on the future reading.
   const future = structuredClone(SUCCESS);
   future.cpu_cores_samples = [
     {
@@ -1467,9 +1553,9 @@ test("implausibly future meter sample times fail closed as stale", () => {
     {
       ...SUCCESS.cpu_cores_samples[0],
       container_name: "sidecar",
-      sample_time: "2026-09-13T12:00:00+00:00",
-      interval_start: "2026-09-13T12:00:00+00:00",
-      interval_end: "2026-09-13T12:00:00+00:00",
+      sample_time: "2026-09-12T12:30:00+00:00",
+      interval_start: "2026-09-12T12:30:00+00:00",
+      interval_end: "2026-09-12T12:30:00+00:00",
       value: "0.90",
     },
   ];
@@ -1488,7 +1574,7 @@ test("implausibly future meter sample times fail closed as stale", () => {
     nowMs: Date.parse("2026-09-12T12:01:00+00:00"),
   });
   assert.equal(view.isStale, true);
-  assert.equal(view.sampleTime, "2026-09-13T12:00:00+00:00");
+  assert.equal(view.sampleTime, "2026-09-12T12:30:00+00:00");
 });
 
 test("view enum accepts only 1h/6h/24h", () => {
