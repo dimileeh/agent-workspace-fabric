@@ -86,8 +86,9 @@ append a `confirmed` suffix, lower-bound hint, coverage banner, scope caption,
 unknown-count badge, or other strip chrome for routine partial/unknown HTTP 200
 snapshots — only the existing terminal `last Nh` hint, plus request/outage
 errors and stale-data warnings, remain operator-visible. Machine-readable
-`coverage` and `count_evidence` stay required contract fields: producers must
-publish them and the console parses/validates them, but they are not surfaced as
+`coverage` stays a required contract field: producers must publish it and the
+console parses/validates it. Optional `count_evidence` is parsed and validated
+when present (or explicitly null); producers may omit it. Neither is surfaced as
 Fleet health strip chrome. A non-null exact count always takes precedence and is
 never overwritten by confirmed evidence.
 
