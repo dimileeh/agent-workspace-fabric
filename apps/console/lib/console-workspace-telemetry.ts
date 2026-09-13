@@ -766,6 +766,17 @@ export function buildSparklineGeometry(
   };
 }
 
+/**
+ * Kubernetes request-vs-limit: when both sides are present, request must not
+ * exceed limit. A null limit means unbounded; a null request is unconstrained.
+ */
+function requestWithinLimit(request: number | null, limit: number | null): boolean {
+  if (request === null || limit === null) {
+    return true;
+  }
+  return request <= limit;
+}
+
 function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefined {
   if (value === null) {
     return null;
@@ -778,11 +789,23 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
   if (cpuRequestCores === undefined || cpuLimitCores === undefined) {
     return undefined;
   }
+  if (!requestWithinLimit(cpuRequestCores, cpuLimitCores)) {
+    return undefined;
+  }
   if (
     !isNullableNonNegativeSafeByteCount(value.memory_request_bytes) ||
     !isNullableNonNegativeSafeByteCount(value.memory_limit_bytes) ||
     !isNullableNonNegativeSafeByteCount(value.ephemeral_storage_request_bytes) ||
     !isNullableNonNegativeSafeByteCount(value.ephemeral_storage_limit_bytes)
+  ) {
+    return undefined;
+  }
+  if (
+    !requestWithinLimit(value.memory_request_bytes, value.memory_limit_bytes) ||
+    !requestWithinLimit(
+      value.ephemeral_storage_request_bytes,
+      value.ephemeral_storage_limit_bytes,
+    )
   ) {
     return undefined;
   }

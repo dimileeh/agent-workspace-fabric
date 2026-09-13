@@ -1283,6 +1283,39 @@ test("unknown CPU/memory limits stay null rather than zero", () => {
   assert.notEqual(view.admitted?.memoryLimitBytes, 0);
 });
 
+test("parseTelemetryPresentation rejects admitted requests that exceed their limits", () => {
+  const cpuOver = structuredClone(SUCCESS);
+  cpuOver.admitted.cpu_request_cores = "2";
+  cpuOver.admitted.cpu_limit_cores = "1";
+  assert.equal(parseTelemetryPresentation(cpuOver), null, "cpu request > limit");
+
+  const memOver = structuredClone(SUCCESS);
+  memOver.admitted.memory_request_bytes = 4294967296;
+  memOver.admitted.memory_limit_bytes = 2147483648;
+  assert.equal(parseTelemetryPresentation(memOver), null, "memory request > limit");
+
+  const ephemeralOver = structuredClone(SUCCESS);
+  ephemeralOver.admitted.ephemeral_storage_request_bytes = 2147483648;
+  ephemeralOver.admitted.ephemeral_storage_limit_bytes = 1073741824;
+  assert.equal(
+    parseTelemetryPresentation(ephemeralOver),
+    null,
+    "ephemeral request > limit",
+  );
+
+  // Equal request/limit remains valid; null limit (unbounded) skips the check.
+  const equalCpu = structuredClone(SUCCESS);
+  equalCpu.admitted.cpu_request_cores = "1";
+  equalCpu.admitted.cpu_limit_cores = "1";
+  assert.ok(parseTelemetryPresentation(equalCpu), "cpu request == limit ok");
+
+  const nullLimit = structuredClone(SUCCESS);
+  nullLimit.admitted.cpu_limit_cores = null;
+  nullLimit.admitted.memory_limit_bytes = null;
+  nullLimit.admitted.ephemeral_storage_limit_bytes = null;
+  assert.ok(parseTelemetryPresentation(nullLimit), "null limits skip invariant");
+});
+
 function sampleTimestampForIndex(i) {
   const day = String(1 + Math.floor(i / 86400)).padStart(2, "0");
   const tod = i % 86400;
