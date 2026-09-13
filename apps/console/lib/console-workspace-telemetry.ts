@@ -55,6 +55,15 @@ export const MAX_DECIMAL_STRING_LENGTH = 64;
  */
 export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
 /**
+ * Lexical length cap for container_name before retaining a sample.
+ * Legitimate compose/K8s container names fit well under this (DNS labels ≤63;
+ * profile service names ≤64). Without the cap, a malformed producer can supply
+ * arbitrarily long names that are copied into identity keys, sets, sorts, and
+ * partition joins across up to MAX_TELEMETRY_SAMPLES rows — defeating the
+ * sample-count bound on the console thread.
+ */
+export const MAX_CONTAINER_NAME_LENGTH = 64;
+/**
  * Memory / ephemeral bytes upper bound.
  * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
  * in JS Number (above this, values round silently and must be rejected).
@@ -339,6 +348,11 @@ function parseSampleArray(
       return null;
     }
     if (typeof item.container_name !== "string" || item.container_name.length === 0) {
+      return null;
+    }
+    // Reject before retaining so identity keys / partition joins cannot allocate
+    // unbounded strings across up to MAX_TELEMETRY_SAMPLES rows.
+    if (item.container_name.length > MAX_CONTAINER_NAME_LENGTH) {
       return null;
     }
     if (item.unit !== expectedUnit) {

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   COST_EXCLUSION_NOTE,
+  MAX_CONTAINER_NAME_LENGTH,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
   MAX_RFC3339_TIMESTAMP_LENGTH,
@@ -559,6 +560,29 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   const stringMem = structuredClone(SUCCESS);
   stringMem.admitted.memory_limit_bytes = "4294967296";
   assert.equal(parseTelemetryPresentation(stringMem), null);
+});
+
+test("parseTelemetryPresentation rejects overlong container_name strings", () => {
+  // Sample-count cap does not bound per-name lexical size. Overlong names are
+  // copied into identity keys, sets, sorts, and partition joins.
+  const overlongName = "c".repeat(MAX_CONTAINER_NAME_LENGTH + 1);
+  assert.equal(overlongName.length, MAX_CONTAINER_NAME_LENGTH + 1);
+
+  const overlongCpu = structuredClone(SUCCESS);
+  overlongCpu.cpu_cores_samples[0].container_name = overlongName;
+  assert.equal(parseTelemetryPresentation(overlongCpu), null, "cpu overlong container_name");
+
+  const overlongMem = structuredClone(SUCCESS);
+  overlongMem.memory_bytes_samples[0].container_name = overlongName;
+  assert.equal(parseTelemetryPresentation(overlongMem), null, "memory overlong container_name");
+
+  // Boundary-length non-empty names still parse (cap is lexical).
+  const atCapName = "c".repeat(MAX_CONTAINER_NAME_LENGTH);
+  assert.equal(atCapName.length, MAX_CONTAINER_NAME_LENGTH);
+  const atCap = structuredClone(SUCCESS);
+  atCap.cpu_cores_samples[0].container_name = atCapName;
+  atCap.memory_bytes_samples[0].container_name = atCapName;
+  assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap container_name ok");
 });
 
 test("parseTelemetryPresentation rejects overlong RFC3339 timestamp strings", () => {
