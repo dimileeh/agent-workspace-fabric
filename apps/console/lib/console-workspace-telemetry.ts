@@ -303,6 +303,14 @@ function parseSampleArray(
     if (compareTimestampInstants(item.interval_start, item.interval_end) > 0) {
       return null;
     }
+    // sample_time must fall within [interval_start, interval_end] (inclusive).
+    // Out-of-window instants would skew partition selection, ordering, and freshness.
+    if (
+      compareTimestampInstants(item.sample_time, item.interval_start) < 0 ||
+      compareTimestampInstants(item.sample_time, item.interval_end) > 0
+    ) {
+      return null;
+    }
     // Fail closed: unknown/typo quality must not parse as complete usage.
     if (!isOneOf(item.quality, TELEMETRY_QUALITIES)) {
       return null;

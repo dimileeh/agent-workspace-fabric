@@ -127,6 +127,49 @@ test("parseTelemetryPresentation rejects samples with reversed interval windows"
   assert.equal(parseTelemetryPresentation(reversedSubMs), null);
 });
 
+test("parseTelemetryPresentation rejects sample_time outside its measurement interval", () => {
+  // Interval is ordered but sample_time is before the window — must fail closed
+  // so freshness/partition logic cannot treat an out-of-window instant as current.
+  const beforeStart = structuredClone(SUCCESS);
+  beforeStart.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  beforeStart.cpu_cores_samples[0].interval_end = "2026-09-12T12:01:00+00:00";
+  beforeStart.cpu_cores_samples[0].sample_time = "2026-09-12T11:00:00+00:00";
+  assert.equal(parseTelemetryPresentation(beforeStart), null);
+
+  const afterEnd = structuredClone(SUCCESS);
+  afterEnd.memory_bytes_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  afterEnd.memory_bytes_samples[0].interval_end = "2026-09-12T12:01:00+00:00";
+  afterEnd.memory_bytes_samples[0].sample_time = "2026-09-12T12:02:00+00:00";
+  assert.equal(parseTelemetryPresentation(afterEnd), null);
+
+  // Offset spelling that is strictly before start in UTC.
+  const beforeViaOffset = structuredClone(SUCCESS);
+  beforeViaOffset.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  beforeViaOffset.cpu_cores_samples[0].interval_end = "2026-09-12T12:01:00+00:00";
+  beforeViaOffset.cpu_cores_samples[0].sample_time = "2026-09-12T12:30:00+01:00";
+  assert.equal(parseTelemetryPresentation(beforeViaOffset), null);
+
+  // Sub-ms: sample after end must reject even when ms buckets match.
+  const afterSubMs = structuredClone(SUCCESS);
+  afterSubMs.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00.000001Z";
+  afterSubMs.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00.000002Z";
+  afterSubMs.cpu_cores_samples[0].sample_time = "2026-09-12T12:00:00.000003Z";
+  assert.equal(parseTelemetryPresentation(afterSubMs), null);
+
+  // Inclusive endpoints remain valid (including alternate RFC3339 spellings).
+  const atStart = structuredClone(SUCCESS);
+  atStart.cpu_cores_samples[0].interval_start = "2026-09-12T11:59:00+00:00";
+  atStart.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00+00:00";
+  atStart.cpu_cores_samples[0].sample_time = "2026-09-12T11:59:00Z";
+  assert.ok(parseTelemetryPresentation(atStart));
+
+  const atEnd = structuredClone(SUCCESS);
+  atEnd.cpu_cores_samples[0].interval_start = "2026-09-12T11:59:00+00:00";
+  atEnd.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00+00:00";
+  atEnd.cpu_cores_samples[0].sample_time = "2026-09-12T13:00:00+01:00";
+  assert.ok(parseTelemetryPresentation(atEnd));
+});
+
 test("parseTelemetryPresentation rejects unknown sample quality rather than treating it as complete", () => {
   for (const bad of ["typo", "complete", "", 1, null, undefined]) {
     const badCpu = structuredClone(SUCCESS);
@@ -1019,7 +1062,11 @@ test("fresh envelope with aged meter samples is stale and Sample uses sample tim
   // Envelope is fresh relative to now; CPU/memory readings are older than stale_after.
   agedMeters.observed_at = "2026-09-12T12:05:00+00:00";
   agedMeters.cpu_cores_samples[0].sample_time = "2026-09-12T11:50:00+00:00";
+  agedMeters.cpu_cores_samples[0].interval_start = "2026-09-12T11:50:00+00:00";
+  agedMeters.cpu_cores_samples[0].interval_end = "2026-09-12T11:50:00+00:00";
   agedMeters.memory_bytes_samples[0].sample_time = "2026-09-12T11:51:00+00:00";
+  agedMeters.memory_bytes_samples[0].interval_start = "2026-09-12T11:51:00+00:00";
+  agedMeters.memory_bytes_samples[0].interval_end = "2026-09-12T11:51:00+00:00";
   const parsed = parseTelemetryPresentation(agedMeters);
   assert.ok(parsed);
   const nowMs = Date.parse("2026-09-12T12:05:30+00:00");
@@ -1039,7 +1086,11 @@ test("differing but fresh CPU/memory sample times mark sampleTimeMixed", () => {
   const mixed = structuredClone(SUCCESS);
   mixed.observed_at = "2026-09-12T12:00:00+00:00";
   mixed.cpu_cores_samples[0].sample_time = "2026-09-12T11:58:00+00:00";
+  mixed.cpu_cores_samples[0].interval_start = "2026-09-12T11:58:00+00:00";
+  mixed.cpu_cores_samples[0].interval_end = "2026-09-12T11:58:00+00:00";
   mixed.memory_bytes_samples[0].sample_time = "2026-09-12T12:00:00+00:00";
+  mixed.memory_bytes_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  mixed.memory_bytes_samples[0].interval_end = "2026-09-12T12:00:00+00:00";
   const parsed = parseTelemetryPresentation(mixed);
   assert.ok(parsed);
   const view = projectWorkspaceTelemetryView(parsed, {
@@ -1067,7 +1118,11 @@ test("fresh envelope and meters with aged admitted observed_at is stale", () => 
   // Envelope + meters are within stale_after; allocation snapshot is not.
   agedAdmitted.observed_at = "2026-09-12T12:05:00+00:00";
   agedAdmitted.cpu_cores_samples[0].sample_time = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.cpu_cores_samples[0].interval_start = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.cpu_cores_samples[0].interval_end = "2026-09-12T12:05:00+00:00";
   agedAdmitted.memory_bytes_samples[0].sample_time = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.memory_bytes_samples[0].interval_start = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.memory_bytes_samples[0].interval_end = "2026-09-12T12:05:00+00:00";
   agedAdmitted.admitted.observed_at = "2026-09-12T11:50:00+00:00";
   const parsed = parseTelemetryPresentation(agedAdmitted);
   assert.ok(parsed);
@@ -1086,12 +1141,16 @@ test("implausibly future meter sample times fail closed as stale", () => {
       ...SUCCESS.cpu_cores_samples[0],
       container_name: "agent",
       sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
       value: "0.10",
     },
     {
       ...SUCCESS.cpu_cores_samples[0],
       container_name: "sidecar",
       sample_time: "2026-09-13T12:00:00+00:00",
+      interval_start: "2026-09-13T12:00:00+00:00",
+      interval_end: "2026-09-13T12:00:00+00:00",
       value: "0.90",
     },
   ];
@@ -1099,6 +1158,8 @@ test("implausibly future meter sample times fail closed as stale", () => {
     {
       ...SUCCESS.memory_bytes_samples[0],
       sample_time: "2026-09-12T12:00:00+00:00",
+      interval_start: "2026-09-12T12:00:00+00:00",
+      interval_end: "2026-09-12T12:00:00+00:00",
     },
   ];
   future.observed_at = "2026-09-12T12:00:00+00:00";
