@@ -950,8 +950,26 @@ function parseEstimate(
     if (!isPlainObject(value.evidence)) {
       return null;
     }
-    if (typeof value.evidence.source === "string") {
+    // Known evidence fields must keep their types; do not silently drop a
+    // malformed source while still displaying the estimate as complete.
+    if ("source" in value.evidence && value.evidence.source !== undefined) {
+      if (typeof value.evidence.source !== "string") {
+        return null;
+      }
       rateSource = value.evidence.source;
+    }
+    // Duplicated rate-table identity must agree with the displayed top-level
+    // version — contradictory provenance fails closed.
+    if (
+      "rate_table_version" in value.evidence &&
+      value.evidence.rate_table_version !== undefined
+    ) {
+      if (
+        typeof value.evidence.rate_table_version !== "string" ||
+        value.evidence.rate_table_version !== value.rate_table_version
+      ) {
+        return null;
+      }
     }
   }
   const rateTableVersion =

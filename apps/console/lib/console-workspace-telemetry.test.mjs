@@ -375,6 +375,57 @@ test("parseTelemetryPresentation rejects estimate coverage beyond the selected v
   // Exact window duration remains valid (success fixture: 1h / 3600s).
   assert.ok(parseTelemetryPresentation(SUCCESS));
 });
+
+test("parseTelemetryPresentation rejects malformed or conflicting estimate evidence", () => {
+  // Non-string source must fail closed — not silently render as missing provenance.
+  const nonStringSource = structuredClone(SUCCESS);
+  nonStringSource.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      source: 42,
+    },
+  };
+  assert.equal(parseTelemetryPresentation(nonStringSource), null);
+
+  const nullSource = structuredClone(SUCCESS);
+  nullSource.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      source: null,
+    },
+  };
+  assert.equal(parseTelemetryPresentation(nullSource), null);
+
+  // Evidence rate_table_version that disagrees with the displayed top-level version.
+  const conflictingVersion = structuredClone(SUCCESS);
+  conflictingVersion.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      rate_table_version: "other-rate-table",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(conflictingVersion), null);
+
+  // Non-string evidence rate_table_version is also malformed provenance.
+  const nonStringVersion = structuredClone(SUCCESS);
+  nonStringVersion.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    evidence: {
+      ...structuredClone(SUCCESS.estimate.evidence),
+      rate_table_version: 1,
+    },
+  };
+  assert.equal(parseTelemetryPresentation(nonStringVersion), null);
+
+  // Matching duplicated identities remain valid (success fixture).
+  assert.ok(parseTelemetryPresentation(SUCCESS));
+  // Unallocated evidence without source / rate_table_version remains valid.
+  assert.ok(parseTelemetryPresentation(UNALLOCATED));
+});
+
 test("parseTelemetryPresentation rejects estimate_state that contradicts amount fields", () => {
   // complete with a null amount would surface as unpriced despite estimate_state.
   const completeNullAmount = structuredClone(SUCCESS);
