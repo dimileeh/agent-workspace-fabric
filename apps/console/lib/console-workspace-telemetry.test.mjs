@@ -724,6 +724,14 @@ test("complete estimates require positive priced coverage, including for zero am
   assert.equal(view.estimate.estimatedUsd, 0);
 });
 
+test("partial estimates reject positive priced coverage without an amount", () => {
+  const raw = structuredClone(PARTIAL);
+  raw.estimate.priced_interval_seconds = 60;
+  raw.estimate.unpriced_interval_seconds = 600;
+  raw.estimate.estimated_usd = null;
+  assert.equal(parseTelemetryPresentation(raw), null);
+});
+
 test("partial estimates require priced coverage for a non-null amount, including zero", () => {
   const raw = structuredClone(PARTIAL);
   raw.estimate.priced_interval_seconds = 0;
