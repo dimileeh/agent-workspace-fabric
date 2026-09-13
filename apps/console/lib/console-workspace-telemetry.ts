@@ -405,6 +405,9 @@ function parseSampleArray(
     if (item.container_name.length > MAX_CONTAINER_NAME_LENGTH) {
       return null;
     }
+    if (item.container_name.trim().length === 0) {
+      return null;
+    }
     if (item.unit !== expectedUnit) {
       return null;
     }

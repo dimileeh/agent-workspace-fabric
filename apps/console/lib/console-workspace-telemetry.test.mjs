@@ -944,6 +944,26 @@ test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings
   assert.equal(parseTelemetryPresentation(stringMem), null);
 });
 
+test("parseTelemetryPresentation rejects trim-empty container names", () => {
+  for (const name of ["", " ", "\t\r\n", "\u00a0\u2003"]) {
+    for (const series of [
+      ["cpu_cores_samples"],
+      ["memory_bytes_samples"],
+      ["cpu_cores_samples", "memory_bytes_samples"],
+    ]) {
+      const raw = structuredClone(SUCCESS);
+      for (const key of series) {
+        raw[key][0].container_name = name;
+      }
+      assert.equal(
+        parseTelemetryPresentation(raw),
+        null,
+        `${series.join(" + ")} rejects container name ${JSON.stringify(name)}`,
+      );
+    }
+  }
+});
+
 test("parseTelemetryPresentation rejects overlong container_name strings", () => {
   // Sample-count cap does not bound per-name lexical size. Overlong names are
   // copied into identity keys, sets, sorts, and partition joins.
