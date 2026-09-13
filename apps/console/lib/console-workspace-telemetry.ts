@@ -888,7 +888,10 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
   };
 }
 
-function parseEstimate(value: unknown): ParsedEstimate | null {
+function parseEstimate(
+  value: unknown,
+  view: TelemetryViewWindow,
+): ParsedEstimate | null {
   if (!isPlainObject(value)) {
     return null;
   }
@@ -907,6 +910,15 @@ function parseEstimate(value: unknown): ParsedEstimate | null {
     !Number.isInteger(value.priced_interval_seconds) ||
     !isNonNegativeFiniteNumber(value.unpriced_interval_seconds, MAX_DECIMAL_MAGNITUDE) ||
     !Number.isInteger(value.unpriced_interval_seconds)
+  ) {
+    return null;
+  }
+  // Interval coverage cannot exceed the selected view window, or a multi-hour
+  // charge would display under a shorter selector (e.g. 7200s under "1h").
+  const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[view];
+  if (
+    value.priced_interval_seconds + value.unpriced_interval_seconds >
+    viewDurationSeconds
   ) {
     return null;
   }
@@ -1024,17 +1036,8 @@ export function parseTelemetryPresentation(
   if (!assertSampleIdentities([cpuSamples, memorySamples], expectedResourceUid)) {
     return null;
   }
-  const estimate = parseEstimate(payload.estimate);
+  const estimate = parseEstimate(payload.estimate, payload.view);
   if (estimate === null) {
-    return null;
-  }
-  // Interval coverage cannot exceed the selected view window, or a multi-hour
-  // charge would display under a shorter selector (e.g. 7200s under "1h").
-  const viewDurationSeconds = TELEMETRY_VIEW_DURATION_SECONDS[payload.view];
-  if (
-    estimate.pricedIntervalSeconds + estimate.unpricedIntervalSeconds >
-    viewDurationSeconds
-  ) {
     return null;
   }
 

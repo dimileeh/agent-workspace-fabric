@@ -362,6 +362,16 @@ test("parseTelemetryPresentation rejects estimate coverage beyond the selected v
   };
   assert.equal(parseTelemetryPresentation(overPartial), null);
 
+  // Same bound applies to longer selectors (6h = 21600s).
+  const overSixHour = structuredClone(SUCCESS);
+  overSixHour.view = "6h";
+  overSixHour.estimate = {
+    ...structuredClone(SUCCESS.estimate),
+    priced_interval_seconds: 21601,
+    unpriced_interval_seconds: 0,
+  };
+  assert.equal(parseTelemetryPresentation(overSixHour), null);
+
   // Exact window duration remains valid (success fixture: 1h / 3600s).
   assert.ok(parseTelemetryPresentation(SUCCESS));
 });
