@@ -156,6 +156,26 @@ test("parseTelemetryPresentation rejects sample_time outside its measurement int
   afterSubMs.cpu_cores_samples[0].sample_time = "2026-09-12T12:00:00.000003Z";
   assert.equal(parseTelemetryPresentation(afterSubMs), null);
 
+  // Sub-ms: sample before start must likewise fail closed.
+  const beforeSubMs = structuredClone(SUCCESS);
+  beforeSubMs.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00.000002Z";
+  beforeSubMs.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00.000003Z";
+  beforeSubMs.cpu_cores_samples[0].sample_time = "2026-09-12T12:00:00.000001Z";
+  assert.equal(parseTelemetryPresentation(beforeSubMs), null);
+
+  // Zero-width window: sample_time must equal the single declared instant.
+  const pointMismatch = structuredClone(SUCCESS);
+  pointMismatch.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  pointMismatch.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00+00:00";
+  pointMismatch.cpu_cores_samples[0].sample_time = "2026-09-12T12:00:01+00:00";
+  assert.equal(parseTelemetryPresentation(pointMismatch), null);
+
+  const pointMatch = structuredClone(SUCCESS);
+  pointMatch.cpu_cores_samples[0].interval_start = "2026-09-12T12:00:00+00:00";
+  pointMatch.cpu_cores_samples[0].interval_end = "2026-09-12T12:00:00+00:00";
+  pointMatch.cpu_cores_samples[0].sample_time = "2026-09-12T12:00:00Z";
+  assert.ok(parseTelemetryPresentation(pointMatch));
+
   // Inclusive endpoints remain valid (including alternate RFC3339 spellings).
   const atStart = structuredClone(SUCCESS);
   atStart.cpu_cores_samples[0].interval_start = "2026-09-12T11:59:00+00:00";

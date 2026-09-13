@@ -303,11 +303,13 @@ function parseSampleArray(
     if (compareTimestampInstants(item.interval_start, item.interval_end) > 0) {
       return null;
     }
-    // sample_time must fall within [interval_start, interval_end] (inclusive).
-    // Out-of-window instants would skew partition selection, ordering, and freshness.
+    // Out-of-window sample_time would skew partition selection, ordering, and freshness.
     if (
-      compareTimestampInstants(item.sample_time, item.interval_start) < 0 ||
-      compareTimestampInstants(item.sample_time, item.interval_end) > 0
+      !isSampleTimeWithinMeasurementInterval(
+        item.sample_time,
+        item.interval_start,
+        item.interval_end,
+      )
     ) {
       return null;
     }
@@ -987,6 +989,21 @@ function compareTimestampInstants(left: string, right: string): number {
     : normalizedLeft < normalizedRight
       ? -1
       : 1;
+}
+
+/**
+ * True when sampleTime falls in [intervalStart, intervalEnd] inclusive.
+ * Callers must already reject reversed windows (start > end).
+ */
+function isSampleTimeWithinMeasurementInterval(
+  sampleTime: string,
+  intervalStart: string,
+  intervalEnd: string,
+): boolean {
+  return (
+    compareTimestampInstants(sampleTime, intervalStart) >= 0 &&
+    compareTimestampInstants(sampleTime, intervalEnd) <= 0
+  );
 }
 
 function latestTimestamp(samples: ParsedTelemetrySample[]): string | null {
