@@ -302,7 +302,9 @@ test("slow requests time out without overlap and recover on the next minute", as
   expect(reads).toBe(2); release();
 });
 
-for (const ownership of [undefined, null, false, 0, "", [], {}, { workspace_record_id: "ws_other" }]) {
+for (const ownership of [undefined, null, false, 0, "", [], {}, { workspace_record_id: "ws_other" },
+  ...["   ", "\t\n\r"].map(provider_resource_uid => ({ ...fixture().ownership, provider_resource_uid })),
+]) {
   test(`invalid ownership ${JSON.stringify(ownership)} rejects initial data and clears last-success`, async ({ page }) => {
     await setup(page);
     let invalid = true;

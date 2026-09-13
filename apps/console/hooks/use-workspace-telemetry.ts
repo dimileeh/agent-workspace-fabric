@@ -54,7 +54,7 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
         if (!owner || typeof owner !== "object" || Array.isArray(owner) ||
           owner.workspace_record_id !== workspaceId ||
           !Number.isSafeInteger(owner.placement_attempt) || Number(owner.placement_attempt) < 0 ||
-          typeof owner.provider_resource_uid !== "string" || !owner.provider_resource_uid || owner.provider_resource_uid.length > 64 ||
+          typeof owner.provider_resource_uid !== "string" || !owner.provider_resource_uid.trim() || owner.provider_resource_uid.length > 64 ||
           ["org_id", "project_id"].some(key => query.has(key) && owner[key] !== query.get(key))) {
           setState({ data: null, error: "Telemetry ownership mismatch", lastGoodAt: null });
           return;
