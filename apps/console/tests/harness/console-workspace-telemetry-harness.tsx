@@ -34,6 +34,7 @@ const LONG_MODEL_LABEL =
  */
 export function ConsoleWorkspaceTelemetryHarness() {
   const searchParams = useSearchParams();
+  const scenario = searchParams.get("scenario");
   const fixtureName = searchParams.get("fixture") ?? "success";
   const capabilitiesAbsent = searchParams.get("capabilities") === "absent";
   const modeParam = searchParams.get("mode");
@@ -181,6 +182,43 @@ export function ConsoleWorkspaceTelemetryHarness() {
         ];
       }
     }
+    // Consumer mutations only; these are not PostgreSQL query exports.
+    if (scenario && raw && typeof raw === "object") {
+      const envelope = raw as Record<string, unknown>;
+      if (scenario === "cold") {
+        Object.assign(envelope, {
+          admitted: null, estimate: null, observed_at: null,
+          cpu_cores_samples: [], memory_bytes_samples: [],
+        });
+      } else if (scenario === "retained") {
+        Object.assign(envelope, {
+          admitted: null, observed_at: null, cpu_cores_samples: [],
+          memory_bytes_samples: [], estimate_scope: "resource_attempt",
+          view: selectedView,
+          estimate: { ...successFixture.estimate, priced_interval_seconds: 7200 },
+        });
+      } else if (scenario === "unpriced") {
+        envelope.estimate = {
+          ...successFixture.estimate, estimate_state: "unpriced", estimated_usd: null,
+          priced_interval_seconds: 0, unpriced_interval_seconds: 3600,
+        };
+      } else if (scenario === "lag") {
+        Object.assign(envelope, {
+          estimate: null,
+          window_end_at: successFixture.observed_at,
+          observed_at: "2026-09-12T11:59:00Z",
+          cpu_cores_samples: [{
+            ...successFixture.cpu_cores_samples[0],
+            sample_time: "2026-09-12T11:59:00Z",
+            interval_start: "2026-09-12T11:58:00Z",
+            interval_end: "2026-09-12T11:59:00Z",
+          }],
+          memory_bytes_samples: [{
+            ...successFixture.memory_bytes_samples[0], interval_start: null,
+          }],
+        });
+      }
+    }
     const parsed = parseTelemetryPresentation(raw);
     if (!parsed) {
       return null;
@@ -188,6 +226,8 @@ export function ConsoleWorkspaceTelemetryHarness() {
     return projectWorkspaceTelemetryView(parsed, { nowMs });
   }, [
     capabilitiesAbsent,
+    scenario,
+    selectedView,
     fixtureName,
     unknownLimits,
     admittedPartial,

@@ -51,6 +51,9 @@ function formatBytesOrUnknown(value: number | null | undefined): string {
 
 function costLabel(view: WorkspaceTelemetryView): string {
   const { displayState, estimatedUsd } = view.estimate;
+  if (displayState === "not_recorded") {
+    return "Not recorded";
+  }
   if (displayState === "unallocated") {
     return "Unallocated";
   }
@@ -223,7 +226,7 @@ function fillAgainstLimit(used: number | null, limit: number | null): number | n
 }
 
 /**
- * Compact workspace resource + estimated workload cost view.
+ * Compact workspace resource + allocation estimate view.
  * Props-driven only — does not fetch or poll.
  */
 export function ConsoleWorkspaceTelemetry({
@@ -274,7 +277,7 @@ export function ConsoleWorkspaceTelemetry({
   // partial — data_quality_notes stay hidden.
   const envelopePartial =
     viewModel.state === "partial" || viewModel.quality === "partial";
-  // Highlight the window whose meters/history/cost are on screen. selectedView may
+  // Highlight the window whose meters/history are on screen. selectedView may
   // diverge while a request is in flight or after a failed window change retains
   // the prior payload — never imply the requested tab owns the displayed data.
   const displayedView = viewModel.view;
@@ -292,7 +295,7 @@ export function ConsoleWorkspaceTelemetry({
             <span
               className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-1.5 py-0.5 text-[10px] font-medium text-attention-text"
               data-testid="telemetry-partial-indicator"
-              title="Producer reported incomplete telemetry for this window"
+              title="Incomplete telemetry or allocation evidence"
             >
               <span aria-hidden>⚠</span>
               partial
@@ -404,6 +407,12 @@ export function ConsoleWorkspaceTelemetry({
           ) : null}
         </div>
 
+        {admitted === null && viewModel.state !== "unallocated" ? (
+          <div data-testid="telemetry-admission-missing" className="text-xs text-fg-muted">
+            Admission not recorded
+          </div>
+        ) : null}
+
         {viewModel.state === "unallocated" ? (
           <div
             data-testid="telemetry-unallocated"
@@ -466,7 +475,7 @@ export function ConsoleWorkspaceTelemetry({
           <div className="flex min-w-0 items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 font-semibold text-fg">
               <Wallet size={13} aria-hidden />
-              Estimated workload cost
+              Allocation estimate
             </span>
             <span
               className="tnum shrink-0 text-sm font-medium text-fg-strong"
@@ -474,6 +483,11 @@ export function ConsoleWorkspaceTelemetry({
             >
               {costLabel(viewModel)}
             </span>
+          </div>
+          <div data-testid="telemetry-estimate-scope" className="mt-1 text-[11px] text-fg-muted">
+            {viewModel.estimate.scope === "resource_attempt"
+              ? "Retained resource / placement-attempt estimate; independent of chart window."
+              : "Allocation estimate for the displayed chart window."}
           </div>
           <div className="mt-1 text-[11px] text-fg-muted">{viewModel.exclusionNote}</div>
         </div>
@@ -493,7 +507,12 @@ export function ConsoleWorkspaceTelemetry({
           />
           <Fact
             label="Priced / unpriced"
-            value={`${viewModel.estimate.pricedIntervalSeconds}s / ${viewModel.estimate.unpricedIntervalSeconds}s`}
+            value={
+              viewModel.estimate.pricedIntervalSeconds === null ||
+              viewModel.estimate.unpricedIntervalSeconds === null
+                ? "Not recorded"
+                : `${viewModel.estimate.pricedIntervalSeconds}s / ${viewModel.estimate.unpricedIntervalSeconds}s`
+            }
             mono
             stale={stale}
           />
