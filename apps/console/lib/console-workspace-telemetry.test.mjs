@@ -463,6 +463,17 @@ test("overflowing staleAfterSeconds fail-closes freshness to stale", () => {
   assert.equal(view.isStale, true);
 });
 
+test("live freshness caps mutated seven-day staleAfterSeconds at five minutes", () => {
+  // Review: a 604800 producer threshold must not leave a one-hour-old success
+  // fixture fresh; effective live threshold is capped at 300s.
+  const parsed = parseTelemetryPresentation(SUCCESS);
+  assert.ok(parsed);
+  parsed.staleAfterSeconds = 7 * 24 * 60 * 60;
+  const oneHourLater = Date.parse("2026-09-12T13:00:00+00:00");
+  const view = projectWorkspaceTelemetryView(parsed, { nowMs: oneHourLater });
+  assert.equal(view.isStale, true);
+});
+
 test("parseTelemetryPresentation rejects nonfinite and oversized numeric strings", () => {
   for (const bad of ["NaN", "Infinity", "-1", "-0.01", "1e309", "1e20", "not-a-number", ""]) {
     const badCpu = structuredClone(SUCCESS);

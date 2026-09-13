@@ -1426,7 +1426,17 @@ function computeIsStale(
   if (meterHasStaleSample) {
     return true;
   }
-  const staleAfter = presentation.staleAfterSeconds;
+  // Live contract: effective freshness threshold is at most five minutes.
+  // Cap finite producer values above the live max (e.g. mutated 7d bypass);
+  // leave values whose ms conversion overflows so thresholdMs fail-closes.
+  let staleAfter = presentation.staleAfterSeconds;
+  if (
+    Number.isFinite(staleAfter) &&
+    Number.isFinite(staleAfter * 1000) &&
+    staleAfter > MAX_STALE_AFTER_SECONDS
+  ) {
+    staleAfter = MAX_STALE_AFTER_SECONDS;
+  }
   if (
     presentation.observedAt !== null &&
     isTimestampOlderThanStaleThreshold(presentation.observedAt, nowMs, staleAfter)
