@@ -2523,3 +2523,38 @@ test("missing telemetry timestamps do not imply clock skew", () => {
   parsed.observedAt = null;
   assert.equal(projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW }).hasFutureTimestamp, false);
 });
+
+test("buildSparklineGeometry positions irregular samples by elapsed time", () => {
+  const points = [0, 59, 60].map((minute, i) => ({
+    sampleTime: new Date(Date.UTC(2026, 8, 13, 11, minute)).toISOString(),
+    value: i,
+  }));
+  const geom = buildSparklineGeometry(points, 120, 28);
+  assert.equal(geom.paths[0].d, "M 0.0,26.0 L 118.0,14.0 L 120.0,2.0");
+  const qualified = buildSparklineGeometry(points.map((p, i) => ({
+    ...p, quality: i === 1 ? "partial" : "ok",
+  })));
+  assert.deepEqual(qualified.markers.map((p) => p.x), [0, 118, 120]);
+  assert.equal(qualified.paths.length, 0);
+});
+
+test("buildSparklineGeometry preserves elapsed positions after downsampling", () => {
+  const points = Array.from({ length: 128 }, (_, i) => ({
+    sampleTime: new Date(Date.UTC(2026, 8, 13) + i * i * 1000).toISOString(),
+    value: i,
+  }));
+  const geom = buildSparklineGeometry(points, 120, 131);
+  const coords = [...geom.paths[0].d.matchAll(/([\d.]+),([\d.]+)/g)];
+  assert.ok(coords.length <= MAX_SPARKLINE_POINTS);
+  for (const [, x, y] of coords) {
+    const originalIndex = 129 - Number(y);
+    assert.ok(Math.abs(Number(x) - (originalIndex / 127) ** 2 * 120) <= 0.051);
+  }
+});
+
+test("buildSparklineGeometry centers coincident timestamps", () => {
+  const geom = buildSparklineGeometry([1, 2].map((value) => ({
+    sampleTime: "2026-09-13T12:00:00Z", value,
+  })));
+  assert.equal(geom.paths[0].d, "M 60.0,26.0 L 60.0,2.0");
+});

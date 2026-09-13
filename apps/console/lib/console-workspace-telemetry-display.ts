@@ -39,7 +39,7 @@ export function downsampleSeriesForSparkline<T>(
 type SparklineDownsamplePoint = {
   value: number;
   quality: TelemetryQuality;
-  /** Index in the pre-downsample series; anchors SVG x to the sample grid. */
+  /** Index in the pre-downsample series; locates timestamps and quality breaks. */
   originalIndex: number;
 };
 
@@ -159,6 +159,7 @@ export type SparklineGeometry = {
 
 type SparklineInputPoint = {
   value: number;
+  sampleTime?: string;
   quality?: TelemetryQuality;
 };
 
@@ -205,9 +206,9 @@ function pathDFromCoords(coords: readonly string[]): string {
  * Contiguous same-quality runs stay connected; quality transitions leave gaps.
  * One-sample runs become markers. Non-ok history is never a single unqualified path.
  * Qualification uses the full series; SVG downsampling prefers non-ok samples
- * within the point budget. X uses each sample's original series index so
- * ok-anchor eviction cannot warp the time grid or join previously gapped
- * non-ok runs into one path.
+ * within the point budget. X uses elapsed time across the original series;
+ * untimed inputs retain index spacing. Original indices preserve timestamps
+ * and prevent joining previously gapped non-ok runs after downsampling.
  */
 export function buildSparklineGeometry(
   points: readonly SparklineInputPoint[],
@@ -231,6 +232,10 @@ export function buildSparklineGeometry(
     };
   }
 
+  const times = points.map((p) => Date.parse(p.sampleTime ?? ""));
+  const hasTimes = times.every(Number.isFinite);
+  const startTime = times[0]!;
+  const timeSpan = times[lastOrig]! - startTime;
   let min = series[0]!.value;
   let max = series[0]!.value;
   for (let i = 1; i < series.length; i++) {
@@ -244,7 +249,10 @@ export function buildSparklineGeometry(
   }
   const span = max - min || 1;
   const coords = series.map((p) => {
-    const x = (p.originalIndex / lastOrig) * width;
+    const fraction = hasTimes
+      ? timeSpan === 0 ? 0.5 : (times[p.originalIndex]! - startTime) / timeSpan
+      : p.originalIndex / lastOrig;
+    const x = fraction * width;
     const y = height - ((p.value - min) / span) * (height - 4) - 2;
     return {
       x,
