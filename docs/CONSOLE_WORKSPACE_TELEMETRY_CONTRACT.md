@@ -135,8 +135,10 @@ attempt and upstream URL are not user routing inputs. The response is the direct
 
 The child owns cancellation, loading, malformed/error state and same-identity
 last-success display. Workspace, view, backend/tenant context, authorization epoch
-and gate changes invalidate retained data and in-flight work. 401/403 clears the
-console's authorized data. Supplied ownership is checked against request context;
+and gate changes invalidate retained data and in-flight work. A telemetry endpoint
+401/403 is feed-local: it clears retained telemetry and stops that reader while
+workspace cards and the inspector remain available. Supplied ownership is checked
+against request context;
 observed resource/attempt replacement discards prior retained data. Browser reads
 use `cache: no-store`. Provider sample age advances independently of request success;
 a longer view does not turn live data into historical data. Cost remains the
