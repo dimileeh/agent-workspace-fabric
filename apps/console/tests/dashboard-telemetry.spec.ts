@@ -55,6 +55,34 @@ test("one selected read for all gates; minute cadence and distinct views", async
   const count = reads.length; await page.clock.runFor(61_000); expect(reads).toHaveLength(count);
 });
 
+test("telemetry error codes survive polling retries and clear on recovery", async ({ page }) => {
+  await setup(page);
+  let status = 200;
+  let errorCode = "TELEMETRY_UNAVAILABLE";
+  let reads = 0;
+  await page.route("**/telemetry?*", async route => {
+    reads++;
+    await fulfillJson(route, status === 200 ? fixture() : { detail: { error_code: errorCode, message: "Unavailable" } }, status);
+  });
+  await page.clock.install(); await page.goto("/"); await open(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  for (const failureStatus of [503, 429]) {
+    status = failureStatus;
+    errorCode = status === 503 ? "TELEMETRY_UNAVAILABLE" : "RATE_LIMITED";
+    for (let retry = 0; retry < 2; retry++) {
+      const previousReads = reads;
+      await page.clock.runFor(61_000);
+      await expect.poll(() => reads).toBe(previousReads + 1);
+      await expect(page.getByTestId("telemetry-request-error")).toHaveText(`${errorCode}: Unavailable`);
+      await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+    }
+  }
+  status = 200;
+  await page.clock.runFor(61_000);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+});
+
 for (const deniedStatus of [401, 403]) {
 test(`transient error retains same identity; ${deniedStatus} revocation clears`, async ({ page }) => {
   const caps = await setup(page); let status = 200; let reads = 0;

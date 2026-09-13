@@ -44,7 +44,8 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
         const result = await parseApiResponse<unknown>(response);
         if (!current()) return;
         if (!result.ok) {
-          throw new Error(result.message || "Telemetry request failed");
+          const message = result.message || "Telemetry request failed";
+          throw new Error(result.errorCode ? `${result.errorCode}: ${message}` : message);
         }
         const raw = result.data as Record<string, unknown> | null;
         // Ownership is private validation evidence, never UI text or routing authority.
