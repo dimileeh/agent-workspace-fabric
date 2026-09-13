@@ -6,7 +6,7 @@ import {
   HARNESS_PAGE_EXTENSION,
   isConsoleTestHarnessRouteBuildEnabled,
   resolveConsolePageExtensions,
-} from "./console-test-harness-routes.ts";
+} from "../console-test-harness-routes.ts";
 
 test("harness route build is disabled by default", () => {
   assert.equal(isConsoleTestHarnessRouteBuildEnabled({}), false);
