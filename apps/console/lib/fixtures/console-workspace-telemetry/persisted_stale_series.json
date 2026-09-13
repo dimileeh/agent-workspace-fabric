@@ -1,0 +1,109 @@
+{
+  "admitted": {
+    "billable": true,
+    "compute_class": "autopilot",
+    "container_creating": false,
+    "cpu_limit_cores": "1.0000000000",
+    "cpu_request_cores": "0.5000000000",
+    "ephemeral_storage_limit_bytes": null,
+    "ephemeral_storage_request_bytes": 1073741824,
+    "evidence": {
+      "compute_class": "autopilot",
+      "container_creating": false,
+      "init_cpu_cores": "0",
+      "init_memory_bytes": 0,
+      "overhead_cpu_cores": "0",
+      "overhead_memory_bytes": 0,
+      "owner_job_name": "job-a",
+      "owner_job_uid": "job-uid-1",
+      "pod_created_at": "2026-09-10T12:00:00Z",
+      "pod_phase": "Running",
+      "pod_uid": "pod-uid-ws_stale_series",
+      "region": "us-central1",
+      "sidecar_cpu_cores": "0",
+      "sidecar_memory_bytes": 0
+    },
+    "memory_limit_bytes": 2147483648,
+    "memory_request_bytes": 1073741824,
+    "observed_at": "2026-09-12T12:00:00+00:00",
+    "owner_job_name": "job-a",
+    "owner_job_uid": "job-uid-1",
+    "partial": false,
+    "pod_phase": "Running",
+    "provider_resource_uid": "pod-uid-ws_stale_series",
+    "region": "us-central1"
+  },
+  "cpu_cores_samples": [
+    {
+      "container_name": "agent",
+      "evidence": {
+        "metric_type": "kubernetes.io/container/cpu/core_usage_time",
+        "reset_detected": false
+      },
+      "interval_end": "2026-09-12T11:53:20+00:00",
+      "interval_start": "2026-09-12T11:52:20+00:00",
+      "metric_type": "kubernetes.io/container/cpu/core_usage_time",
+      "provider_resource_uid": "pod-uid-ws_stale_series",
+      "quality": "ok",
+      "sample_time": "2026-09-12T11:53:20+00:00",
+      "unit": "cores",
+      "value": "0.250000000000"
+    }
+  ],
+  "data_quality_notes": [
+    "stale"
+  ],
+  "estimate": {
+    "currency": "USD",
+    "estimate_state": "complete",
+    "estimated_usd": "0.0251000000",
+    "evidence": {
+      "rate_table_version": "synthetic-stage3-v1",
+      "source": "synthetic://stage3",
+      "synthetic": true,
+      "unpriced_reason": null
+    },
+    "priced_interval_seconds": 3600,
+    "rate_table_version": "synthetic-stage3-v1",
+    "unpriced_interval_seconds": 0
+  },
+  "estimate_scope": "resource_attempt",
+  "memory_bytes_samples": [
+    {
+      "container_name": "agent",
+      "evidence": {
+        "memory_types": [
+          "evictable",
+          "non-evictable"
+        ],
+        "metric_type": "kubernetes.io/container/memory/used_bytes"
+      },
+      "interval_end": "2026-09-12T12:00:00+00:00",
+      "interval_start": null,
+      "metric_type": "kubernetes.io/container/memory/used_bytes",
+      "provider_resource_uid": "pod-uid-ws_stale_series",
+      "quality": "ok",
+      "sample_time": "2026-09-12T12:00:00+00:00",
+      "unit": "bytes",
+      "value": "3072.000000000000"
+    }
+  ],
+  "observed_at": "2026-09-12T11:53:20+00:00",
+  "ownership": {
+    "cell_id": "cell_ws_stale_series",
+    "cloud_resource_owner_id": "owner_ws_stale_series_1",
+    "org_id": "org_synthetic",
+    "placement_attempt": 1,
+    "project_id": "p_stale_series",
+    "provider_resource_uid": "pod-uid-ws_stale_series",
+    "resource_name": "pod-a",
+    "resource_namespace": "ns-a",
+    "workspace_placement_id": "place_ws_stale_series_1",
+    "workspace_record_id": "ws_stale_series"
+  },
+  "quality": "stale",
+  "stale_after_seconds": 300,
+  "state": "stale",
+  "view": "1h",
+  "window_end_at": "2026-09-12T12:00:00+00:00"
+}

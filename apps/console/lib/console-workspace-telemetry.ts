@@ -7,12 +7,14 @@
  */
 
 import {
-  RFC3339_DATE_TIME,
+  isFiniteTimestampString,
   compareTimestampInstants,
   isSampleTimeWithinMeasurementInterval,
   timestampInstantKey,
   timestampInstantMs,
 } from "./console-workspace-telemetry-timestamps.ts";
+
+export { MAX_RFC3339_TIMESTAMP_LENGTH } from "./console-workspace-telemetry-timestamps.ts";
 
 export {
   MAX_SPARKLINE_POINTS,
@@ -71,12 +73,6 @@ const MAX_DECIMAL_MAGNITUDE = 1e15;
  * before regex/Number so a single field cannot force unbounded scanning.
  */
 export const MAX_DECIMAL_STRING_LENGTH = 64;
-/**
- * Bound timestamps before regex/Date.parse and fractional-second processing.
- * Nanosecond timestamps with offsets need ~35 chars; unlimited fractions would
- * multiply parsing and identity-key work across MAX_TELEMETRY_SAMPLES rows.
- */
-export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
 /**
  * Bound container_name before retention, identity keys, sorting and partition
  * joins. DNS labels fit in 63 chars; profile service names fit in 64.
@@ -240,44 +236,6 @@ export type WorkspaceTelemetryView = {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isFiniteTimestampString(value: string): boolean {
-  // Reject before regex/Date.parse so a single overlong fractional-second
-  // field cannot burn UI-thread time scanning an unbounded producer string.
-  if (value.length > MAX_RFC3339_TIMESTAMP_LENGTH) {
-    return false;
-  }
-  const match = RFC3339_DATE_TIME.exec(value);
-  if (!match) {
-    return false;
-  }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-  if (
-    dt.getUTCFullYear() !== year ||
-    dt.getUTCMonth() !== month - 1 ||
-    dt.getUTCDate() !== day ||
-    dt.getUTCHours() !== hour ||
-    dt.getUTCMinutes() !== minute ||
-    dt.getUTCSeconds() !== second
-  ) {
-    return false;
-  }
-  const tzDesignator = match[8];
-  if (tzDesignator !== "Z" && tzDesignator !== "z") {
-    const tzHour = Number(match[9]);
-    const tzMinute = Number(match[10]);
-    if (tzHour > 23 || tzMinute > 59) {
-      return false;
-    }
-  }
-  return Number.isFinite(Date.parse(value));
 }
 
 function isNullableTimestamp(value: unknown): value is string | null {
@@ -823,7 +781,8 @@ function parseEstimate(
     }
     // Known evidence fields must keep their types; do not silently drop a
     // malformed or blank source while still displaying the estimate as complete.
-    if ("source" in value.evidence && value.evidence.source !== undefined) {
+    if (value.evidence.source === null && value.estimate_state !== "unpriced") return null;
+    if (value.evidence.source !== undefined && value.evidence.source !== null) {
       if (
         typeof value.evidence.source !== "string" ||
         value.evidence.source.length > MAX_RATE_PROVENANCE_LENGTH ||
@@ -1399,6 +1358,34 @@ function meterSampleTimesAreMixed(
   return distinct.size > 1;
 }
 
+/** Age projected readings without regrouping or rebuilding telemetry series. */
+export function projectWorkspaceTelemetryFreshness(
+  presentation: ParsedTelemetryPresentation,
+  readings: {
+    cpu: Pick<WorkspaceTelemetryView["cpu"], "sampleTime" | "usedStale">;
+    memory: Pick<WorkspaceTelemetryView["memory"], "sampleTime" | "usedStale">;
+  },
+  nowMs: number,
+): Pick<WorkspaceTelemetryView, "isStale" | "hasFutureTimestamp"> {
+  const meterSampleTimes = [readings.cpu.sampleTime, readings.memory.sampleTime];
+  const hasFutureTimestamp = [
+    presentation.windowEndAt,
+    presentation.observedAt,
+    presentation.admitted?.observedAt ?? null,
+    ...meterSampleTimes,
+  ].some(timestamp => timestamp != null &&
+    compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0);
+  return {
+    hasFutureTimestamp,
+    isStale: hasFutureTimestamp || computeIsStale(
+      presentation,
+      nowMs,
+      meterSampleTimes,
+      readings.cpu.usedStale || readings.memory.usedStale,
+    ),
+  };
+}
+
 /**
  * Project allowlisted UI fields from a parsed presentation.
  * Does not fetch; `nowMs` is injected for deterministic freshness tests.
@@ -1432,13 +1419,6 @@ export function projectWorkspaceTelemetryView(
   const missingAllocationEvidence = presentation.state !== "unallocated" &&
     (presentation.admitted === null || presentation.admitted.partial ||
       presentation.estimate === null || presentation.estimate.estimateState === "unpriced");
-  const hasFutureTimestamp = [
-    presentation.windowEndAt,
-    presentation.observedAt,
-    presentation.admitted?.observedAt ?? null,
-    ...meterSampleTimes,
-  ].some(timestamp => timestamp != null &&
-    compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0);
 
   return {
     state: missingAllocationEvidence && presentation.state === "success" ? "partial" : presentation.state,
@@ -1448,13 +1428,7 @@ export function projectWorkspaceTelemetryView(
     observedAt: presentation.observedAt,
     sampleTime,
     sampleTimeMixed,
-    hasFutureTimestamp,
-    isStale: hasFutureTimestamp || computeIsStale(
-      presentation,
-      nowMs,
-      meterSampleTimes,
-      cpuAgg.usedStale || memAgg.usedStale,
-    ),
+    ...projectWorkspaceTelemetryFreshness(presentation, { cpu: cpuAgg, memory: memAgg }, nowMs),
     admitted:
       presentation.admitted === null
         ? null

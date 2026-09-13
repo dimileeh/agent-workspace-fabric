@@ -3,6 +3,51 @@
 export const RFC3339_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-](\d{2}):(\d{2}))$/;
 
+/**
+ * Bound timestamps before regex/Date.parse and fractional-second processing.
+ * Nanosecond timestamps with offsets need ~35 chars; unlimited fractions would
+ * multiply parsing and identity-key work across MAX_TELEMETRY_SAMPLES rows.
+ */
+export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
+
+export function isFiniteTimestampString(value: string): boolean {
+  // Reject before regex/Date.parse so a single overlong fractional-second
+  // field cannot burn UI-thread time scanning an unbounded producer string.
+  if (value.length > MAX_RFC3339_TIMESTAMP_LENGTH) {
+    return false;
+  }
+  const match = RFC3339_DATE_TIME.exec(value);
+  if (!match) {
+    return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    dt.getUTCFullYear() !== year ||
+    dt.getUTCMonth() !== month - 1 ||
+    dt.getUTCDate() !== day ||
+    dt.getUTCHours() !== hour ||
+    dt.getUTCMinutes() !== minute ||
+    dt.getUTCSeconds() !== second
+  ) {
+    return false;
+  }
+  const tzDesignator = match[8];
+  if (tzDesignator !== "Z" && tzDesignator !== "z") {
+    const tzHour = Number(match[9]);
+    const tzMinute = Number(match[10]);
+    if (tzHour > 23 || tzMinute > 59) {
+      return false;
+    }
+  }
+  return Number.isFinite(Date.parse(value));
+}
+
 /** Epoch ms for a parsed RFC3339 sample timestamp (already validated upstream). */
 export function timestampInstantMs(value: string): number {
   return Date.parse(value);

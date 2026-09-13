@@ -25,6 +25,9 @@ export const KNOWN_WIDGET_ROUTES: Readonly<Record<string, string>> = {
   fleet_summary: "/v1/console/dashboard-summary",
   resource_capacity: "/v1/metrics/resources/saturation",
   cloud_runtime: "/v1/console/cloud-runtime",
+  telemetry: "/v1/workspaces/{workspace_id}/telemetry",
+  allocation: "/v1/workspaces/{workspace_id}/telemetry",
+  cost: "/v1/workspaces/{workspace_id}/telemetry",
 };
 
 /** Bounded v1 diagnostic IDs and exact route templates. */

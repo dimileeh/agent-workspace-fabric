@@ -3172,6 +3172,7 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
   test.setTimeout(45_000);
   let tailPhase: "ok" | "deny_both" | "recover_quiet" | "recover_active" = "ok";
   const activeRecoverRelease = createDeferred();
+  const quietDenialRelease = createDeferred();
   let streamOpens = 0;
   const workspaceId = "ws_inspector_tail_partial_recover";
   const quietMarker = "authorized-quiet-inspector-partial";
@@ -3264,12 +3265,13 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
     }
     if (path === `/api/awf/workspaces/${workspaceId}/logs/quiet.stdout`) {
       if (tailPhase === "deny_both") {
+        await quietDenialRelease.promise;
         await fulfillJson(
           route,
           {
             detail: {
               error_code: "FORBIDDEN",
-              message: "log tail permission revoked",
+              message: "quiet log tail permission revoked",
             },
           },
           403,
@@ -3290,7 +3292,7 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
           {
             detail: {
               error_code: "FORBIDDEN",
-              message: "log tail permission revoked",
+              message: "active log tail permission revoked",
             },
           },
           403,
@@ -3350,7 +3352,11 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
   tailPhase = "deny_both";
   await inspector.getByRole("button", { name: "Tail", exact: true }).click();
 
-  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  // Settle active denial first: recovering quiet must retain the sibling error
+  // even when quiet was the last denial to arrive.
+  await expect(output).toContainText("active log tail permission revoked");
+  quietDenialRelease.resolve();
+  await expect(output).toContainText("quiet log tail permission revoked");
   await expect(output).not.toContainText(quietMarker);
   await expect(output).not.toContainText(activeMarker);
   await expect(page.getByText("Stream: idle")).toBeVisible();
@@ -3361,7 +3367,7 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
 
   await expect(output).toContainText(quietRecovered, { timeout: 12_000 });
   await expect(output).not.toContainText(activeRecovered);
-  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible();
+  await expect(output).toContainText("active log tail permission revoked");
   await expect.poll(() => streamOpens, { timeout: 3_000 }).toBe(opensAtDenial);
   await expect(page.getByText("Stream: idle")).toBeVisible();
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);

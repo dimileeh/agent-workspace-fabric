@@ -47,3 +47,22 @@ producer commit, generating command/test, fixed query clock, scenario, expected
 normalization and SHA-256, then rerun the focused consumer and independent audit.
 Do not relabel the current four files or add invented query DTOs to fill the gap.
 See [the contract and evidence matrix](../../../../../docs/CONSOLE_WORKSPACE_TELEMETRY_CONTRACT.md).
+
+## PR643 persisted synthetic exports
+
+Imported verbatim via authenticated gh from dimileeh/awf-cloud at `8d2b59ead8ca3f2dcb34e6a049d40d48a2fd7c21`. Core audited base: `2cc77e2c235560aabcfcb28f08cb22ba814b858d`. Historical producer provenance is preserved verbatim; this import is not a new database audit. Source directory: `tests/fixtures/console_telemetry/`.
+
+- `persisted_active_no_estimate.json`: `8a6e57b72640e80b5c8efbf876f23692fd9227e0ff9d7ae914352a9d207ba2a0`
+- `persisted_checkpoint_no_samples.json`: `368739f44f026935f69f9563ad423ac7daeb98f6dfe6688db92314acc2a129fc`
+- `persisted_cold_absent.json`: `5b82754a9a54974af5ac09ed641746e1519b60ab2ea9503bb85ac21f6a4e5511`
+- `persisted_cpu_lagging_memory.json`: `f4b53e86fa241ff772253afed4ef93eab3d9458428a5e9f7eac38d81326ec872`
+- `persisted_day_two_containers.json`: `77fe90cbba816947c0b822d2691d2169e8463532e35728b9606958214e5b2efb`
+- `persisted_estimate_no_checkpoint.json`: `048e64a90d4c5cb7028fa6d0a024e467d7a4b272623ed359c1d23538dcf674c9`
+- `persisted_missing_family.json`: `66d63d9581278a1f87a6876f1444b93799d64266b40459b71aad0d1de8ed39e9`
+- `persisted_provenance.json`: `f35ba114e3025243f3cf40b7bf323d0d8553eaeaff4c44b1945992f5ae37fa4c`
+- `persisted_retained_cleaned_terminal.json`: `59db36232bc10dc6b630fd32009cba01c106d4fa690e20dacd3514361bf6ac39`
+- `persisted_shared_unallocated.json`: `b9ddc691307958bf4e5b9fb77a9d3bffe882568ad924a457113b6e50edcc4dcc`
+- `persisted_stale_series.json`: `8c92244dcb45484a5c16df0ba2a32f9b3b4920a77b6c31233b6d059d68371a3f`
+- `persisted_terminal_1h.json`: `e7b70a9cdb9630b40f639f18845f175c8f9bbd2a28593da31d4bfb164128d745`
+- `persisted_terminal_2h_under_1h.json`: `eb7d87421a8675adc549dc350317989ba40244d6ee00f55ba2ebc018a4f042fe`
+- `persisted_unpriced_allocation.json`: `6d61a29f888fde55a3c5d7e3ce5cc42a4a9ca74b7cfacc0f0bdd23bdb2f0e2c6`
