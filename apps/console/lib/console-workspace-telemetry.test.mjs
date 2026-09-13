@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   COST_EXCLUSION_NOTE,
+  MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
   MAX_SPARKLINE_POINTS,
   MAX_STALE_AFTER_SECONDS,
@@ -1324,6 +1325,25 @@ function sampleTimestampForIndex(i) {
   const second = String(tod % 60).padStart(2, "0");
   return `2026-09-${day}T${hour}:${minute}:${second}+00:00`;
 }
+
+test("parseTelemetryPresentation accepts exactly MAX_DATA_QUALITY_NOTES", () => {
+  const atCap = structuredClone(SUCCESS);
+  atCap.data_quality_notes = Array.from(
+    { length: MAX_DATA_QUALITY_NOTES },
+    (_, i) => `note_${i}`,
+  );
+  assert.ok(parseTelemetryPresentation(atCap));
+});
+
+test("parseTelemetryPresentation rejects data_quality_notes larger than MAX_DATA_QUALITY_NOTES before scanning", () => {
+  const oversized = structuredClone(SUCCESS);
+  // Length gate must fail closed without iterating every element.
+  oversized.data_quality_notes = Array.from(
+    { length: MAX_DATA_QUALITY_NOTES + 1 },
+    (_, i) => `note_${i}`,
+  );
+  assert.equal(parseTelemetryPresentation(oversized), null);
+});
 
 test("parseSampleArray accepts exactly MAX_TELEMETRY_SAMPLES", () => {
   const atCap = structuredClone(SUCCESS);

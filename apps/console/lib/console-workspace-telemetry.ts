@@ -56,6 +56,13 @@ const MAX_BYTES_MAGNITUDE = Number.MAX_SAFE_INTEGER;
  * force unbounded allocation or an O(n log n) sort in the console.
  */
 export const MAX_TELEMETRY_SAMPLES = 2048;
+/**
+ * Hard cap on data_quality_notes accepted for schema compatibility.
+ * Notes are discarded (never projected into UI), but the reader still validates
+ * each element is a string — reject oversized arrays before that scan so a
+ * malformed producer cannot force unbounded work on the console thread.
+ */
+export const MAX_DATA_QUALITY_NOTES = 64;
 /** Max SVG points drawn for a telemetry sparkline after downsampling. */
 export const MAX_SPARKLINE_POINTS = 64;
 /**
@@ -942,6 +949,10 @@ export function parseTelemetryPresentation(
   // Accept machine notes for schema compatibility; never surface as UI copy.
   if (payload.data_quality_notes !== undefined) {
     if (!Array.isArray(payload.data_quality_notes)) {
+      return null;
+    }
+    // Reject before scanning so the cap bounds CPU, not only retained output.
+    if (payload.data_quality_notes.length > MAX_DATA_QUALITY_NOTES) {
       return null;
     }
     for (const note of payload.data_quality_notes) {
