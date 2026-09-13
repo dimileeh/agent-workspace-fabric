@@ -81,6 +81,16 @@ export const MAX_CONTAINER_NAME_LENGTH = 64;
  */
 export const MAX_ALLOCATION_LABEL_LENGTH = 64;
 /**
+ * Lexical length cap for provider_resource_uid before retaining samples or
+ * resolving presentation identity.
+ * Legitimate K8s ObjectMeta UIDs are UUIDs (36 chars). Without the cap, a
+ * malformed producer can supply arbitrarily long UID strings that pass the
+ * type-only check, are retained across up to MAX_TELEMETRY_SAMPLES rows, and
+ * are repeatedly compared during identity validation — defeating the
+ * sample-count bound on the console thread.
+ */
+export const MAX_PROVIDER_RESOURCE_UID_LENGTH = 64;
+/**
  * Memory / ephemeral bytes upper bound.
  * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
  * in JS Number (above this, values round silently and must be rejected).
@@ -435,6 +445,14 @@ function parseSampleArray(
     ) {
       return null;
     }
+    // Reject before retaining so identity comparisons cannot allocate/compare
+    // unbounded strings across up to MAX_TELEMETRY_SAMPLES rows.
+    if (
+      typeof item.provider_resource_uid === "string" &&
+      item.provider_resource_uid.length > MAX_PROVIDER_RESOURCE_UID_LENGTH
+    ) {
+      return null;
+    }
     samples.push({
       containerName: item.container_name,
       sampleTime: item.sample_time,
@@ -503,6 +521,10 @@ function readPresentationResourceUidField(
   }
   const uid = container.provider_resource_uid;
   if (typeof uid !== "string" || uid.length === 0) {
+    return undefined;
+  }
+  // Fail closed before identity resolve compares/retains unbounded UIDs.
+  if (uid.length > MAX_PROVIDER_RESOURCE_UID_LENGTH) {
     return undefined;
   }
   return uid;

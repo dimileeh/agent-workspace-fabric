@@ -10,6 +10,7 @@ import {
   MAX_CONTAINER_NAME_LENGTH,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
+  MAX_PROVIDER_RESOURCE_UID_LENGTH,
   MAX_RFC3339_TIMESTAMP_LENGTH,
   MAX_SPARKLINE_POINTS,
   MAX_STALE_AFTER_SECONDS,
@@ -813,6 +814,55 @@ test("parseTelemetryPresentation rejects overlong container_name strings", () =>
   atCap.cpu_cores_samples[0].container_name = atCapName;
   atCap.memory_bytes_samples[0].container_name = atCapName;
   assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap container_name ok");
+});
+
+test("parseTelemetryPresentation rejects overlong provider_resource_uid strings", () => {
+  // Sample-count cap does not bound per-UID lexical size. Overlong UIDs are
+  // retained and repeatedly compared during identity validation.
+  const overlongUid = "u".repeat(MAX_PROVIDER_RESOURCE_UID_LENGTH + 1);
+  assert.equal(overlongUid.length, MAX_PROVIDER_RESOURCE_UID_LENGTH + 1);
+
+  const overlongSample = structuredClone(SUCCESS);
+  overlongSample.cpu_cores_samples[0].provider_resource_uid = overlongUid;
+  assert.equal(
+    parseTelemetryPresentation(overlongSample),
+    null,
+    "sample overlong provider_resource_uid",
+  );
+
+  const overlongMem = structuredClone(SUCCESS);
+  overlongMem.memory_bytes_samples[0].provider_resource_uid = overlongUid;
+  assert.equal(
+    parseTelemetryPresentation(overlongMem),
+    null,
+    "memory overlong provider_resource_uid",
+  );
+
+  const overlongAdmitted = structuredClone(SUCCESS);
+  overlongAdmitted.admitted.provider_resource_uid = overlongUid;
+  assert.equal(
+    parseTelemetryPresentation(overlongAdmitted),
+    null,
+    "admitted overlong provider_resource_uid",
+  );
+
+  const overlongOwnership = structuredClone(SUCCESS);
+  overlongOwnership.ownership.provider_resource_uid = overlongUid;
+  assert.equal(
+    parseTelemetryPresentation(overlongOwnership),
+    null,
+    "ownership overlong provider_resource_uid",
+  );
+
+  // Boundary-length non-empty UIDs still parse (cap is lexical).
+  const atCapUid = "u".repeat(MAX_PROVIDER_RESOURCE_UID_LENGTH);
+  assert.equal(atCapUid.length, MAX_PROVIDER_RESOURCE_UID_LENGTH);
+  const atCap = structuredClone(SUCCESS);
+  atCap.admitted.provider_resource_uid = atCapUid;
+  atCap.ownership.provider_resource_uid = atCapUid;
+  atCap.cpu_cores_samples[0].provider_resource_uid = atCapUid;
+  atCap.memory_bytes_samples[0].provider_resource_uid = atCapUid;
+  assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap provider_resource_uid ok");
 });
 
 test("parseTelemetryPresentation rejects overlong allocation presentation strings", () => {
