@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   COST_EXCLUSION_NOTE,
+  MAX_ALLOCATION_LABEL_LENGTH,
   MAX_CONTAINER_NAME_LENGTH,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
@@ -690,6 +691,38 @@ test("parseTelemetryPresentation rejects overlong container_name strings", () =>
   atCap.cpu_cores_samples[0].container_name = atCapName;
   atCap.memory_bytes_samples[0].container_name = atCapName;
   assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap container_name ok");
+});
+
+test("parseTelemetryPresentation rejects overlong allocation presentation strings", () => {
+  // Numeric/timestamp/sample/container caps do not bound compute_class, region,
+  // or pod_phase. Overlong labels are retained and projected into Fact nodes.
+  const overlongLabel = "x".repeat(MAX_ALLOCATION_LABEL_LENGTH + 1);
+  assert.equal(overlongLabel.length, MAX_ALLOCATION_LABEL_LENGTH + 1);
+
+  const overlongCompute = structuredClone(SUCCESS);
+  overlongCompute.admitted.compute_class = overlongLabel;
+  assert.equal(
+    parseTelemetryPresentation(overlongCompute),
+    null,
+    "overlong compute_class",
+  );
+
+  const overlongRegion = structuredClone(SUCCESS);
+  overlongRegion.admitted.region = overlongLabel;
+  assert.equal(parseTelemetryPresentation(overlongRegion), null, "overlong region");
+
+  const overlongPhase = structuredClone(SUCCESS);
+  overlongPhase.admitted.pod_phase = overlongLabel;
+  assert.equal(parseTelemetryPresentation(overlongPhase), null, "overlong pod_phase");
+
+  // Boundary-length labels still parse (cap is lexical).
+  const atCapLabel = "x".repeat(MAX_ALLOCATION_LABEL_LENGTH);
+  assert.equal(atCapLabel.length, MAX_ALLOCATION_LABEL_LENGTH);
+  const atCap = structuredClone(SUCCESS);
+  atCap.admitted.compute_class = atCapLabel;
+  atCap.admitted.region = atCapLabel;
+  atCap.admitted.pod_phase = atCapLabel;
+  assert.notEqual(parseTelemetryPresentation(atCap), null, "length-cap allocation labels ok");
 });
 
 test("parseTelemetryPresentation rejects overlong RFC3339 timestamp strings", () => {

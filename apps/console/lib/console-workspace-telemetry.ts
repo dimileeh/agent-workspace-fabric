@@ -71,6 +71,16 @@ export const MAX_RFC3339_TIMESTAMP_LENGTH = 64;
  */
 export const MAX_CONTAINER_NAME_LENGTH = 64;
 /**
+ * Lexical length cap for admitted allocation presentation labels
+ * (compute_class, region, pod_phase) before retaining the snapshot.
+ * Legitimate GKE/autopilot class names, region codes, and pod phases fit well
+ * under this. Without the cap, a malformed producer can supply arbitrarily
+ * long strings that pass the type-only check and are retained, projected, and
+ * rendered into Fact DOM nodes — defeating the numeric, timestamp,
+ * sample-count, and container-name bounds on the console thread.
+ */
+export const MAX_ALLOCATION_LABEL_LENGTH = 64;
+/**
  * Memory / ephemeral bytes upper bound.
  * Capped at Number.MAX_SAFE_INTEGER so admitted/sample byte counts stay exact
  * in JS Number (above this, values round silently and must be rejected).
@@ -864,6 +874,13 @@ function parseAdmitted(value: unknown): ParsedAdmittedResources | null | undefin
     typeof value.partial !== "boolean" ||
     typeof value.pod_phase !== "string" ||
     typeof value.region !== "string"
+  ) {
+    return undefined;
+  }
+  if (
+    value.compute_class.length > MAX_ALLOCATION_LABEL_LENGTH ||
+    value.pod_phase.length > MAX_ALLOCATION_LABEL_LENGTH ||
+    value.region.length > MAX_ALLOCATION_LABEL_LENGTH
   ) {
     return undefined;
   }
