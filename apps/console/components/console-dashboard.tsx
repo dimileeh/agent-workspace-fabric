@@ -891,9 +891,8 @@ export function ConsoleDashboard() {
     loadFailureSummary,
   );
 
-  // Keep the ref aligned during render so detail/live-stream readers never see a
-  // stale selection between the selectedId commit and the session-reset effect.
-  selectedIdRef.current = selectedId;
+  // selectedIdRef is kept in sync by useWorkspaceSelectionUrl.setSelectedId
+  // (write-before-setState). Do not assign it during render — react-hooks/refs.
 
   const previousInspectorSessionIdRef = useRef(selectedId);
 

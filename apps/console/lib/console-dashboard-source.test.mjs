@@ -3485,6 +3485,11 @@ test("inspector session reset clears before paint when switching workspaces", ()
     /setDetail\(emptyDetail\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setRetryState\(\{ status: "idle" \}\);[\s\S]*?setOperatorActionState\(\{ status: "idle" \}\);/,
     "Expected the shared inspector session reset to clear detail, streams, logs, and action chrome",
   );
+  assert.doesNotMatch(
+    dashboard,
+    /^\s*selectedIdRef\.current\s*=\s*selectedId\s*;/m,
+    "Expected selectedIdRef not to be assigned during render (react-hooks/refs); setSelectedId keeps it in sync",
+  );
 });
 
 test("operator action post-mutation reloads are guarded by authorized feed epoch", () => {
