@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import {
 useCallback,
 useEffect,
+useLayoutEffect,
 useMemo,
 useRef,
 useState,
@@ -894,10 +895,9 @@ export function ConsoleDashboard() {
   // stale selection between the selectedId commit and the session-reset effect.
   selectedIdRef.current = selectedId;
 
-  // Reset inspector session after paint. Opening from a cleared selection already
-  // has empty detail; keeping this out of useLayoutEffect avoids a synchronous
-  // second dashboard commit inside the open click (pane timing budgets).
-  useEffect(() => {
+  const previousInspectorSessionIdRef = useRef(selectedId);
+
+  const resetInspectorSession = useCallback(() => {
     logListingAuthDeniedRef.current = false;
     setLogListingAuthDenied(false);
     logTailAuthDeniedRef.current = false;
@@ -915,7 +915,27 @@ export function ConsoleDashboard() {
     setWorkspaceDetailError(null);
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
-  }, [selectedId]);
+  }, []);
+
+  // Switching between workspaces must clear before paint: selectedOverview already
+  // belongs to the new id, so a post-paint-only reset would attribute the previous
+  // workspace's detail, logs, streams, and action chrome to the open pane.
+  useLayoutEffect(() => {
+    const previousId = previousInspectorSessionIdRef.current;
+    previousInspectorSessionIdRef.current = selectedId;
+    if (previousId == null || selectedId == null || previousId === selectedId) {
+      return;
+    }
+    resetInspectorSession();
+  }, [resetInspectorSession, selectedId]);
+
+  // Reset inspector session after paint for open/close (and again after a switch).
+  // Opening from a cleared selection already has empty detail; keeping that path
+  // out of useLayoutEffect avoids a synchronous second dashboard commit inside
+  // the open click (pane timing budgets).
+  useEffect(() => {
+    resetInspectorSession();
+  }, [resetInspectorSession, selectedId]);
 
   useWorkspaceLiveStream({
     selectedId,
