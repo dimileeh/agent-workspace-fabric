@@ -1167,11 +1167,17 @@ test("filtering a selected workspace releases refresh anchoring", async ({ page 
 test("selecting a visible workspace keeps a boundary viewport covered", async ({ page }) => {
   await page.setViewportSize({ width: 1_000, height: 720 });
   await mockAwfConsoleApi(page);
-  await installLargeFleetOverview(page);
+  const overviewCursors: Array<string | null> = [];
+  await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewCursors.push(cursor),
+  });
 
   await page.goto("/");
   await waitForConsoleReady(page);
   await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Wait for the continuation request before asserting the loaded summary so
+  // shared CI CPUs do not flake on paint alone after a heavy sibling file.
+  await expect.poll(() => overviewCursors).toEqual([null, String(PAGE_SIZE)]);
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
     .toBeVisible();
 
