@@ -2832,6 +2832,45 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
     "partial",
   );
 
+  // Partial estimate_state is also cost incompleteness: complete meters with a
+  // producer envelope partial driven only by a partial estimate must clear when
+  // cost is unsupported (same as null/unpriced), and stay partial when cost is
+  // expected.
+  const partialEstimate = structuredClone(SUCCESS);
+  partialEstimate.state = "partial";
+  partialEstimate.quality = "partial";
+  Object.assign(partialEstimate.estimate, {
+    estimate_state: "partial",
+    estimated_usd: "0.0040000",
+    priced_interval_seconds: 1800,
+    unpriced_interval_seconds: 600,
+  });
+  const partialEstimateParsed = parseTelemetryPresentation(partialEstimate);
+  assert.ok(partialEstimateParsed);
+  assert.equal(partialEstimateParsed.estimate?.estimateState, "partial");
+  const partialEstimateCostOff = projectWorkspaceTelemetryView(partialEstimateParsed, {
+    nowMs: FIXED_NOW,
+    expectCost: false,
+  });
+  assert.equal(partialEstimateCostOff.state, "success");
+  assert.equal(partialEstimateCostOff.quality, "ok");
+  assert.equal(
+    projectWorkspaceTelemetryView(partialEstimateParsed, {
+      nowMs: FIXED_NOW,
+      expectAllocation: false,
+      expectCost: false,
+    }).state,
+    "success",
+  );
+  assert.equal(
+    projectWorkspaceTelemetryView(partialEstimateParsed, {
+      nowMs: FIXED_NOW,
+      expectAllocation: false,
+      expectCost: true,
+    }).state,
+    "partial",
+  );
+
   // Producer partial caused only by gated-off null allocation/cost must clear
   // for the visible sections (same outcome as inferred success→ok path).
   const producerCostPartial = structuredClone(SUCCESS);

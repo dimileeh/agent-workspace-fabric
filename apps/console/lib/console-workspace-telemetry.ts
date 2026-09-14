@@ -1433,11 +1433,11 @@ export function projectWorkspaceTelemetryFreshness(
  *
  * `expectTelemetry` / `expectAllocation` / `expectCost` mirror negotiated
  * widget gates. When a section is unsupported, null/partial admitted or
- * null/unpriced estimate must not infer envelope partial — those fields are
- * hidden, not incomplete — and aged timestamps from that section must not
- * mark the visible panel stale. Producer-marked envelope partial that is
- * attributable only to gated-off allocation/cost evidence is cleared for the
- * visible view when expected telemetry meters are themselves complete;
+ * null/partial/unpriced estimate must not infer envelope partial — those
+ * fields are hidden, not incomplete — and aged timestamps from that section
+ * must not mark the visible panel stale. Producer-marked envelope partial that
+ * is attributable only to gated-off allocation/cost evidence is cleared for
+ * the visible view when expected telemetry meters are themselves complete;
  * envelope-only partial with complete nested evidence is kept, and empty or
  * partial meters keep the producer envelope so dashes are not presented as a
  * successful complete reading. Producer envelope stale driven by meter aging is
@@ -1482,7 +1482,8 @@ export function projectWorkspaceTelemetryView(
     presentation.admitted === null || Boolean(presentation.admitted?.partial);
   const costIncomplete =
     presentation.estimate === null ||
-    presentation.estimate.estimateState === "unpriced";
+    presentation.estimate.estimateState === "unpriced" ||
+    presentation.estimate.estimateState === "partial";
   const missingAllocationEvidence = presentation.state !== "unallocated" &&
     ((expectAllocation && allocationIncomplete) ||
       (expectCost && costIncomplete));
