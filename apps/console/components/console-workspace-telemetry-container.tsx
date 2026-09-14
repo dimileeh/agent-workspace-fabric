@@ -55,9 +55,17 @@ function TelemetryRead({
     return () => window.clearInterval(timer);
   }, []);
   // Dense series depend only on the response; clock ticks age metadata alone.
+  // Pass negotiated allocation/cost gates so inferred envelope partial does not
+  // fire for hidden unsupported sections.
   const projected = useMemo(
-    () => state.data ? projectWorkspaceTelemetryView(state.data) : null,
-    [state.data],
+    () =>
+      state.data
+        ? projectWorkspaceTelemetryView(state.data, {
+            expectAllocation: gates[1],
+            expectCost: gates[2],
+          })
+        : null,
+    [state.data, gates[1], gates[2]],
   );
   const model = projected && state.data ? {
     ...projected,

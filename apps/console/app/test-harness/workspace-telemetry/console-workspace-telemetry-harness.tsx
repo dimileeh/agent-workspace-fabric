@@ -57,6 +57,9 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const envelopePartial = searchParams.get("envelopePartial") === "1";
   const envelopeQualityPartial =
     searchParams.get("envelopeQualityPartial") === "1";
+  // Drop allocation/cost payloads while keeping meters (gated-off evidence probes).
+  const nullAdmitted = searchParams.get("nullAdmitted") === "1";
+  const nullEstimate = searchParams.get("nullEstimate") === "1";
   const nowMsParam = searchParams.get("nowMs");
   const nowMs = nowMsParam ? Number(nowMsParam) : Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -76,7 +79,9 @@ export function ConsoleWorkspaceTelemetryHarness() {
         mixedSampleTimes ||
         sampleStale ||
         envelopePartial ||
-        envelopeQualityPartial) &&
+        envelopeQualityPartial ||
+        nullAdmitted ||
+        nullEstimate) &&
       raw &&
       typeof raw === "object" &&
       raw !== null
@@ -89,6 +94,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
           memory_limit_bytes?: number | null;
           partial?: boolean;
         } | null;
+        estimate?: unknown;
         cpu_cores_samples?: Array<Record<string, unknown>>;
         memory_bytes_samples?: Array<Record<string, unknown>>;
       };
@@ -97,6 +103,12 @@ export function ConsoleWorkspaceTelemetryHarness() {
         envelope.quality = "partial";
       } else if (envelopeQualityPartial) {
         envelope.quality = "partial";
+      }
+      if (nullAdmitted) {
+        envelope.admitted = null;
+      }
+      if (nullEstimate) {
+        envelope.estimate = null;
       }
       if (sampleStale && envelope.cpu_cores_samples?.[0]) {
         envelope.cpu_cores_samples[0] = {
@@ -227,7 +239,11 @@ export function ConsoleWorkspaceTelemetryHarness() {
     if (!parsed) {
       return null;
     }
-    return projectWorkspaceTelemetryView(parsed, { nowMs });
+    return projectWorkspaceTelemetryView(parsed, {
+      nowMs,
+      expectAllocation: showAllocation,
+      expectCost: showCost,
+    });
   }, [
     capabilitiesAbsent,
     scenario,
@@ -240,6 +256,10 @@ export function ConsoleWorkspaceTelemetryHarness() {
     sampleStale,
     envelopePartial,
     envelopeQualityPartial,
+    nullAdmitted,
+    nullEstimate,
+    showAllocation,
+    showCost,
     nowMs,
   ]);
 

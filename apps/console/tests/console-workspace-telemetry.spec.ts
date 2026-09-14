@@ -287,6 +287,33 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByText(/Unallocated — shared Core monitor/i)).toHaveCount(0);
   });
 
+  test("gated-off allocation/cost nulls do not infer envelope partial", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    // Complete meters with null admitted/estimate: full panel still partial.
+    await openHarness(page, {
+      fixture: "success",
+      nullAdmitted: "1",
+      nullEstimate: "1",
+    });
+    const root = page.getByTestId("console-workspace-telemetry");
+    await expect(root).toHaveAttribute("data-awf-telemetry-state", "partial");
+    await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
+
+    // Same payload with allocation/cost unsupported must keep success/ok.
+    await openHarness(page, {
+      fixture: "success",
+      nullAdmitted: "1",
+      nullEstimate: "1",
+      showAllocation: "0",
+      showCost: "0",
+    });
+    await expect(root).toHaveAttribute("data-awf-telemetry-state", "success");
+    await expect(page.getByTestId("telemetry-partial-indicator")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-series-cpu")).toBeVisible();
+  });
+
   test("request error is shown when provided and omitted when null", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, {

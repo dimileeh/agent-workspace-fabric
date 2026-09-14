@@ -1389,12 +1389,22 @@ export function projectWorkspaceTelemetryFreshness(
 /**
  * Project allowlisted UI fields from a parsed presentation.
  * Does not fetch; `nowMs` is injected for deterministic freshness tests.
+ *
+ * `expectAllocation` / `expectCost` mirror negotiated widget gates. When a
+ * section is unsupported, null/partial admitted or null/unpriced estimate must
+ * not infer envelope partial — those fields are hidden, not incomplete.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
-  options: { nowMs?: number } = {},
+  options: {
+    nowMs?: number;
+    expectAllocation?: boolean;
+    expectCost?: boolean;
+  } = {},
 ): WorkspaceTelemetryView {
   const nowMs = options.nowMs ?? Date.now();
+  const expectAllocation = options.expectAllocation !== false;
+  const expectCost = options.expectCost !== false;
   // Completeness is pod-scoped: a container seen on either meter must be present
   // on both before either reading is treated as a whole-Pod total vs limits.
   const expectedContainers = collectContainerNames(
@@ -1417,8 +1427,11 @@ export function projectWorkspaceTelemetryView(
   const sampleTimeMixed = meterSampleTimesAreMixed(meterSampleTimes);
 
   const missingAllocationEvidence = presentation.state !== "unallocated" &&
-    (presentation.admitted === null || presentation.admitted.partial ||
-      presentation.estimate === null || presentation.estimate.estimateState === "unpriced");
+    ((expectAllocation &&
+      (presentation.admitted === null || presentation.admitted.partial)) ||
+      (expectCost &&
+        (presentation.estimate === null ||
+          presentation.estimate.estimateState === "unpriced")));
 
   return {
     state: missingAllocationEvidence && presentation.state === "success" ? "partial" : presentation.state,

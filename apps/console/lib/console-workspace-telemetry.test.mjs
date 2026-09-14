@@ -2643,6 +2643,87 @@ test("paired recorded unpriced is distinct from missing and unallocated", () => 
   assert.equal(parseTelemetryPresentation({ ...UNALLOCATED, estimate: null }), null);
 });
 
+test("inferred qualification ignores gated-off allocation and cost evidence", () => {
+  // Complete meters with null admitted/estimate: full-panel still partial, but
+  // telemetry-only (allocation/cost unsupported) must keep success/ok.
+  const raw = structuredClone(SUCCESS);
+  raw.admitted = null;
+  raw.estimate = null;
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  const full = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+  assert.equal(full.state, "partial");
+  assert.equal(full.quality, "partial");
+  const telemetryOnly = projectWorkspaceTelemetryView(parsed, {
+    nowMs: FIXED_NOW,
+    expectAllocation: false,
+    expectCost: false,
+  });
+  assert.equal(telemetryOnly.state, "success");
+  assert.equal(telemetryOnly.quality, "ok");
+  assert.equal(telemetryOnly.cpu.usedCores, 0.25);
+  assert.equal(telemetryOnly.admitted, null);
+  assert.equal(telemetryOnly.estimate.displayState, "not_recorded");
+
+  // Allocation expected alone still downgrades on null admitted.
+  const allocOnly = projectWorkspaceTelemetryView(parsed, {
+    nowMs: FIXED_NOW,
+    expectAllocation: true,
+    expectCost: false,
+  });
+  assert.equal(allocOnly.state, "partial");
+  assert.equal(allocOnly.quality, "partial");
+
+  // Cost expected alone still downgrades on null/unpriced estimate.
+  const costOnly = projectWorkspaceTelemetryView(parsed, {
+    nowMs: FIXED_NOW,
+    expectAllocation: false,
+    expectCost: true,
+  });
+  assert.equal(costOnly.state, "partial");
+  assert.equal(costOnly.quality, "partial");
+
+  const unpriced = structuredClone(SUCCESS);
+  Object.assign(unpriced.estimate, {
+    estimate_state: "unpriced", estimated_usd: null, priced_interval_seconds: 0,
+    unpriced_interval_seconds: 3600,
+  });
+  const unpricedParsed = parseTelemetryPresentation(unpriced);
+  assert.ok(unpricedParsed);
+  assert.equal(
+    projectWorkspaceTelemetryView(unpricedParsed, {
+      nowMs: FIXED_NOW,
+      expectAllocation: true,
+      expectCost: false,
+    }).state,
+    "success",
+  );
+  assert.equal(
+    projectWorkspaceTelemetryView(unpricedParsed, {
+      nowMs: FIXED_NOW,
+      expectAllocation: false,
+      expectCost: true,
+    }).state,
+    "partial",
+  );
+
+  // Producer-marked envelope partial is preserved even when gates are off.
+  const envelopePartial = structuredClone(SUCCESS);
+  envelopePartial.state = "partial";
+  envelopePartial.quality = "partial";
+  envelopePartial.admitted = null;
+  envelopePartial.estimate = null;
+  const marked = parseTelemetryPresentation(envelopePartial);
+  assert.ok(marked);
+  const markedView = projectWorkspaceTelemetryView(marked, {
+    nowMs: FIXED_NOW,
+    expectAllocation: false,
+    expectCost: false,
+  });
+  assert.equal(markedView.state, "partial");
+  assert.equal(markedView.quality, "partial");
+});
+
 test("paired memory gauges normalize only internal starts and keep complete container partitions", () => {
   const raw = structuredClone(SUCCESS);
   for (const family of ["cpu_cores_samples", "memory_bytes_samples"]) {
