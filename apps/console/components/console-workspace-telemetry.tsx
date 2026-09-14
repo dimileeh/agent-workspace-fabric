@@ -279,6 +279,11 @@ export function ConsoleWorkspaceTelemetry({
     mode === "live"
       ? viewModel.isStale
       : producerStale || viewModel.hasFutureTimestamp;
+  // Allocation/cost facts stay visible when telemetry is unsupported; do not
+  // hide freshness chrome for aged admitted.observed_at (or other isStale
+  // signals) just because usage/history chrome is gated off.
+  const showStaleChrome =
+    stale && (showTelemetry || showAllocation || showCost);
   const modeLabel = mode === "historical" ? "Historical" : "Live";
   // Envelope-level partial is not implied by nested meter/cost badges; surface it
   // in the panel header (glyph + label) when the producer marks state or quality
@@ -294,7 +299,7 @@ export function ConsoleWorkspaceTelemetry({
     <Panel
       title="Workspace resources"
       icon={<Cpu size={16} aria-hidden />}
-      stale={showTelemetry && stale}
+      stale={showStaleChrome}
       staleLabel="stale"
       className="min-w-0"
       action={showTelemetry ? (
@@ -508,13 +513,13 @@ export function ConsoleWorkspaceTelemetry({
             label="Rate table"
             value={viewModel.estimate.rateTableVersion ?? "—"}
             mono
-            stale={showTelemetry && stale}
+            stale={showStaleChrome}
           />
           <Fact
             label="Rate source"
             value={viewModel.estimate.rateSource ?? "—"}
             mono
-            stale={showTelemetry && stale}
+            stale={showStaleChrome}
           />
           <Fact
             label="Priced / unpriced"
@@ -525,7 +530,7 @@ export function ConsoleWorkspaceTelemetry({
                 : `${viewModel.estimate.pricedIntervalSeconds}s / ${viewModel.estimate.unpricedIntervalSeconds}s`
             }
             mono
-            stale={showTelemetry && stale}
+            stale={showStaleChrome}
           />
           </> : null}
           {admitted ? (
@@ -533,13 +538,13 @@ export function ConsoleWorkspaceTelemetry({
               <Fact
                 label="Compute class"
                 value={admitted.computeClass ?? "—"}
-                stale={showTelemetry && stale}
+                stale={showStaleChrome}
               />
-              <Fact label="Region" value={admitted.region ?? "—"} stale={showTelemetry && stale} />
+              <Fact label="Region" value={admitted.region ?? "—"} stale={showStaleChrome} />
               <Fact
                 label="Billable"
                 value={admitted.billable == null ? "—" : admitted.billable ? "yes" : "no"}
-                stale={showTelemetry && stale}
+                stale={showStaleChrome}
               />
             </>
           ) : null}

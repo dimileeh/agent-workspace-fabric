@@ -311,6 +311,27 @@ test.describe("console workspace telemetry harness", () => {
     await expectNoFleetChrome(page);
   });
 
+  test("allocation-only panel still shows stale when admitted is aged", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    // Telemetry unsupported: usage/history chrome off, but req/lim and
+    // compute-class/region/billable remain visible and must not look current
+    // when admitted.observed_at has aged past stale_after.
+    await openHarness(page, {
+      fixture: "success",
+      showTelemetry: "0",
+      mode: "live",
+      nowMs: String(Date.parse("2026-09-12T12:06:00+00:00")),
+    });
+
+    await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("req");
+    await expect(page.getByText("Compute class", { exact: true })).toBeVisible();
+    await expect(
+      page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']").first(),
+    ).toBeVisible();
+  });
+
   test("stale live mode sets data-awf-stale; historical mode is labeled", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, {
