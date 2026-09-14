@@ -1437,9 +1437,12 @@ export function projectWorkspaceTelemetryFreshness(
  * hidden, not incomplete — and aged timestamps from that section must not
  * mark the visible panel stale. Producer-marked envelope partial that is
  * attributable only to gated-off allocation/cost evidence is cleared for the
- * visible view; envelope-only partial with complete nested evidence is kept.
- * Producer envelope stale driven by meter aging is likewise cleared when
- * telemetry is unsupported so allocation-only views keep current admitted facts.
+ * visible view when expected telemetry meters are themselves complete;
+ * envelope-only partial with complete nested evidence is kept, and empty or
+ * partial meters keep the producer envelope so dashes are not presented as a
+ * successful complete reading. Producer envelope stale driven by meter aging is
+ * likewise cleared when telemetry is unsupported so allocation-only views keep
+ * current admitted facts.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
@@ -1485,9 +1488,17 @@ export function projectWorkspaceTelemetryView(
       (expectCost && costIncomplete));
   // Producer may already mark partial for unsupported sections (e.g.
   // missing_estimate). Clear that qualification when incompleteness exists
-  // only in gated-off sections so telemetry-only panels stay success/ok.
+  // only in gated-off sections so telemetry-only panels stay success/ok —
+  // but only when expected meters are themselves complete (empty series keep
+  // usedPartial=false, so clearing would hide the only incomplete signal).
+  const expectedTelemetryComplete = !expectTelemetry ||
+    (cpuAgg.used !== null &&
+      memAgg.used !== null &&
+      !cpuAgg.usedPartial &&
+      !memAgg.usedPartial);
   const hiddenSectionOnlyPartial = presentation.state !== "unallocated" &&
     !missingAllocationEvidence &&
+    expectedTelemetryComplete &&
     ((!expectAllocation && allocationIncomplete) ||
       (!expectCost && costIncomplete));
   // Producer envelope stale is meter-series freshness. Clear it when telemetry

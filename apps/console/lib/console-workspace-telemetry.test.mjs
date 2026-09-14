@@ -2892,6 +2892,30 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
     projectWorkspaceTelemetryView(noEstimateParsed, { nowMs: noEstimateNow }).state,
     "partial",
   );
+
+  // Empty meters with gated-off null allocation/cost must keep producer partial:
+  // clearing would present dashes / "No history" as a complete success reading.
+  for (const name of ["persisted_cold_absent", "persisted_checkpoint_no_samples"]) {
+    const emptyMeters = loadFixture(name);
+    const emptyParsed = parseTelemetryPresentation(emptyMeters);
+    assert.ok(emptyParsed);
+    assert.equal(emptyParsed.state, "partial");
+    assert.equal(emptyParsed.quality, "partial");
+    assert.equal(emptyParsed.cpuSamples.length, 0);
+    assert.equal(emptyParsed.memorySamples.length, 0);
+    const emptyNow = Date.parse(emptyMeters.window_end_at);
+    const telemetryOnlyEmpty = projectWorkspaceTelemetryView(emptyParsed, {
+      nowMs: emptyNow,
+      expectAllocation: false,
+      expectCost: false,
+    });
+    assert.equal(telemetryOnlyEmpty.state, "partial");
+    assert.equal(telemetryOnlyEmpty.quality, "partial");
+    assert.equal(telemetryOnlyEmpty.cpu.usedCores, null);
+    assert.equal(telemetryOnlyEmpty.cpu.usedPartial, false);
+    assert.equal(telemetryOnlyEmpty.memory.usedBytes, null);
+    assert.equal(telemetryOnlyEmpty.memory.usedPartial, false);
+  }
 });
 
 test("paired memory gauges normalize only internal starts and keep complete container partitions", () => {
