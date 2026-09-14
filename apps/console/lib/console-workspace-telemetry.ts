@@ -17,6 +17,7 @@ import {
   ESTIMATE_STATES,
   MAX_ALLOCATION_LABEL_LENGTH,
   MAX_CONTAINER_NAME_LENGTH,
+  MAX_DATA_QUALITY_NOTE_LENGTH,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
   MAX_PROVIDER_RESOURCE_UID_LENGTH,
@@ -54,6 +55,7 @@ export {
   ESTIMATE_STATES,
   MAX_ALLOCATION_LABEL_LENGTH,
   MAX_CONTAINER_NAME_LENGTH,
+  MAX_DATA_QUALITY_NOTE_LENGTH,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
   MAX_PROVIDER_RESOURCE_UID_LENGTH,
@@ -756,6 +758,11 @@ export function parseTelemetryPresentation(
     }
     for (const note of payload.data_quality_notes) {
       if (typeof note !== "string") {
+        return null;
+      }
+      // Reject overlong notes before retention so array count alone cannot
+      // leave unbounded strings in telemetry state / projection hashing.
+      if (note.length > MAX_DATA_QUALITY_NOTE_LENGTH) {
         return null;
       }
     }

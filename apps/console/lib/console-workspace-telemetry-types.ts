@@ -70,6 +70,12 @@ export const MAX_TELEMETRY_SAMPLES = 2048;
  */
 export const MAX_DATA_QUALITY_NOTES = 64;
 /**
+ * Bound each data_quality_note string before retention and section-aware
+ * hashing. Machine tokens fit well under 64; array count alone cannot limit
+ * a single overlong entry's browser memory / UI-thread cost.
+ */
+export const MAX_DATA_QUALITY_NOTE_LENGTH = 64;
+/**
  * Stage3 live freshness cap: sample/envelope/admitted times expire after 5m.
  * Reject larger thresholds that would keep old readings fresh or overflow
  * seconds * 1000 to Infinity.

@@ -8,6 +8,7 @@ import {
   COST_EXCLUSION_NOTE,
   MAX_ALLOCATION_LABEL_LENGTH,
   MAX_CONTAINER_NAME_LENGTH,
+  MAX_DATA_QUALITY_NOTE_LENGTH,
   MAX_DATA_QUALITY_NOTES,
   MAX_DECIMAL_STRING_LENGTH,
   MAX_PROVIDER_RESOURCE_UID_LENGTH,
@@ -2268,6 +2269,22 @@ test("parseTelemetryPresentation rejects data_quality_notes larger than MAX_DATA
     (_, i) => `note_${i}`,
   );
   assert.equal(parseTelemetryPresentation(oversized), null);
+});
+
+test("parseTelemetryPresentation accepts a data_quality_note at MAX_DATA_QUALITY_NOTE_LENGTH", () => {
+  const atCap = structuredClone(SUCCESS);
+  const note = "n".repeat(MAX_DATA_QUALITY_NOTE_LENGTH);
+  assert.equal(note.length, MAX_DATA_QUALITY_NOTE_LENGTH);
+  atCap.data_quality_notes = [note];
+  assert.ok(parseTelemetryPresentation(atCap));
+});
+
+test("parseTelemetryPresentation rejects an overlong data_quality_note before retention", () => {
+  const overlong = structuredClone(SUCCESS);
+  const note = "n".repeat(MAX_DATA_QUALITY_NOTE_LENGTH + 1);
+  assert.equal(note.length, MAX_DATA_QUALITY_NOTE_LENGTH + 1);
+  overlong.data_quality_notes = [note];
+  assert.equal(parseTelemetryPresentation(overlong), null);
 });
 
 test("parseSampleArray accepts exactly MAX_TELEMETRY_SAMPLES", () => {
