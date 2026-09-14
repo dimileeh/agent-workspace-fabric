@@ -37,7 +37,10 @@ export function WorkspaceInspector({
         />
       )}
       <div
-        className={`fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-line bg-surface-2 shadow-2xl transition-transform duration-300 xl:w-[calc(100vw-440px)] 2xl:w-[calc(100vw-500px)] ${
+        // Instant open/close: a transform transition shifts the panel's bounding
+        // box for hundreds of ms and forces pointer actionability (and the
+        // open→close performance gates) to wait out the animation.
+        className={`fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-line bg-surface-2 shadow-2xl xl:w-[calc(100vw-440px)] 2xl:w-[calc(100vw-500px)] ${
           isOpen ? "translate-x-0" : "translate-x-full"
         }`}
         inert={!isOpen ? true : undefined}
