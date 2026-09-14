@@ -2981,6 +2981,52 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
 
 });
 
+test("gated-off telemetry clears missing_metric_family producer partial", () => {
+  // Regression for PRRT_kwDOSJAM6s6iKcYR: persisted_missing_family is partial
+  // solely for a hidden memory family while admitted and estimate are complete.
+  // Allocation-only / cost-only panels must not retain that telemetry-only chip.
+  const raw = loadFixture("persisted_missing_family");
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.state, "partial");
+  assert.equal(parsed.quality, "partial");
+  assert.ok(parsed.dataQualityNotes.includes("missing_metric_family"));
+  assert.equal(parsed.admitted?.partial, false);
+  assert.equal(parsed.estimate?.estimateState, "complete");
+  assert.equal(parsed.memorySamples.length, 0);
+  const nowMs = Date.parse(raw.window_end_at);
+
+  const full = projectWorkspaceTelemetryView(parsed, { nowMs });
+  assert.equal(full.state, "partial");
+  assert.equal(full.quality, "partial");
+
+  for (const gates of [
+    { expectTelemetry: false, expectAllocation: true, expectCost: false },
+    { expectTelemetry: false, expectAllocation: false, expectCost: true },
+    { expectTelemetry: false, expectAllocation: true, expectCost: true },
+  ]) {
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs, ...gates });
+    assert.equal(view.state, "success", JSON.stringify(gates));
+    assert.equal(view.quality, "ok", JSON.stringify(gates));
+  }
+
+  // Unqualified envelope-only partial (no identifying telemetry note) stays.
+  const envelopeOnly = structuredClone(SUCCESS);
+  envelopeOnly.state = "partial";
+  envelopeOnly.quality = "partial";
+  const envelopeParsed = parseTelemetryPresentation(envelopeOnly);
+  assert.ok(envelopeParsed);
+  assert.equal(
+    projectWorkspaceTelemetryView(envelopeParsed, {
+      nowMs: FIXED_NOW,
+      expectTelemetry: false,
+      expectAllocation: true,
+      expectCost: false,
+    }).state,
+    "partial",
+  );
+});
+
 test("empty expected meters keep producer partial under gated-off allocation/cost", () => {
   // Regression for PRRT_kwDOSJAM6s6iFLfj: gated-off null/unpriced sections must
   // not clear the envelope when telemetry is expected but samples are absent
