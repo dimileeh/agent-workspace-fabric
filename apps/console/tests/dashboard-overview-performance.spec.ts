@@ -1947,10 +1947,12 @@ test("stalled retained history does not block first-page publication or the next
   let delayRetainedBatch = false;
   let refreshedFirstPage = false;
   const firstPageRequests: number[] = [];
+  const overviewCursors: Array<string | null> = [];
   const batchRequests: string[][] = [];
   await mockAwfConsoleApi(page);
   const releaseHistory = await installLargeFleetOverview(page, {
     onRequest: (cursor) => {
+      overviewCursors.push(cursor);
       if (cursor === null) {
         firstPageRequests.push(Date.now());
       }
@@ -1968,10 +1970,12 @@ test("stalled retained history does not block first-page publication or the next
   const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   await expect(loadMore).toBeVisible();
   await loadMore.click();
-  // Exact loaded summary; allow CI contention after a heavy sibling file.
+  // Wait for the continuation request before asserting the loaded summary so
+  // shared CI CPUs do not flake on paint alone after a heavy sibling file.
+  await expect.poll(() => overviewCursors).toEqual([null, String(PAGE_SIZE)]);
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
-  ).toBeVisible({ timeout: 15_000 });
+  ).toBeVisible();
 
   delayRetainedBatch = true;
   refreshedFirstPage = true;

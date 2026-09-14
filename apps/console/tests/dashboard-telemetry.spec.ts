@@ -545,15 +545,14 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   const scrollBefore = await list.evaluate(element => element.scrollTop);
   expect(scrollBefore).toBeGreaterThan(0);
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();
-  const started = Date.now();
   await open(page, "ws_interaction_75");
   await expect(page.getByTestId("telemetry-loading")).toBeVisible();
+  // Held routes stay unresolved: closing must not await the in-flight read.
+  expect(held.length).toBeGreaterThan(0);
+  const heldDuringClose = held.length;
   await page.getByRole("button", { name: "Close inspector" }).click();
   await expect(inspector).toHaveClass(/translate-x-full/);
-  const delayedPaneMs = Date.now() - started;
-  // Wall-clock open→close under shared CI CPUs; held telemetry never resolves,
-  // so this still proves the pane does not wait on the in-flight read.
-  expect(delayedPaneMs).toBeLessThan(2_000);
+  expect(held.length).toBe(heldDuringClose);
   await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(scrollBefore);
   await expect(page.getByLabel("Select ws_interaction_75 for fullscreen logs")).toBeChecked();
   await open(page, "ws_interaction_75");
@@ -576,14 +575,13 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   await expect(page.getByLabel("Select ws_interaction_75 for fullscreen logs")).toBeChecked();
   await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(duringRead);
   expect(cursors.filter(cursor => cursor !== null)).toEqual([]);
-  const denseStarted = Date.now();
   await page.getByRole("button", { name: "Close inspector" }).click();
   await expect(inspector).toHaveClass(/translate-x-full/);
+  // Re-open must show loading again without waiting on a prior held response.
+  const heldBeforeReopen = held.length;
   await open(page, "ws_interaction_75");
   await expect(page.getByTestId("telemetry-loading")).toBeVisible();
-  const densePaneMs = Date.now() - denseStarted;
-  expect(densePaneMs).toBeLessThan(2_000);
-  console.info(`[telemetry-interaction] delayed-open-close=${delayedPaneMs}ms dense-close-open=${densePaneMs}ms`);
+  await expect.poll(() => held.length).toBeGreaterThan(heldBeforeReopen);
   await page.getByRole("button", { name: "Close inspector" }).click();
   await list.evaluate(element => element.scrollTo({ top: element.scrollHeight }));
   await expect.poll(() => cursors.filter(cursor => cursor !== null)).toEqual(["100"]);
