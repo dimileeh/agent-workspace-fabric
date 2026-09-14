@@ -1440,9 +1440,10 @@ export function projectWorkspaceTelemetryFreshness(
  * the visible view when expected telemetry meters are themselves complete;
  * envelope-only partial with complete nested evidence is kept, and empty or
  * partial meters keep the producer envelope so dashes are not presented as a
- * successful complete reading. Producer envelope stale driven by meter aging is
- * likewise cleared when telemetry is unsupported so allocation-only views keep
- * current admitted facts.
+ * successful complete reading. Success/ok envelopes with absent enabled meter
+ * series are likewise projected partial when telemetry is expected. Producer
+ * envelope stale driven by meter aging is likewise cleared when telemetry is
+ * unsupported so allocation-only views keep current admitted facts.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
@@ -1484,9 +1485,14 @@ export function projectWorkspaceTelemetryView(
     presentation.estimate === null ||
     presentation.estimate.estimateState === "unpriced" ||
     presentation.estimate.estimateState === "partial";
+  // Absent enabled meter series are incomplete evidence (dashes / "No history"),
+  // distinct from usedPartial on present samples which keep envelope success.
+  const missingEnabledMeterEvidence = expectTelemetry &&
+    (cpuAgg.series.length === 0 || memAgg.series.length === 0);
   const missingAllocationEvidence = presentation.state !== "unallocated" &&
     ((expectAllocation && allocationIncomplete) ||
-      (expectCost && costIncomplete));
+      (expectCost && costIncomplete) ||
+      missingEnabledMeterEvidence);
   // Producer may already mark partial for unsupported sections (e.g.
   // missing_estimate). Clear that qualification when incompleteness exists
   // only in gated-off sections so telemetry-only panels stay success/ok —

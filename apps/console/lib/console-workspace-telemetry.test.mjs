@@ -2968,6 +2968,43 @@ test("empty expected meters keep producer partial under gated-off allocation/cos
   }
 });
 
+test("success envelope with empty enabled meters projects partial", () => {
+  // Regression for PRRT_kwDOSJAM6s6iF4lq: success/ok with complete allocation
+  // and cost but absent meter series must not present dashes as a complete
+  // reading when telemetry is expected.
+  for (const empty of ["both", "cpu", "memory"]) {
+    const raw = structuredClone(SUCCESS);
+    if (empty === "both" || empty === "cpu") raw.cpu_cores_samples = [];
+    if (empty === "both" || empty === "memory") raw.memory_bytes_samples = [];
+    const parsed = parseTelemetryPresentation(raw);
+    assert.ok(parsed, empty);
+    assert.equal(parsed.state, "success", empty);
+    assert.equal(parsed.quality, "ok", empty);
+    const view = projectWorkspaceTelemetryView(parsed, { nowMs: FIXED_NOW });
+    assert.equal(view.state, "partial", empty);
+    assert.equal(view.quality, "partial", empty);
+    if (empty === "both" || empty === "cpu") {
+      assert.equal(view.cpu.usedCores, null, empty);
+      assert.equal(view.cpu.series.length, 0, empty);
+    }
+    if (empty === "both" || empty === "memory") {
+      assert.equal(view.memory.usedBytes, null, empty);
+      assert.equal(view.memory.series.length, 0, empty);
+    }
+  }
+
+  // Telemetry-unsupported views must not infer partial from hidden empty meters.
+  const bothEmpty = structuredClone(SUCCESS);
+  bothEmpty.cpu_cores_samples = [];
+  bothEmpty.memory_bytes_samples = [];
+  const telemetryOff = projectWorkspaceTelemetryView(
+    parseTelemetryPresentation(bothEmpty),
+    { nowMs: FIXED_NOW, expectTelemetry: false },
+  );
+  assert.equal(telemetryOff.state, "success");
+  assert.equal(telemetryOff.quality, "ok");
+});
+
 test("paired memory gauges normalize only internal starts and keep complete container partitions", () => {
   const raw = structuredClone(SUCCESS);
   for (const family of ["cpu_cores_samples", "memory_bytes_samples"]) {
