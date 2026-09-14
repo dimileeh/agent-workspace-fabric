@@ -3027,6 +3027,44 @@ test("gated-off telemetry clears missing_metric_family producer partial", () => 
   );
 });
 
+test("gated-off telemetry clears downsampled producer partial with complete meters", () => {
+  // Regression for PRRT_kwDOSJAM6s6iMb5K: downsampled / partial_samples can
+  // leave current meter aggregates complete (metersIncomplete false). When
+  // telemetry is gated off, those notes alone must still clear the envelope
+  // so allocation/cost panels are not partial solely for a hidden section.
+  for (const note of ["downsampled", "partial_samples"]) {
+    const raw = structuredClone(SUCCESS);
+    raw.state = "partial";
+    raw.quality = "partial";
+    raw.data_quality_notes = [note];
+    const parsed = parseTelemetryPresentation(raw);
+    assert.ok(parsed);
+    assert.equal(parsed.state, "partial");
+    assert.ok(parsed.dataQualityNotes.includes(note));
+
+    const telemetryOn = projectWorkspaceTelemetryView(parsed, {
+      nowMs: FIXED_NOW,
+    });
+    assert.equal(telemetryOn.state, "partial", note);
+    assert.equal(telemetryOn.quality, "partial", note);
+    assert.ok(telemetryOn.cpu.series.length > 0, note);
+    assert.equal(telemetryOn.cpu.usedPartial, false, note);
+
+    for (const gates of [
+      { expectTelemetry: false, expectAllocation: true, expectCost: true },
+      { expectTelemetry: false, expectAllocation: true, expectCost: false },
+      { expectTelemetry: false, expectAllocation: false, expectCost: true },
+    ]) {
+      const view = projectWorkspaceTelemetryView(parsed, {
+        nowMs: FIXED_NOW,
+        ...gates,
+      });
+      assert.equal(view.state, "success", `${note} ${JSON.stringify(gates)}`);
+      assert.equal(view.quality, "ok", `${note} ${JSON.stringify(gates)}`);
+    }
+  }
+});
+
 test("empty expected meters keep producer partial under gated-off allocation/cost", () => {
   // Regression for PRRT_kwDOSJAM6s6iFLfj: gated-off null/unpriced sections must
   // not clear the envelope when telemetry is expected but samples are absent

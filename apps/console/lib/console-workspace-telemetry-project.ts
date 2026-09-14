@@ -544,14 +544,16 @@ function dataQualityNotesOnlyGatedOff(
  * is attributable only to gated-off allocation/cost/telemetry evidence is
  * cleared for the visible view when expected sections are themselves complete
  * and producer notes do not also cite quality in an expected section (e.g.
- * downsampled while meters are shown); envelope-only partial with complete
- * nested evidence and no identifying gated-off note is kept, and empty or
- * partial meters keep the producer envelope when telemetry is expected so
- * dashes are not presented as a successful complete reading. Success/ok
- * envelopes with absent enabled meter series are likewise projected partial
- * when telemetry is expected. Producer envelope stale driven by meter aging is
- * likewise cleared when telemetry is unsupported so allocation-only views keep
- * current admitted facts.
+ * downsampled while meters are shown). Recognized telemetry quality notes
+ * alone are sufficient hidden-section evidence when meters are unsupported,
+ * including when current aggregates look complete. Envelope-only partial with
+ * complete nested evidence and no identifying gated-off note is kept, and
+ * empty or partial meters keep the producer envelope when telemetry is
+ * expected so dashes are not presented as a successful complete reading.
+ * Success/ok envelopes with absent enabled meter series are likewise
+ * projected partial when telemetry is expected. Producer envelope stale driven
+ * by meter aging is likewise cleared when telemetry is unsupported so
+ * allocation-only views keep current admitted facts.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
@@ -608,25 +610,34 @@ export function projectWorkspaceTelemetryView(
       (expectCost && costIncomplete) ||
       missingEnabledMeterEvidence);
   // Producer may already mark partial for unsupported sections (e.g.
-  // missing_estimate / missing_metric_family). Clear that qualification when
-  // incompleteness exists only in gated-off sections so visible panels stay
-  // success/ok — but only when expected meters are themselves complete and
-  // notes do not also cite quality in an expected section (downsampled while
-  // meters are shown, …). Empty series leave usedPartial=false, so gating on
-  // used!==null (and series length) is required or clearing would present
-  // dashes as a successful complete reading when telemetry is expected.
+  // missing_estimate / missing_metric_family / downsampled). Clear that
+  // qualification when incompleteness exists only in gated-off sections so
+  // visible panels stay success/ok — but only when expected meters are
+  // themselves complete and notes do not also cite quality in an expected
+  // section (downsampled while meters are shown, …). Empty series leave
+  // usedPartial=false, so gating on used!==null (and series length) is
+  // required or clearing would present dashes as a successful complete
+  // reading when telemetry is expected. Complete meter aggregates with only
+  // telemetry quality notes (downsampled / partial_samples) still count as
+  // hidden-section evidence when meters are gated off — metersIncomplete
+  // alone would miss that branch.
   const expectedTelemetryComplete = !expectTelemetry || !metersIncomplete;
   const notesOnlyGatedOffSections = dataQualityNotesOnlyGatedOff(
     presentation.dataQualityNotes,
     { expectAllocation, expectCost, expectTelemetry },
   );
+  const gatedOffTelemetryQualityNotes = !expectTelemetry &&
+    presentation.dataQualityNotes.some(note =>
+      TELEMETRY_SECTION_QUALITY_NOTES.has(note)
+    );
   const hiddenSectionOnlyPartial = presentation.state !== "unallocated" &&
     !missingAllocationEvidence &&
     expectedTelemetryComplete &&
     notesOnlyGatedOffSections &&
     ((!expectAllocation && allocationIncomplete) ||
       (!expectCost && costIncomplete) ||
-      (!expectTelemetry && metersIncomplete));
+      (!expectTelemetry && metersIncomplete) ||
+      gatedOffTelemetryQualityNotes);
   // Producer envelope stale is meter-series freshness. Clear it when telemetry
   // is unsupported so allocation-only chrome does not inherit hidden CPU aging
   // (historical mode reads state/quality for producerStale).
