@@ -2088,8 +2088,8 @@ test("freshness ignores aged evidence from unsupported widget sections", () => {
 test("allocation-only ignores producer envelope stale from aged hidden meters", () => {
   // persisted_stale_series: admitted.observed_at is current, but state/quality
   // are producer-stale because the CPU series aged. Filtering meter times alone
-  // cannot fix allocation-only freshness while computeIsStale honors the
-  // global stale envelope unconditionally.
+  // cannot fix allocation-only freshness; computeIsStale must be section-aware
+  // (honorProducerEnvelopeStale=false) so the global stale envelope is ignored.
   const raw = loadFixture("persisted_stale_series");
   const parsed = parseTelemetryPresentation(raw);
   assert.ok(parsed);
@@ -2108,6 +2108,10 @@ test("allocation-only ignores producer envelope stale from aged hidden meters", 
   assert.equal(allocOnly.hasFutureTimestamp, false);
   assert.equal(allocOnly.state, "success");
   assert.equal(allocOnly.quality, "ok");
+  // Freshness projection keeps raw producer stale state/quality on the
+  // presentation slice; only the section-aware gate must clear isStale.
+  assert.equal(parsed.state, "stale");
+  assert.equal(parsed.quality, "stale");
   assert.deepEqual(
     projectWorkspaceTelemetryFreshness(parsed, allocOnly, nowMs, {
       expectTelemetry: false,

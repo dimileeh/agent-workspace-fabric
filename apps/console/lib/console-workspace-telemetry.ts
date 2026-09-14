@@ -1274,22 +1274,29 @@ function isTimestampOlderThanStaleThreshold(
 }
 
 /**
- * Stale when producer marks state/quality stale (for sections that still
- * surface telemetry), when a displayed CPU/memory aggregate includes a stale
- * sample, or when the envelope, admitted allocation snapshot, or any meter
- * sample time used for displayed CPU/memory values exceeds the threshold.
- * Fresh envelopes/meters must not mask aged allocation requests/limits, aged
- * resource samples, or producer-stale current readings. Allocation-only views
- * omit the producer envelope stale mark so aged hidden meters cannot stale a
- * current admitted snapshot.
+ * Stale when producer marks state/quality stale (when
+ * `honorProducerEnvelopeStale` is true), when a displayed CPU/memory aggregate
+ * includes a stale sample, or when the envelope, admitted allocation snapshot,
+ * or any meter sample time used for displayed CPU/memory values exceeds the
+ * threshold. Fresh envelopes/meters must not mask aged allocation
+ * requests/limits, aged resource samples, or producer-stale current readings.
+ * Allocation-only callers pass `honorProducerEnvelopeStale: false` so a
+ * producer stale envelope driven by aged hidden CPU series cannot stale a
+ * current admitted snapshot (see persisted_stale_series).
  */
 function computeIsStale(
   presentation: ParsedTelemetryPresentation,
   nowMs: number,
   meterSampleTimes: Array<string | null>,
   meterHasStaleSample: boolean,
+  honorProducerEnvelopeStale: boolean = true,
 ): boolean {
-  if (presentation.state === "stale" || presentation.quality === "stale") {
+  // Section-aware: producer envelope stale is meter-series freshness. Skip it
+  // when the caller excluded telemetry so allocation-only views stay current.
+  if (
+    honorProducerEnvelopeStale &&
+    (presentation.state === "stale" || presentation.quality === "stale")
+  ) {
     return true;
   }
   if (meterHasStaleSample) {
@@ -1385,18 +1392,12 @@ export function projectWorkspaceTelemetryFreshness(
     ? [readings.cpu.sampleTime, readings.memory.sampleTime]
     : [];
   // Build a sample-free presentation slice so clock ticks never re-read series
-  // arrays (freshness ticks use projected meter metadata only). When telemetry
-  // is unsupported, drop producer envelope stale: that mark is driven by meter
-  // aging the caller already excluded (see persisted_stale_series).
+  // arrays (freshness ticks use projected meter metadata only). Producer
+  // envelope stale is gated inside computeIsStale via honorProducerEnvelopeStale
+  // (allocation-only / expectTelemetry=false) rather than rewriting state here.
   const freshnessPresentation: ParsedTelemetryPresentation = {
-    state:
-      !expectTelemetry && presentation.state === "stale"
-        ? "success"
-        : presentation.state,
-    quality:
-      !expectTelemetry && presentation.quality === "stale"
-        ? "ok"
-        : presentation.quality,
+    state: presentation.state,
+    quality: presentation.quality,
     view: presentation.view,
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: expectTelemetry ? presentation.observedAt : null,
@@ -1421,6 +1422,7 @@ export function projectWorkspaceTelemetryFreshness(
       nowMs,
       meterSampleTimes,
       expectTelemetry && (readings.cpu.usedStale || readings.memory.usedStale),
+      expectTelemetry,
     ),
   };
 }
