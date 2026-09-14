@@ -1422,7 +1422,9 @@ export function projectWorkspaceTelemetryFreshness(
  * widget gates. When a section is unsupported, null/partial admitted or
  * null/unpriced estimate must not infer envelope partial — those fields are
  * hidden, not incomplete — and aged timestamps from that section must not
- * mark the visible panel stale.
+ * mark the visible panel stale. Producer-marked envelope partial that is
+ * attributable only to gated-off allocation/cost evidence is cleared for the
+ * visible view; envelope-only partial with complete nested evidence is kept.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
@@ -1458,16 +1460,33 @@ export function projectWorkspaceTelemetryView(
   );
   const sampleTimeMixed = meterSampleTimesAreMixed(meterSampleTimes);
 
+  const allocationIncomplete =
+    presentation.admitted === null || Boolean(presentation.admitted?.partial);
+  const costIncomplete =
+    presentation.estimate === null ||
+    presentation.estimate.estimateState === "unpriced";
   const missingAllocationEvidence = presentation.state !== "unallocated" &&
-    ((expectAllocation &&
-      (presentation.admitted === null || presentation.admitted.partial)) ||
-      (expectCost &&
-        (presentation.estimate === null ||
-          presentation.estimate.estimateState === "unpriced")));
+    ((expectAllocation && allocationIncomplete) ||
+      (expectCost && costIncomplete));
+  // Producer may already mark partial for unsupported sections (e.g.
+  // missing_estimate). Clear that qualification when incompleteness exists
+  // only in gated-off sections so telemetry-only panels stay success/ok.
+  const hiddenSectionOnlyPartial = presentation.state !== "unallocated" &&
+    !missingAllocationEvidence &&
+    ((!expectAllocation && allocationIncomplete) ||
+      (!expectCost && costIncomplete));
 
   return {
-    state: missingAllocationEvidence && presentation.state === "success" ? "partial" : presentation.state,
-    quality: missingAllocationEvidence && presentation.quality === "ok" ? "partial" : presentation.quality,
+    state: missingAllocationEvidence && presentation.state === "success"
+      ? "partial"
+      : hiddenSectionOnlyPartial && presentation.state === "partial"
+        ? "success"
+        : presentation.state,
+    quality: missingAllocationEvidence && presentation.quality === "ok"
+      ? "partial"
+      : hiddenSectionOnlyPartial && presentation.quality === "partial"
+        ? "ok"
+        : presentation.quality,
     view: presentation.view,
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: presentation.observedAt,

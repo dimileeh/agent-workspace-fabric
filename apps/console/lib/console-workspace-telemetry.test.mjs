@@ -2786,21 +2786,66 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
     "partial",
   );
 
-  // Producer-marked envelope partial is preserved even when gates are off.
-  const envelopePartial = structuredClone(SUCCESS);
-  envelopePartial.state = "partial";
-  envelopePartial.quality = "partial";
-  envelopePartial.admitted = null;
-  envelopePartial.estimate = null;
-  const marked = parseTelemetryPresentation(envelopePartial);
-  assert.ok(marked);
-  const markedView = projectWorkspaceTelemetryView(marked, {
+  // Producer partial caused only by gated-off null allocation/cost must clear
+  // for the visible sections (same outcome as inferred success→ok path).
+  const producerCostPartial = structuredClone(SUCCESS);
+  producerCostPartial.state = "partial";
+  producerCostPartial.quality = "partial";
+  producerCostPartial.admitted = null;
+  producerCostPartial.estimate = null;
+  const cleared = parseTelemetryPresentation(producerCostPartial);
+  assert.ok(cleared);
+  const clearedView = projectWorkspaceTelemetryView(cleared, {
     nowMs: FIXED_NOW,
     expectAllocation: false,
     expectCost: false,
   });
-  assert.equal(markedView.state, "partial");
-  assert.equal(markedView.quality, "partial");
+  assert.equal(clearedView.state, "success");
+  assert.equal(clearedView.quality, "ok");
+
+  // True envelope-only producer partial (complete nested evidence) is preserved
+  // even when allocation/cost widgets are unsupported.
+  const envelopeOnly = structuredClone(SUCCESS);
+  envelopeOnly.state = "partial";
+  envelopeOnly.quality = "partial";
+  const envelopeMarked = parseTelemetryPresentation(envelopeOnly);
+  assert.ok(envelopeMarked);
+  const envelopeView = projectWorkspaceTelemetryView(envelopeMarked, {
+    nowMs: FIXED_NOW,
+    expectAllocation: false,
+    expectCost: false,
+  });
+  assert.equal(envelopeView.state, "partial");
+  assert.equal(envelopeView.quality, "partial");
+
+  // Real producer fixture arrives already partial solely from missing_estimate;
+  // cost-unsupported views must not retain that hidden-section qualification.
+  const noEstimate = loadFixture("persisted_active_no_estimate");
+  const noEstimateParsed = parseTelemetryPresentation(noEstimate);
+  assert.ok(noEstimateParsed);
+  assert.equal(noEstimateParsed.state, "partial");
+  assert.equal(noEstimateParsed.quality, "partial");
+  assert.equal(noEstimateParsed.estimate, null);
+  assert.equal(noEstimateParsed.admitted?.partial, false);
+  const noEstimateNow = Date.parse(noEstimate.window_end_at);
+  const costOff = projectWorkspaceTelemetryView(noEstimateParsed, {
+    nowMs: noEstimateNow,
+    expectCost: false,
+  });
+  assert.equal(costOff.state, "success");
+  assert.equal(costOff.quality, "ok");
+  assert.equal(
+    projectWorkspaceTelemetryView(noEstimateParsed, {
+      nowMs: noEstimateNow,
+      expectAllocation: false,
+      expectCost: false,
+    }).state,
+    "success",
+  );
+  assert.equal(
+    projectWorkspaceTelemetryView(noEstimateParsed, { nowMs: noEstimateNow }).state,
+    "partial",
+  );
 });
 
 test("paired memory gauges normalize only internal starts and keep complete container partitions", () => {
