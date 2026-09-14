@@ -928,7 +928,11 @@ test("virtualization keeps the viewport covered while crossing a row-window boun
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
 
   const list = page.getByTestId("workspace-list-scroll");
@@ -1854,7 +1858,11 @@ test("routine refresh updates and removes retained workspaces outside page one",
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
   ).toBeVisible();
@@ -2006,8 +2014,10 @@ test("failed retained history does not discard a successful first-page refresh",
 }) => {
   let failRetainedBatch = false;
   let refreshedFirstPage = false;
+  const batchRequests: string[][] = [];
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
+    onBatchRequest: (workspaceIds) => batchRequests.push(workspaceIds),
     shouldFailBatch: () => failRetainedBatch,
     resolvePageItem: (item) =>
       refreshedFirstPage && item.workspace_id === "ws_perf_0001"
@@ -2017,7 +2027,11 @@ test("failed retained history does not discard a successful first-page refresh",
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Keep setup at the first page: locator.click() scrolls to the footer and can
+  // autoload a page before its click requests another one.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
   ).toBeVisible();
@@ -2030,6 +2044,9 @@ test("failed retained history does not discard a successful first-page refresh",
     page.getByText("First page survived history failure", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("retained history unavailable", { exact: true })).toBeVisible();
+  expect(batchRequests[0]).toEqual(
+    fleet.slice(PAGE_SIZE, PAGE_SIZE * 2).map((item) => item.workspace_id),
+  );
 });
 
 test("routine refresh drops a selected retained workspace excluded by its repository query", async ({

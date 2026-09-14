@@ -544,7 +544,13 @@ export function useWorkspaceLogTails({
               }
               return trimLogEntries(
                 [
-                  ...current.filter((entry) => entry.workspaceId !== workspaceId),
+                  // Revoke cached output, but keep sibling denial diagnostics
+                  // until those streams recover, regardless of response order.
+                  ...current.filter(
+                    (entry) =>
+                      entry.workspaceId !== workspaceId ||
+                      (entry.streamId !== stream.stream_id && entry.key.startsWith("tail-error:")),
+                  ),
                   {
                     key: `tail-error:${workspaceId}:${stream.stream_id}:${Date.now()}`,
                     workspaceId,

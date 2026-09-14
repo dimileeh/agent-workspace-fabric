@@ -63,7 +63,7 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByTestId("telemetry-series-cpu-marker")).toBeVisible();
     await expect(page.getByTestId("telemetry-series-memory-marker")).toBeVisible();
     await expect(page.getByTestId("telemetry-workload-cost-value")).toContainText("$");
-    await expect(page.getByText("Estimated workload cost")).toBeVisible();
+    await expect(page.getByText("Allocation estimate", { exact: true })).toBeVisible();
     await expect(page.getByText(/LLM usage/i)).toHaveCount(0);
 
     await expectNoFleetChrome(page);
@@ -361,4 +361,47 @@ test.describe("console workspace telemetry harness", () => {
     await openHarness(page, { fixture: "success" });
     await expect(page.getByTestId("telemetry-harness-root")).toBeVisible();
   });
+});
+
+test("paired missing records render not recorded, partial, and no synthetic durations", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 844 });
+  await openHarness(page, { scenario: "cold" });
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+  await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
+  await expect(page.getByTestId("telemetry-admission-missing")).toHaveText("Admission not recorded");
+  await expect(page.getByTestId("console-workspace-telemetry")).not.toContainText("0s / 0s");
+  await expect(page.getByTestId("telemetry-unallocated")).toHaveCount(0);
+  await expectNoViewportOverflow(page);
+  await expectNoFleetChrome(page);
+  await openHarness(page, { scenario: "unpriced" });
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
+});
+
+test("paired attempt estimate keeps lifetime amount while chart selectors change", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 844 });
+  await openHarness(page, { scenario: "retained", mode: "historical" });
+  await expect(page.getByText("Allocation estimate", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("telemetry-estimate-scope")).toHaveText(
+    "Retained resource / placement-attempt estimate; independent of chart window.",
+  );
+  const amount = page.getByTestId("telemetry-workload-cost-value");
+  await expect(amount).toHaveText("$0.0123");
+  await expect(page.getByTestId("console-workspace-telemetry")).toContainText("7200s / 0s");
+  for (const view of ["6h", "24h", "1h"]) {
+    await page.getByTestId(`telemetry-view-${view}`).click();
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveAttribute("data-awf-displayed-view", view);
+    await expect(amount).toHaveText("$0.0123");
+  }
+  await expectNoViewportOverflow(page);
+  await expectNoFleetChrome(page);
+});
+
+test("paired query clock preserves mixed freshness and memory gauge rendering", async ({ page }) => {
+  await openHarness(page, { scenario: "lag" });
+  await expect(page.getByTestId("console-workspace-telemetry")).toHaveAttribute("data-awf-sample-time-mixed", "true");
+  await expect(page.getByTestId("telemetry-meter-memory")).toContainText("1.0 GB");
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+  await openHarness(page, { scenario: "lag", nowMs: String(Date.parse("2026-09-12T12:04:01Z")) });
+  await expect(page.locator("[data-awf-stale='true']").first()).toBeVisible();
 });

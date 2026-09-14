@@ -1,0 +1,114 @@
+{
+  "acceptance": "Producer evidence only; paired Core validation and production acceptance remain outstanding.",
+  "audited_cloud_sha": "70567f1e152d01b2220244481e23b1fab5422284",
+  "audited_core_sha": "8590c28946389f1867b192dffbfaac14c682e620",
+  "cases": {
+    "active_no_estimate": {},
+    "checkpoint_no_samples": {
+      "samples": false
+    },
+    "cold_absent": {
+      "admitted": false,
+      "samples": false
+    },
+    "cpu_lagging_memory": {
+      "cpu_lag": 60,
+      "duration": 3600
+    },
+    "day_two_containers": {
+      "containers": [
+        "agent",
+        "sidecar"
+      ],
+      "minutes": 1440,
+      "view": "24h"
+    },
+    "estimate_no_checkpoint": {
+      "admitted": false,
+      "duration": 3600
+    },
+    "missing_family": {
+      "duration": 3600,
+      "memory": false
+    },
+    "retained_cleaned_terminal": {
+      "duration": 7200,
+      "retained": true
+    },
+    "shared_unallocated": {
+      "admitted": false,
+      "samples": false,
+      "unallocated": true
+    },
+    "stale_series": {
+      "cpu_lag": 400,
+      "duration": 3600
+    },
+    "terminal_1h": {
+      "duration": 3600
+    },
+    "terminal_2h_under_1h": {
+      "duration": 7200
+    },
+    "unpriced_allocation": {
+      "duration": 3600,
+      "rates": false
+    }
+  },
+  "generator_base_revision": "82a17e20fcebda66cd6ff0aaf83b30b91ed79c15",
+  "generator_source_sha256": {
+    "apps/api/awf_cloud_api/console_telemetry/admitted_resources.py": "e9388fc00c6008ff089fb0151e0228bae5fec1f83cfacdc1121413b62b0aa4f3",
+    "apps/api/awf_cloud_api/console_telemetry/estimation.py": "d8deeac6ba0020dc1aaf5968131ac9faf29ade82fc5cceee3be2300b5875142f",
+    "apps/api/awf_cloud_api/console_telemetry/metrics_normalize.py": "8fb304f8862e12561e800df0f8e51614291190e7a779ce9370d04b14c90d58c2",
+    "apps/api/awf_cloud_api/console_telemetry/persistence.py": "b1b0eea38b1168a7fc43d4fd3f960fbd3857f77d1419e18d0f6b622b2812ca17",
+    "apps/api/awf_cloud_api/console_telemetry/query.py": "b212c6148e01cdfa6bd0d41b5d338c263dd972a78afc4f37bacae981ae85a804",
+    "apps/api/awf_cloud_api/console_telemetry/query_projection.py": "91eec29703767ce45d3bc1d81f40f8102e1d78af3a004460d0cd0f17a3c9ad4d",
+    "apps/api/awf_cloud_api/console_telemetry/types.py": "a7d07589f2925cada910c2b283e6c7dcf2299a06948c0b689df3ef6c106e297e",
+    "tests/test_console_telemetry_admitted_resources.py": "f6e10468c77034a70757248c38bec0d7ecdcfc2d97ec6d73be5f72294b494d52",
+    "tests/test_console_telemetry_persisted_contract.py": "98d0f7795163b8f1e0debdf2a720167e3d5a92ee5b554d48dbc326d828f93812",
+    "tests/test_console_telemetry_persistence_postgres.py": "866e15ae72fb7750651539e30a79ddc592e118e70824bbcee0f644353554e66e"
+  },
+  "pipeline": [
+    "normalize_series",
+    "merge_memory_partitions",
+    "read_admitted_resources",
+    "estimate_allocation_cost",
+    "upsert_metric_observations",
+    "upsert_allocation_checkpoint",
+    "upsert_terminal_summary",
+    "query_workspace_telemetry",
+    "TelemetryPresentation.to_contract_dict"
+  ],
+  "query_clock": "2026-09-12T12:00:00+00:00",
+  "reproduce": "uv run python -m tests.test_console_telemetry_persisted_contract --export",
+  "sha256": {
+    "persisted_active_no_estimate.json": "8a6e57b72640e80b5c8efbf876f23692fd9227e0ff9d7ae914352a9d207ba2a0",
+    "persisted_checkpoint_no_samples.json": "368739f44f026935f69f9563ad423ac7daeb98f6dfe6688db92314acc2a129fc",
+    "persisted_cold_absent.json": "5b82754a9a54974af5ac09ed641746e1519b60ab2ea9503bb85ac21f6a4e5511",
+    "persisted_cpu_lagging_memory.json": "f4b53e86fa241ff772253afed4ef93eab3d9458428a5e9f7eac38d81326ec872",
+    "persisted_day_two_containers.json": "77fe90cbba816947c0b822d2691d2169e8463532e35728b9606958214e5b2efb",
+    "persisted_estimate_no_checkpoint.json": "048e64a90d4c5cb7028fa6d0a024e467d7a4b272623ed359c1d23538dcf674c9",
+    "persisted_missing_family.json": "66d63d9581278a1f87a6876f1444b93799d64266b40459b71aad0d1de8ed39e9",
+    "persisted_retained_cleaned_terminal.json": "59db36232bc10dc6b630fd32009cba01c106d4fa690e20dacd3514361bf6ac39",
+    "persisted_shared_unallocated.json": "b9ddc691307958bf4e5b9fb77a9d3bffe882568ad924a457113b6e50edcc4dcc",
+    "persisted_stale_series.json": "8c92244dcb45484a5c16df0ba2a32f9b3b4920a77b6c31233b6d059d68371a3f",
+    "persisted_terminal_1h.json": "e7b70a9cdb9630b40f639f18845f175c8f9bbd2a28593da31d4bfb164128d745",
+    "persisted_terminal_2h_under_1h.json": "eb7d87421a8675adc549dc350317989ba40244d6ee00f55ba2ebc018a4f042fe",
+    "persisted_unpriced_allocation.json": "6d61a29f888fde55a3c5d7e3ce5cc42a4a9ca74b7cfacc0f0bdd23bdb2f0e2c6"
+  },
+  "synthetic": true,
+  "synthetic_rate": {
+    "compute_class": "autopilot",
+    "cpu_per_core_hour": "0.04",
+    "currency": "USD",
+    "effective_at": "2026-08-13 12:00:00+00:00",
+    "ephemeral_per_gib_hour": "0.0001",
+    "memory_per_gib_hour": "0.005",
+    "precision": "1E-7",
+    "rate_table_version": "synthetic-stage3-v1",
+    "region": "us-central1",
+    "source_url": "synthetic://stage3",
+    "synthetic": "True"
+  },
+  "working_tree_basis": "Exact generator/producer source hashes below include uncommitted implementation changes."
+}

@@ -178,6 +178,7 @@ export function ConsoleDashboard() {
   const [, setEventFeedAuthDenied] = useState(false);
   // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
+  const [telemetryAuthEpoch, setTelemetryAuthEpoch] = useState(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
   const consoleAuthDeniedRef = useRef(false);
   // Capability poll generation: discard a stale successful 200 after a newer
@@ -364,6 +365,7 @@ export function ConsoleDashboard() {
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
     authorizedFeedEpochRef.current += 1;
+    setTelemetryAuthEpoch(authorizedFeedEpochRef.current);
     if (options?.authDenied) {
       consoleAuthDeniedRef.current = true;
     } else {
@@ -1176,15 +1178,6 @@ export function ConsoleDashboard() {
           lastSuccessAt={
             fleetSummaryAvailable ? (dashboardSummary?.last_success_at ?? null) : null
           }
-          coverageStatus={
-            fleetSummaryAvailable ? (dashboardSummary?.coverage.status ?? null) : null
-          }
-          coverageNotes={
-            fleetSummaryAvailable ? (dashboardSummary?.coverage.notes ?? null) : null
-          }
-          countEvidence={
-            fleetSummaryAvailable ? (dashboardSummary?.count_evidence ?? null) : null
-          }
         />
       ) : null}
       <SectionNav
@@ -1265,6 +1258,9 @@ export function ConsoleDashboard() {
 </section>
 
       <ConsoleDashboardInspector
+        telemetryCapabilities={capabilities}
+        telemetryAuthEpoch={telemetryAuthEpoch}
+        telemetryEpochRef={authorizedFeedEpochRef}
         selectedId={selectedId}
         selectedOverview={selectedOverview}
         selectedMergeQueueItem={selectedMergeQueueItem}
