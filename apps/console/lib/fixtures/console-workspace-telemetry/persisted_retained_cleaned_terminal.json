@@ -1,0 +1,74 @@
+{
+  "admitted": {
+    "billable": true,
+    "compute_class": "autopilot",
+    "container_creating": false,
+    "cpu_limit_cores": "1.0000000000",
+    "cpu_request_cores": "0.5000000000",
+    "ephemeral_storage_limit_bytes": null,
+    "ephemeral_storage_request_bytes": 1073741824,
+    "evidence": {
+      "compute_class": "autopilot",
+      "container_creating": false,
+      "init_cpu_cores": "0",
+      "init_memory_bytes": 0,
+      "overhead_cpu_cores": "0",
+      "overhead_memory_bytes": 0,
+      "owner_job_name": "job-a",
+      "owner_job_uid": "job-uid-1",
+      "pod_created_at": "2026-09-10T12:00:00Z",
+      "pod_phase": "Running",
+      "pod_uid": "pod-uid-ws_retained_cleaned_terminal",
+      "region": "us-central1",
+      "sidecar_cpu_cores": "0",
+      "sidecar_memory_bytes": 0
+    },
+    "memory_limit_bytes": 2147483648,
+    "memory_request_bytes": 1073741824,
+    "observed_at": "2026-09-12T12:00:00+00:00",
+    "owner_job_name": "job-a",
+    "owner_job_uid": "job-uid-1",
+    "partial": false,
+    "pod_phase": "Running",
+    "provider_resource_uid": "pod-uid-ws_retained_cleaned_terminal",
+    "region": "us-central1"
+  },
+  "cpu_cores_samples": [],
+  "data_quality_notes": [
+    "no_samples"
+  ],
+  "estimate": {
+    "currency": "USD",
+    "estimate_state": "complete",
+    "estimated_usd": "0.0502000000",
+    "evidence": {
+      "rate_table_version": "synthetic-stage3-v1",
+      "source": "synthetic://stage3",
+      "synthetic": true,
+      "unpriced_reason": null
+    },
+    "priced_interval_seconds": 7200,
+    "rate_table_version": "synthetic-stage3-v1",
+    "unpriced_interval_seconds": 0
+  },
+  "estimate_scope": "resource_attempt",
+  "memory_bytes_samples": [],
+  "observed_at": null,
+  "ownership": {
+    "cell_id": "cell_ws_retained_cleaned_terminal",
+    "cloud_resource_owner_id": "owner_ws_retained_cleaned_terminal_1",
+    "org_id": "org_synthetic",
+    "placement_attempt": 1,
+    "project_id": "p_retained_cleaned_terminal",
+    "provider_resource_uid": "pod-uid-ws_retained_cleaned_terminal",
+    "resource_name": "pod-a",
+    "resource_namespace": "ns-a",
+    "workspace_placement_id": "place_ws_retained_cleaned_terminal_1",
+    "workspace_record_id": "ws_retained_cleaned_terminal"
+  },
+  "quality": "partial",
+  "stale_after_seconds": 300,
+  "state": "partial",
+  "view": "1h",
+  "window_end_at": "2026-09-16T12:00:00+00:00"
+}

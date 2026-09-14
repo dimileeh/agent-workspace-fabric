@@ -49,7 +49,6 @@ import {
   displayedTaskKey,
   MAX_FULLSCREEN_LOG_WORKSPACES,
 } from "@/lib/console-dashboard-derived";
-import { formatDashboardCoverageNotice } from "@/lib/console-dashboard-summary";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   attentionAgeSeconds,
@@ -72,7 +71,7 @@ import type { OperatorPreferences } from "@/lib/operator-preferences";
 import {
 formatRecoveryBadge
 } from "@/lib/recovery-format";
-import type { ConsoleDashboardCountEvidence, WorkspaceOverview } from "@/lib/types";
+import type { WorkspaceOverview } from "@/lib/types";
 import {
 Badge, KpiStat,
 SmallExternalAnchor,
@@ -258,25 +257,14 @@ export function FleetHealthStrip({
   kpis,
   error,
   lastSuccessAt,
-  coverageStatus,
-  coverageNotes,
-  countEvidence,
 }: {
   kpis: FleetKpi[];
   error?: string | null;
   lastSuccessAt?: string | null;
-  coverageStatus?: "complete" | "partial" | "unknown" | null;
-  coverageNotes?: readonly string[] | null;
-  countEvidence?: ConsoleDashboardCountEvidence | null;
 }) {
   const anyStale = kpis.some((kpi) => kpi.stale);
-  // HTTP 200 can still be incomplete. Do not treat partial/unknown as a request
-  // error — that banner is cleared on success — but do not let non-null counts
-  // look fully current either.
-  const coverageNotice = formatDashboardCoverageNotice(
-    coverageStatus ? { status: coverageStatus, notes: coverageNotes ?? [] } : null,
-    countEvidence,
-  );
+  // Partial/unknown coverage on HTTP 200 is presentation-silent: keep request-error
+  // and stale banners only. Backend coverage/count_evidence fields remain parsed.
   return (
     <div className="border-b border-line bg-canvas px-4 py-3" aria-label="Fleet health">
       {error ? (
@@ -289,19 +277,6 @@ export function FleetHealthStrip({
           <span>{error}</span>
           {lastSuccessAt ? (
             <span className="text-danger-text/80">· last success {lastSuccessAt}</span>
-          ) : null}
-        </div>
-      ) : null}
-      {coverageNotice ? (
-        <div
-          className="mb-2 inline-flex max-w-full flex-wrap items-center gap-1 rounded-[var(--radius-control)] border border-attention-border bg-attention-soft px-2 py-0.5 text-[11px] font-medium text-attention-text"
-          role="status"
-          data-testid="dashboard-summary-coverage"
-        >
-          <span aria-hidden>⚠</span>
-          <span>{coverageNotice}</span>
-          {!error && lastSuccessAt ? (
-            <span className="text-attention-text/80">· last complete {lastSuccessAt}</span>
           ) : null}
         </div>
       ) : null}

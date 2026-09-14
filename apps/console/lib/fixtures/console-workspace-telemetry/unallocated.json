@@ -1,0 +1,37 @@
+{
+  "admitted": null,
+  "cpu_cores_samples": [],
+  "data_quality_notes": [
+    "unallocated"
+  ],
+  "estimate": {
+    "currency": "USD",
+    "estimate_state": "unallocated",
+    "estimated_usd": null,
+    "evidence": {
+      "allocation_kind": "unallocated",
+      "unpriced_reason": "no_dedicated_allocation"
+    },
+    "priced_interval_seconds": 0,
+    "rate_table_version": "",
+    "unpriced_interval_seconds": 0
+  },
+  "memory_bytes_samples": [],
+  "observed_at": null,
+  "ownership": {
+    "cell_id": "cell_example",
+    "cloud_resource_owner_id": "owner_pod_example",
+    "org_id": "org_example",
+    "placement_attempt": 1,
+    "project_id": "project_example",
+    "provider_resource_uid": "pod-uid-example",
+    "resource_name": "pod-example",
+    "resource_namespace": "ns-example",
+    "workspace_placement_id": "place_example",
+    "workspace_record_id": "ws_example"
+  },
+  "quality": "ok",
+  "stale_after_seconds": 300,
+  "state": "unallocated",
+  "view": "1h"
+}

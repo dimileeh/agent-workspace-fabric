@@ -88,6 +88,7 @@ exclude = [
 "apps/console/hooks" = "awf/bootstrap_assets/apps/console/hooks"
 "apps/console/lib" = "awf/bootstrap_assets/apps/console/lib"
 "apps/console/next.config.ts" = "awf/bootstrap_assets/apps/console/next.config.ts"
+"apps/console/console-test-harness-routes.ts" = "awf/bootstrap_assets/apps/console/console-test-harness-routes.ts"
 "apps/console/package-lock.json" = "awf/bootstrap_assets/apps/console/package-lock.json"
 "apps/console/package.json" = "awf/bootstrap_assets/apps/console/package.json"
 "apps/console/postcss.config.mjs" = "awf/bootstrap_assets/apps/console/postcss.config.mjs"
@@ -117,6 +118,7 @@ include = [
     "/apps/console/hooks",
     "/apps/console/lib",
     "/apps/console/next.config.ts",
+    "/apps/console/console-test-harness-routes.ts",
     "/apps/console/package-lock.json",
     "/apps/console/package.json",
     "/apps/console/postcss.config.mjs",

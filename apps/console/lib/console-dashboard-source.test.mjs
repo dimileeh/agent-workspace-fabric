@@ -1047,8 +1047,8 @@ test("loadLogTail retains last-successful tails on transient refresh failure", (
   );
   assert.match(
     authBody,
-    /current\.filter\(\(entry\) => entry\.workspaceId !== workspaceId\)/,
-    "Expected 401/403 to drop prior tail and live entries for the revoked workspace",
+    /current\.filter\(\s*\(entry\) =>\s*entry\.workspaceId !== workspaceId \|\|\s*\(entry\.streamId !== stream\.stream_id && entry\.key\.startsWith\("tail-error:"\)\)/,
+    "Expected 401/403 to drop cached output while retaining only sibling denial diagnostics",
   );
   assert.match(
     authBody,

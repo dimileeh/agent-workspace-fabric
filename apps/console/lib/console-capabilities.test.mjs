@@ -923,7 +923,7 @@ test("parseConsoleCapabilities rejects available widget without inventory route"
   assert.equal(parsed.ok, false);
   if (parsed.ok) return;
   assert.equal(parsed.kind, "malformed");
-  assert.match(parsed.message, /telemetry.*no inventory route/);
+  assert.match(parsed.message, /telemetry.*route must be/);
 });
 
 test("isWidgetAvailable rejects inventory-mismatched routes", () => {

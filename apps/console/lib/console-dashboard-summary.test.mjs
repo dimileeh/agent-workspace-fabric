@@ -4,7 +4,6 @@ import test from "node:test";
 
 import {
   fleetKpisFromDashboardSummary,
-  formatDashboardCoverageNotice,
   parseDashboardSummary,
 } from "./console-dashboard-summary.ts";
 
@@ -148,47 +147,6 @@ test("parseDashboardSummary accepts string coverage.notes arrays", () => {
   );
   assert.ok(parsed);
   assert.deepEqual(parsed.coverage.notes, ["queued_count_unavailable"]);
-});
-
-test("formatDashboardCoverageNotice surfaces partial and unknown notes", () => {
-  const partial = JSON.parse(
-    readFileSync(
-      new URL("../../../docs/console/fixtures/v1/dashboard-summary.partial.json", import.meta.url),
-      "utf8",
-    ),
-  );
-  assert.equal(
-    formatDashboardCoverageNotice(partial.coverage),
-    "partial coverage — queued count unavailable",
-  );
-  const noPrior = JSON.parse(
-    readFileSync(
-      new URL(
-        "../../../docs/console/fixtures/v1/dashboard-summary.no-prior-success.json",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  assert.equal(
-    formatDashboardCoverageNotice(noPrior.coverage),
-    "partial coverage — queued count unavailable; no prior successful snapshot",
-  );
-  assert.equal(
-    formatDashboardCoverageNotice({ status: "unknown", notes: ["provider_lag"] }),
-    "coverage unknown — provider lag",
-  );
-  assert.equal(
-    formatDashboardCoverageNotice({ status: "unknown", notes: [] }),
-    "coverage unknown — some counts are incomplete",
-  );
-  assert.equal(
-    formatDashboardCoverageNotice({ status: "partial", notes: ["", "  "] }),
-    "partial coverage — some counts are incomplete",
-  );
-  assert.equal(formatDashboardCoverageNotice({ status: "complete", notes: [] }), null);
-  assert.equal(formatDashboardCoverageNotice(null), null);
-  assert.equal(formatDashboardCoverageNotice(undefined), null);
 });
 
 test("parseDashboardSummary accepts absent, null, and valid count evidence", () => {
@@ -335,11 +293,15 @@ test("parseDashboardSummary rejects a positive exact lower bound with one unknow
   assert.equal(parseDashboardSummary(payload), null);
 });
 
-test("confirmed KPI lower bounds stay qualified while exact values win", () => {
+test("confirmed KPI values render as plain numbers while exact values win", () => {
+  // Production-shaped 29/24/5 evidence: confirmed nonzero + evidenced zero → plain numbers.
   const lowerBounds = parseDashboardSummary(
     summaryWithCountEvidence({ confirmed: { active: 1, executing: 1 } }),
   );
   assert.ok(lowerBounds);
+  assert.equal(lowerBounds.count_evidence.total_workspaces, 29);
+  assert.equal(lowerBounds.count_evidence.status_known_workspaces, 24);
+  assert.equal(lowerBounds.count_evidence.status_unknown_workspaces, 5);
   const lowerBoundKpis = fleetKpisFromDashboardSummary({
     summary: lowerBounds,
     summaryStale: true,
@@ -352,16 +314,15 @@ test("confirmed KPI lower bounds stay qualified while exact values win", () => {
   const monitoring = lowerBoundKpis.find((item) => item.id === "monitoring_pr");
   const completed = lowerBoundKpis.find((item) => item.id === "completed");
   assert.deepEqual(
-    { value: active.value, suffix: active.suffix, stale: active.stale },
-    { value: 1, suffix: " confirmed", stale: true },
+    { value: active.value, suffix: active.suffix, hint: active.hint, stale: active.stale },
+    { value: 1, suffix: undefined, hint: undefined, stale: true },
   );
   assert.deepEqual(
-    { value: monitoring.value, suffix: monitoring.suffix },
-    { value: 0, suffix: " confirmed" },
+    { value: monitoring.value, suffix: monitoring.suffix, hint: monitoring.hint },
+    { value: 0, suffix: undefined, hint: undefined },
   );
-  assert.match(active.hint, /exact metric count is incomplete/);
-  assert.match(completed.hint, /last 24h/);
-  assert.match(completed.hint, /exact metric count is incomplete/);
+  assert.equal(completed.hint, "last 24h");
+  assert.doesNotMatch(String(completed.hint ?? ""), /confirmed|lower bound|incomplete/i);
   assert.equal(lowerBounds.counts.active, null);
 
   const exactPayload = summaryWithCountEvidence({
@@ -386,8 +347,9 @@ test("confirmed KPI lower bounds stay qualified while exact values win", () => {
     {
       value: exactKpis.find((item) => item.id === "active").value,
       suffix: exactKpis.find((item) => item.id === "active").suffix,
+      hint: exactKpis.find((item) => item.id === "active").hint,
     },
-    { value: 1, suffix: undefined },
+    { value: 1, suffix: undefined, hint: undefined },
   );
   assert.deepEqual(
     {
@@ -398,7 +360,7 @@ test("confirmed KPI lower bounds stay qualified while exact values win", () => {
   );
 });
 
-test("confirmed KPI hints describe metric gaps when every workflow status is known", () => {
+test("confirmed KPI path keeps only baseHints without lower-bound wording", () => {
   const summary = parseDashboardSummary(
     summaryWithCountEvidence({ total: 1, known: 1, unknown: 0, confirmed: { active: 1 } }),
   );
@@ -413,10 +375,16 @@ test("confirmed KPI hints describe metric gaps when every workflow status is kno
     showCapacity: false,
     includeSummary: true,
   });
-  for (const id of ["active", "completed"]) {
-    const hint = kpis.find((item) => item.id === id).hint;
-    assert.match(hint, /exact metric count is incomplete/);
-    assert.doesNotMatch(hint, /project total is incomplete/);
+  const active = kpis.find((item) => item.id === "active");
+  const completed = kpis.find((item) => item.id === "completed");
+  assert.equal(active.hint, undefined);
+  assert.equal(completed.hint, "last 24h");
+  for (const item of [active, completed]) {
+    assert.equal(item.suffix, undefined);
+    assert.doesNotMatch(
+      `${item.value}${item.suffix ?? ""}${item.hint ?? ""}`,
+      /confirmed|lower bound|partial coverage|coverage unknown|workflow statuses known/i,
+    );
   }
 });
 
@@ -439,30 +407,6 @@ test("missing count evidence keeps null KPIs as honest dashes", () => {
   assert.deepEqual(
     { value: queued.value, suffix: queued.suffix, hint: queued.hint },
     { value: "—", suffix: undefined, hint: undefined },
-  );
-});
-
-test("coverage notice quantifies statuses without hiding other evidence gaps", () => {
-  const parsed = parseDashboardSummary(
-    summaryWithCountEvidence({ total: 1, known: 1, unknown: 0 }),
-  );
-  assert.ok(parsed);
-  parsed.coverage.notes = ["terminal_timestamp_unavailable", "attention_evidence_unavailable"];
-  assert.equal(
-    formatDashboardCoverageNotice(parsed.coverage, parsed.count_evidence),
-    "partial coverage — 1 of 1 workflow statuses known; 0 unknown; terminal timestamp unavailable; attention evidence unavailable",
-  );
-  assert.equal(
-    formatDashboardCoverageNotice(
-      { status: "unknown", notes: ["provider_lag"] },
-      {
-        total_workspaces: 29,
-        status_known_workspaces: 24,
-        status_unknown_workspaces: 5,
-        confirmed_counts: zeroConfirmedCounts(),
-      },
-    ),
-    "coverage unknown — 24 of 29 workflow statuses known; 5 unknown; provider lag",
   );
 });
 

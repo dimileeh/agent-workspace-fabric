@@ -5,7 +5,7 @@ const eslintConfig = [
   ...nextVitals,
   ...nextTs,
   {
-    ignores: [".next/**", ".next-hosted/**", "node_modules/**", "out/**", "playwright-report/**", "test-results/**"],
+    ignores: [".next/**", ".next-hosted/**", ".next-harness/**", "node_modules/**", "out/**", "playwright-report/**", "test-results/**"],
   },
   {
     rules: {

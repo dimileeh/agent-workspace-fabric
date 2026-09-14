@@ -225,10 +225,10 @@ export async function mockAwfConsoleApi(page: Page, options: MockAwfOptions = {}
           },
         }));
 
-  await page.route("**/api/awf/**", async (route) => {
+  await page.route(/\/api\/(?:awf|core-console)\//, async (route) => {
     const url = new URL(route.request().url());
-    const path = url.pathname;
-    options.onRequest?.(path);
+    const path = url.pathname.replace("/api/core-console/", "/api/awf/");
+    options.onRequest?.(url.pathname);
 
     if (path === "/api/awf/health") {
       await fulfillJson(route, { status: "ok" });
@@ -277,4 +277,15 @@ export async function mockAwfConsoleApi(page: Page, options: MockAwfOptions = {}
 
     await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
   });
+}
+
+/** Consumer-authored enabled shared-wire example; hosted default remains dark. */
+export function hostedTelemetryCapabilities() {
+  const caps = hostedCapabilities() as { widgets: Array<Record<string, unknown>> };
+  caps.widgets = caps.widgets.map(widget =>
+    ["telemetry", "allocation", "cost"].includes(String(widget.id))
+      ? { id: widget.id, availability: "available", route: "/v1/workspaces/{workspace_id}/telemetry", semantics: "Selected workspace resource-attempt telemetry" }
+      : widget,
+  );
+  return caps;
 }

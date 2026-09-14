@@ -664,7 +664,7 @@ export function operatorIdempotencyKey(
   return `console:${action}:${workspaceId}:${suffix}`;
 }
 
-async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {
+export async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {
   const text = await response.text();
   const parsed = parseJson(text);
   const body = parsed.ok ? parsed.value : null;
