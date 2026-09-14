@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 
-import { ConsoleWorkspaceTelemetryHarness } from "@/tests/harness/console-workspace-telemetry-harness";
+import { ConsoleWorkspaceTelemetryHarness } from "./console-workspace-telemetry-harness";
 
 /**
  * Test-only App Router entry (`page.harness.tsx`). Registered via

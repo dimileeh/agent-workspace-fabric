@@ -118,6 +118,33 @@ def test_console_hook_imports_are_packaged_for_bootstrap_build() -> None:
         assert source.relative_to(REPO_ROOT).as_posix().startswith("apps/console/hooks/")
 
 
+_TESTS_IMPORT = re.compile(r"""from ["']@/tests/[^"']+["']""")
+
+
+def test_console_harness_pages_do_not_import_unpackaged_tests() -> None:
+    """Packaged ``apps/console/app`` harness pages must not depend on ``tests/``.
+
+    Hatch force-includes ``apps/console/app`` but omits ``apps/console/tests``.
+    TypeScript still typechecks ``page.harness.tsx`` during ``npm run build``, so
+    an import of ``@/tests/...`` breaks console builds from the published package.
+    """
+    pyproject_path = REPO_ROOT / "pyproject.toml"
+    with pyproject_path.open("rb") as f:
+        data = tomllib.load(f)
+    wheel_force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert "apps/console/app" in wheel_force_include
+    assert "apps/console/tests" not in wheel_force_include
+
+    harness_pages = sorted((REPO_ROOT / "apps/console/app").rglob("*.harness.tsx"))
+    assert harness_pages, "expected at least one App Router harness page under apps/console/app"
+
+    for page in harness_pages:
+        text = page.read_text(encoding="utf-8")
+        assert not _TESTS_IMPORT.search(text), (
+            f"{page.relative_to(REPO_ROOT).as_posix()} must not import unpackaged @/tests modules"
+        )
+
+
 def test_sdist_includes_installer_release_metadata() -> None:
     """The sdist ships the checked-in installer/release metadata (T11/T12 lanes)."""
     pyproject_path = REPO_ROOT / "pyproject.toml"

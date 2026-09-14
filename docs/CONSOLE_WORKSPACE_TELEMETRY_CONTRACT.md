@@ -105,7 +105,7 @@ From `apps/console`:
 
 ```sh
 node --test --test-concurrency=4 --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/console-workspace-telemetry.test.mjs
-npx eslint lib/console-workspace-telemetry.ts lib/console-workspace-telemetry.test.mjs components/console-workspace-telemetry.tsx tests/harness/console-workspace-telemetry-harness.tsx tests/console-workspace-telemetry.spec.ts
+npx eslint lib/console-workspace-telemetry.ts lib/console-workspace-telemetry.test.mjs components/console-workspace-telemetry.tsx app/test-harness/workspace-telemetry/console-workspace-telemetry-harness.tsx tests/console-workspace-telemetry.spec.ts
 npx playwright test tests/console-workspace-telemetry.spec.ts --workers=2
 ```
 
