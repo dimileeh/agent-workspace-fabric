@@ -15,6 +15,7 @@ def test_console_docker_context_ignores_generated_host_artifacts() -> None:
 
     assert "apps/console/node_modules/" in dockerignore
     assert "apps/console/.next/" in dockerignore
+    assert "apps/console/.next-harness/" in dockerignore.splitlines()
     assert "apps/console/.env.local" in dockerignore
     assert "apps/console/tsconfig.tsbuildinfo" in dockerignore
 

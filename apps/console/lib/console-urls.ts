@@ -282,3 +282,13 @@ function stripTrailingSlash(value: string): string {
   }
   return value.replace(/\/+$/, "");
 }
+
+/** One selected-workspace resource; routing authority stays in configured context. */
+export function workspaceTelemetryPath(
+  workspaceId: string,
+  view: "1h" | "6h" | "24h" = "1h",
+  pageSearch?: string,
+): string {
+  if (!["1h", "6h", "24h"].includes(view)) throw new Error("Invalid telemetry view");
+  return awfPath(`workspaces/${encodeURIComponent(workspaceId)}/telemetry`, { view }, pageSearch);
+}

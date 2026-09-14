@@ -1,10 +1,13 @@
 {
-  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route (any non-null route, including relative /v1/..., empty string, or absolute URL, rejects; absent/null accept). Unsupported entries omit route (null/absent only — empty string \"\" is reject, matching Python/OpenAPI). Identity/context rules are unchanged (local optional identity).",
+  "description": "Shared exact v1 inventory route matrix for OpenAPI Draft202012, Pydantic ConsoleCapabilitiesResponse, and TS parseConsoleCapabilities. Available widgets/diagnostics must use an inventory id and that id's exact route; omit/null/wrong relative routes and unknown available ids fail closed. Available controls omit route (any non-null route, including relative /v1/..., empty string, or absolute URL, rejects; absent/null accept). Unsupported entries omit route (null/absent only — empty string \"\" is reject, matching Python/OpenAPI). Identity/context rules are unchanged (local optional identity). Stage 3 telemetry cases are consumer-authored shared-wire examples, not Cloud exports.",
   "inventory": {
     "widgets": {
       "fleet_summary": "/v1/console/dashboard-summary",
       "resource_capacity": "/v1/metrics/resources/saturation",
-      "cloud_runtime": "/v1/console/cloud-runtime"
+      "cloud_runtime": "/v1/console/cloud-runtime",
+      "telemetry": "/v1/workspaces/{workspace_id}/telemetry",
+      "allocation": "/v1/workspaces/{workspace_id}/telemetry",
+      "cost": "/v1/workspaces/{workspace_id}/telemetry"
     },
     "diagnostics": {
       "reliability": "/v1/metrics/workspaces/summary",
@@ -16,8 +19,14 @@
       "workspace_logs": "/v1/workspaces/{workspace_id}/logs",
       "workspace_stream": "/v1/workspaces/{workspace_id}/stream"
     },
-    "widgets_without_route": ["telemetry", "allocation", "cost"],
-    "controls": ["remonitor", "refresh", "revalidate", "cancel", "retry"]
+    "widgets_without_route": [],
+    "controls": [
+      "remonitor",
+      "refresh",
+      "revalidate",
+      "cancel",
+      "retry"
+    ]
   },
   "cases": [
     {
@@ -507,6 +516,294 @@
             "semantics": "explode"
           }
         ]
+      }
+    },
+    {
+      "name": "telemetry_canonical",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "telemetry_absolute",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "available",
+            "route": "https://example.invalid/v1/workspaces/{workspace_id}/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "telemetry_expanded",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "available",
+            "route": "/v1/workspaces/ws/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "telemetry_query",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "telemetry",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/telemetry?view=1h",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "allocation_canonical",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "allocation",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "allocation_absolute",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "allocation",
+            "availability": "available",
+            "route": "https://example.invalid/v1/workspaces/{workspace_id}/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "allocation_expanded",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "allocation",
+            "availability": "available",
+            "route": "/v1/workspaces/ws/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "allocation_query",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "allocation",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/telemetry?view=1h",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "cost_canonical",
+      "expect": "accept",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "cost",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "cost_absolute",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "cost",
+            "availability": "available",
+            "route": "https://example.invalid/v1/workspaces/{workspace_id}/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "cost_expanded",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "cost",
+            "availability": "available",
+            "route": "/v1/workspaces/ws/telemetry",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
+      }
+    },
+    {
+      "name": "cost_query",
+      "expect": "reject",
+      "payload": {
+        "schema_version": 1,
+        "backend_kind": "hosted",
+        "generated_at": "2026-09-12T12:00:00Z",
+        "identity": {
+          "backend_id": "synthetic-hosted",
+          "scope": "project",
+          "tenant_id": "org/project"
+        },
+        "widgets": [
+          {
+            "id": "cost",
+            "availability": "available",
+            "route": "/v1/workspaces/{workspace_id}/telemetry?view=1h",
+            "semantics": "Selected resource-attempt telemetry"
+          }
+        ],
+        "diagnostics": [],
+        "controls": []
       }
     }
   ]

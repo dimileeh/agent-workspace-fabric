@@ -1,5 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { streamAuthProbeDelayMs } from "@/components/console-dashboard-shared";
 import type { AwfStreamFrame } from "@/lib/types";
 
 import { fulfillJson, localCapabilities, localDashboardSummary } from "./fixtures/console-api";
@@ -9,6 +10,11 @@ const now = "2026-05-21T10:00:00.000Z";
 const quietOpenedAt = "2026-05-21T10:00:20.000Z";
 const activeOpenedAt = "2026-05-21T10:00:10.000Z";
 const quietStreamId = "quiet.stdout";
+
+/** Install a clock so stream-auth probe timers can be advanced without wall waits. */
+async function installPausedClock(page: Page, time = now) {
+  await page.clock.install({ time: new Date(time) });
+}
 
 type MockAwfApiOptions = {
   advanceActiveTailAfterFirstRead?: boolean;
@@ -3172,6 +3178,7 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
   test.setTimeout(45_000);
   let tailPhase: "ok" | "deny_both" | "recover_quiet" | "recover_active" = "ok";
   const activeRecoverRelease = createDeferred();
+  const quietDenialRelease = createDeferred();
   let streamOpens = 0;
   const workspaceId = "ws_inspector_tail_partial_recover";
   const quietMarker = "authorized-quiet-inspector-partial";
@@ -3264,12 +3271,13 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
     }
     if (path === `/api/awf/workspaces/${workspaceId}/logs/quiet.stdout`) {
       if (tailPhase === "deny_both") {
+        await quietDenialRelease.promise;
         await fulfillJson(
           route,
           {
             detail: {
               error_code: "FORBIDDEN",
-              message: "log tail permission revoked",
+              message: "quiet log tail permission revoked",
             },
           },
           403,
@@ -3290,7 +3298,7 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
           {
             detail: {
               error_code: "FORBIDDEN",
-              message: "log tail permission revoked",
+              message: "active log tail permission revoked",
             },
           },
           403,
@@ -3350,7 +3358,11 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
   tailPhase = "deny_both";
   await inspector.getByRole("button", { name: "Tail", exact: true }).click();
 
-  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible({ timeout: 12_000 });
+  // Settle active denial first: recovering quiet must retain the sibling error
+  // even when quiet was the last denial to arrive.
+  await expect(output).toContainText("active log tail permission revoked");
+  quietDenialRelease.resolve();
+  await expect(output).toContainText("quiet log tail permission revoked");
   await expect(output).not.toContainText(quietMarker);
   await expect(output).not.toContainText(activeMarker);
   await expect(page.getByText("Stream: idle")).toBeVisible();
@@ -3361,7 +3373,7 @@ test("inspector logs keep earlier recovered tails while a sibling denial holds t
 
   await expect(output).toContainText(quietRecovered, { timeout: 12_000 });
   await expect(output).not.toContainText(activeRecovered);
-  await expect(inspector.getByText(/log tail permission revoked/i)).toBeVisible();
+  await expect(output).toContainText("active log tail permission revoked");
   await expect.poll(() => streamOpens, { timeout: 3_000 }).toBe(opensAtDenial);
   await expect(page.getByText("Stream: idle")).toBeVisible();
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
@@ -6288,8 +6300,11 @@ streamTest(`inspector reschedules a stream probe after a non-auth ${terminal} fr
     await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
   });
 
+  await installPausedClock(page);
   await page.goto(`/?workspaceId=${workspaceId}`);
   await waitForConsoleReady(page);
+  // Freeze timers after hydration so probe delays advance only via fastForward.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
 
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();
   await expect(inspector).toHaveClass(/translate-x-0/);
@@ -6303,16 +6318,20 @@ streamTest(`inspector reschedules a stream probe after a non-auth ${terminal} fr
 
   streamPhase = "probe-fail";
   const opensAtDenial = streamOpens;
-  await expect.poll(() => streamOpens, { timeout: 30_000 }).toBeGreaterThan(opensAtDenial);
+  await page.clock.fastForward(streamAuthProbeDelayMs);
+  await expect.poll(() => streamOpens, { timeout: 5_000 }).toBeGreaterThan(opensAtDenial);
   await expect(inspector.getByText(denialMessage)).toBeVisible();
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
   await expect(page.getByText("Stream: live")).toHaveCount(0);
   await expect(page.getByText("Stream: idle")).toBeVisible();
 
   const opensAfterFailedProbe = streamOpens;
-  await expect.poll(() => streamOpens, { timeout: 4_000 }).toBe(opensAfterFailedProbe);
+  // Partial probe interval must not open another connection while still failing.
+  await page.clock.fastForward(streamAuthProbeDelayMs - 1);
+  expect(streamOpens).toBe(opensAfterFailedProbe);
   streamPhase = "recover";
-  await expect.poll(() => streamOpens, { timeout: 30_000 }).toBeGreaterThan(opensAfterFailedProbe);
+  await page.clock.fastForward(1);
+  await expect.poll(() => streamOpens, { timeout: 5_000 }).toBeGreaterThan(opensAfterFailedProbe);
   await expect(inspector.getByText(denialMessage)).toHaveCount(0, { timeout: 12_000 });
   await expect(inspector.getByText(liveSecret)).toHaveCount(0);
   await expect(page.getByText("Stream: live")).toBeVisible();
@@ -6460,8 +6479,10 @@ test(`fullscreen logs do not recover a stream probe after a non-auth ${terminal}
     await fulfillJson(route, { detail: { message: `unmocked ${path}` } }, 404);
   });
 
+  await installPausedClock(page);
   await page.goto("/");
   await waitForConsoleReady(page);
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
   await page.getByTestId(`workspace-card-${workspaceId}`).getByRole("button", { name: "Logs", exact: true }).click();
 
   const modal = page.locator(".fixed.inset-0.z-50");
@@ -6478,7 +6499,8 @@ test(`fullscreen logs do not recover a stream probe after a non-auth ${terminal}
 
   streamPhase = "probe-fail";
   const opensAtDenial = streamOpens;
-  await expect.poll(() => streamOpens, { timeout: 30_000 }).toBeGreaterThan(opensAtDenial);
+  await page.clock.fastForward(streamAuthProbeDelayMs);
+  await expect.poll(() => streamOpens, { timeout: 5_000 }).toBeGreaterThan(opensAtDenial);
   await expect(modal.getByText(denialMessage)).toBeVisible();
   await expect(modal.getByText(/stream live/)).toHaveCount(0);
   await expect(modal.getByText(/stream idle/)).toBeVisible();
@@ -6487,7 +6509,9 @@ test(`fullscreen logs do not recover a stream probe after a non-auth ${terminal}
   await expect(output).toContainText("No log data loaded.");
 
   const opensAfterFailedProbe = streamOpens;
-  await expect.poll(() => streamOpens, { timeout: 4_000 }).toBe(opensAfterFailedProbe);
+  // Failed probe reschedules; a partial interval must not open another attempt yet.
+  await page.clock.fastForward(streamAuthProbeDelayMs - 1);
+  expect(streamOpens).toBe(opensAfterFailedProbe);
   await expect(modal.getByText(denialMessage)).toBeVisible();
   await expect(output).not.toContainText(liveSecret);
 });

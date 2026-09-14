@@ -9,5 +9,6 @@
 - [Protected Quality-Gate Files](PROTECTED_FILES.md)
 - [Recipe: DinD private-registry Docker auth](recipes/dind-private-registry-auth.md)
 - [Console Backend Contract](CONSOLE_BACKEND_CONTRACT.md)
+- [Console Workspace Telemetry Contract](CONSOLE_WORKSPACE_TELEMETRY_CONTRACT.md)
 
 The repository README links the primary public guides and references.

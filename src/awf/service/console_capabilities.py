@@ -19,10 +19,11 @@ CONSOLE_WIDGET_INVENTORY_ROUTES: dict[str, str] = {
     "fleet_summary": "/v1/console/dashboard-summary",
     "resource_capacity": "/v1/metrics/resources/saturation",
     "cloud_runtime": "/v1/console/cloud-runtime",
+    "telemetry": "/v1/workspaces/{workspace_id}/telemetry",
+    "allocation": "/v1/workspaces/{workspace_id}/telemetry",
+    "cost": "/v1/workspaces/{workspace_id}/telemetry",
 }
-CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE: frozenset[str] = frozenset(
-    {"telemetry", "allocation", "cost"}
-)
+CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE: frozenset[str] = frozenset()
 CONSOLE_WIDGET_IDS: frozenset[str] = (
     frozenset(CONSOLE_WIDGET_INVENTORY_ROUTES) | CONSOLE_WIDGETS_WITHOUT_INVENTORY_ROUTE
 )

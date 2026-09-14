@@ -11,27 +11,47 @@ const hostedEnv = {
   NEXT_PUBLIC_AWF_CONSOLE_CONTEXT_QUERY_KEYS: "org_id,project_id",
 };
 
+// Dedicated ports (not 3100/3101): a developer's plain `npm run dev` must not
+// be reused — it lacks AWF_CONSOLE_TEST_HARNESS=1, so /test-harness/* 404s.
+const localHarnessOrigin = "http://127.0.0.1:3190";
+const hostedHarnessOrigin = "http://127.0.0.1:3191";
+
 export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
+  // Bound concurrency for both harness servers: tests use isolated pages/API mocks.
+  // Keep default within-file ordering and explicit serial suites intact.
+  // Two workers stay inside the 15-minute console job when stream-auth probe
+  // waits use a paused clock; four workers finished faster but flaked timing /
+  // geometry budgets under shared CI CPU contention.
+  workers: 2,
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
   use: {
-    baseURL: "http://127.0.0.1:3100",
+    baseURL: localHarnessOrigin,
     trace: "retain-on-failure",
   },
   webServer: [
     {
-      command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
-      url: "http://127.0.0.1:3100",
-      reuseExistingServer: !process.env.CI,
+      command: "npm run dev -- --hostname 127.0.0.1 --port 3190",
+      url: localHarnessOrigin,
+      reuseExistingServer: false,
       timeout: 120_000,
+      // Registers page.harness.tsx via next.config pageExtensions for /test-harness/*.
+      env: {
+        ...process.env,
+        AWF_CONSOLE_DIST_DIR: ".next-harness",
+        AWF_CONSOLE_TEST_HARNESS: "1",
+      },
     },
     {
-      command: "npm run dev -- --hostname 127.0.0.1 --port 3101",
-      url: "http://127.0.0.1:3101/workspaces",
-      reuseExistingServer: !process.env.CI,
+      command: "npm run dev -- --hostname 127.0.0.1 --port 3191",
+      url: `${hostedHarnessOrigin}/workspaces`,
+      reuseExistingServer: false,
       timeout: 120_000,
-      env: hostedEnv,
+      env: {
+        ...hostedEnv,
+        AWF_CONSOLE_TEST_HARNESS: "1",
+      },
     },
   ],
   projects: [

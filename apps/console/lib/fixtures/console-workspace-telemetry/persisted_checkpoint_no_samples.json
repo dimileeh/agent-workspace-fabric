@@ -1,0 +1,62 @@
+{
+  "admitted": {
+    "billable": true,
+    "compute_class": "autopilot",
+    "container_creating": false,
+    "cpu_limit_cores": "1.0000000000",
+    "cpu_request_cores": "0.5000000000",
+    "ephemeral_storage_limit_bytes": null,
+    "ephemeral_storage_request_bytes": 1073741824,
+    "evidence": {
+      "compute_class": "autopilot",
+      "container_creating": false,
+      "init_cpu_cores": "0",
+      "init_memory_bytes": 0,
+      "overhead_cpu_cores": "0",
+      "overhead_memory_bytes": 0,
+      "owner_job_name": "job-a",
+      "owner_job_uid": "job-uid-1",
+      "pod_created_at": "2026-09-10T12:00:00Z",
+      "pod_phase": "Running",
+      "pod_uid": "pod-uid-ws_checkpoint_no_samples",
+      "region": "us-central1",
+      "sidecar_cpu_cores": "0",
+      "sidecar_memory_bytes": 0
+    },
+    "memory_limit_bytes": 2147483648,
+    "memory_request_bytes": 1073741824,
+    "observed_at": "2026-09-12T12:00:00+00:00",
+    "owner_job_name": "job-a",
+    "owner_job_uid": "job-uid-1",
+    "partial": false,
+    "pod_phase": "Running",
+    "provider_resource_uid": "pod-uid-ws_checkpoint_no_samples",
+    "region": "us-central1"
+  },
+  "cpu_cores_samples": [],
+  "data_quality_notes": [
+    "no_samples",
+    "missing_estimate"
+  ],
+  "estimate": null,
+  "estimate_scope": "resource_attempt",
+  "memory_bytes_samples": [],
+  "observed_at": null,
+  "ownership": {
+    "cell_id": "cell_ws_checkpoint_no_samples",
+    "cloud_resource_owner_id": "owner_ws_checkpoint_no_samples_1",
+    "org_id": "org_synthetic",
+    "placement_attempt": 1,
+    "project_id": "p_checkpoint_no_samples",
+    "provider_resource_uid": "pod-uid-ws_checkpoint_no_samples",
+    "resource_name": "pod-a",
+    "resource_namespace": "ns-a",
+    "workspace_placement_id": "place_ws_checkpoint_no_samples_1",
+    "workspace_record_id": "ws_checkpoint_no_samples"
+  },
+  "quality": "partial",
+  "stale_after_seconds": 300,
+  "state": "partial",
+  "view": "1h",
+  "window_end_at": "2026-09-12T12:00:00+00:00"
+}

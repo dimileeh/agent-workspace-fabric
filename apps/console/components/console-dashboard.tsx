@@ -178,6 +178,7 @@ export function ConsoleDashboard() {
   const [, setEventFeedAuthDenied] = useState(false);
   // Bumped on auth/tenant clear so in-flight feed responses cannot restore wiped data.
   const authorizedFeedEpochRef = useRef(0);
+  const [telemetryAuthEpoch, setTelemetryAuthEpoch] = useState(0);
   // Sync auth-denial latch (React state lags behind clearAuthorizedConsoleFeeds).
   const consoleAuthDeniedRef = useRef(false);
   // Capability poll generation: discard a stale successful 200 after a newer
@@ -364,6 +365,7 @@ export function ConsoleDashboard() {
 
   const clearAuthorizedConsoleFeeds = useCallback((options?: { clearCapabilities?: boolean; authDenied?: boolean }) => {
     authorizedFeedEpochRef.current += 1;
+    setTelemetryAuthEpoch(authorizedFeedEpochRef.current);
     if (options?.authDenied) {
       consoleAuthDeniedRef.current = true;
     } else {
@@ -889,8 +891,12 @@ export function ConsoleDashboard() {
     loadFailureSummary,
   );
 
-  useLayoutEffect(() => {
-    selectedIdRef.current = selectedId;
+  // selectedIdRef is kept in sync by useWorkspaceSelectionUrl.setSelectedId
+  // (write-before-setState). Do not assign it during render — react-hooks/refs.
+
+  const previousInspectorSessionIdRef = useRef(selectedId);
+
+  const resetInspectorSession = useCallback(() => {
     logListingAuthDeniedRef.current = false;
     setLogListingAuthDenied(false);
     logTailAuthDeniedRef.current = false;
@@ -908,7 +914,27 @@ export function ConsoleDashboard() {
     setWorkspaceDetailError(null);
     setRetryState({ status: "idle" });
     setOperatorActionState({ status: "idle" });
-  }, [selectedId]);
+  }, []);
+
+  // Switching between workspaces must clear before paint: selectedOverview already
+  // belongs to the new id, so a post-paint-only reset would attribute the previous
+  // workspace's detail, logs, streams, and action chrome to the open pane.
+  useLayoutEffect(() => {
+    const previousId = previousInspectorSessionIdRef.current;
+    previousInspectorSessionIdRef.current = selectedId;
+    if (previousId == null || selectedId == null || previousId === selectedId) {
+      return;
+    }
+    resetInspectorSession();
+  }, [resetInspectorSession, selectedId]);
+
+  // Reset inspector session after paint for open/close (and again after a switch).
+  // Opening from a cleared selection already has empty detail; keeping that path
+  // out of useLayoutEffect avoids a synchronous second dashboard commit inside
+  // the open click (pane timing budgets).
+  useEffect(() => {
+    resetInspectorSession();
+  }, [resetInspectorSession, selectedId]);
 
   useWorkspaceLiveStream({
     selectedId,
@@ -1176,15 +1202,6 @@ export function ConsoleDashboard() {
           lastSuccessAt={
             fleetSummaryAvailable ? (dashboardSummary?.last_success_at ?? null) : null
           }
-          coverageStatus={
-            fleetSummaryAvailable ? (dashboardSummary?.coverage.status ?? null) : null
-          }
-          coverageNotes={
-            fleetSummaryAvailable ? (dashboardSummary?.coverage.notes ?? null) : null
-          }
-          countEvidence={
-            fleetSummaryAvailable ? (dashboardSummary?.count_evidence ?? null) : null
-          }
         />
       ) : null}
       <SectionNav
@@ -1265,6 +1282,9 @@ export function ConsoleDashboard() {
 </section>
 
       <ConsoleDashboardInspector
+        telemetryCapabilities={capabilities}
+        telemetryAuthEpoch={telemetryAuthEpoch}
+        telemetryEpochRef={authorizedFeedEpochRef}
         selectedId={selectedId}
         selectedOverview={selectedOverview}
         selectedMergeQueueItem={selectedMergeQueueItem}

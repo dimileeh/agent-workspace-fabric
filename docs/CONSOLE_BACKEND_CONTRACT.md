@@ -80,9 +80,17 @@ Never guess mode from hostname, browser location, query strings, or failed metri
 **Null ≠ zero.** Incomplete fields stay `null` with `coverage.status=partial|unknown`.
 UI renders `—` and never coerces null to `0`. When the optional
 `count_evidence` object is present and valid, the UI may render a confirmed
-lower bound for a null exact count, but it visibly qualifies the value as
-`N confirmed`; it never replaces the null exact value or presents the lower
-bound as an exact total. A non-null exact count always takes precedence.
+lower-bound integer for a null exact count as a **plain number** (including
+evidenced zero). Exact non-null counts always win. The console does **not**
+append a `confirmed` suffix, lower-bound hint, coverage banner, scope caption,
+unknown-count badge, or other strip chrome for routine partial/unknown HTTP 200
+snapshots — only the existing terminal `last Nh` hint, plus request/outage
+errors and stale-data warnings, remain operator-visible. Machine-readable
+`coverage` stays a required contract field: producers must publish it and the
+console parses/validates it. Optional `count_evidence` is parsed and validated
+when present (or explicitly null); producers may omit it. Neither is surfaced as
+Fleet health strip chrome. A non-null exact count always takes precedence and is
+never overwritten by confirmed evidence.
 
 ### Optional count evidence
 
@@ -122,11 +130,13 @@ summary. The following invariants are required:
 
 For example, a snapshot of 29 workspaces with 24 known statuses and five
 unknown statuses may publish all ten confirmed counters as zero. The UI shows
-`0 confirmed` for null exact counters and reports
-`24 of 29 workflow statuses known; 5 unknown`. If the next same-scope snapshot
-adds one authoritative running workflow, the evidence is total 30, known 25,
-unknown five, with `active=1` and `executing=1` in `confirmed_counts`; those
-null exact counters render as `1 confirmed`.
+plain `0` for those null exact counters (confirmed evidence only; no
+`0 confirmed` chrome). Coverage math such as
+`24 of 29 workflow statuses known; 5 unknown` remains in the payload for
+parsers and producers — not as strip banner copy. If the next same-scope
+snapshot adds one authoritative running workflow, the evidence is total 30,
+known 25, unknown five, with `active=1` and `executing=1` in
+`confirmed_counts`; those null exact counters render as plain `1`.
 
 Omission and explicit null are accepted for reader compatibility. Core's local
 exact-summary producer omits the field when unused, so its existing serialized
@@ -249,8 +259,10 @@ feeds.
   id — see `console/fixtures/v1/capabilities.route-matrix.json`; may include
   `{workspace_id}`), `semantics`. Unknown inventory id, or missing/null/
   non-inventory route (e.g. `/v1/wrong-route`) ⇒ malformed (fail closed).
-  Widgets without an inventory route (`telemetry`, `allocation`, `cost`) cannot
-  be `available`.
+  `telemetry`, `allocation`, and `cost` share the selected-workspace template
+  `/v1/workspaces/{workspace_id}/telemetry` (one read, not three polls). Query
+  `view=1h|6h|24h` is supplied separately and defaults to `1h`; query-bearing
+  advertised routes are invalid. Local/default-off hosted payloads stay unsupported.
 - Unsupported: `id`, `availability=unsupported`, `reason_code`, `message` (`route` omitted)
 - Controls: `id`, `availability`, `semantics` required; available controls omit route.
 
@@ -267,3 +279,6 @@ a timestamp.
 Each count key is required on the object; values are strict nonnegative
 `integer | null`. The ten exact fields and their meanings are unchanged by the
 optional evidence extension.
+
+Stage 3 selected-workspace telemetry routing, cancellation, polling and exact
+producer evidence are specified in [the telemetry contract](CONSOLE_WORKSPACE_TELEMETRY_CONTRACT.md#stage-3-selected-workspace-integration). This consumer change does not activate production.

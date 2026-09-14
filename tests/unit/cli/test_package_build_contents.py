@@ -43,6 +43,7 @@ _CONSOLE_BUILD_ASSETS = (
     "package.json",
     "package-lock.json",
     "next.config.ts",
+    "console-test-harness-routes.ts",
     "postcss.config.mjs",
     "tsconfig.json",
     "app",

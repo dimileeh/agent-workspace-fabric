@@ -1047,8 +1047,8 @@ test("loadLogTail retains last-successful tails on transient refresh failure", (
   );
   assert.match(
     authBody,
-    /current\.filter\(\(entry\) => entry\.workspaceId !== workspaceId\)/,
-    "Expected 401/403 to drop prior tail and live entries for the revoked workspace",
+    /current\.filter\(\s*\(entry\) =>\s*entry\.workspaceId !== workspaceId \|\|\s*\(entry\.streamId !== stream\.stream_id && entry\.key\.startsWith\("tail-error:"\)\)/,
+    "Expected 401/403 to drop cached output while retaining only sibling denial diagnostics",
   );
   assert.match(
     authBody,
@@ -3455,6 +3455,40 @@ test("operator action state is guarded by current workspace selection", () => {
     mutating,
     /const runWorkspaceOperatorAction = useCallback\([\s\S]*?const epoch = authorizedFeedEpochRef\.current;[\s\S]*?epoch !== authorizedFeedEpochRef\.current/,
     "Expected operator actions to capture and discard on authorizedFeedEpochRef advance",
+  );
+});
+
+// Regression for PR #977 review thread PRRT_kwDOSJAM6s6iOT1k: moving the
+// inspector session reset entirely to useEffect paints workspace A's detail
+// under B's selectedOverview. Workspace→workspace switches must clear before
+// paint; open-from-cleared stays on the post-paint path for pane timing.
+test("inspector session reset clears before paint when switching workspaces", () => {
+  const dashboard = dashboardSource.dashboard;
+
+  assert.match(
+    dashboard,
+    /const previousInspectorSessionIdRef = useRef\(selectedId\);/,
+    "Expected a ref tracking the previous inspector selection for switch detection",
+  );
+  assert.match(
+    dashboard,
+    /useLayoutEffect\(\(\) => \{\s*const previousId = previousInspectorSessionIdRef\.current;\s*previousInspectorSessionIdRef\.current = selectedId;\s*if \(previousId == null \|\| selectedId == null \|\| previousId === selectedId\) \{\s*return;\s*\}\s*resetInspectorSession\(\);\s*\}, \[resetInspectorSession, selectedId\]\);/,
+    "Expected workspace→workspace selection changes to reset the inspector session in useLayoutEffect before paint",
+  );
+  assert.match(
+    dashboard,
+    /useEffect\(\(\) => \{\s*resetInspectorSession\(\);\s*\}, \[resetInspectorSession, selectedId\]\);/,
+    "Expected open/close (and post-switch) inspector session reset to remain on the post-paint useEffect path",
+  );
+  assert.match(
+    dashboard,
+    /setDetail\(emptyDetail\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setRetryState\(\{ status: "idle" \}\);[\s\S]*?setOperatorActionState\(\{ status: "idle" \}\);/,
+    "Expected the shared inspector session reset to clear detail, streams, logs, and action chrome",
+  );
+  assert.doesNotMatch(
+    dashboard,
+    /^\s*selectedIdRef\.current\s*=\s*selectedId\s*;/m,
+    "Expected selectedIdRef not to be assigned during render (react-hooks/refs); setSelectedId keeps it in sync",
   );
 });
 
