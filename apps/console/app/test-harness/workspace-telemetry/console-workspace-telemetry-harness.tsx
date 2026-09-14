@@ -41,6 +41,10 @@ export function ConsoleWorkspaceTelemetryHarness() {
   const mode = modeParam === "historical" ? "historical" : "live";
   const requestError = searchParams.get("error");
   const lastGoodAt = searchParams.get("lastGood");
+  // Independent widget gates (omit with =0 to mimic unsupported/policy_disabled).
+  const showTelemetry = searchParams.get("showTelemetry") !== "0";
+  const showAllocation = searchParams.get("showAllocation") !== "0";
+  const showCost = searchParams.get("showCost") !== "0";
   const unknownLimits = searchParams.get("unknownLimits") === "1";
   const admittedPartial = searchParams.get("admittedPartial") === "1";
   const incompleteSeries = searchParams.get("incompleteSeries") === "1";
@@ -264,6 +268,9 @@ export function ConsoleWorkspaceTelemetryHarness() {
           lastGoodAt={lastGoodAt}
           requestError={requestError}
           available={!capabilitiesAbsent}
+          showTelemetry={showTelemetry}
+          showAllocation={showAllocation}
+          showCost={showCost}
           workspaceId={LONG_WORKSPACE_ID}
           modelLabel={LONG_MODEL_LABEL}
         />

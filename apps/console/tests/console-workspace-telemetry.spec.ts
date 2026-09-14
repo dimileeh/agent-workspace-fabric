@@ -269,6 +269,24 @@ test.describe("console workspace telemetry harness", () => {
     await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText("$0");
   });
 
+  test("unallocated notice stays behind the allocation gate", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    // Telemetry available, allocation unsupported (e.g. policy_disabled): the
+    // allocation-specific unallocated notice must not leak onto the telemetry-
+    // only surface; usage/history chrome remains under showTelemetry.
+    await openHarness(page, {
+      fixture: "unallocated",
+      showAllocation: "0",
+      showCost: "0",
+    });
+
+    await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(page.getByTestId("telemetry-unallocated")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-mode-label")).toBeVisible();
+    await expect(page.getByTestId("telemetry-series-cpu")).toBeVisible();
+    await expect(page.getByText(/Unallocated — shared Core monitor/i)).toHaveCount(0);
+  });
+
   test("request error is shown when provided and omitted when null", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, {

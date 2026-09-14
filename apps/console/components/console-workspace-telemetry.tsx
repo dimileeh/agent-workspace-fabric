@@ -421,14 +421,14 @@ export function ConsoleWorkspaceTelemetry({
           </div>
         ) : null}
 
-        {(showTelemetry || showAllocation) && (viewModel.state === "unallocated" ? (
+        {showAllocation && viewModel.state === "unallocated" ? (
           <div
             data-testid="telemetry-unallocated"
             className="rounded-[var(--radius-control)] border border-line bg-surface-2 px-3 py-2 text-xs text-fg-muted"
           >
             Unallocated — shared Core monitor runtime is not free capacity.
           </div>
-        ) : (
+        ) : (showTelemetry || showAllocation) && viewModel.state !== "unallocated" ? (
           <div className="grid min-w-0 gap-2 sm:grid-cols-2">
             <ResourceMeter
               showAllocation={showAllocation}
@@ -465,7 +465,7 @@ export function ConsoleWorkspaceTelemetry({
               }
             />
           </div>
-        ))}
+        ) : null}
 
         {showTelemetry ? <div className="grid min-w-0 gap-2 sm:grid-cols-2">
           <div className="min-w-0">
