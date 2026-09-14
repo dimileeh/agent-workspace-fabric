@@ -384,8 +384,11 @@ for (const gate of ["telemetry", "allocation", "cost"]) {
       await expect(page.getByTestId(id)).toHaveCount(gate === "telemetry" ? 1 : 0);
     }
     const panel = page.getByTestId("console-workspace-telemetry").locator("xpath=ancestor::section[1]");
+    // Clock is past 12:11; fixture observed_at / admitted.observed_at stay at 12:00,
+    // so section-aware freshness marks telemetry and allocation stale (cost-only has
+    // neither timestamp in the projection).
     await expect(panel.getByTitle("Showing the last snapshot — live data may be stale"))
-      .toHaveCount(gate === "telemetry" ? 1 : 0);
+      .toHaveCount(gate === "cost" ? 0 : 1);
     if (gate === "allocation") {
       await expect(page.getByTestId("telemetry-meter-cpu")).not.toContainText("partial");
       await expect(page.getByTestId("telemetry-meter-memory")).not.toContainText("partial");
