@@ -270,11 +270,14 @@ export function ConsoleWorkspaceTelemetry({
   // (envelope state/quality or current sample quality) must still dim/flag
   // the panel, as must future producer time relative to the projection clock.
   // Age-only isStale must not surface in historical mode.
+  // Meter usedStale is telemetry-section evidence — when usage chrome is gated
+  // off, ignore it so allocation/cost-only facts do not inherit hidden sample
+  // stale (live already gates via section-aware viewModel.isStale).
   const producerStale =
     viewModel.state === "stale" ||
     viewModel.quality === "stale" ||
-    viewModel.cpu.usedStale ||
-    viewModel.memory.usedStale;
+    (showTelemetry &&
+      (viewModel.cpu.usedStale || viewModel.memory.usedStale));
   const stale =
     mode === "live"
       ? viewModel.isStale

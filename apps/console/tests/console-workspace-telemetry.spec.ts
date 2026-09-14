@@ -439,6 +439,23 @@ test.describe("console workspace telemetry harness", () => {
     await expect(
       page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']").first(),
     ).toBeVisible();
+
+    // Allocation/cost-only: hidden meter usedStale must not paint stale chrome
+    // (live uses section-aware isStale; historical must gate the same way).
+    await openHarness(page, {
+      fixture: "success",
+      mode: "historical",
+      showTelemetry: "0",
+      sampleStale: "1",
+      nowMs: String(Date.parse("2026-09-12T12:00:00+00:00")),
+    });
+    await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(page.getByTestId("telemetry-mode-label")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("req");
+    await expect(
+      page.getByTestId("console-workspace-telemetry").locator("[data-awf-stale='true']"),
+    ).toHaveCount(0);
   });
 
   test("harness route is reachable when AWF_CONSOLE_TEST_HARNESS build entry is enabled", async ({
