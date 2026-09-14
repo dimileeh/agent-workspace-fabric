@@ -1,6 +1,8 @@
 import { expect, type Page, test } from "@playwright/test";
 
-test.describe.configure({ mode: "serial" });
+// Each case owns its page, viewport, and harness query. Share the worker pool
+// so this file does not serialize behind the rest of the unsharded suite.
+test.describe.configure({ mode: "parallel" });
 
 const HARNESS = "/test-harness/workspace-telemetry";
 

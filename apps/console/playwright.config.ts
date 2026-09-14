@@ -21,7 +21,9 @@ export default defineConfig({
   outputDir: "./test-results",
   // Bound concurrency for both harness servers: tests use isolated pages/API mocks.
   // Keep default within-file ordering and explicit serial suites intact.
-  workers: 2,
+  // Four workers cut wall-clock on the ~340-case unsharded suite enough to stay
+  // inside the existing 15-minute CI job without raising timeouts or sharding.
+  workers: 4,
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
   use: {
     baseURL: localHarnessOrigin,
