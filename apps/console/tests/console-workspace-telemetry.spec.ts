@@ -227,6 +227,20 @@ test.describe("console workspace telemetry harness", () => {
     await openHarness(page, { fixture: "success", envelopeQualityPartial: "1" });
     await expect(root).toHaveAttribute("data-awf-telemetry-state", "success");
     await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
+
+    // Allocation/cost-only: nested meters have no partial labels, so the
+    // envelope chip must stay visible even when the telemetry tab selector is
+    // gated off (PRRT_kwDOSJAM6s6iJXrw).
+    await openHarness(page, {
+      fixture: "success",
+      envelopePartial: "1",
+      showTelemetry: "0",
+    });
+    await expect(root).toHaveAttribute("data-awf-telemetry-state", "partial");
+    await expect(page.getByTestId("telemetry-partial-indicator")).toBeVisible();
+    await expect(page.getByTestId("telemetry-view-selector")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("req");
+    await expect(page.getByTestId("telemetry-meter-cpu")).not.toContainText("partial");
   });
 
   test("incomplete historical partitions qualify sparkline history", async ({ page }) => {
