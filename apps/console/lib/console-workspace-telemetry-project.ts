@@ -296,11 +296,14 @@ function resolveCostDisplayState(estimate: ParsedEstimate | null): CostDisplaySt
   if (estimate.estimateState === "unallocated") {
     return "unallocated";
   }
-  if (estimate.estimatedUsd === null) {
-    return "unpriced";
-  }
+  // Partial may have estimatedUsd null when priced_interval_seconds is 0
+  // (parseEstimate allows that). Classify before the null→unpriced fallback so
+  // incomplete-coverage qualification is not lost.
   if (estimate.estimateState === "partial") {
     return "partial";
+  }
+  if (estimate.estimatedUsd === null) {
+    return "unpriced";
   }
   return "complete";
 }

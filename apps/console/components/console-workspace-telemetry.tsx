@@ -63,14 +63,15 @@ function costLabel(view: WorkspaceTelemetryView): string {
   if (displayState === "unpriced") {
     return "Unpriced";
   }
+  if (displayState === "partial") {
+    // Null amount is valid for partial with zero priced seconds; still qualify
+    // incomplete coverage rather than collapsing to the unpriced label.
+    return estimatedUsd === null ? "Partial" : `${formatWorkloadUsd(estimatedUsd)} (partial)`;
+  }
   if (estimatedUsd === null) {
     return "Unpriced";
   }
-  const amount = formatWorkloadUsd(estimatedUsd);
-  if (displayState === "partial") {
-    return `${amount} (partial)`;
-  }
-  return amount;
+  return formatWorkloadUsd(estimatedUsd);
 }
 
 function ResourceMeter({

@@ -745,10 +745,13 @@ test("partial estimates require priced coverage for a non-null amount, including
   }
 
   raw.estimate.estimated_usd = null;
-  const unpriced = parseTelemetryPresentation(raw);
-  assert.ok(unpriced);
-  const view = projectWorkspaceTelemetryView(unpriced, { nowMs: FIXED_NOW });
-  assert.equal(view.estimate.displayState, "unpriced");
+  const zeroPricedPartial = parseTelemetryPresentation(raw);
+  assert.ok(zeroPricedPartial);
+  // Zero priced seconds + null USD is still estimate_state partial (incomplete
+  // coverage), not unpriced — preserve the producer qualification in displayState.
+  assert.equal(zeroPricedPartial.estimate.estimateState, "partial");
+  const view = projectWorkspaceTelemetryView(zeroPricedPartial, { nowMs: FIXED_NOW });
+  assert.equal(view.estimate.displayState, "partial");
   assert.equal(view.estimate.estimatedUsd, null);
 
   raw.estimate.priced_interval_seconds = 60;
