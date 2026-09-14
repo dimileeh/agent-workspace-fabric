@@ -2006,6 +2006,85 @@ test("fresh envelope and meters with aged admitted observed_at is stale", () => 
   assert.equal(view.isStale, true);
 });
 
+test("freshness ignores aged evidence from unsupported widget sections", () => {
+  const nowMs = Date.parse("2026-09-12T12:05:30+00:00");
+
+  // Allocation-only: aged meters must not stale a current admitted snapshot.
+  const agedMeters = structuredClone(SUCCESS);
+  agedMeters.observed_at = "2026-09-12T11:50:00+00:00";
+  agedMeters.window_end_at = "2026-09-12T11:50:00+00:00";
+  agedMeters.admitted.observed_at = "2026-09-12T12:05:00+00:00";
+  agedMeters.cpu_cores_samples[0].sample_time = "2026-09-12T11:50:00+00:00";
+  agedMeters.cpu_cores_samples[0].interval_start = "2026-09-12T11:50:00+00:00";
+  agedMeters.cpu_cores_samples[0].interval_end = "2026-09-12T11:50:00+00:00";
+  agedMeters.memory_bytes_samples[0].sample_time = "2026-09-12T11:50:00+00:00";
+  agedMeters.memory_bytes_samples[0].interval_start = "2026-09-12T11:50:00+00:00";
+  agedMeters.memory_bytes_samples[0].interval_end = "2026-09-12T11:50:00+00:00";
+  const allocParsed = parseTelemetryPresentation(agedMeters);
+  assert.ok(allocParsed);
+  const allocOnly = projectWorkspaceTelemetryView(allocParsed, {
+    nowMs,
+    expectTelemetry: false,
+    expectAllocation: true,
+    expectCost: false,
+  });
+  assert.equal(allocOnly.isStale, false);
+  assert.equal(allocOnly.hasFutureTimestamp, false);
+  // Same payload with telemetry expected still ages from meters.
+  assert.equal(
+    projectWorkspaceTelemetryView(allocParsed, {
+      nowMs,
+      expectTelemetry: true,
+      expectAllocation: true,
+    }).isStale,
+    true,
+  );
+  // Clock-tick path must honor the same gates.
+  assert.deepEqual(
+    projectWorkspaceTelemetryFreshness(allocParsed, allocOnly, nowMs, {
+      expectTelemetry: false,
+      expectAllocation: true,
+    }),
+    { isStale: false, hasFutureTimestamp: false },
+  );
+
+  // Telemetry-only: aged admitted must not stale current meters/envelope.
+  const agedAdmitted = structuredClone(SUCCESS);
+  agedAdmitted.observed_at = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.cpu_cores_samples[0].sample_time = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.cpu_cores_samples[0].interval_start = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.cpu_cores_samples[0].interval_end = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.memory_bytes_samples[0].sample_time = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.memory_bytes_samples[0].interval_start = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.memory_bytes_samples[0].interval_end = "2026-09-12T12:05:00+00:00";
+  agedAdmitted.admitted.observed_at = "2026-09-12T11:50:00+00:00";
+  const telemParsed = parseTelemetryPresentation(agedAdmitted);
+  assert.ok(telemParsed);
+  const telemOnly = projectWorkspaceTelemetryView(telemParsed, {
+    nowMs,
+    expectTelemetry: true,
+    expectAllocation: false,
+    expectCost: false,
+  });
+  assert.equal(telemOnly.isStale, false);
+  assert.equal(telemOnly.hasFutureTimestamp, false);
+  assert.equal(
+    projectWorkspaceTelemetryView(telemParsed, {
+      nowMs,
+      expectTelemetry: true,
+      expectAllocation: true,
+    }).isStale,
+    true,
+  );
+  assert.deepEqual(
+    projectWorkspaceTelemetryFreshness(telemParsed, telemOnly, nowMs, {
+      expectTelemetry: true,
+      expectAllocation: false,
+    }),
+    { isStale: false, hasFutureTimestamp: false },
+  );
+});
+
 test("implausibly future meter sample times fail closed as stale", () => {
   // A future sample_time wins latestTimestamp over legitimate readings; without
   // a closed freshness check, nowMs - ms is negative so isStale stays false

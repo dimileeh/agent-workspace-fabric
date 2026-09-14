@@ -1358,7 +1358,12 @@ function meterSampleTimesAreMixed(
   return distinct.size > 1;
 }
 
-/** Age projected readings without regrouping or rebuilding telemetry series. */
+/**
+ * Age projected readings without regrouping or rebuilding telemetry series.
+ *
+ * `expectTelemetry` / `expectAllocation` mirror negotiated widget gates. Aged
+ * timestamps from an unsupported section must not mark the visible panel stale.
+ */
 export function projectWorkspaceTelemetryFreshness(
   presentation: ParsedTelemetryPresentation,
   readings: {
@@ -1366,22 +1371,45 @@ export function projectWorkspaceTelemetryFreshness(
     memory: Pick<WorkspaceTelemetryView["memory"], "sampleTime" | "usedStale">;
   },
   nowMs: number,
+  options: {
+    expectTelemetry?: boolean;
+    expectAllocation?: boolean;
+  } = {},
 ): Pick<WorkspaceTelemetryView, "isStale" | "hasFutureTimestamp"> {
-  const meterSampleTimes = [readings.cpu.sampleTime, readings.memory.sampleTime];
+  const expectTelemetry = options.expectTelemetry !== false;
+  const expectAllocation = options.expectAllocation !== false;
+  const meterSampleTimes = expectTelemetry
+    ? [readings.cpu.sampleTime, readings.memory.sampleTime]
+    : [];
+  // Build a sample-free presentation slice so clock ticks never re-read series
+  // arrays (freshness ticks use projected meter metadata only).
+  const freshnessPresentation: ParsedTelemetryPresentation = {
+    state: presentation.state,
+    quality: presentation.quality,
+    view: presentation.view,
+    staleAfterSeconds: presentation.staleAfterSeconds,
+    observedAt: expectTelemetry ? presentation.observedAt : null,
+    windowEndAt: expectTelemetry ? presentation.windowEndAt : null,
+    admitted: expectAllocation ? presentation.admitted : null,
+    cpuSamples: [],
+    memorySamples: [],
+    estimateScope: presentation.estimateScope,
+    estimate: presentation.estimate,
+  };
   const hasFutureTimestamp = [
-    presentation.windowEndAt,
-    presentation.observedAt,
-    presentation.admitted?.observedAt ?? null,
+    freshnessPresentation.windowEndAt,
+    freshnessPresentation.observedAt,
+    freshnessPresentation.admitted?.observedAt ?? null,
     ...meterSampleTimes,
   ].some(timestamp => timestamp != null &&
     compareTimestampInstants(timestamp, "1970-01-01T00:00:00Z", nowMs) > 0);
   return {
     hasFutureTimestamp,
     isStale: hasFutureTimestamp || computeIsStale(
-      presentation,
+      freshnessPresentation,
       nowMs,
       meterSampleTimes,
-      readings.cpu.usedStale || readings.memory.usedStale,
+      expectTelemetry && (readings.cpu.usedStale || readings.memory.usedStale),
     ),
   };
 }
@@ -1390,19 +1418,23 @@ export function projectWorkspaceTelemetryFreshness(
  * Project allowlisted UI fields from a parsed presentation.
  * Does not fetch; `nowMs` is injected for deterministic freshness tests.
  *
- * `expectAllocation` / `expectCost` mirror negotiated widget gates. When a
- * section is unsupported, null/partial admitted or null/unpriced estimate must
- * not infer envelope partial — those fields are hidden, not incomplete.
+ * `expectTelemetry` / `expectAllocation` / `expectCost` mirror negotiated
+ * widget gates. When a section is unsupported, null/partial admitted or
+ * null/unpriced estimate must not infer envelope partial — those fields are
+ * hidden, not incomplete — and aged timestamps from that section must not
+ * mark the visible panel stale.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
   options: {
     nowMs?: number;
+    expectTelemetry?: boolean;
     expectAllocation?: boolean;
     expectCost?: boolean;
   } = {},
 ): WorkspaceTelemetryView {
   const nowMs = options.nowMs ?? Date.now();
+  const expectTelemetry = options.expectTelemetry !== false;
   const expectAllocation = options.expectAllocation !== false;
   const expectCost = options.expectCost !== false;
   // Completeness is pod-scoped: a container seen on either meter must be present
@@ -1441,7 +1473,12 @@ export function projectWorkspaceTelemetryView(
     observedAt: presentation.observedAt,
     sampleTime,
     sampleTimeMixed,
-    ...projectWorkspaceTelemetryFreshness(presentation, { cpu: cpuAgg, memory: memAgg }, nowMs),
+    ...projectWorkspaceTelemetryFreshness(
+      presentation,
+      { cpu: cpuAgg, memory: memAgg },
+      nowMs,
+      { expectTelemetry, expectAllocation },
+    ),
     admitted:
       presentation.admitted === null
         ? null

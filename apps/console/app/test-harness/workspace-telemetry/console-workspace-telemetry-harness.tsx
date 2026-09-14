@@ -241,6 +241,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     }
     return projectWorkspaceTelemetryView(parsed, {
       nowMs,
+      expectTelemetry: showTelemetry,
       expectAllocation: showAllocation,
       expectCost: showCost,
     });
@@ -258,6 +259,7 @@ export function ConsoleWorkspaceTelemetryHarness() {
     envelopeQualityPartial,
     nullAdmitted,
     nullEstimate,
+    showTelemetry,
     showAllocation,
     showCost,
     nowMs,
