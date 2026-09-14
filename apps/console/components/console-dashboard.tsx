@@ -4,7 +4,6 @@ import { useSearchParams } from "next/navigation";
 import {
 useCallback,
 useEffect,
-useLayoutEffect,
 useMemo,
 useRef,
 useState,
@@ -891,8 +890,14 @@ export function ConsoleDashboard() {
     loadFailureSummary,
   );
 
-  useLayoutEffect(() => {
-    selectedIdRef.current = selectedId;
+  // Keep the ref aligned during render so detail/live-stream readers never see a
+  // stale selection between the selectedId commit and the session-reset effect.
+  selectedIdRef.current = selectedId;
+
+  // Reset inspector session after paint. Opening from a cleared selection already
+  // has empty detail; keeping this out of useLayoutEffect avoids a synchronous
+  // second dashboard commit inside the open click (pane timing budgets).
+  useEffect(() => {
     logListingAuthDeniedRef.current = false;
     setLogListingAuthDenied(false);
     logTailAuthDeniedRef.current = false;

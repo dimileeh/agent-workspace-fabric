@@ -743,7 +743,7 @@ const WorkspaceCard = memo(function WorkspaceCard({
   return (
     <div
       data-testid={`workspace-card-${item.workspace_id}`}
-      className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
+      className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 hover:bg-slate-50 ${
         selected ? "bg-blue-50" : "bg-white"
       }`}
     >

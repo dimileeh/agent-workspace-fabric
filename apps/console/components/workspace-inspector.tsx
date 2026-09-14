@@ -31,7 +31,9 @@ export function WorkspaceInspector({
     <>
       {isOpen && (
         <div
-          className="fixed inset-0 z-40 bg-overlay backdrop-blur-sm sm:hidden"
+          // Avoid backdrop-blur on the mobile scrim: filter blur is expensive on
+          // open/close and is not needed for the HMI overlay affordance.
+          className="fixed inset-0 z-40 bg-overlay sm:hidden"
           onClick={onClose}
           aria-hidden="true"
         />
