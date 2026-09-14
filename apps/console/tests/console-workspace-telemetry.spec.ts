@@ -359,6 +359,29 @@ test.describe("console workspace telemetry harness", () => {
     ).toBeVisible();
   });
 
+  test("allocation-only panel shows last-good when poll fails with retained data", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    // Telemetry gated off: usage/sample chrome hidden, but a failed poll that
+    // retains allocation/cost must still expose last-good next to the error.
+    await openHarness(page, {
+      fixture: "success",
+      showTelemetry: "0",
+      error: "telemetry upstream timeout",
+      lastGood: "2026-09-12T11:00:00+00:00",
+    });
+
+    await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(page.getByTestId("telemetry-request-error")).toHaveText(
+      "telemetry upstream timeout",
+    );
+    await expect(page.getByTestId("telemetry-mode-label")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-sample-time")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-last-good")).toBeVisible();
+    await expect(page.getByTestId("telemetry-meter-cpu")).toContainText("req");
+  });
+
   test("stale live mode sets data-awf-stale; historical mode is labeled", async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 800 });
     await openHarness(page, {

@@ -384,41 +384,47 @@ export function ConsoleWorkspaceTelemetry({
           </div>
         ) : null}
 
-        {showTelemetry ? <div className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-fg-muted">
-          <span
-            className="inline-flex items-center rounded-[var(--radius-control)] border border-line bg-surface px-1.5 py-0.5 font-medium text-fg"
-            data-testid="telemetry-mode-label"
-          >
-            {modeLabel}
-          </span>
-          <span
-            className="tnum"
-            data-testid="telemetry-sample-time"
-            data-awf-sample-time-mixed={
-              viewModel.sampleTimeMixed ? "true" : "false"
-            }
-            title={
-              viewModel.sampleTimeMixed
-                ? "CPU and memory readings use different sample times"
-                : undefined
-            }
-          >
-            {viewModel.sampleTimeMixed ? (
+        {showTelemetry || lastGoodAt ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+            {showTelemetry ? (
               <>
-                Sample (mixed) CPU{" "}
-                {formatDateTime(viewModel.cpu.sampleTime)} · Mem{" "}
-                {formatDateTime(viewModel.memory.sampleTime)}
+                <span
+                  className="inline-flex items-center rounded-[var(--radius-control)] border border-line bg-surface px-1.5 py-0.5 font-medium text-fg"
+                  data-testid="telemetry-mode-label"
+                >
+                  {modeLabel}
+                </span>
+                <span
+                  className="tnum"
+                  data-testid="telemetry-sample-time"
+                  data-awf-sample-time-mixed={
+                    viewModel.sampleTimeMixed ? "true" : "false"
+                  }
+                  title={
+                    viewModel.sampleTimeMixed
+                      ? "CPU and memory readings use different sample times"
+                      : undefined
+                  }
+                >
+                  {viewModel.sampleTimeMixed ? (
+                    <>
+                      Sample (mixed) CPU{" "}
+                      {formatDateTime(viewModel.cpu.sampleTime)} · Mem{" "}
+                      {formatDateTime(viewModel.memory.sampleTime)}
+                    </>
+                  ) : (
+                    <>Sample {formatDateTime(viewModel.sampleTime)}</>
+                  )}
+                </span>
               </>
-            ) : (
-              <>Sample {formatDateTime(viewModel.sampleTime)}</>
-            )}
-          </span>
-          {lastGoodAt ? (
-            <span className="tnum" data-testid="telemetry-last-good">
-              Last good {formatDateTime(lastGoodAt)}
-            </span>
-          ) : null}
-        </div> : null}
+            ) : null}
+            {lastGoodAt ? (
+              <span className="tnum" data-testid="telemetry-last-good">
+                Last good {formatDateTime(lastGoodAt)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
 
         {showAllocation && admitted === null && viewModel.state !== "unallocated" ? (
           <div data-testid="telemetry-admission-missing" className="text-xs text-fg-muted">
