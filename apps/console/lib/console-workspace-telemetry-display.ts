@@ -1,6 +1,6 @@
 /** Telemetry SVG geometry and resource-meter formatting. */
 
-import type { TelemetryQuality } from "./console-workspace-telemetry.ts";
+import type { TelemetryQuality } from "./console-workspace-telemetry-types.ts";
 
 /** Max SVG points drawn for a telemetry sparkline after downsampling. */
 export const MAX_SPARKLINE_POINTS = 64;
