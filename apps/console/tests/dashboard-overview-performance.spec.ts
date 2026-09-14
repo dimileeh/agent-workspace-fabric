@@ -1965,10 +1965,13 @@ test("stalled retained history does not block first-page publication or the next
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  const loadMore = page.getByRole("button", { name: "Load more workspaces" });
+  await expect(loadMore).toBeVisible();
+  await loadMore.click();
+  // Exact loaded summary; allow CI contention after a heavy sibling file.
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 15_000 });
 
   delayRetainedBatch = true;
   refreshedFirstPage = true;

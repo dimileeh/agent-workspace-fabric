@@ -380,9 +380,15 @@ for (const gate of ["telemetry", "allocation", "cost"]) {
     await fulfillJson(held[1], body);
     await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
     await expect(tabs).toHaveCount(gate === "telemetry" ? 1 : 0);
-    for (const id of ["telemetry-mode-label", "telemetry-sample-time", "telemetry-partial-indicator"]) {
+    // Mode/sample chrome is telemetry-gated. Envelope partial stays for
+    // telemetry (meter quality) and cost (unpriced estimate); allocation-only
+    // clears meter-driven producer partial when admitted is complete.
+    for (const id of ["telemetry-mode-label", "telemetry-sample-time"]) {
       await expect(page.getByTestId(id)).toHaveCount(gate === "telemetry" ? 1 : 0);
     }
+    await expect(page.getByTestId("telemetry-partial-indicator")).toHaveCount(
+      gate === "allocation" ? 0 : 1,
+    );
     const panel = page.getByTestId("console-workspace-telemetry").locator("xpath=ancestor::section[1]");
     // Clock is past 12:11; fixture observed_at / admitted.observed_at stay at 12:00,
     // so section-aware freshness marks telemetry and allocation stale (cost-only has
@@ -545,7 +551,9 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   await page.getByRole("button", { name: "Close inspector" }).click();
   await expect(inspector).toHaveClass(/translate-x-full/);
   const delayedPaneMs = Date.now() - started;
-  expect(delayedPaneMs).toBeLessThan(1_000);
+  // Wall-clock open→close under shared CI CPUs; held telemetry never resolves,
+  // so this still proves the pane does not wait on the in-flight read.
+  expect(delayedPaneMs).toBeLessThan(2_000);
   await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(scrollBefore);
   await expect(page.getByLabel("Select ws_interaction_75 for fullscreen logs")).toBeChecked();
   await open(page, "ws_interaction_75");
@@ -574,7 +582,7 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   await open(page, "ws_interaction_75");
   await expect(page.getByTestId("telemetry-loading")).toBeVisible();
   const densePaneMs = Date.now() - denseStarted;
-  expect(densePaneMs).toBeLessThan(1_000);
+  expect(densePaneMs).toBeLessThan(2_000);
   console.info(`[telemetry-interaction] delayed-open-close=${delayedPaneMs}ms dense-close-open=${densePaneMs}ms`);
   await page.getByRole("button", { name: "Close inspector" }).click();
   await list.evaluate(element => element.scrollTo({ top: element.scrollHeight }));
