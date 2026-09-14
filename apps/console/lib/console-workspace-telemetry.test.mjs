@@ -2932,6 +2932,33 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
     "partial",
   );
 
+  // Real producer fixture is partial for both downsampled history and a hidden
+  // missing_estimate. Telemetry-only views must keep the envelope qualification
+  // when meters look complete — downsampled is visible telemetry quality, not a
+  // gated-off cost cause (PRRT_kwDOSJAM6s6iG6Kb).
+  const dayTwo = loadFixture("persisted_day_two_containers");
+  const dayTwoParsed = parseTelemetryPresentation(dayTwo);
+  assert.ok(dayTwoParsed);
+  assert.equal(dayTwoParsed.state, "partial");
+  assert.equal(dayTwoParsed.quality, "partial");
+  assert.equal(dayTwoParsed.estimate, null);
+  assert.ok(dayTwoParsed.dataQualityNotes.includes("downsampled"));
+  assert.ok(dayTwoParsed.dataQualityNotes.includes("missing_estimate"));
+  const dayTwoNow = Date.parse(dayTwo.window_end_at);
+  const dayTwoTelemetryOnly = projectWorkspaceTelemetryView(dayTwoParsed, {
+    nowMs: dayTwoNow,
+    expectAllocation: false,
+    expectCost: false,
+  });
+  assert.equal(dayTwoTelemetryOnly.state, "partial");
+  assert.equal(dayTwoTelemetryOnly.quality, "partial");
+  assert.ok(dayTwoTelemetryOnly.cpu.series.length > 0);
+  assert.equal(dayTwoTelemetryOnly.cpu.usedPartial, false);
+  assert.equal(
+    JSON.stringify(dayTwoTelemetryOnly).includes("downsampled"),
+    false,
+  );
+
 });
 
 test("empty expected meters keep producer partial under gated-off allocation/cost", () => {

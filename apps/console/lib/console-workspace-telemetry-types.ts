@@ -63,8 +63,10 @@ export const MAX_PROVIDER_RESOURCE_UID_LENGTH = 64;
  */
 export const MAX_TELEMETRY_SAMPLES = 2048;
 /**
- * Bound data_quality_notes before scanning for strings, even though notes are
- * discarded rather than projected, to prevent unbounded UI-thread work.
+ * Bound data_quality_notes before scanning for strings. Notes are retained on
+ * the parsed presentation for projection decisions (e.g. whether producer
+ * partial is attributable only to gated-off sections) but never projected into
+ * WorkspaceTelemetryView display strings.
  */
 export const MAX_DATA_QUALITY_NOTES = 64;
 /**
@@ -124,6 +126,11 @@ export type ParsedTelemetryPresentation = {
   windowEndAt: string | null;
   estimateScope: EstimateScope;
   estimate: ParsedEstimate | null;
+  /**
+   * Machine notes retained for section-aware envelope projection only.
+   * Never copied into WorkspaceTelemetryView or rendered as operator copy.
+   */
+  dataQualityNotes: readonly string[];
 };
 
 export type WorkspaceTelemetrySeriesPoint = {

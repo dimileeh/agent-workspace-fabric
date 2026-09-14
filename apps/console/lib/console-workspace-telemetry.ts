@@ -743,7 +743,9 @@ export function parseTelemetryPresentation(
   if (!isOneOf(estimateScope, ["view", "resource_attempt"])) {
     return null;
   }
-  // Accept machine notes for schema compatibility; never surface as UI copy.
+  // Accept machine notes for schema compatibility; retain for projection
+  // decisions (gated-off vs telemetry quality) but never surface as UI copy.
+  let dataQualityNotes: readonly string[] = [];
   if (payload.data_quality_notes !== undefined) {
     if (!Array.isArray(payload.data_quality_notes)) {
       return null;
@@ -757,6 +759,7 @@ export function parseTelemetryPresentation(
         return null;
       }
     }
+    dataQualityNotes = payload.data_quality_notes;
   }
   if (payload.ownership !== undefined && payload.ownership !== null) {
     if (!isPlainObject(payload.ownership)) {
@@ -824,5 +827,6 @@ export function parseTelemetryPresentation(
     cpuSamples,
     memorySamples,
     estimate,
+    dataQualityNotes,
   };
 }

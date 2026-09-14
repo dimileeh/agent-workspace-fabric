@@ -465,6 +465,7 @@ export function projectWorkspaceTelemetryFreshness(
     memorySamples: [],
     estimateScope: presentation.estimateScope,
     estimate: presentation.estimate,
+    dataQualityNotes: presentation.dataQualityNotes,
   };
   const hasFutureTimestamp = [
     freshnessPresentation.windowEndAt,
@@ -485,6 +486,35 @@ export function projectWorkspaceTelemetryFreshness(
   };
 }
 
+/** Cost-section notes that may explain producer partial when cost is gated off. */
+const COST_SECTION_QUALITY_NOTES = new Set([
+  "missing_estimate",
+  "unpriced_estimate",
+  "partial_estimate",
+]);
+/** Allocation-section notes that may explain producer partial when allocation is gated off. */
+const ALLOCATION_SECTION_QUALITY_NOTES = new Set(["missing_admitted"]);
+
+/**
+ * True when every retained note is attributable to a gated-off section (or
+ * there are no notes). Telemetry quality notes such as `downsampled` block
+ * clearing so visible history stays envelope-qualified.
+ */
+function dataQualityNotesOnlyGatedOff(
+  notes: readonly string[],
+  gates: { expectAllocation: boolean; expectCost: boolean },
+): boolean {
+  return notes.every(note => {
+    if (COST_SECTION_QUALITY_NOTES.has(note)) {
+      return !gates.expectCost;
+    }
+    if (ALLOCATION_SECTION_QUALITY_NOTES.has(note)) {
+      return !gates.expectAllocation;
+    }
+    return false;
+  });
+}
+
 /**
  * Project allowlisted UI fields from a parsed presentation.
  * Does not fetch; `nowMs` is injected for deterministic freshness tests.
@@ -495,7 +525,8 @@ export function projectWorkspaceTelemetryFreshness(
  * fields are hidden, not incomplete — and aged timestamps from that section
  * must not mark the visible panel stale. Producer-marked envelope partial that
  * is attributable only to gated-off allocation/cost evidence is cleared for
- * the visible view when expected telemetry meters are themselves complete;
+ * the visible view when expected telemetry meters are themselves complete and
+ * producer notes do not also cite telemetry quality (e.g. downsampled);
  * envelope-only partial with complete nested evidence is kept, and empty or
  * partial meters keep the producer envelope so dashes are not presented as a
  * successful complete reading. Success/ok envelopes with absent enabled meter
@@ -554,9 +585,10 @@ export function projectWorkspaceTelemetryView(
   // Producer may already mark partial for unsupported sections (e.g.
   // missing_estimate). Clear that qualification when incompleteness exists
   // only in gated-off sections so telemetry-only panels stay success/ok —
-  // but only when expected meters are themselves complete. Empty series leave
-  // usedPartial=false, so gating on used!==null (and series length) is required
-  // or clearing would present dashes as a successful complete reading.
+  // but only when expected meters are themselves complete and notes do not
+  // also cite telemetry quality (downsampled / no_samples / …). Empty series
+  // leave usedPartial=false, so gating on used!==null (and series length) is
+  // required or clearing would present dashes as a successful complete reading.
   const expectedTelemetryComplete = !expectTelemetry ||
     (cpuAgg.used !== null &&
       memAgg.used !== null &&
@@ -564,9 +596,14 @@ export function projectWorkspaceTelemetryView(
       memAgg.series.length > 0 &&
       !cpuAgg.usedPartial &&
       !memAgg.usedPartial);
+  const notesOnlyGatedOffSections = dataQualityNotesOnlyGatedOff(
+    presentation.dataQualityNotes,
+    { expectAllocation, expectCost },
+  );
   const hiddenSectionOnlyPartial = presentation.state !== "unallocated" &&
     !missingAllocationEvidence &&
     expectedTelemetryComplete &&
+    notesOnlyGatedOffSections &&
     ((!expectAllocation && allocationIncomplete) ||
       (!expectCost && costIncomplete));
   // Producer envelope stale is meter-series freshness. Clear it when telemetry
