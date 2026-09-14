@@ -1489,11 +1489,14 @@ export function projectWorkspaceTelemetryView(
   // Producer may already mark partial for unsupported sections (e.g.
   // missing_estimate). Clear that qualification when incompleteness exists
   // only in gated-off sections so telemetry-only panels stay success/ok —
-  // but only when expected meters are themselves complete (empty series keep
-  // usedPartial=false, so clearing would hide the only incomplete signal).
+  // but only when expected meters are themselves complete. Empty series leave
+  // usedPartial=false, so gating on used!==null (and series length) is required
+  // or clearing would present dashes as a successful complete reading.
   const expectedTelemetryComplete = !expectTelemetry ||
     (cpuAgg.used !== null &&
       memAgg.used !== null &&
+      cpuAgg.series.length > 0 &&
+      memAgg.series.length > 0 &&
       !cpuAgg.usedPartial &&
       !memAgg.usedPartial);
   const hiddenSectionOnlyPartial = presentation.state !== "unallocated" &&

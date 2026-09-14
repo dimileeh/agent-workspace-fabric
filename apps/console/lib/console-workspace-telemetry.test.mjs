@@ -2893,8 +2893,12 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
     "partial",
   );
 
-  // Empty meters with gated-off null allocation/cost must keep producer partial:
-  // clearing would present dashes / "No history" as a complete success reading.
+});
+
+test("empty expected meters keep producer partial under gated-off allocation/cost", () => {
+  // Regression for PRRT_kwDOSJAM6s6iFLfj: gated-off null/unpriced sections must
+  // not clear the envelope when telemetry is expected but samples are absent
+  // (usedPartial stays false on empty series).
   for (const name of ["persisted_cold_absent", "persisted_checkpoint_no_samples"]) {
     const emptyMeters = loadFixture(name);
     const emptyParsed = parseTelemetryPresentation(emptyMeters);
@@ -2915,6 +2919,13 @@ test("inferred qualification ignores gated-off allocation and cost evidence", ()
     assert.equal(telemetryOnlyEmpty.cpu.usedPartial, false);
     assert.equal(telemetryOnlyEmpty.memory.usedBytes, null);
     assert.equal(telemetryOnlyEmpty.memory.usedPartial, false);
+    // Cost unsupported alone still must not promote empty meters to success/ok.
+    const costOffEmpty = projectWorkspaceTelemetryView(emptyParsed, {
+      nowMs: emptyNow,
+      expectCost: false,
+    });
+    assert.equal(costOffEmpty.state, "partial");
+    assert.equal(costOffEmpty.quality, "partial");
   }
 });
 
