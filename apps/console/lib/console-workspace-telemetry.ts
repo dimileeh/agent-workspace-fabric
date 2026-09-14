@@ -1274,11 +1274,14 @@ function isTimestampOlderThanStaleThreshold(
 }
 
 /**
- * Stale when producer marks state/quality stale, when a displayed CPU/memory
- * aggregate includes a stale sample, or when the envelope, admitted allocation
- * snapshot, or any meter sample time used for displayed CPU/memory values
- * exceeds the threshold. Fresh envelopes/meters must not mask aged allocation
- * requests/limits, aged resource samples, or producer-stale current readings.
+ * Stale when producer marks state/quality stale (for sections that still
+ * surface telemetry), when a displayed CPU/memory aggregate includes a stale
+ * sample, or when the envelope, admitted allocation snapshot, or any meter
+ * sample time used for displayed CPU/memory values exceeds the threshold.
+ * Fresh envelopes/meters must not mask aged allocation requests/limits, aged
+ * resource samples, or producer-stale current readings. Allocation-only views
+ * omit the producer envelope stale mark so aged hidden meters cannot stale a
+ * current admitted snapshot.
  */
 function computeIsStale(
   presentation: ParsedTelemetryPresentation,
@@ -1382,10 +1385,18 @@ export function projectWorkspaceTelemetryFreshness(
     ? [readings.cpu.sampleTime, readings.memory.sampleTime]
     : [];
   // Build a sample-free presentation slice so clock ticks never re-read series
-  // arrays (freshness ticks use projected meter metadata only).
+  // arrays (freshness ticks use projected meter metadata only). When telemetry
+  // is unsupported, drop producer envelope stale: that mark is driven by meter
+  // aging the caller already excluded (see persisted_stale_series).
   const freshnessPresentation: ParsedTelemetryPresentation = {
-    state: presentation.state,
-    quality: presentation.quality,
+    state:
+      !expectTelemetry && presentation.state === "stale"
+        ? "success"
+        : presentation.state,
+    quality:
+      !expectTelemetry && presentation.quality === "stale"
+        ? "ok"
+        : presentation.quality,
     view: presentation.view,
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: expectTelemetry ? presentation.observedAt : null,
@@ -1425,6 +1436,8 @@ export function projectWorkspaceTelemetryFreshness(
  * mark the visible panel stale. Producer-marked envelope partial that is
  * attributable only to gated-off allocation/cost evidence is cleared for the
  * visible view; envelope-only partial with complete nested evidence is kept.
+ * Producer envelope stale driven by meter aging is likewise cleared when
+ * telemetry is unsupported so allocation-only views keep current admitted facts.
  */
 export function projectWorkspaceTelemetryView(
   presentation: ParsedTelemetryPresentation,
@@ -1475,18 +1488,31 @@ export function projectWorkspaceTelemetryView(
     !missingAllocationEvidence &&
     ((!expectAllocation && allocationIncomplete) ||
       (!expectCost && costIncomplete));
+  // Producer envelope stale is meter-series freshness. Clear it when telemetry
+  // is unsupported so allocation-only chrome does not inherit hidden CPU aging
+  // (historical mode reads state/quality for producerStale).
+  const hiddenTelemetryOnlyStale = !expectTelemetry &&
+    (presentation.state === "stale" || presentation.quality === "stale");
 
   return {
-    state: missingAllocationEvidence && presentation.state === "success"
+    state: missingAllocationEvidence &&
+        (presentation.state === "success" ||
+          (hiddenTelemetryOnlyStale && presentation.state === "stale"))
       ? "partial"
       : hiddenSectionOnlyPartial && presentation.state === "partial"
         ? "success"
-        : presentation.state,
-    quality: missingAllocationEvidence && presentation.quality === "ok"
+        : hiddenTelemetryOnlyStale && presentation.state === "stale"
+          ? "success"
+          : presentation.state,
+    quality: missingAllocationEvidence &&
+        (presentation.quality === "ok" ||
+          (hiddenTelemetryOnlyStale && presentation.quality === "stale"))
       ? "partial"
       : hiddenSectionOnlyPartial && presentation.quality === "partial"
         ? "ok"
-        : presentation.quality,
+        : hiddenTelemetryOnlyStale && presentation.quality === "stale"
+          ? "ok"
+          : presentation.quality,
     view: presentation.view,
     staleAfterSeconds: presentation.staleAfterSeconds,
     observedAt: presentation.observedAt,

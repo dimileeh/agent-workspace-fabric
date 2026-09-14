@@ -2085,6 +2085,48 @@ test("freshness ignores aged evidence from unsupported widget sections", () => {
   );
 });
 
+test("allocation-only ignores producer envelope stale from aged hidden meters", () => {
+  // persisted_stale_series: admitted.observed_at is current, but state/quality
+  // are producer-stale because the CPU series aged. Filtering meter times alone
+  // cannot fix allocation-only freshness while computeIsStale honors the
+  // global stale envelope unconditionally.
+  const raw = loadFixture("persisted_stale_series");
+  const parsed = parseTelemetryPresentation(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.state, "stale");
+  assert.equal(parsed.quality, "stale");
+  assert.equal(parsed.admitted?.observedAt, "2026-09-12T12:00:00+00:00");
+  const nowMs = Date.parse("2026-09-12T12:01:00+00:00");
+
+  const allocOnly = projectWorkspaceTelemetryView(parsed, {
+    nowMs,
+    expectTelemetry: false,
+    expectAllocation: true,
+    expectCost: false,
+  });
+  assert.equal(allocOnly.isStale, false);
+  assert.equal(allocOnly.hasFutureTimestamp, false);
+  assert.equal(allocOnly.state, "success");
+  assert.equal(allocOnly.quality, "ok");
+  assert.deepEqual(
+    projectWorkspaceTelemetryFreshness(parsed, allocOnly, nowMs, {
+      expectTelemetry: false,
+      expectAllocation: true,
+    }),
+    { isStale: false, hasFutureTimestamp: false },
+  );
+
+  // Telemetry expected: producer envelope stale must still win.
+  const full = projectWorkspaceTelemetryView(parsed, {
+    nowMs,
+    expectTelemetry: true,
+    expectAllocation: true,
+  });
+  assert.equal(full.isStale, true);
+  assert.equal(full.state, "stale");
+  assert.equal(full.quality, "stale");
+});
+
 test("implausibly future meter sample times fail closed as stale", () => {
   // A future sample_time wins latestTimestamp over legitimate readings; without
   // a closed freshness check, nowMs - ms is negative so isStale stays false
