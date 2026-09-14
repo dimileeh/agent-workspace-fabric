@@ -25,7 +25,7 @@ test("harness servers isolate build artifacts from ordinary development", () => 
 });
 
 for (const ci of ["", "1"]) {
-  test(`browser workers stay bounded at four with CI=${JSON.stringify(ci)}`, () => {
+  test(`browser workers stay bounded at two with CI=${JSON.stringify(ci)}`, () => {
     const config = JSON.parse(execFileSync(process.execPath, [
       "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON",
       "--input-type=module",
@@ -36,7 +36,7 @@ for (const ci of ["", "1"]) {
       env: { ...process.env, CI: ci },
       encoding: "utf8",
     }));
-    assert.equal(config.workers, 4);
+    assert.equal(config.workers, 2);
     // Keep within-file ordering and explicit serial suites intact.
     assert.notEqual(config.fullyParallel, true);
   });
