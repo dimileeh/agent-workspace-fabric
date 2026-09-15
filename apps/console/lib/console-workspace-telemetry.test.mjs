@@ -264,13 +264,13 @@ test("isLegitimateNullOwnershipNoResource accepts bounded agreeing rate versions
       },
     },
   })), true);
-  // Top-level alone without evidence duplication is also accepted when types match.
+  // Nonblank top-level without evidence duplication must not bypass ownership.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
       rate_table_version: "producer-global-rates-v1",
     },
-  })), true);
+  })), false);
   // Nonblank evidence.source is absent on the real response — keep fail-closed.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {

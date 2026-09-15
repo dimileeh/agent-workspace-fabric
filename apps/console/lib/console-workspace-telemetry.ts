@@ -180,9 +180,10 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
       return false;
     }
   }
-  // Blank historical versions and bounded producer global rate_table_version
-  // (with empty→null-normalized evidence agreement) are legitimate. Nonblank
-  // evidence.source is absent on the real no-target response — fail closed.
+  // Blank historical versions may omit evidence.rate_table_version. Nonblank
+  // producer global versions must duplicate into evidence and agree
+  // (empty→null-normalized). Nonblank evidence.source is absent on the real
+  // no-target response — fail closed.
   if (typeof payload.estimate.rate_table_version !== "string") {
     return false;
   }
@@ -198,11 +199,16 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
       return false;
     }
   }
-  if (
+  const hasEvidenceVersion =
     "rate_table_version" in evidence &&
     evidence.rate_table_version !== undefined &&
-    evidence.rate_table_version !== null
-  ) {
+    evidence.rate_table_version !== null;
+  // Require the evidence copy whenever the top-level version is nonblank so a
+  // partial envelope cannot skip agreement and widen the ownership bypass.
+  if (topLevelVersion !== null && !hasEvidenceVersion) {
+    return false;
+  }
+  if (hasEvidenceVersion) {
     if (typeof evidence.rate_table_version !== "string") {
       return false;
     }
