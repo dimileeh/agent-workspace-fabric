@@ -93,6 +93,35 @@ test("isLegitimateNullOwnershipNoResource accepts Cloud no-resource absence shap
   assert.ok(parseTelemetryPresentation(sharedNullOwnershipUnallocated()));
 });
 
+test("isLegitimateNullOwnershipNoResource rejects non-canonical null-estimate ownership absence", () => {
+  // Parser-valid empty shell that is neither partial/not-recorded nor shared-unallocated.
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    state: "success",
+    quality: "ok",
+    observed_at: "2026-09-12T12:01:00.000Z",
+    data_quality_notes: [],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    state: "success",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    quality: "ok",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    observed_at: "2026-09-12T12:01:00.000Z",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: [],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: undefined,
+  })), false);
+  // Unallocated estimate without envelope state coupling must fail closed here.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    state: "success",
+  })), false);
+});
+
 test("isLegitimateNullOwnershipNoResource rejects null ownership with resource-bearing or contradictory fields", () => {
   const sample = structuredClone(SUCCESS.cpu_cores_samples[0]);
   assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({

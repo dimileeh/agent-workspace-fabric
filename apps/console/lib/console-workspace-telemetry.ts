@@ -109,8 +109,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Cloud may emit `ownership: null` for no retained resource / shared unallocated.
- * Accept that absence only when the payload carries no resource-bearing samples,
- * admitted allocation, or numeric cost — never as a general ownership bypass.
+ * Accept that absence only for the two canonical empty-shell contracts:
+ * partial/not-recorded (`estimate: null`) or shared-unallocated
+ * (`state` + estimate both unallocated, no numeric cost) — never as a general
+ * ownership bypass for parser-valid success/ok empty shells.
  */
 export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   if (!isPlainObject(payload) || payload.ownership !== null) {
@@ -126,12 +128,19 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
     return false;
   }
   if (payload.estimate === null) {
-    return true;
+    return (
+      payload.state === "partial" &&
+      payload.quality === "partial" &&
+      payload.observed_at === null &&
+      Array.isArray(payload.data_quality_notes) &&
+      payload.data_quality_notes.includes("not_recorded")
+    );
   }
   if (!isPlainObject(payload.estimate)) {
     return false;
   }
   return (
+    payload.state === "unallocated" &&
     payload.estimate.estimate_state === "unallocated" &&
     payload.estimate.estimated_usd === null
   );
