@@ -208,6 +208,57 @@ test("isLegitimateNullOwnershipNoResource requires canonical unallocated evidenc
   }
 });
 
+test("isLegitimateNullOwnershipNoResource requires blank projected pricing provenance", () => {
+  // Foreign rate identity must not ride the ownership bypass into the cost panel.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "tenant-other-private-plan",
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        source: "https://tenant-other.example/rates",
+      },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "tenant-other-private-plan",
+      evidence: {
+        allocation_kind: "unallocated",
+        source: "https://tenant-other.example/rates",
+        rate_table_version: "tenant-other-private-plan",
+      },
+    },
+  })), false);
+  // Evidence-duplicated rate identity must also stay blank when present.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "tenant-other-private-plan",
+      },
+    },
+  })), false);
+  // Whitespace-only / blank duplicated provenance still matches the Cloud contract.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "  ",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "",
+      },
+    },
+  })), true);
+});
+
 test("isLegitimateNullOwnershipNoResource requires exact singleton producer notes", () => {
   // Membership alone must not bypass ownership when notes are mixed or duplicated.
   assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
