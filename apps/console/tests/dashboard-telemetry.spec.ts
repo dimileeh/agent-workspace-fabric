@@ -319,6 +319,120 @@ test("slow requests time out without overlap and recover on the next minute", as
   expect(reads).toBe(2); release();
 });
 
+/** Exact Cloud no-resource body (production); refresh window_end_at for the test clock. */
+function productionNoResourceBody(windowEndAt: string) {
+  return {
+    window_end_at: windowEndAt,
+    estimate_scope: "resource_attempt",
+    state: "partial",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: null,
+    quality: "partial",
+    data_quality_notes: ["not_recorded"],
+  };
+}
+
+/** Cloud shared-monitor emit with null ownership (unallocated, not free). */
+function sharedUnallocatedNullOwnershipBody(windowEndAt: string) {
+  return {
+    window_end_at: windowEndAt,
+    estimate_scope: "resource_attempt",
+    state: "unallocated",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: {
+      currency: "USD",
+      estimate_state: "unallocated",
+      estimated_usd: null,
+      evidence: { allocation_kind: "unallocated" },
+      priced_interval_seconds: 0,
+      rate_table_version: "",
+      unpriced_interval_seconds: 0,
+    },
+    quality: "ok",
+    data_quality_notes: ["unallocated"],
+  };
+}
+
+test("production null-ownership no-resource renders not-recorded without ownership mismatch", async ({ page }) => {
+  await setup(page);
+  await page.route("**/telemetry?*", async route => {
+    const view = new URL(route.request().url()).searchParams.get("view")!;
+    const body = productionNoResourceBody("2026-09-12T12:01:00.000Z");
+    body.view = view;
+    await fulfillJson(route, body);
+  });
+  await gotoWithClock(page); await open(page);
+  await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+  await expect(page.getByTestId("telemetry-admission-missing")).toBeVisible();
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByText("$0.00")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
+});
+
+test("shared unallocated null ownership renders Unallocated without ownership mismatch", async ({ page }) => {
+  await setup(page);
+  await page.route("**/telemetry?*", async route => {
+    const view = new URL(route.request().url()).searchParams.get("view")!;
+    const body = sharedUnallocatedNullOwnershipBody("2026-09-12T12:01:00.000Z");
+    body.view = view;
+    await fulfillJson(route, body);
+  });
+  await gotoWithClock(page); await open(page);
+  await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unallocated");
+  await expect(page.getByTestId("telemetry-unallocated")).toBeVisible();
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByText("$0.00")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
+});
+
+test("owned to null-ownership no-resource discards samples allocation and cost; later owned recovers", async ({ page }) => {
+  await setup(page);
+  let phase: "owned" | "empty" | "owned_again" = "owned";
+  await page.route("**/telemetry?*", async route => {
+    const view = new URL(route.request().url()).searchParams.get("view")!;
+    if (phase === "empty") {
+      const body = productionNoResourceBody("2026-09-12T12:02:00.000Z");
+      body.view = view;
+      await fulfillJson(route, body);
+      return;
+    }
+    const body = fixture();
+    body.view = view;
+    await fulfillJson(route, body);
+  });
+  await gotoWithClock(page); await open(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toBeVisible();
+  await expect(page.getByText("Compute class", { exact: true })).toBeVisible();
+  phase = "empty";
+  await pollTelemetry(page);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+  await expect(page.getByTestId("telemetry-admission-missing")).toBeVisible();
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toHaveCount(0);
+  await expect(page.getByText("Compute class", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-last-good")).toHaveCount(0);
+  phase = "owned_again";
+  await pollTelemetry(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toBeVisible();
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+});
+
 for (const ownership of [undefined, null, false, 0, "", [], {}, { workspace_record_id: "ws_other" },
   ...["   ", "\t\n\r"].map(provider_resource_uid => ({ ...fixture().ownership, provider_resource_uid })),
 ]) {

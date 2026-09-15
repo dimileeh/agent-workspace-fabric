@@ -107,6 +107,36 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Cloud may emit `ownership: null` for no retained resource / shared unallocated.
+ * Accept that absence only when the payload carries no resource-bearing samples,
+ * admitted allocation, or numeric cost — never as a general ownership bypass.
+ */
+export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
+  if (!isPlainObject(payload) || payload.ownership !== null) {
+    return false;
+  }
+  if (!Array.isArray(payload.cpu_cores_samples) || payload.cpu_cores_samples.length !== 0) {
+    return false;
+  }
+  if (!Array.isArray(payload.memory_bytes_samples) || payload.memory_bytes_samples.length !== 0) {
+    return false;
+  }
+  if (payload.admitted !== null) {
+    return false;
+  }
+  if (payload.estimate === null) {
+    return true;
+  }
+  if (!isPlainObject(payload.estimate)) {
+    return false;
+  }
+  return (
+    payload.estimate.estimate_state === "unallocated" &&
+    payload.estimate.estimated_usd === null
+  );
+}
+
 function isNullableTimestamp(value: unknown): value is string | null {
   return value === null || (typeof value === "string" && isFiniteTimestampString(value));
 }

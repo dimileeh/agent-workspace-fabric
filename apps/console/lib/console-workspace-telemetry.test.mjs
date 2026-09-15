@@ -20,6 +20,7 @@ import {
   buildSparklineGeometry,
   downsampleSeriesForSparkline,
   formatCores,
+  isLegitimateNullOwnershipNoResource,
   parseTelemetryPresentation,
   projectWorkspaceTelemetryView,
   projectWorkspaceTelemetryFreshness,
@@ -38,6 +39,89 @@ const STALE = loadFixture("stale");
 const UNALLOCATED = loadFixture("unallocated");
 
 const FIXED_NOW = Date.parse("2026-09-12T12:01:00+00:00");
+
+function productionNullOwnershipNoResource(overrides = {}) {
+  return {
+    window_end_at: "2026-09-12T12:01:00.000Z",
+    estimate_scope: "resource_attempt",
+    state: "partial",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: null,
+    quality: "partial",
+    data_quality_notes: ["not_recorded"],
+    ...overrides,
+  };
+}
+
+function sharedNullOwnershipUnallocated(overrides = {}) {
+  return {
+    window_end_at: "2026-09-12T12:01:00.000Z",
+    estimate_scope: "resource_attempt",
+    state: "unallocated",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: {
+      currency: "USD",
+      estimate_state: "unallocated",
+      estimated_usd: null,
+      evidence: { allocation_kind: "unallocated" },
+      priced_interval_seconds: 0,
+      rate_table_version: "",
+      unpriced_interval_seconds: 0,
+    },
+    quality: "ok",
+    data_quality_notes: ["unallocated"],
+    ...overrides,
+  };
+}
+
+test("isLegitimateNullOwnershipNoResource accepts Cloud no-resource absence shapes", () => {
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource()), true);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated()), true);
+  assert.ok(parseTelemetryPresentation(productionNullOwnershipNoResource()));
+  assert.ok(parseTelemetryPresentation(sharedNullOwnershipUnallocated()));
+});
+
+test("isLegitimateNullOwnershipNoResource rejects null ownership with resource-bearing or contradictory fields", () => {
+  const sample = structuredClone(SUCCESS.cpu_cores_samples[0]);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    cpu_cores_samples: [sample],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    memory_bytes_samples: [structuredClone(SUCCESS.memory_bytes_samples[0])],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    admitted: structuredClone(SUCCESS.admitted),
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate: { ...structuredClone(UNALLOCATED.estimate), estimated_usd: "0.00" },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate: structuredClone(SUCCESS.estimate),
+  })), false);
+  for (const ownership of [undefined, {}, [], false, 0, ""]) {
+    assert.equal(
+      isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({ ownership })),
+      false,
+      JSON.stringify(ownership),
+    );
+  }
+  // Populated fixture with ownership forced null must stay rejectable (hook security).
+  const populated = structuredClone(SUCCESS);
+  populated.ownership = null;
+  assert.equal(isLegitimateNullOwnershipNoResource(populated), false);
+});
 
 test("parseTelemetryPresentation accepts all four verbatim producer fixtures", () => {
   for (const [name, raw] of [
