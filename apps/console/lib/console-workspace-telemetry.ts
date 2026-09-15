@@ -113,10 +113,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * contracts: partial/not-recorded (`estimate: null`) or shared-unallocated
  * (envelope + estimate unallocated, ok quality, exact singleton unallocated
  * note, no numeric cost, estimate.evidence.allocation_kind "unallocated" with
- * no resource-identifying UIDs, and blank projected pricing provenance) —
- * never as a general ownership bypass for parser-valid success/ok empty shells,
- * mixed notes, contradictory evidence, foreign rate metadata, or view-scoped
- * envelopes.
+ * no resource-identifying UIDs, and blank or bounded agreeing rate-table
+ * provenance without evidence.source) — never as a general ownership bypass
+ * for parser-valid success/ok empty shells, mixed notes, contradictory
+ * evidence, or view-scoped envelopes. Unallocated Facts project away rate
+ * identity rather than treating a producer global version as foreign tenant data.
  */
 export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   if (!isPlainObject(payload) || payload.ownership !== null) {
@@ -179,20 +180,38 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
       return false;
     }
   }
-  // Canonical Cloud unallocated has a blank rate-table version and no rate
-  // source. Reject nonblank projected provenance so foreign tenant rate
-  // metadata cannot render via the ownership bypass.
-  if (
-    typeof payload.estimate.rate_table_version !== "string" ||
-    payload.estimate.rate_table_version.trim() !== ""
-  ) {
+  // Blank historical versions and bounded producer global rate_table_version
+  // (with empty→null-normalized evidence agreement) are legitimate. Nonblank
+  // evidence.source is absent on the real no-target response — fail closed.
+  if (typeof payload.estimate.rate_table_version !== "string") {
     return false;
   }
-  for (const field of ["source", "rate_table_version"] as const) {
-    if (!(field in evidence) || evidence[field] === undefined || evidence[field] === null) {
-      continue;
+  if (payload.estimate.rate_table_version.length > MAX_RATE_PROVENANCE_LENGTH) {
+    return false;
+  }
+  const topLevelVersion =
+    payload.estimate.rate_table_version.trim() === ""
+      ? null
+      : payload.estimate.rate_table_version;
+  if ("source" in evidence && evidence.source !== undefined && evidence.source !== null) {
+    if (typeof evidence.source !== "string" || evidence.source.trim() !== "") {
+      return false;
     }
-    if (typeof evidence[field] !== "string" || evidence[field].trim() !== "") {
+  }
+  if (
+    "rate_table_version" in evidence &&
+    evidence.rate_table_version !== undefined &&
+    evidence.rate_table_version !== null
+  ) {
+    if (typeof evidence.rate_table_version !== "string") {
+      return false;
+    }
+    if (evidence.rate_table_version.length > MAX_RATE_PROVENANCE_LENGTH) {
+      return false;
+    }
+    const evidenceVersion =
+      evidence.rate_table_version.trim() === "" ? null : evidence.rate_table_version;
+    if (evidenceVersion !== topLevelVersion) {
       return false;
     }
   }
@@ -784,13 +803,10 @@ function parseEstimate(
   if (rateTableVersion === null && value.estimate_state !== "unallocated") {
     return null;
   }
-  // Canonical Cloud unallocated has blank projected pricing provenance. Reject
-  // nonblank rate identity/source so foreign tenant metadata cannot render on
-  // the cost panel even when ownership validation is bypassed.
-  if (
-    value.estimate_state === "unallocated" &&
-    (rateTableVersion !== null || rateSource !== null)
-  ) {
+  // Unallocated may carry a producer global rate_table_version; Facts suppress
+  // it via projection. Nonblank evidence.source is absent on the real response
+  // and must not parse into the cost panel.
+  if (value.estimate_state === "unallocated" && rateSource !== null) {
     return null;
   }
   return {
