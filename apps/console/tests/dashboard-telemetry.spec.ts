@@ -365,6 +365,18 @@ function sharedUnallocatedNullOwnershipBody(windowEndAt: string) {
   };
 }
 
+/** Exact pinned Cloud no-target shared-monitor body (refresh window_end_at only). */
+function cloudSharedUnallocatedNoTargetBody(windowEndAt: string) {
+  const body = JSON.parse(
+    readFileSync(
+      `${process.cwd()}/lib/fixtures/console-workspace-telemetry/cloud_shared_unallocated_no_target.json`,
+      "utf8",
+    ),
+  );
+  body.window_end_at = windowEndAt;
+  return body;
+}
+
 test("production null-ownership no-resource renders not-recorded without ownership mismatch", async ({ page }) => {
   await setup(page);
   await page.route("**/telemetry?*", async route => {
@@ -398,6 +410,43 @@ test("shared unallocated null ownership renders Unallocated without ownership mi
   await expect(page.getByText("$0.00")).toHaveCount(0);
   await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
 });
+
+for (const viewWindow of ["1h", "6h", "24h"] as const) {
+  test(`real Cloud shared-unallocated no-target ${viewWindow} renders Unallocated without rate Facts`, async ({ page }) => {
+    await setup(page);
+    const wireVersion = "gke-autopilot-pod-2026-09-12";
+    const reads: string[] = [];
+    await page.route("**/telemetry?*", async route => {
+      const view = new URL(route.request().url()).searchParams.get("view")!;
+      reads.push(view);
+      const body = cloudSharedUnallocatedNoTargetBody("2026-09-12T12:01:00.000Z");
+      body.view = view;
+      await fulfillJson(route, body);
+    });
+    await gotoWithClock(page); await open(page);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unallocated");
+    if (viewWindow !== "1h") {
+      await page.getByTestId(`telemetry-view-${viewWindow}`).click();
+      await expect.poll(() => reads.at(-1)).toBe(viewWindow);
+      await expect(page.getByTestId(`telemetry-view-${viewWindow}`)).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    }
+    await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unallocated");
+    await expect(page.getByTestId("telemetry-unallocated")).toBeVisible();
+    await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+    await expect(page.getByText("$0.00")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
+    await expect(page.getByText(wireVersion, { exact: true })).toHaveCount(0);
+    const rateTableFact = page.getByText("Rate table", { exact: true }).locator("..");
+    await expect(rateTableFact).toContainText("—");
+    await expect(rateTableFact).not.toContainText(wireVersion);
+    const rateSourceFact = page.getByText("Rate source", { exact: true }).locator("..");
+    await expect(rateSourceFact).toContainText("—");
+  });
+}
 
 test("owned to null-ownership no-resource discards samples allocation and cost; later owned recovers", async ({ page }) => {
   await setup(page);

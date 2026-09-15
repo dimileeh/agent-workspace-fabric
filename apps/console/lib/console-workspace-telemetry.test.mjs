@@ -37,6 +37,9 @@ const SUCCESS = loadFixture("success");
 const PARTIAL = loadFixture("partial");
 const STALE = loadFixture("stale");
 const UNALLOCATED = loadFixture("unallocated");
+const CLOUD_SHARED_UNALLOCATED_NO_TARGET = loadFixture(
+  "cloud_shared_unallocated_no_target",
+);
 
 const FIXED_NOW = Date.parse("2026-09-12T12:01:00+00:00");
 
@@ -91,6 +94,46 @@ test("isLegitimateNullOwnershipNoResource accepts Cloud no-resource absence shap
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated()), true);
   assert.ok(parseTelemetryPresentation(productionNullOwnershipNoResource()));
   assert.ok(parseTelemetryPresentation(sharedNullOwnershipUnallocated()));
+});
+
+test("real Cloud shared-unallocated no-target fixture is accepted and projects without rate Facts", () => {
+  // Pinned producer: estimate_allocation_cost([], PRODUCTION_RATES, unallocated=True).
+  assert.equal(
+    isLegitimateNullOwnershipNoResource(CLOUD_SHARED_UNALLOCATED_NO_TARGET),
+    true,
+  );
+  const parsed = parseTelemetryPresentation(CLOUD_SHARED_UNALLOCATED_NO_TARGET);
+  assert.ok(parsed);
+  assert.equal(parsed.view, "1h");
+  assert.equal(parsed.estimate?.estimateState, "unallocated");
+  assert.equal(parsed.estimate?.estimatedUsd, null);
+  // Parse may retain producer global version; projection must suppress Facts.
+  assert.equal(parsed.estimate?.rateTableVersion, "gke-autopilot-pod-2026-09-12");
+  const view = projectWorkspaceTelemetryView(parsed, {
+    nowMs: Date.parse(CLOUD_SHARED_UNALLOCATED_NO_TARGET.window_end_at),
+  });
+  assert.equal(view.estimate.displayState, "unallocated");
+  assert.equal(view.estimate.estimatedUsd, null);
+  assert.equal(view.estimate.rateTableVersion, null);
+  assert.equal(view.estimate.rateSource, null);
+  assert.notEqual(view.estimate.estimatedUsd, 0);
+  assert.notEqual(view.estimate.displayState, "complete");
+
+  for (const viewWindow of ["1h", "6h", "24h"]) {
+    const clone = structuredClone(CLOUD_SHARED_UNALLOCATED_NO_TARGET);
+    clone.view = viewWindow;
+    assert.equal(isLegitimateNullOwnershipNoResource(clone), true, viewWindow);
+    const windowParsed = parseTelemetryPresentation(clone);
+    assert.ok(windowParsed, viewWindow);
+    assert.equal(windowParsed.view, viewWindow);
+    assert.equal(windowParsed.estimateScope, "resource_attempt");
+    const windowView = projectWorkspaceTelemetryView(windowParsed, {
+      nowMs: Date.parse(clone.window_end_at),
+    });
+    assert.equal(windowView.estimate.displayState, "unallocated", viewWindow);
+    assert.equal(windowView.estimate.rateTableVersion, null, viewWindow);
+    assert.equal(windowView.estimate.rateSource, null, viewWindow);
+  }
 });
 
 test("isLegitimateNullOwnershipNoResource rejects non-canonical null-estimate ownership absence", () => {
@@ -208,14 +251,27 @@ test("isLegitimateNullOwnershipNoResource requires canonical unallocated evidenc
   }
 });
 
-test("isLegitimateNullOwnershipNoResource requires blank projected pricing provenance", () => {
-  // Foreign rate identity must not ride the ownership bypass into the cost panel.
+test("isLegitimateNullOwnershipNoResource accepts bounded agreeing rate versions and rejects malformed provenance", () => {
+  // Matching bounded producer global version (real no-target shape) is legitimate.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
-      rate_table_version: "tenant-other-private-plan",
+      rate_table_version: "gke-autopilot-pod-2026-09-12",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "gke-autopilot-pod-2026-09-12",
+        unpriced_reason: "no_dedicated_allocation",
+      },
+    },
+  })), true);
+  // Nonblank top-level without evidence duplication must not bypass ownership.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "producer-global-rates-v1",
     },
   })), false);
+  // Nonblank evidence.source is absent on the real response — keep fail-closed.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
@@ -228,25 +284,58 @@ test("isLegitimateNullOwnershipNoResource requires blank projected pricing prove
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
-      rate_table_version: "tenant-other-private-plan",
+      rate_table_version: "producer-global-rates-v1",
       evidence: {
         allocation_kind: "unallocated",
         source: "https://tenant-other.example/rates",
-        rate_table_version: "tenant-other-private-plan",
+        rate_table_version: "producer-global-rates-v1",
       },
     },
   })), false);
-  // Evidence-duplicated rate identity must also stay blank when present.
+  // Top-level vs evidence version mismatch fails closed.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "producer-global-rates-v1",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "other-rate-table",
+      },
+    },
+  })), false);
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
       evidence: {
         allocation_kind: "unallocated",
-        rate_table_version: "tenant-other-private-plan",
+        rate_table_version: "producer-global-rates-v1",
       },
     },
   })), false);
-  // Whitespace-only / blank duplicated provenance still matches the Cloud contract.
+  // Non-string / overlong rate versions fail closed.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: 42,
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "x".repeat(MAX_RATE_PROVENANCE_LENGTH + 1),
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "ok",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "x".repeat(MAX_RATE_PROVENANCE_LENGTH + 1),
+      },
+    },
+  })), false);
+  // Whitespace-only / blank duplicated provenance still matches the historical contract.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
@@ -956,15 +1045,28 @@ test("parseTelemetryPresentation rejects malformed or conflicting estimate evide
   assert.ok(parseTelemetryPresentation(UNALLOCATED));
 });
 
-test("parseTelemetryPresentation rejects unallocated estimates with projected pricing provenance", () => {
-  // Canonical Cloud unallocated has a blank rate table and no rate source.
-  // Foreign provenance must not parse into the cost panel Facts.
-  const foreignRateTable = structuredClone(UNALLOCATED);
-  foreignRateTable.estimate = {
+test("parseTelemetryPresentation accepts unallocated producer rate versions and rejects nonblank source", () => {
+  // Real Cloud unallocated emits a global rate_table_version; parse retains it,
+  // projection suppresses Facts. Nonblank evidence.source stays fail-closed.
+  const producerRateTable = structuredClone(UNALLOCATED);
+  producerRateTable.estimate = {
     ...structuredClone(UNALLOCATED.estimate),
-    rate_table_version: "tenant-other-private-plan",
+    rate_table_version: "gke-autopilot-pod-2026-09-12",
+    evidence: {
+      allocation_kind: "unallocated",
+      rate_table_version: "gke-autopilot-pod-2026-09-12",
+      unpriced_reason: "no_dedicated_allocation",
+    },
   };
-  assert.equal(parseTelemetryPresentation(foreignRateTable), null);
+  const parsedProducer = parseTelemetryPresentation(producerRateTable);
+  assert.ok(parsedProducer);
+  assert.equal(parsedProducer.estimate.rateTableVersion, "gke-autopilot-pod-2026-09-12");
+  assert.equal(parsedProducer.estimate.rateSource, null);
+  const projected = projectWorkspaceTelemetryView(parsedProducer, { nowMs: FIXED_NOW });
+  assert.equal(projected.estimate.displayState, "unallocated");
+  assert.equal(projected.estimate.rateTableVersion, null);
+  assert.equal(projected.estimate.rateSource, null);
+  assert.equal(projected.estimate.estimatedUsd, null);
 
   const foreignSource = structuredClone(UNALLOCATED);
   foreignSource.estimate = {
@@ -979,14 +1081,25 @@ test("parseTelemetryPresentation rejects unallocated estimates with projected pr
   const foreignBoth = structuredClone(UNALLOCATED);
   foreignBoth.estimate = {
     ...structuredClone(UNALLOCATED.estimate),
-    rate_table_version: "tenant-other-private-plan",
+    rate_table_version: "gke-autopilot-pod-2026-09-12",
     evidence: {
       allocation_kind: "unallocated",
       source: "https://tenant-other.example/rates",
-      rate_table_version: "tenant-other-private-plan",
+      rate_table_version: "gke-autopilot-pod-2026-09-12",
     },
   };
   assert.equal(parseTelemetryPresentation(foreignBoth), null);
+
+  const mismatchedVersions = structuredClone(UNALLOCATED);
+  mismatchedVersions.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    rate_table_version: "gke-autopilot-pod-2026-09-12",
+    evidence: {
+      allocation_kind: "unallocated",
+      rate_table_version: "other-rate-table",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(mismatchedVersions), null);
 });
 
 test("parseTelemetryPresentation rejects estimate_state that contradicts amount fields", () => {

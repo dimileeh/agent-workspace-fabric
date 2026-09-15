@@ -643,6 +643,7 @@ export function projectWorkspaceTelemetryView(
   // (historical mode reads state/quality for producerStale).
   const hiddenTelemetryOnlyStale = !expectTelemetry &&
     (presentation.state === "stale" || presentation.quality === "stale");
+  const costDisplayState = resolveCostDisplayState(presentation.estimate);
 
   return {
     state: missingAllocationEvidence &&
@@ -704,12 +705,20 @@ export function projectWorkspaceTelemetryView(
       containerNamesAtSample: memAgg.containerNames,
     },
     estimate: {
-      displayState: resolveCostDisplayState(presentation.estimate),
+      displayState: costDisplayState,
       scope: presentation.estimateScope,
       currency: "USD",
       estimatedUsd: presentation.estimate?.estimatedUsd ?? null,
-      rateTableVersion: presentation.estimate?.rateTableVersion ?? null,
-      rateSource: presentation.estimate?.rateSource ?? null,
+      // Unallocated cost is not priced — suppress irrelevant rate identity/source
+      // even when the producer emits a global rate_table_version.
+      rateTableVersion:
+        costDisplayState === "unallocated"
+          ? null
+          : (presentation.estimate?.rateTableVersion ?? null),
+      rateSource:
+        costDisplayState === "unallocated"
+          ? null
+          : (presentation.estimate?.rateSource ?? null),
       pricedIntervalSeconds: presentation.estimate?.pricedIntervalSeconds ?? null,
       unpricedIntervalSeconds: presentation.estimate?.unpricedIntervalSeconds ?? null,
     },

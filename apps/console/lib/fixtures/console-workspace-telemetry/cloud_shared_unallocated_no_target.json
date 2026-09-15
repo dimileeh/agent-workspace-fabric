@@ -1,0 +1,27 @@
+{
+  "window_end_at": "2026-09-15T04:14:20.672100+00:00",
+  "estimate_scope": "resource_attempt",
+  "state": "unallocated",
+  "ownership": null,
+  "view": "1h",
+  "observed_at": null,
+  "stale_after_seconds": 300,
+  "cpu_cores_samples": [],
+  "memory_bytes_samples": [],
+  "admitted": null,
+  "estimate": {
+    "estimated_usd": null,
+    "currency": "USD",
+    "estimate_state": "unallocated",
+    "rate_table_version": "gke-autopilot-pod-2026-09-12",
+    "priced_interval_seconds": 0,
+    "unpriced_interval_seconds": 0,
+    "evidence": {
+      "allocation_kind": "unallocated",
+      "rate_table_version": "gke-autopilot-pod-2026-09-12",
+      "unpriced_reason": "no_dedicated_allocation"
+    }
+  },
+  "quality": "ok",
+  "data_quality_notes": ["unallocated"]
+}
