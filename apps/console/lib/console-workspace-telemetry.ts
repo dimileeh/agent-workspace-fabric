@@ -784,6 +784,15 @@ function parseEstimate(
   if (rateTableVersion === null && value.estimate_state !== "unallocated") {
     return null;
   }
+  // Canonical Cloud unallocated has blank projected pricing provenance. Reject
+  // nonblank rate identity/source so foreign tenant metadata cannot render on
+  // the cost panel even when ownership validation is bypassed.
+  if (
+    value.estimate_state === "unallocated" &&
+    (rateTableVersion !== null || rateSource !== null)
+  ) {
+    return null;
+  }
   return {
     currency: "USD",
     estimateState: value.estimate_state,

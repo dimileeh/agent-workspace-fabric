@@ -956,6 +956,39 @@ test("parseTelemetryPresentation rejects malformed or conflicting estimate evide
   assert.ok(parseTelemetryPresentation(UNALLOCATED));
 });
 
+test("parseTelemetryPresentation rejects unallocated estimates with projected pricing provenance", () => {
+  // Canonical Cloud unallocated has a blank rate table and no rate source.
+  // Foreign provenance must not parse into the cost panel Facts.
+  const foreignRateTable = structuredClone(UNALLOCATED);
+  foreignRateTable.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    rate_table_version: "tenant-other-private-plan",
+  };
+  assert.equal(parseTelemetryPresentation(foreignRateTable), null);
+
+  const foreignSource = structuredClone(UNALLOCATED);
+  foreignSource.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    evidence: {
+      allocation_kind: "unallocated",
+      source: "https://tenant-other.example/rates",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(foreignSource), null);
+
+  const foreignBoth = structuredClone(UNALLOCATED);
+  foreignBoth.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    rate_table_version: "tenant-other-private-plan",
+    evidence: {
+      allocation_kind: "unallocated",
+      source: "https://tenant-other.example/rates",
+      rate_table_version: "tenant-other-private-plan",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(foreignBoth), null);
+});
+
 test("parseTelemetryPresentation rejects estimate_state that contradicts amount fields", () => {
   // complete with a null amount would surface as unpriced despite estimate_state.
   const completeNullAmount = structuredClone(SUCCESS);
