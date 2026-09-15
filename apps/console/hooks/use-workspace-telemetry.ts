@@ -3,7 +3,7 @@
 import { useEffect, useState, type MutableRefObject } from "react";
 import { parseApiResponse } from "@/components/console-dashboard-shared";
 import { workspaceTelemetryPath } from "@/lib/console-urls";
-import { parseTelemetryPresentation, type ParsedTelemetryPresentation, type TelemetryViewWindow } from "@/lib/console-workspace-telemetry";
+import { parseTelemetryPresentation, isLegitimateNullOwnershipNoResource, type ParsedTelemetryPresentation, type TelemetryViewWindow } from "@/lib/console-workspace-telemetry";
 
 export type TelemetryReadState = {
   data: ParsedTelemetryPresentation | null;
@@ -51,18 +51,30 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
         // Ownership is private validation evidence, never UI text or routing authority.
         const owner = raw?.ownership as Record<string, unknown> | null | undefined;
         const query = new URL(url, window.location.origin).searchParams;
-        if (!owner || typeof owner !== "object" || Array.isArray(owner) ||
+        if (owner === null) {
+          // Explicit JSON null is Cloud's no-resource / shared-unallocated contract.
+          // Only accept when samples, admitted, and numeric cost are absent.
+          if (!isLegitimateNullOwnershipNoResource(raw)) {
+            setState({ data: null, error: "Telemetry ownership mismatch", lastGoodAt: null });
+            return;
+          }
+          if (resourceIdentity !== null) {
+            resourceIdentity = null;
+            setState({ data: null, error: null, lastGoodAt: null });
+          }
+        } else if (!owner || typeof owner !== "object" || Array.isArray(owner) ||
           owner.workspace_record_id !== workspaceId ||
           !Number.isSafeInteger(owner.placement_attempt) || Number(owner.placement_attempt) < 0 ||
           typeof owner.provider_resource_uid !== "string" || !owner.provider_resource_uid.trim() || owner.provider_resource_uid.length > 64 ||
           ["org_id", "project_id"].some(key => query.has(key) && owner[key] !== query.get(key))) {
           setState({ data: null, error: "Telemetry ownership mismatch", lastGoodAt: null });
           return;
-        }
-        const nextIdentity = JSON.stringify([owner.provider_resource_uid, owner.placement_attempt]);
-        if (nextIdentity !== resourceIdentity) {
-          resourceIdentity = nextIdentity;
-          setState({ data: null, error: null, lastGoodAt: null });
+        } else {
+          const nextIdentity = JSON.stringify([owner.provider_resource_uid, owner.placement_attempt]);
+          if (nextIdentity !== resourceIdentity) {
+            resourceIdentity = nextIdentity;
+            setState({ data: null, error: null, lastGoodAt: null });
+          }
         }
         const parsed = parseTelemetryPresentation(raw);
         if (!parsed || parsed.view !== view) throw new Error("Malformed telemetry response");

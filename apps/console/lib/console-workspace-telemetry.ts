@@ -107,6 +107,123 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Cloud may emit `ownership: null` for no retained resource / shared unallocated.
+ * Accept that absence only for the two canonical resource-attempt empty-shell
+ * contracts: partial/not-recorded (`estimate: null`) or shared-unallocated
+ * (envelope + estimate unallocated, ok quality, exact singleton unallocated
+ * note, no numeric cost, estimate.evidence.allocation_kind "unallocated" with
+ * no resource-identifying UIDs, and blank or bounded agreeing rate-table
+ * provenance without evidence.source) — never as a general ownership bypass
+ * for parser-valid success/ok empty shells, mixed notes, contradictory
+ * evidence, or view-scoped envelopes. Unallocated Facts project away rate
+ * identity rather than treating a producer global version as foreign tenant data.
+ */
+export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
+  if (!isPlainObject(payload) || payload.ownership !== null) {
+    return false;
+  }
+  if (!Array.isArray(payload.cpu_cores_samples) || payload.cpu_cores_samples.length !== 0) {
+    return false;
+  }
+  if (!Array.isArray(payload.memory_bytes_samples) || payload.memory_bytes_samples.length !== 0) {
+    return false;
+  }
+  if (payload.admitted !== null) {
+    return false;
+  }
+  // Declared Cloud absences are resource-attempt scoped, not chart-view.
+  if (payload.estimate_scope !== "resource_attempt") {
+    return false;
+  }
+  if (payload.observed_at !== null) {
+    return false;
+  }
+  if (!Array.isArray(payload.data_quality_notes)) {
+    return false;
+  }
+  // Canonical absences carry exactly one producer note — reject mixed/extra
+  // notes so membership alone cannot bypass ownership validation.
+  if (payload.estimate === null) {
+    return (
+      payload.state === "partial" &&
+      payload.quality === "partial" &&
+      payload.data_quality_notes.length === 1 &&
+      payload.data_quality_notes[0] === "not_recorded"
+    );
+  }
+  if (!isPlainObject(payload.estimate)) {
+    return false;
+  }
+  if (
+    payload.state !== "unallocated" ||
+    payload.quality !== "ok" ||
+    payload.data_quality_notes.length !== 1 ||
+    payload.data_quality_notes[0] !== "unallocated" ||
+    payload.estimate.estimate_state !== "unallocated" ||
+    payload.estimate.estimated_usd !== null
+  ) {
+    return false;
+  }
+  // Shared-unallocated must carry canonical allocation evidence — reject
+  // missing/wrong allocation_kind or resource-identifying UIDs so a
+  // parser-valid estimate shell cannot bypass workspace ownership.
+  const evidence = payload.estimate.evidence;
+  if (!isPlainObject(evidence) || evidence.allocation_kind !== "unallocated") {
+    return false;
+  }
+  for (const field of ["provider_resource_uid", "pod_uid", "owner_job_uid"] as const) {
+    if (!(field in evidence) || evidence[field] === undefined || evidence[field] === null) {
+      continue;
+    }
+    if (typeof evidence[field] !== "string" || evidence[field].length > 0) {
+      return false;
+    }
+  }
+  // Blank historical versions may omit evidence.rate_table_version. Nonblank
+  // producer global versions must duplicate into evidence and agree
+  // (empty→null-normalized). Omitted source is fine; any present source
+  // (null, blank, or nonblank) is not — parseEstimate rejects null/blank for
+  // non-unpriced estimates, and nonblank source is absent on the real
+  // no-target response.
+  if (typeof payload.estimate.rate_table_version !== "string") {
+    return false;
+  }
+  if (payload.estimate.rate_table_version.length > MAX_RATE_PROVENANCE_LENGTH) {
+    return false;
+  }
+  const topLevelVersion =
+    payload.estimate.rate_table_version.trim() === ""
+      ? null
+      : payload.estimate.rate_table_version;
+  if ("source" in evidence && evidence.source !== undefined) {
+    return false;
+  }
+  const hasEvidenceVersion =
+    "rate_table_version" in evidence &&
+    evidence.rate_table_version !== undefined &&
+    evidence.rate_table_version !== null;
+  // Require the evidence copy whenever the top-level version is nonblank so a
+  // partial envelope cannot skip agreement and widen the ownership bypass.
+  if (topLevelVersion !== null && !hasEvidenceVersion) {
+    return false;
+  }
+  if (hasEvidenceVersion) {
+    if (typeof evidence.rate_table_version !== "string") {
+      return false;
+    }
+    if (evidence.rate_table_version.length > MAX_RATE_PROVENANCE_LENGTH) {
+      return false;
+    }
+    const evidenceVersion =
+      evidence.rate_table_version.trim() === "" ? null : evidence.rate_table_version;
+    if (evidenceVersion !== topLevelVersion) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isNullableTimestamp(value: unknown): value is string | null {
   return value === null || (typeof value === "string" && isFiniteTimestampString(value));
 }
@@ -690,6 +807,12 @@ function parseEstimate(
   const rateTableVersion =
     value.rate_table_version.trim() === "" ? null : value.rate_table_version;
   if (rateTableVersion === null && value.estimate_state !== "unallocated") {
+    return null;
+  }
+  // Unallocated may carry a producer global rate_table_version; Facts suppress
+  // it via projection. Nonblank evidence.source is absent on the real response
+  // and must not parse into the cost panel.
+  if (value.estimate_state === "unallocated" && rateSource !== null) {
     return null;
   }
   return {

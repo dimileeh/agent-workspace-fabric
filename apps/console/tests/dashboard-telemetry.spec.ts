@@ -319,6 +319,169 @@ test("slow requests time out without overlap and recover on the next minute", as
   expect(reads).toBe(2); release();
 });
 
+/** Exact Cloud no-resource body (production); refresh window_end_at for the test clock. */
+function productionNoResourceBody(windowEndAt: string) {
+  return {
+    window_end_at: windowEndAt,
+    estimate_scope: "resource_attempt",
+    state: "partial",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: null,
+    quality: "partial",
+    data_quality_notes: ["not_recorded"],
+  };
+}
+
+/** Cloud shared-monitor emit with null ownership (unallocated, not free). */
+function sharedUnallocatedNullOwnershipBody(windowEndAt: string) {
+  return {
+    window_end_at: windowEndAt,
+    estimate_scope: "resource_attempt",
+    state: "unallocated",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: {
+      currency: "USD",
+      estimate_state: "unallocated",
+      estimated_usd: null,
+      evidence: { allocation_kind: "unallocated" },
+      priced_interval_seconds: 0,
+      rate_table_version: "",
+      unpriced_interval_seconds: 0,
+    },
+    quality: "ok",
+    data_quality_notes: ["unallocated"],
+  };
+}
+
+/** Exact pinned Cloud no-target shared-monitor body (refresh window_end_at only). */
+function cloudSharedUnallocatedNoTargetBody(windowEndAt: string) {
+  const body = JSON.parse(
+    readFileSync(
+      `${process.cwd()}/lib/fixtures/console-workspace-telemetry/cloud_shared_unallocated_no_target.json`,
+      "utf8",
+    ),
+  );
+  body.window_end_at = windowEndAt;
+  return body;
+}
+
+test("production null-ownership no-resource renders not-recorded without ownership mismatch", async ({ page }) => {
+  await setup(page);
+  await page.route("**/telemetry?*", async route => {
+    const view = new URL(route.request().url()).searchParams.get("view")!;
+    const body = productionNoResourceBody("2026-09-12T12:01:00.000Z");
+    body.view = view;
+    await fulfillJson(route, body);
+  });
+  await gotoWithClock(page); await open(page);
+  await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+  await expect(page.getByTestId("telemetry-admission-missing")).toBeVisible();
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByText("$0.00")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
+});
+
+test("shared unallocated null ownership renders Unallocated without ownership mismatch", async ({ page }) => {
+  await setup(page);
+  await page.route("**/telemetry?*", async route => {
+    const view = new URL(route.request().url()).searchParams.get("view")!;
+    const body = sharedUnallocatedNullOwnershipBody("2026-09-12T12:01:00.000Z");
+    body.view = view;
+    await fulfillJson(route, body);
+  });
+  await gotoWithClock(page); await open(page);
+  await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unallocated");
+  await expect(page.getByTestId("telemetry-unallocated")).toBeVisible();
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByText("$0.00")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
+});
+
+for (const viewWindow of ["1h", "6h", "24h"] as const) {
+  test(`real Cloud shared-unallocated no-target ${viewWindow} renders Unallocated without rate Facts`, async ({ page }) => {
+    await setup(page);
+    const wireVersion = "gke-autopilot-pod-2026-09-12";
+    const reads: string[] = [];
+    await page.route("**/telemetry?*", async route => {
+      const view = new URL(route.request().url()).searchParams.get("view")!;
+      reads.push(view);
+      const body = cloudSharedUnallocatedNoTargetBody("2026-09-12T12:01:00.000Z");
+      body.view = view;
+      await fulfillJson(route, body);
+    });
+    await gotoWithClock(page); await open(page);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unallocated");
+    if (viewWindow !== "1h") {
+      await page.getByTestId(`telemetry-view-${viewWindow}`).click();
+      await expect.poll(() => reads.at(-1)).toBe(viewWindow);
+      await expect(page.getByTestId(`telemetry-view-${viewWindow}`)).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    }
+    await expect(page.getByTestId("console-workspace-telemetry")).toBeVisible();
+    await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unallocated");
+    await expect(page.getByTestId("telemetry-unallocated")).toBeVisible();
+    await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+    await expect(page.getByText("$0.00")).toHaveCount(0);
+    await expect(page.getByTestId("telemetry-workload-cost-value")).not.toHaveText(/free/i);
+    await expect(page.getByText(wireVersion, { exact: true })).toHaveCount(0);
+    const rateTableFact = page.getByText("Rate table", { exact: true }).locator("..");
+    await expect(rateTableFact).toContainText("—");
+    await expect(rateTableFact).not.toContainText(wireVersion);
+    const rateSourceFact = page.getByText("Rate source", { exact: true }).locator("..");
+    await expect(rateSourceFact).toContainText("—");
+  });
+}
+
+test("owned to null-ownership no-resource discards samples allocation and cost; later owned recovers", async ({ page }) => {
+  await setup(page);
+  let phase: "owned" | "empty" | "owned_again" = "owned";
+  await page.route("**/telemetry?*", async route => {
+    const view = new URL(route.request().url()).searchParams.get("view")!;
+    if (phase === "empty") {
+      const body = productionNoResourceBody("2026-09-12T12:02:00.000Z");
+      body.view = view;
+      await fulfillJson(route, body);
+      return;
+    }
+    const body = fixture();
+    body.view = view;
+    await fulfillJson(route, body);
+  });
+  await gotoWithClock(page); await open(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toBeVisible();
+  await expect(page.getByText("Compute class", { exact: true })).toBeVisible();
+  phase = "empty";
+  await pollTelemetry(page);
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Not recorded");
+  await expect(page.getByTestId("telemetry-admission-missing")).toBeVisible();
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toHaveCount(0);
+  await expect(page.getByText("Compute class", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("telemetry-last-good")).toHaveCount(0);
+  phase = "owned_again";
+  await pollTelemetry(page);
+  await expect(page.getByTestId("telemetry-workload-cost-value")).toHaveText("Unpriced");
+  await expect(page.getByTestId("telemetry-series-cpu").locator("svg")).toBeVisible();
+  await expect(page.getByTestId("telemetry-request-error")).toHaveCount(0);
+});
+
 for (const ownership of [undefined, null, false, 0, "", [], {}, { workspace_record_id: "ws_other" },
   ...["   ", "\t\n\r"].map(provider_resource_uid => ({ ...fixture().ownership, provider_resource_uid })),
 ]) {

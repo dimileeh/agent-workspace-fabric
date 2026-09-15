@@ -66,3 +66,14 @@ Imported verbatim via authenticated gh from dimileeh/awf-cloud at `8d2b59ead8ca3
 - `persisted_terminal_1h.json`: `e7b70a9cdb9630b40f639f18845f175c8f9bbd2a28593da31d4bfb164128d745`
 - `persisted_terminal_2h_under_1h.json`: `eb7d87421a8675adc549dc350317989ba40244d6ee00f55ba2ebc018a4f042fe`
 - `persisted_unpriced_allocation.json`: `6d61a29f888fde55a3c5d7e3ce5cc42a4a9ca74b7cfacc0f0bdd23bdb2f0e2c6`
+
+## Cloud shared-unallocated no-target read (PR987 residual)
+
+Pinned exact producer response from awf-cloud
+`5ff6b6b2985b1455004da116175706f811f0ee1d` no-target shared-monitor branch of
+`read_workspace_telemetry()` (`estimate_allocation_cost([], PRODUCTION_RATES,
+unallocated=True)`). Paths audited: `console_telemetry/{read_service,estimation,types}.py`,
+`contracts/console_telemetry.py`. Only `window_end_at` may change in tests.
+
+- `cloud_shared_unallocated_no_target.json` — wire fields preserved; Core PR987
+  squash reference `5f5dda7dafb2a7bae06edfaf3b3de9c01a4b3cdc`.

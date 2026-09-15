@@ -20,6 +20,7 @@ import {
   buildSparklineGeometry,
   downsampleSeriesForSparkline,
   formatCores,
+  isLegitimateNullOwnershipNoResource,
   parseTelemetryPresentation,
   projectWorkspaceTelemetryView,
   projectWorkspaceTelemetryFreshness,
@@ -36,8 +37,388 @@ const SUCCESS = loadFixture("success");
 const PARTIAL = loadFixture("partial");
 const STALE = loadFixture("stale");
 const UNALLOCATED = loadFixture("unallocated");
+const CLOUD_SHARED_UNALLOCATED_NO_TARGET = loadFixture(
+  "cloud_shared_unallocated_no_target",
+);
 
 const FIXED_NOW = Date.parse("2026-09-12T12:01:00+00:00");
+
+function productionNullOwnershipNoResource(overrides = {}) {
+  return {
+    window_end_at: "2026-09-12T12:01:00.000Z",
+    estimate_scope: "resource_attempt",
+    state: "partial",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: null,
+    quality: "partial",
+    data_quality_notes: ["not_recorded"],
+    ...overrides,
+  };
+}
+
+function sharedNullOwnershipUnallocated(overrides = {}) {
+  return {
+    window_end_at: "2026-09-12T12:01:00.000Z",
+    estimate_scope: "resource_attempt",
+    state: "unallocated",
+    ownership: null,
+    view: "1h",
+    observed_at: null,
+    stale_after_seconds: 300,
+    cpu_cores_samples: [],
+    memory_bytes_samples: [],
+    admitted: null,
+    estimate: {
+      currency: "USD",
+      estimate_state: "unallocated",
+      estimated_usd: null,
+      evidence: { allocation_kind: "unallocated" },
+      priced_interval_seconds: 0,
+      rate_table_version: "",
+      unpriced_interval_seconds: 0,
+    },
+    quality: "ok",
+    data_quality_notes: ["unallocated"],
+    ...overrides,
+  };
+}
+
+test("isLegitimateNullOwnershipNoResource accepts Cloud no-resource absence shapes", () => {
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource()), true);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated()), true);
+  assert.ok(parseTelemetryPresentation(productionNullOwnershipNoResource()));
+  assert.ok(parseTelemetryPresentation(sharedNullOwnershipUnallocated()));
+});
+
+test("real Cloud shared-unallocated no-target fixture is accepted and projects without rate Facts", () => {
+  // Pinned producer: estimate_allocation_cost([], PRODUCTION_RATES, unallocated=True).
+  assert.equal(
+    isLegitimateNullOwnershipNoResource(CLOUD_SHARED_UNALLOCATED_NO_TARGET),
+    true,
+  );
+  const parsed = parseTelemetryPresentation(CLOUD_SHARED_UNALLOCATED_NO_TARGET);
+  assert.ok(parsed);
+  assert.equal(parsed.view, "1h");
+  assert.equal(parsed.estimate?.estimateState, "unallocated");
+  assert.equal(parsed.estimate?.estimatedUsd, null);
+  // Parse may retain producer global version; projection must suppress Facts.
+  assert.equal(parsed.estimate?.rateTableVersion, "gke-autopilot-pod-2026-09-12");
+  const view = projectWorkspaceTelemetryView(parsed, {
+    nowMs: Date.parse(CLOUD_SHARED_UNALLOCATED_NO_TARGET.window_end_at),
+  });
+  assert.equal(view.estimate.displayState, "unallocated");
+  assert.equal(view.estimate.estimatedUsd, null);
+  assert.equal(view.estimate.rateTableVersion, null);
+  assert.equal(view.estimate.rateSource, null);
+  assert.notEqual(view.estimate.estimatedUsd, 0);
+  assert.notEqual(view.estimate.displayState, "complete");
+
+  for (const viewWindow of ["1h", "6h", "24h"]) {
+    const clone = structuredClone(CLOUD_SHARED_UNALLOCATED_NO_TARGET);
+    clone.view = viewWindow;
+    assert.equal(isLegitimateNullOwnershipNoResource(clone), true, viewWindow);
+    const windowParsed = parseTelemetryPresentation(clone);
+    assert.ok(windowParsed, viewWindow);
+    assert.equal(windowParsed.view, viewWindow);
+    assert.equal(windowParsed.estimateScope, "resource_attempt");
+    const windowView = projectWorkspaceTelemetryView(windowParsed, {
+      nowMs: Date.parse(clone.window_end_at),
+    });
+    assert.equal(windowView.estimate.displayState, "unallocated", viewWindow);
+    assert.equal(windowView.estimate.rateTableVersion, null, viewWindow);
+    assert.equal(windowView.estimate.rateSource, null, viewWindow);
+  }
+});
+
+test("isLegitimateNullOwnershipNoResource rejects non-canonical null-estimate ownership absence", () => {
+  // Parser-valid empty shell that is neither partial/not-recorded nor shared-unallocated.
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    state: "success",
+    quality: "ok",
+    observed_at: "2026-09-12T12:01:00.000Z",
+    data_quality_notes: [],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    state: "success",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    quality: "ok",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    observed_at: "2026-09-12T12:01:00.000Z",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: [],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: undefined,
+  })), false);
+  // View-scoped empty shells are not Cloud's no-resource absence contract.
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate_scope: "view",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate_scope: undefined,
+  })), false);
+  // Unallocated estimate without envelope state coupling must fail closed here.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    state: "success",
+  })), false);
+});
+
+test("isLegitimateNullOwnershipNoResource rejects incomplete shared-unallocated absence shapes", () => {
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    quality: "partial",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    observed_at: "2026-09-12T12:01:00.000Z",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: [],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate_scope: "view",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate_scope: undefined,
+  })), false);
+});
+
+test("isLegitimateNullOwnershipNoResource requires canonical unallocated evidence and rejects resource UIDs", () => {
+  // Canonical Cloud evidence (allocation_kind only, or with non-identity notes) stays accepted.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        unpriced_reason: "no_dedicated_allocation",
+      },
+    },
+  })), true);
+  // Missing or non-object evidence cannot bypass ownership.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: undefined,
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: null,
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {},
+    },
+  })), false);
+  // Contradictory allocation_kind must not look like shared-unallocated.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: { allocation_kind: "dedicated", provider_resource_uid: "pod-other" },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: { allocation_kind: "dedicated" },
+    },
+  })), false);
+  // Resource-identifying evidence contradicts the no-resource ownership bypass.
+  for (const field of ["provider_resource_uid", "pod_uid", "owner_job_uid"]) {
+    assert.equal(
+      isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+        estimate: {
+          ...sharedNullOwnershipUnallocated().estimate,
+          evidence: { allocation_kind: "unallocated", [field]: "pod-other" },
+        },
+      })),
+      false,
+      field,
+    );
+  }
+});
+
+test("isLegitimateNullOwnershipNoResource accepts bounded agreeing rate versions and rejects malformed provenance", () => {
+  // Matching bounded producer global version (real no-target shape) is legitimate.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "gke-autopilot-pod-2026-09-12",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "gke-autopilot-pod-2026-09-12",
+        unpriced_reason: "no_dedicated_allocation",
+      },
+    },
+  })), true);
+  // Nonblank top-level without evidence duplication must not bypass ownership.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "producer-global-rates-v1",
+    },
+  })), false);
+  // Present source (null or blank) would pass ownership then fail parseEstimate
+  // for non-unpriced unallocated estimates — reject here too so the hook paths agree.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        source: null,
+      },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        source: "",
+      },
+    },
+  })), false);
+  // Nonblank evidence.source is absent on the real response — keep fail-closed.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        source: "https://tenant-other.example/rates",
+      },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "producer-global-rates-v1",
+      evidence: {
+        allocation_kind: "unallocated",
+        source: "https://tenant-other.example/rates",
+        rate_table_version: "producer-global-rates-v1",
+      },
+    },
+  })), false);
+  // Top-level vs evidence version mismatch fails closed.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "producer-global-rates-v1",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "other-rate-table",
+      },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "producer-global-rates-v1",
+      },
+    },
+  })), false);
+  // Non-string / overlong rate versions fail closed.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: 42,
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "x".repeat(MAX_RATE_PROVENANCE_LENGTH + 1),
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "ok",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "x".repeat(MAX_RATE_PROVENANCE_LENGTH + 1),
+      },
+    },
+  })), false);
+  // Whitespace-only / blank duplicated provenance still matches the historical contract.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      rate_table_version: "  ",
+      evidence: {
+        allocation_kind: "unallocated",
+        rate_table_version: "",
+      },
+    },
+  })), true);
+});
+
+test("isLegitimateNullOwnershipNoResource requires exact singleton producer notes", () => {
+  // Membership alone must not bypass ownership when notes are mixed or duplicated.
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: ["not_recorded", "unallocated"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: ["not_recorded", "not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: ["unallocated", "not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["unallocated", "not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["unallocated", "unallocated"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["not_recorded", "unallocated"],
+  })), false);
+});
+
+test("isLegitimateNullOwnershipNoResource rejects null ownership with resource-bearing or contradictory fields", () => {
+  const sample = structuredClone(SUCCESS.cpu_cores_samples[0]);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    cpu_cores_samples: [sample],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    memory_bytes_samples: [structuredClone(SUCCESS.memory_bytes_samples[0])],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    admitted: structuredClone(SUCCESS.admitted),
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate: { ...structuredClone(UNALLOCATED.estimate), estimated_usd: "0.00" },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate: structuredClone(SUCCESS.estimate),
+  })), false);
+  for (const ownership of [undefined, {}, [], false, 0, ""]) {
+    assert.equal(
+      isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({ ownership })),
+      false,
+      JSON.stringify(ownership),
+    );
+  }
+  // Populated fixture with ownership forced null must stay rejectable (hook security).
+  const populated = structuredClone(SUCCESS);
+  populated.ownership = null;
+  assert.equal(isLegitimateNullOwnershipNoResource(populated), false);
+});
 
 test("parseTelemetryPresentation accepts all four verbatim producer fixtures", () => {
   for (const [name, raw] of [
@@ -682,6 +1063,63 @@ test("parseTelemetryPresentation rejects malformed or conflicting estimate evide
   assert.ok(parseTelemetryPresentation(SUCCESS));
   // Unallocated evidence without source / rate_table_version remains valid.
   assert.ok(parseTelemetryPresentation(UNALLOCATED));
+});
+
+test("parseTelemetryPresentation accepts unallocated producer rate versions and rejects nonblank source", () => {
+  // Real Cloud unallocated emits a global rate_table_version; parse retains it,
+  // projection suppresses Facts. Nonblank evidence.source stays fail-closed.
+  const producerRateTable = structuredClone(UNALLOCATED);
+  producerRateTable.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    rate_table_version: "gke-autopilot-pod-2026-09-12",
+    evidence: {
+      allocation_kind: "unallocated",
+      rate_table_version: "gke-autopilot-pod-2026-09-12",
+      unpriced_reason: "no_dedicated_allocation",
+    },
+  };
+  const parsedProducer = parseTelemetryPresentation(producerRateTable);
+  assert.ok(parsedProducer);
+  assert.equal(parsedProducer.estimate.rateTableVersion, "gke-autopilot-pod-2026-09-12");
+  assert.equal(parsedProducer.estimate.rateSource, null);
+  const projected = projectWorkspaceTelemetryView(parsedProducer, { nowMs: FIXED_NOW });
+  assert.equal(projected.estimate.displayState, "unallocated");
+  assert.equal(projected.estimate.rateTableVersion, null);
+  assert.equal(projected.estimate.rateSource, null);
+  assert.equal(projected.estimate.estimatedUsd, null);
+
+  const foreignSource = structuredClone(UNALLOCATED);
+  foreignSource.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    evidence: {
+      allocation_kind: "unallocated",
+      source: "https://tenant-other.example/rates",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(foreignSource), null);
+
+  const foreignBoth = structuredClone(UNALLOCATED);
+  foreignBoth.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    rate_table_version: "gke-autopilot-pod-2026-09-12",
+    evidence: {
+      allocation_kind: "unallocated",
+      source: "https://tenant-other.example/rates",
+      rate_table_version: "gke-autopilot-pod-2026-09-12",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(foreignBoth), null);
+
+  const mismatchedVersions = structuredClone(UNALLOCATED);
+  mismatchedVersions.estimate = {
+    ...structuredClone(UNALLOCATED.estimate),
+    rate_table_version: "gke-autopilot-pod-2026-09-12",
+    evidence: {
+      allocation_kind: "unallocated",
+      rate_table_version: "other-rate-table",
+    },
+  };
+  assert.equal(parseTelemetryPresentation(mismatchedVersions), null);
 });
 
 test("parseTelemetryPresentation rejects estimate_state that contradicts amount fields", () => {
