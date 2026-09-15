@@ -271,15 +271,23 @@ test("isLegitimateNullOwnershipNoResource accepts bounded agreeing rate versions
       rate_table_version: "producer-global-rates-v1",
     },
   })), false);
-  // Explicit null source is accepted by the ownership gate today only if we
-  // skip it — but parseEstimate rejects null unless estimate_state is unpriced,
-  // so the hook would then fail as malformed telemetry. Reject here too.
+  // Present source (null or blank) would pass ownership then fail parseEstimate
+  // for non-unpriced unallocated estimates — reject here too so the hook paths agree.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     estimate: {
       ...sharedNullOwnershipUnallocated().estimate,
       evidence: {
         allocation_kind: "unallocated",
         source: null,
+      },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        source: "",
       },
     },
   })), false);

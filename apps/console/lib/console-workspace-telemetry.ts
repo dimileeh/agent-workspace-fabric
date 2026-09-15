@@ -182,9 +182,10 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   }
   // Blank historical versions may omit evidence.rate_table_version. Nonblank
   // producer global versions must duplicate into evidence and agree
-  // (empty→null-normalized). Omitted source is fine; explicit null matches
-  // parseEstimate's non-unpriced rejection, and nonblank source is absent on
-  // the real no-target response — fail closed.
+  // (empty→null-normalized). Omitted source is fine; any present source
+  // (null, blank, or nonblank) is not — parseEstimate rejects null/blank for
+  // non-unpriced estimates, and nonblank source is absent on the real
+  // no-target response.
   if (typeof payload.estimate.rate_table_version !== "string") {
     return false;
   }
@@ -196,13 +197,7 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
       ? null
       : payload.estimate.rate_table_version;
   if ("source" in evidence && evidence.source !== undefined) {
-    if (
-      evidence.source === null ||
-      typeof evidence.source !== "string" ||
-      evidence.source.trim() !== ""
-    ) {
-      return false;
-    }
+    return false;
   }
   const hasEvidenceVersion =
     "rate_table_version" in evidence &&
