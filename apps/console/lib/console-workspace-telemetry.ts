@@ -112,8 +112,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Accept that absence only for the two canonical resource-attempt empty-shell
  * contracts: partial/not-recorded (`estimate: null`) or shared-unallocated
  * (envelope + estimate unallocated, ok quality, exact singleton unallocated
- * note, no numeric cost) — never as a general ownership bypass for
- * parser-valid success/ok empty shells, mixed notes, or view-scoped envelopes.
+ * note, no numeric cost, and estimate.evidence.allocation_kind "unallocated"
+ * with no resource-identifying UIDs) — never as a general ownership bypass for
+ * parser-valid success/ok empty shells, mixed notes, contradictory evidence,
+ * or view-scoped envelopes.
  */
 export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   if (!isPlainObject(payload) || payload.ownership !== null) {
@@ -151,14 +153,32 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   if (!isPlainObject(payload.estimate)) {
     return false;
   }
-  return (
-    payload.state === "unallocated" &&
-    payload.quality === "ok" &&
-    payload.data_quality_notes.length === 1 &&
-    payload.data_quality_notes[0] === "unallocated" &&
-    payload.estimate.estimate_state === "unallocated" &&
-    payload.estimate.estimated_usd === null
-  );
+  if (
+    payload.state !== "unallocated" ||
+    payload.quality !== "ok" ||
+    payload.data_quality_notes.length !== 1 ||
+    payload.data_quality_notes[0] !== "unallocated" ||
+    payload.estimate.estimate_state !== "unallocated" ||
+    payload.estimate.estimated_usd !== null
+  ) {
+    return false;
+  }
+  // Shared-unallocated must carry canonical allocation evidence — reject
+  // missing/wrong allocation_kind or resource-identifying UIDs so a
+  // parser-valid estimate shell cannot bypass workspace ownership.
+  const evidence = payload.estimate.evidence;
+  if (!isPlainObject(evidence) || evidence.allocation_kind !== "unallocated") {
+    return false;
+  }
+  for (const field of ["provider_resource_uid", "pod_uid", "owner_job_uid"] as const) {
+    if (!(field in evidence) || evidence[field] === undefined || evidence[field] === null) {
+      continue;
+    }
+    if (typeof evidence[field] !== "string" || evidence[field].length > 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isNullableTimestamp(value: unknown): value is string | null {

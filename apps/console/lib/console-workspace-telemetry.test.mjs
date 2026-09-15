@@ -150,6 +150,64 @@ test("isLegitimateNullOwnershipNoResource rejects incomplete shared-unallocated 
   })), false);
 });
 
+test("isLegitimateNullOwnershipNoResource requires canonical unallocated evidence and rejects resource UIDs", () => {
+  // Canonical Cloud evidence (allocation_kind only, or with non-identity notes) stays accepted.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {
+        allocation_kind: "unallocated",
+        unpriced_reason: "no_dedicated_allocation",
+      },
+    },
+  })), true);
+  // Missing or non-object evidence cannot bypass ownership.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: undefined,
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: null,
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: {},
+    },
+  })), false);
+  // Contradictory allocation_kind must not look like shared-unallocated.
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: { allocation_kind: "dedicated", provider_resource_uid: "pod-other" },
+    },
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate: {
+      ...sharedNullOwnershipUnallocated().estimate,
+      evidence: { allocation_kind: "dedicated" },
+    },
+  })), false);
+  // Resource-identifying evidence contradicts the no-resource ownership bypass.
+  for (const field of ["provider_resource_uid", "pod_uid", "owner_job_uid"]) {
+    assert.equal(
+      isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+        estimate: {
+          ...sharedNullOwnershipUnallocated().estimate,
+          evidence: { allocation_kind: "unallocated", [field]: "pod-other" },
+        },
+      })),
+      false,
+      field,
+    );
+  }
+});
+
 test("isLegitimateNullOwnershipNoResource requires exact singleton producer notes", () => {
   // Membership alone must not bypass ownership when notes are mixed or duplicated.
   assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
