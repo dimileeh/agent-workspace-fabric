@@ -150,6 +150,28 @@ test("isLegitimateNullOwnershipNoResource rejects incomplete shared-unallocated 
   })), false);
 });
 
+test("isLegitimateNullOwnershipNoResource requires exact singleton producer notes", () => {
+  // Membership alone must not bypass ownership when notes are mixed or duplicated.
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: ["not_recorded", "unallocated"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: ["not_recorded", "not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    data_quality_notes: ["unallocated", "not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["unallocated", "not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["unallocated", "unallocated"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["not_recorded", "unallocated"],
+  })), false);
+});
+
 test("isLegitimateNullOwnershipNoResource rejects null ownership with resource-bearing or contradictory fields", () => {
   const sample = structuredClone(SUCCESS.cpu_cores_samples[0]);
   assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
