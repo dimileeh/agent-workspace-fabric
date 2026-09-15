@@ -116,9 +116,37 @@ test("isLegitimateNullOwnershipNoResource rejects non-canonical null-estimate ow
   assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
     data_quality_notes: undefined,
   })), false);
+  // View-scoped empty shells are not Cloud's no-resource absence contract.
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate_scope: "view",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(productionNullOwnershipNoResource({
+    estimate_scope: undefined,
+  })), false);
   // Unallocated estimate without envelope state coupling must fail closed here.
   assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
     state: "success",
+  })), false);
+});
+
+test("isLegitimateNullOwnershipNoResource rejects incomplete shared-unallocated absence shapes", () => {
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    quality: "partial",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    observed_at: "2026-09-12T12:01:00.000Z",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: [],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    data_quality_notes: ["not_recorded"],
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate_scope: "view",
+  })), false);
+  assert.equal(isLegitimateNullOwnershipNoResource(sharedNullOwnershipUnallocated({
+    estimate_scope: undefined,
   })), false);
 });
 

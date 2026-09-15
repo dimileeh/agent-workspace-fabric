@@ -109,10 +109,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Cloud may emit `ownership: null` for no retained resource / shared unallocated.
- * Accept that absence only for the two canonical empty-shell contracts:
- * partial/not-recorded (`estimate: null`) or shared-unallocated
- * (`state` + estimate both unallocated, no numeric cost) — never as a general
- * ownership bypass for parser-valid success/ok empty shells.
+ * Accept that absence only for the two canonical resource-attempt empty-shell
+ * contracts: partial/not-recorded (`estimate: null`) or shared-unallocated
+ * (envelope + estimate unallocated, ok quality, unallocated note, no numeric
+ * cost) — never as a general ownership bypass for parser-valid success/ok
+ * empty shells or view-scoped envelopes.
  */
 export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   if (!isPlainObject(payload) || payload.ownership !== null) {
@@ -127,12 +128,20 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   if (payload.admitted !== null) {
     return false;
   }
+  // Declared Cloud absences are resource-attempt scoped, not chart-view.
+  if (payload.estimate_scope !== "resource_attempt") {
+    return false;
+  }
+  if (payload.observed_at !== null) {
+    return false;
+  }
+  if (!Array.isArray(payload.data_quality_notes)) {
+    return false;
+  }
   if (payload.estimate === null) {
     return (
       payload.state === "partial" &&
       payload.quality === "partial" &&
-      payload.observed_at === null &&
-      Array.isArray(payload.data_quality_notes) &&
       payload.data_quality_notes.includes("not_recorded")
     );
   }
@@ -141,6 +150,8 @@ export function isLegitimateNullOwnershipNoResource(payload: unknown): boolean {
   }
   return (
     payload.state === "unallocated" &&
+    payload.quality === "ok" &&
+    payload.data_quality_notes.includes("unallocated") &&
     payload.estimate.estimate_state === "unallocated" &&
     payload.estimate.estimated_usd === null
   );
