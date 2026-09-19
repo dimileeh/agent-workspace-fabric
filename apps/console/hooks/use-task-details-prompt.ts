@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { apiGet } from "@/components/console-dashboard-shared";
@@ -143,6 +143,7 @@ export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPro
   const [applied, setApplied] = useState<AppliedPrompt | null>(null);
   const [visit, setVisit] = useState<PromptVisit>({ identity, id: 0 });
   const generationRef = useRef(0);
+  const activeVisitRef = useRef(0);
   // Bump during render so A→B→A cannot paint the previous success before the
   // effect for the new visit runs. The modal stays mounted across workspace
   // prop changes, and the dialog does not remount these controls.
@@ -150,7 +151,17 @@ export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPro
   const visitId = visitChanged ? visit.id + 1 : visit.id;
   if (visitChanged) {
     setVisit({ identity, id: visitId });
+    // Drop the previous visit's prompt now. A matching identity must not keep
+    // it on screen, including when access was revoked between visits.
+    if (applied !== null) {
+      setApplied(null);
+    }
   }
+  // Sync before passive effects. An in-flight apply can resume in the
+  // microtask after this layout pass and before generation is bumped.
+  useLayoutEffect(() => {
+    activeVisitRef.current = visitId;
+  }, [visitId]);
 
   useEffect(() => {
     if (workspaceId === null || identity === null) {
@@ -182,7 +193,11 @@ export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPro
       }
       const next = classifyDetail(result, requestedId);
       setApplied((current) => {
-        if (cancelled || generation !== generationRef.current) {
+        if (
+          cancelled ||
+          generation !== generationRef.current ||
+          requestedVisit !== activeVisitRef.current
+        ) {
           return current;
         }
         return { identity: requestedIdentity, visit: requestedVisit, state: next };
