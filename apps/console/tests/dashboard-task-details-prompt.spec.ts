@@ -475,3 +475,36 @@ test("a successful detail is rendered only when its id matches the requested wor
 
   expect(detailReads(reads)).toHaveLength(cases.length);
 });
+
+test("missing or non-string detail prompts are errors, not an absent prompt", async ({ page }) => {
+  const reads: string[] = [];
+  const cases = [
+    { id: "ws_prompt_omit_prompt", body: { id: "ws_prompt_omit_prompt" } },
+    { id: "ws_prompt_null_prompt", body: { id: "ws_prompt_null_prompt", task_prompt: null } },
+    { id: "ws_prompt_numeric_prompt", body: { id: "ws_prompt_numeric_prompt", task_prompt: 404 } },
+    { id: "ws_prompt_object_prompt", body: { id: "ws_prompt_object_prompt", task_prompt: { text: FOREIGN_PROMPT } } },
+  ] as const;
+  const items = cases.map((entry) => overviewItem(entry.id, entry.id, OVERVIEW_LEAK));
+  await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: items });
+  await installDetailRoute(page, reads, async (route, id) => {
+    const entry = cases.find((candidate) => candidate.id === id);
+    await fulfillJson(route, entry?.body ?? { id, task_prompt: FOREIGN_PROMPT });
+  });
+
+  await openConsole(page, true);
+  expect(detailReads(reads)).toEqual([]);
+
+  for (const entry of cases) {
+    const dialog = await openDetails(page, entry.id);
+    const prompt = dialog.getByTestId("task-details-prompt");
+    const alert = prompt.getByTestId("task-details-prompt-error");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText("Task prompt response was malformed.");
+    await expect(prompt).not.toContainText(FOREIGN_PROMPT);
+    await expect(prompt).not.toContainText(OVERVIEW_LEAK);
+    await expect(prompt).not.toContainText("No prompt stored for this workspace.");
+    await dialog.getByRole("button", { name: "Close task details" }).click();
+  }
+
+  expect(detailReads(reads)).toHaveLength(cases.length);
+});

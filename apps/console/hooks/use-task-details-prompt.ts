@@ -20,6 +20,7 @@ const MISSING_MESSAGE = "Workspace detail was not found.";
 const DENIED_FALLBACK = "Task prompt access was denied.";
 const ERROR_FALLBACK = "Unable to load the task prompt.";
 const MISMATCH_MESSAGE = "Task prompt response did not match this workspace.";
+const MALFORMED_PROMPT_MESSAGE = "Task prompt response was malformed.";
 
 type ResolvedPrompt = Exclude<TaskDetailsPromptState, { status: "closed" } | { status: "loading" }>;
 
@@ -87,16 +88,22 @@ function classifyDetail(result: ApiEnvelope<Workspace>, requestedId: string): Re
   }
 
   // apiGet does not validate the payload. Accept a prompt only when the body
-  // names this workspace; missing, empty, or non-string ids are not a match.
+  // names this workspace and task_prompt is a string. Missing, empty, or
+  // non-string ids are not a match. A missing or non-string task_prompt is a
+  // malformed contract, not an empty prompt; empty and whitespace-only strings
+  // remain the absent presentation.
   const data: unknown = result.data;
   const responseId = responseWorkspaceId(data);
   if (responseId === null || responseId !== requestedId) {
     return { status: "error", message: MISMATCH_MESSAGE };
   }
   const taskPrompt = (data as { task_prompt?: unknown }).task_prompt;
+  if (typeof taskPrompt !== "string") {
+    return { status: "error", message: MALFORMED_PROMPT_MESSAGE };
+  }
   return {
     status: "ready",
-    prompt: typeof taskPrompt === "string" && taskPrompt.trim() ? taskPrompt : "",
+    prompt: taskPrompt.trim() ? taskPrompt : "",
   };
 }
 
