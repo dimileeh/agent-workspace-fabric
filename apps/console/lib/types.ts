@@ -881,6 +881,8 @@ export type AwfStreamFrame =
       fd: string;
       offset: number;
       next_offset?: number;
+      text_offset?: number;
+      text_next_offset?: number;
       data: string;
       occurred_at?: string;
     }

@@ -20,6 +20,7 @@ useRef,
 useState
 } from "react";
 
+import { useTaskDetailsPrompt } from "@/hooks/use-task-details-prompt";
 import {
 distinctFinishedAt,
 formatAgentIdentityLabel,
@@ -105,6 +106,41 @@ formatTokenCount
 // client and fall back to useEffect on the server where there is no layout.
 const useIsomorphicLayoutEffect =
   typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+function TaskDetailsPrompt({ workspaceId }: { workspaceId: string }) {
+  const state = useTaskDetailsPrompt(workspaceId);
+  if (state.status === "ready") {
+    return <TaskPromptBody prompt={state.prompt} />;
+  }
+  if (state.status === "denied" || state.status === "missing" || state.status === "error") {
+    const testId =
+      state.status === "denied"
+        ? "task-details-prompt-denied"
+        : state.status === "missing"
+          ? "task-details-prompt-missing"
+          : "task-details-prompt-error";
+    return (
+      <div
+        role="alert"
+        data-testid={testId}
+        className="flex items-start gap-2 rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-sm text-danger-text"
+      >
+        <AlertCircle className="mt-0.5 shrink-0" size={16} aria-hidden />
+        <span>{state.message}</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      role="status"
+      data-testid="task-details-prompt-loading"
+      className="flex items-center gap-2 text-sm text-fg-muted"
+    >
+      <Loader2 size={14} className="animate-spin" aria-hidden />
+      Loading task prompt…
+    </div>
+  );
+}
 
 export function TaskDetailsModal({
   workspace,
@@ -216,9 +252,12 @@ export function TaskDetailsModal({
             workspaceId={workspace.workspace_id}
             refreshKey={workspace.updated_at}
           />
-          <section className="grid gap-2 rounded-md border border-line bg-surface-2 p-3">
+          <section
+            className="grid gap-2 rounded-md border border-line bg-surface-2 p-3"
+            data-testid="task-details-prompt"
+          >
             <div className="text-xs font-semibold text-fg-muted">Prompt sent to AWF</div>
-            <TaskPromptBody prompt={workspace.task_prompt} />
+            <TaskDetailsPrompt workspaceId={workspace.workspace_id} />
           </section>
         </div>
       </div>
