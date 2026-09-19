@@ -898,22 +898,25 @@ export function ConsoleDashboard() {
 
   const resetInspectorSession = useCallback(() => {
     logListingAuthDeniedRef.current = false;
-    setLogListingAuthDenied(false);
     logTailAuthDeniedRef.current = false;
-    setLogTailAuthDenied(false);
     workspaceDetailAuthDeniedRef.current = false;
-    setWorkspaceDetailAuthDenied(false);
     workspaceBaseDetailAuthDeniedRef.current = false;
     eventFeedAuthDeniedRef.current = false;
-    setEventFeedAuthDenied(false);
     selectedStreamsRef.current = [];
-    setDetail(emptyDetail);
-    setSelectedStreams([]);
-    setLogEntries([]);
-    setStreamOffsets({});
-    setWorkspaceDetailError(null);
-    setRetryState({ status: "idle" });
-    setOperatorActionState({ status: "idle" });
+    // Keep the current identity when the session is already clear. A fresh [] / {}
+    // on every open schedules a second dashboard commit inside the <1s pane
+    // timing budget even though the inspector has nothing to drop.
+    setLogListingAuthDenied((current) => (current ? false : current));
+    setLogTailAuthDenied((current) => (current ? false : current));
+    setWorkspaceDetailAuthDenied((current) => (current ? false : current));
+    setEventFeedAuthDenied((current) => (current ? false : current));
+    setDetail((current) => (current === emptyDetail ? current : emptyDetail));
+    setSelectedStreams((current) => (current.length === 0 ? current : []));
+    setLogEntries((current) => (current.length === 0 ? current : []));
+    setStreamOffsets((current) => (Object.keys(current).length === 0 ? current : {}));
+    setWorkspaceDetailError((current) => (current === null ? current : null));
+    setRetryState((current) => (current.status === "idle" ? current : { status: "idle" }));
+    setOperatorActionState((current) => (current.status === "idle" ? current : { status: "idle" }));
   }, []);
 
   // Switching between workspaces must clear before paint: selectedOverview already

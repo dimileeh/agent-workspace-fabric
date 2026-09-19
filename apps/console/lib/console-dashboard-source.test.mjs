@@ -811,7 +811,7 @@ test("overview and workspace-detail errors clear only when their own feed succee
   );
   assert.match(
     dashboard,
-    /setLogEntries\(\[\]\);\s*setStreamOffsets\(\{\}\);\s*setWorkspaceDetailError\(null\);/,
+    /setLogEntries\(\(current\) => \(current\.length === 0 \? current : \[\]\)\);\s*setStreamOffsets\(\(current\) => \(Object\.keys\(current\)\.length === 0 \? current : \{\}\)\);\s*setWorkspaceDetailError\(\(current\) => \(current === null \? current : null\)\);/,
     "Expected selection changes to drop the previous workspace-detail error",
   );
 });
@@ -3482,8 +3482,8 @@ test("inspector session reset clears before paint when switching workspaces", ()
   );
   assert.match(
     dashboard,
-    /setDetail\(emptyDetail\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setRetryState\(\{ status: "idle" \}\);[\s\S]*?setOperatorActionState\(\{ status: "idle" \}\);/,
-    "Expected the shared inspector session reset to clear detail, streams, logs, and action chrome",
+    /setDetail\(\(current\) => \(current === emptyDetail \? current : emptyDetail\)\);[\s\S]*?setSelectedStreams\(\(current\) => \(current\.length === 0 \? current : \[\]\)\);[\s\S]*?setLogEntries\(\(current\) => \(current\.length === 0 \? current : \[\]\)\);[\s\S]*?setRetryState\(\(current\) => \(current\.status === "idle" \? current : \{ status: "idle" \}\)\);[\s\S]*?setOperatorActionState\(\(current\) => \(current\.status === "idle" \? current : \{ status: "idle" \}\)\);/,
+    "Expected the shared inspector session reset to clear dirty detail, streams, logs, and action chrome without allocating a new identity when already clear",
   );
   assert.doesNotMatch(
     dashboard,
