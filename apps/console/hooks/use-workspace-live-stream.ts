@@ -7,6 +7,7 @@ import {
   resolveWorkspaceStreamSubscription,
 } from "@/lib/console-capabilities";
 import { awfPath } from "@/lib/console-urls";
+import { streamOffsetAfterLiveFrame, visibleLiveLogFrame } from "@/lib/live-log-replay";
 import type { ConsoleCapabilities } from "@/lib/types";
 import {
   type DetailState,
@@ -16,32 +17,6 @@ import {
   streamAuthProbeDelayMs,
   trimLogEntries,
 } from "@/components/console-dashboard-shared";
-
-/**
- * End offset of the tail snapshot already rendered for this stream.
- * Denial diagnostics are not byte coverage. A reconnect that replays a live
- * frame from before this offset must not append it: the tail write only drops
- * live entries that are already in the list when it flushes.
- */
-function coveredTailByteOffset(
-  entries: readonly LogEntry[],
-  workspaceId: string,
-  streamId: string,
-): number {
-  let covered = 0;
-  for (const entry of entries) {
-    if (
-      entry.kind !== "tail" ||
-      entry.workspaceId !== workspaceId ||
-      entry.streamId !== streamId ||
-      entry.key.startsWith("tail-error:")
-    ) {
-      continue;
-    }
-    covered = Math.max(covered, entry.offset + entry.data.length);
-  }
-  return covered;
-}
 
 type StreamState = "idle" | "connecting" | "live" | "error";
 
@@ -369,23 +344,29 @@ export function useWorkspaceLiveStream({
           if (streamAuthDenied()) {
             return current;
           }
-          // Tail recovery and this frame are separate updates. If the snapshot
-          // flushed first, appending a replay from offset 0 paints lines the
-          // tail already replaced.
-          if (frame.offset < coveredTailByteOffset(current, frame.workspace_id, frame.stream_id)) {
+          // Tail recovery and this frame are separate updates. Keep only
+          // bytes the snapshot has not already painted, including a suffix
+          // when the replay starts inside the tail and continues past it.
+          const visible = visibleLiveLogFrame(
+            current,
+            frame.workspace_id,
+            frame.stream_id,
+            frame,
+          );
+          if (visible === null) {
             return current;
           }
           return trimLogEntries(
             [
               ...current,
               {
-                key: `live:${frame.workspace_id}:${frame.stream_id}:${frame.offset}:${frame.next_offset ?? frame.offset}:${frame.seq}`,
+                key: `live:${frame.workspace_id}:${frame.stream_id}:${visible.offset}:${visible.nextOffset}:${frame.seq}`,
                 workspaceId: frame.workspace_id,
                 streamId: frame.stream_id,
                 source: frame.source,
                 fd: frame.fd,
-                offset: frame.offset,
-                data: frame.data,
+                offset: visible.offset,
+                data: visible.data,
                 occurredAt: frame.occurred_at ?? new Date().toISOString(),
                 order: Date.parse(frame.occurred_at ?? "") || Date.now(),
                 kind: "live",
@@ -399,12 +380,13 @@ export function useWorkspaceLiveStream({
             return current;
           }
           const known = current[frame.stream_id] ?? 0;
-          if (frame.offset < known) {
+          const next = streamOffsetAfterLiveFrame(known, frame);
+          if (next === known) {
             return current;
           }
           return {
             ...current,
-            [frame.stream_id]: Math.max(known, frame.next_offset ?? 0),
+            [frame.stream_id]: next,
           };
         });
         return;
