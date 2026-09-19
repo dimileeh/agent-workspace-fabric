@@ -53,6 +53,19 @@ function structuredErrorMessage(detail: unknown): string {
   return "";
 }
 
+function responseWorkspaceId(data: unknown): string | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  const id = (data as { id?: unknown }).id;
+  // Empty and whitespace-only ids are not a workspace identity, even if they
+  // happen to equal the requested id.
+  if (typeof id !== "string" || id.trim() === "") {
+    return null;
+  }
+  return id;
+}
+
 function classifyDetail(result: ApiEnvelope<Workspace>, requestedId: string): ResolvedPrompt {
   if (!result.ok) {
     if (result.status === 401 || result.status === 403) {
@@ -73,19 +86,18 @@ function classifyDetail(result: ApiEnvelope<Workspace>, requestedId: string): Re
     };
   }
 
-  const data = result.data;
   // apiGet does not validate the payload. Accept a prompt only when the body
   // names this workspace; missing, empty, or non-string ids are not a match.
-  if (
-    !data ||
-    typeof data !== "object" ||
-    typeof data.id !== "string" ||
-    data.id !== requestedId
-  ) {
+  const data: unknown = result.data;
+  const responseId = responseWorkspaceId(data);
+  if (responseId === null || responseId !== requestedId) {
     return { status: "error", message: MISMATCH_MESSAGE };
   }
-  const raw = typeof data.task_prompt === "string" ? data.task_prompt : "";
-  return { status: "ready", prompt: raw.trim() ? raw : "" };
+  const taskPrompt = (data as { task_prompt?: unknown }).task_prompt;
+  return {
+    status: "ready",
+    prompt: typeof taskPrompt === "string" && taskPrompt.trim() ? taskPrompt : "",
+  };
 }
 
 function readLocationFingerprint(): string {

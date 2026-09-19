@@ -449,6 +449,7 @@ test("a successful detail is rendered only when its id matches the requested wor
     { id: "ws_prompt_empty_id", body: { id: "", task_prompt: FOREIGN_PROMPT } },
     { id: "ws_prompt_blank_id", body: { id: "   ", task_prompt: FOREIGN_PROMPT } },
     { id: "ws_prompt_numeric_id", body: { id: 404, task_prompt: FOREIGN_PROMPT } },
+    { id: "ws_prompt_null_id", body: { id: null, task_prompt: FOREIGN_PROMPT } },
   ] as const;
   const items = cases.map((entry) => overviewItem(entry.id, entry.id, OVERVIEW_LEAK));
   await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: items });
