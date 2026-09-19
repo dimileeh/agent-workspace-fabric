@@ -427,7 +427,10 @@ function workspaceDetail(id: string) {
     branch_name: `codex/${id}`,
     base_commit: "abc123",
     task_title: "Dark theme verification workspace",
-    task_prompt: "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
+    task_prompt:
+      id === workspaceId
+        ? longTaskPrompt()
+        : "# Task\n- Verify dark mode\n- Exercise high contrast and large font",
     task_external_id: null,
     task_class: "console",
     owned_paths: ["apps/console/**"],

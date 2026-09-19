@@ -18,7 +18,12 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.events import WORKSPACE_EVENT_BROADCASTER, WorkspaceEventFrame
-from awf.runtime.logs import LOG_BROADCASTER, LogFrame, read_log_chunk
+from awf.runtime.logs import (
+    LOG_BROADCASTER,
+    LogFrame,
+    boundary_aligned_log_text,
+    read_log_chunk_bytes,
+)
 from awf.service.workspaces import workspace_response
 
 router = APIRouter(tags=["workspace-streams"])
@@ -141,25 +146,30 @@ async def _send_initial_state(
                 if not path.is_file():
                     continue
                 offset = max(stream.byte_count - tail_bytes, 0)
-                data, next_offset, _eof = await read_log_chunk(
+                chunk, next_offset, _eof = await read_log_chunk_bytes(
                     path=path,
                     offset=offset,
                     limit_bytes=tail_bytes,
                 )
-                if data:
-                    await websocket.send_json(
-                        {
-                            "type": "log",
-                            "seq": 0,
-                            "workspace_id": workspace_id,
-                            "stream_id": stream.stream_id,
-                            "source": stream.source,
-                            "fd": stream.kind,
-                            "offset": offset,
-                            "next_offset": next_offset,
-                            "data": data,
-                        }
-                    )
+                aligned = boundary_aligned_log_text(chunk, offset=offset)
+                data = chunk.decode("utf-8", errors="replace") if aligned is None else aligned[0]
+                if not data:
+                    continue
+                payload: dict[str, object] = {
+                    "type": "log",
+                    "seq": 0,
+                    "workspace_id": workspace_id,
+                    "stream_id": stream.stream_id,
+                    "source": stream.source,
+                    "fd": stream.kind,
+                    "offset": offset,
+                    "next_offset": next_offset,
+                    "data": data,
+                }
+                if aligned is not None:
+                    payload["text_offset"] = aligned[1]
+                    payload["text_next_offset"] = aligned[2]
+                await websocket.send_json(payload)
     return True
 
 
