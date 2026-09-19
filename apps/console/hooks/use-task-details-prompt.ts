@@ -74,10 +74,14 @@ function classifyDetail(result: ApiEnvelope<Workspace>, requestedId: string): Re
   }
 
   const data = result.data;
-  if (!data || typeof data !== "object") {
-    return { status: "ready", prompt: "" };
-  }
-  if (typeof data.id === "string" && data.id.trim() !== "" && data.id !== requestedId) {
+  // apiGet does not validate the payload. Accept a prompt only when the body
+  // names this workspace; missing, empty, or non-string ids are not a match.
+  if (
+    !data ||
+    typeof data !== "object" ||
+    typeof data.id !== "string" ||
+    data.id !== requestedId
+  ) {
     return { status: "error", message: MISMATCH_MESSAGE };
   }
   const raw = typeof data.task_prompt === "string" ? data.task_prompt : "";

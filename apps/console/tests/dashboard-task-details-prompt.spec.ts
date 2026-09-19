@@ -441,3 +441,36 @@ test("a late 200 after context change or a newer denial does not restore the pro
   expect(detailReads(reads).length).toBeLessThanOrEqual(4);
   expect(detailReads(reads).some((url) => url.includes("ws_prompt_context_b"))).toBe(false);
 });
+
+test("a successful detail is rendered only when its id matches the requested workspace", async ({ page }) => {
+  const reads: string[] = [];
+  const cases = [
+    { id: "ws_prompt_omit_id", body: { task_prompt: FOREIGN_PROMPT } },
+    { id: "ws_prompt_empty_id", body: { id: "", task_prompt: FOREIGN_PROMPT } },
+    { id: "ws_prompt_blank_id", body: { id: "   ", task_prompt: FOREIGN_PROMPT } },
+    { id: "ws_prompt_numeric_id", body: { id: 404, task_prompt: FOREIGN_PROMPT } },
+  ] as const;
+  const items = cases.map((entry) => overviewItem(entry.id, entry.id, OVERVIEW_LEAK));
+  await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: items });
+  await installDetailRoute(page, reads, async (route, id) => {
+    const entry = cases.find((candidate) => candidate.id === id);
+    await fulfillJson(route, entry?.body ?? { id, task_prompt: FOREIGN_PROMPT });
+  });
+
+  await openConsole(page, true);
+  expect(detailReads(reads)).toEqual([]);
+
+  for (const entry of cases) {
+    const dialog = await openDetails(page, entry.id);
+    const prompt = dialog.getByTestId("task-details-prompt");
+    const alert = prompt.getByTestId("task-details-prompt-error");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText("Task prompt response did not match this workspace.");
+    await expect(prompt).not.toContainText(FOREIGN_PROMPT);
+    await expect(prompt).not.toContainText(OVERVIEW_LEAK);
+    await expect(prompt).not.toContainText("No prompt stored for this workspace.");
+    await dialog.getByRole("button", { name: "Close task details" }).click();
+  }
+
+  expect(detailReads(reads)).toHaveLength(cases.length);
+});
