@@ -3194,8 +3194,14 @@ test("configured context query changes clear authorized state before capability 
   );
   assert.match(
     dashboard,
-    /history\.(?:replace|push)State/,
+    /return subscribeToHistoryNavigation\(syncConfiguredContext\)/,
     "Expected soft history URL changes to be observed for context invalidation",
+  );
+  const historyNavigation = readFileSync(new URL("./history-navigation.ts", import.meta.url), "utf8");
+  assert.match(
+    historyNavigation,
+    /history\.pushState\s*=[\s\S]*?notifyListeners\(\)[\s\S]*?history\.replaceState\s*=[\s\S]*?notifyListeners\(\)/,
+    "Expected the shared subscriber to notify context invalidation on pushState and replaceState",
   );
   assert.match(
     dashboard,
