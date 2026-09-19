@@ -14,7 +14,14 @@ export type LiveLogFrameView = {
 type LiveLogFrame = {
   offset: number;
   next_offset?: number;
+  text_offset?: number;
+  text_next_offset?: number;
   data: string;
+};
+
+type TextByteRange = {
+  textOffset: number;
+  textEnd: number;
 };
 
 /**
@@ -60,9 +67,46 @@ function frameByteEnd(frame: LiveLogFrame): number {
 }
 
 /**
+ * Span whose UTF-8 encoding is exactly `encodedLength`.
+ *
+ * `text_offset` / `text_next_offset` are the server's boundary-safe range.
+ * Without them, the raw window is safe only when re-encoding `data` does not
+ * change its length. A replacement character from a mid-sequence decode is
+ * three bytes, so `covered - offset` would no longer name the file range.
+ */
+function boundarySafeTextRange(
+  frame: LiveLogFrame,
+  frameEnd: number,
+  encodedLength: number,
+): TextByteRange | null {
+  if (typeof frame.text_offset === "number" && typeof frame.text_next_offset === "number") {
+    const span = frame.text_next_offset - frame.text_offset;
+    if (encodedLength !== span) {
+      return null;
+    }
+    return { textOffset: frame.text_offset, textEnd: frame.text_next_offset };
+  }
+  const span = frameEnd - frame.offset;
+  if (encodedLength !== span) {
+    return null;
+  }
+  return { textOffset: frame.offset, textEnd: frameEnd };
+}
+
+function utf8IndexAtOrAfterCodePoint(bytes: Uint8Array, index: number): number {
+  let cursor = index;
+  while (cursor < bytes.length && (bytes[cursor] & 0xc0) === 0x80) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+/**
  * Drop a reconnect replay that the tail snapshot already painted. A frame that
- * starts inside that byte range and continues past it keeps only the suffix;
- * discarding the whole frame would hide lines written after the snapshot.
+ * starts inside that byte range and continues past it keeps only the suffix
+ * when the text is a faithful encoding of a known byte span. Discarding the
+ * whole frame would hide lines written after the snapshot, and indexing a
+ * replacement decode would corrupt that suffix.
  */
 export function visibleLiveLogFrame(
   entries: readonly TailCoverageEntry[],
@@ -79,16 +123,22 @@ export function visibleLiveLogFrame(
     return { offset: frame.offset, nextOffset: frameEnd, data: frame.data };
   }
   const bytes = new TextEncoder().encode(frame.data);
-  const start = covered - frame.offset;
-  const end = Math.min(bytes.length, frameEnd - frame.offset);
-  if (end <= start) {
+  const range = boundarySafeTextRange(frame, frameEnd, bytes.length);
+  if (range === null) {
+    return { offset: frame.offset, nextOffset: frameEnd, data: frame.data };
+  }
+  if (range.textEnd <= covered) {
     return null;
   }
-  const data = new TextDecoder().decode(bytes.subarray(start, end));
-  if (data.length === 0) {
+  if (range.textOffset >= covered) {
+    return { offset: range.textOffset, nextOffset: frameEnd, data: frame.data };
+  }
+  const start = utf8IndexAtOrAfterCodePoint(bytes, covered - range.textOffset);
+  if (start >= bytes.length) {
     return null;
   }
-  return { offset: covered, nextOffset: frameEnd, data };
+  const data = new TextDecoder().decode(bytes.subarray(start));
+  return { offset: range.textOffset + start, nextOffset: frameEnd, data };
 }
 
 /** Advance the stream cursor only when the frame contains bytes past it. */
