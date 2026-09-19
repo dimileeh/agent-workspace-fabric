@@ -827,6 +827,8 @@ export function ConsoleDashboard() {
     // Seed fingerprint from the current URL without clearing on first mount.
     invalidateAuthorizedFeedsIfContextChanged();
 
+    // One shared history patch. A local pushState/replaceState wrapper here
+    // restores over the task-details subscriber and drops context invalidation.
     return subscribeToHistoryNavigation(syncConfiguredContext);
   }, [invalidateAuthorizedFeedsIfContextChanged, loadCapabilities, loadOverview]);
 
