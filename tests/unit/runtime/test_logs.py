@@ -17,7 +17,13 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.redaction import REDACTION_MARKER
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.logs import LogBroadcaster, LogStore, WorkspaceLogSink, stream_compose_service_logs
+from awf.runtime.logs import (
+    LogBroadcaster,
+    LogStore,
+    WorkspaceLogSink,
+    boundary_aligned_log_text,
+    stream_compose_service_logs,
+)
 from awf.runtime.validation import ValidationRunner
 
 
@@ -892,3 +898,40 @@ async def test_stream_compose_service_logs_cancel_does_not_signal_already_exited
 
     assert process.terminated is False
     assert process.killed is False
+
+
+@pytest.mark.unit
+def test_boundary_aligned_log_text_skips_a_leading_partial_character() -> None:
+    """A window that starts on a continuation byte must not shift later bytes."""
+    text, text_offset, text_next_offset = boundary_aligned_log_text(
+        b"\xa9XYZ",
+        offset=11,
+    )
+
+    assert (text, text_offset, text_next_offset) == ("XYZ", 12, 15)
+    assert text.encode() == b"XYZ"
+
+
+@pytest.mark.unit
+def test_boundary_aligned_log_text_drops_only_a_trailing_incomplete_sequence() -> None:
+    text, text_offset, text_next_offset = boundary_aligned_log_text(
+        b"caf\xc3",
+        offset=4,
+    )
+
+    assert (text, text_offset, text_next_offset) == ("caf", 4, 7)
+
+
+@pytest.mark.unit
+def test_boundary_aligned_log_text_keeps_valid_utf8_including_a_file_start() -> None:
+    assert boundary_aligned_log_text(b"", offset=0) == ("", 0, 0)
+    assert boundary_aligned_log_text("café".encode(), offset=0) == ("café", 0, 5)
+    assert boundary_aligned_log_text(b"\x9f\x98\x80TAIL", offset=3) == ("TAIL", 6, 10)
+    assert boundary_aligned_log_text(b"\x80\x80", offset=2) == ("", 4, 4)
+
+
+@pytest.mark.unit
+def test_boundary_aligned_log_text_refuses_interior_invalid_bytes() -> None:
+    assert boundary_aligned_log_text(b"ab\xffcd", offset=0) is None
+    assert boundary_aligned_log_text(b"\xa9XYZ", offset=0) is None
+    assert boundary_aligned_log_text(b"\x80\x80\x80\x80", offset=1) is None

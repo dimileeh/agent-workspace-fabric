@@ -262,6 +262,42 @@ class LogStore:
         return resolved
 
 
+_UTF8_CONTINUATION_MASK = 0b1100_0000
+_UTF8_CONTINUATION_VALUE = 0b1000_0000
+
+
+def _leading_utf8_continuation_bytes(data: bytes) -> int:
+    """Return a leading partial UTF-8 sequence, at most three continuation bytes."""
+    skipped = 0
+    limit = min(len(data), 3)
+    while skipped < limit and (data[skipped] & _UTF8_CONTINUATION_MASK == _UTF8_CONTINUATION_VALUE):
+        skipped += 1
+    return skipped
+
+
+def boundary_aligned_log_text(chunk: bytes, *, offset: int) -> tuple[str, int, int] | None:
+    """Return text that round-trips to a byte range inside ``chunk``.
+
+    ``offset`` is the file position of ``chunk[0]``. Leading continuation bytes
+    (a read that started mid-character) and a trailing incomplete sequence stay
+    outside the returned range. ``None`` means the interior cannot be decoded
+    without replacement, so callers must not publish those bounds.
+    """
+    if not chunk:
+        return "", offset, offset
+
+    start = _leading_utf8_continuation_bytes(chunk) if offset > 0 else 0
+    remainder = chunk[start:]
+    try:
+        text = remainder.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if exc.reason != "unexpected end of data":
+            return None
+        text = remainder[: exc.start].decode("utf-8")
+        return text, offset + start, offset + start + exc.start
+    return text, offset + start, offset + len(chunk)
+
+
 async def read_log_chunk(
     *,
     path: Path,

@@ -7,6 +7,7 @@ import {
   resolveWorkspaceStreamSubscription,
 } from "@/lib/console-capabilities";
 import { awfPath } from "@/lib/console-urls";
+import { streamOffsetAfterLiveFrame, visibleLiveLogFrame } from "@/lib/live-log-replay";
 import type { ConsoleCapabilities } from "@/lib/types";
 import {
   type DetailState,
@@ -343,17 +344,29 @@ export function useWorkspaceLiveStream({
           if (streamAuthDenied()) {
             return current;
           }
+          // Tail recovery and this frame are separate updates. Keep only
+          // bytes the snapshot has not already painted, including a suffix
+          // when the replay starts inside the tail and continues past it.
+          const visible = visibleLiveLogFrame(
+            current,
+            frame.workspace_id,
+            frame.stream_id,
+            frame,
+          );
+          if (visible === null) {
+            return current;
+          }
           return trimLogEntries(
             [
               ...current,
               {
-                key: `live:${frame.workspace_id}:${frame.stream_id}:${frame.offset}:${frame.next_offset ?? frame.offset}:${frame.seq}`,
+                key: `live:${frame.workspace_id}:${frame.stream_id}:${visible.offset}:${visible.nextOffset}:${frame.seq}`,
                 workspaceId: frame.workspace_id,
                 streamId: frame.stream_id,
                 source: frame.source,
                 fd: frame.fd,
-                offset: frame.offset,
-                data: frame.data,
+                offset: visible.offset,
+                data: visible.data,
                 occurredAt: frame.occurred_at ?? new Date().toISOString(),
                 order: Date.parse(frame.occurred_at ?? "") || Date.now(),
                 kind: "live",
@@ -366,9 +379,14 @@ export function useWorkspaceLiveStream({
           if (streamAuthDenied()) {
             return current;
           }
+          const known = current[frame.stream_id] ?? 0;
+          const next = streamOffsetAfterLiveFrame(known, frame);
+          if (next === known) {
+            return current;
+          }
           return {
             ...current,
-            [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
+            [frame.stream_id]: next,
           };
         });
         return;
