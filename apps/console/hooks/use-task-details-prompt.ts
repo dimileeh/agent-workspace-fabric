@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 
 import { apiGet } from "@/components/console-dashboard-shared";
 import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
+import { subscribeToHistoryNavigation } from "@/lib/history-navigation";
 import type { ApiEnvelope, Workspace } from "@/lib/types";
 
 export type TaskDetailsPromptState =
@@ -90,30 +91,14 @@ function readLocationFingerprint(): string {
   return configuredContextFingerprint(window.location.search);
 }
 
-function subscribeToPageSearch(onStoreChange: () => void): () => void {
-  window.addEventListener("popstate", onStoreChange);
-  const { history } = window;
-  const pushState = history.pushState.bind(history);
-  const replaceState = history.replaceState.bind(history);
-  history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
-    pushState(data, unused, url);
-    onStoreChange();
-  }) as History["pushState"];
-  history.replaceState = ((data: unknown, unused: string, url?: string | URL | null) => {
-    replaceState(data, unused, url);
-    onStoreChange();
-  }) as History["replaceState"];
-  return () => {
-    window.removeEventListener("popstate", onStoreChange);
-    history.pushState = pushState;
-    history.replaceState = replaceState;
-  };
-}
-
 function useTaskDetailsContextFingerprint(): { location: string; router: string } {
   const searchParams = useSearchParams();
   const router = configuredContextFingerprint(`?${searchParams.toString()}`);
-  const location = useSyncExternalStore(subscribeToPageSearch, readLocationFingerprint, () => router);
+  const location = useSyncExternalStore(
+    subscribeToHistoryNavigation,
+    readLocationFingerprint,
+    () => router,
+  );
   return { location, router };
 }
 

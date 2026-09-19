@@ -17,6 +17,7 @@ import {
 } from "@/lib/console-capabilities";
 import { fleetKpisFromDashboardSummary } from "@/lib/console-dashboard-summary";
 import { configuredContextFingerprint } from "@/lib/console-urls";
+import { subscribeToHistoryNavigation } from "@/lib/history-navigation";
 import { useCapabilityGatedPoll } from "@/hooks/use-capability-gated-poll";
 import { useConsoleCapabilities } from "@/hooks/use-console-capabilities";
 import { useConsoleFleetFeeds } from "@/hooks/use-console-fleet-feeds";
@@ -826,25 +827,7 @@ export function ConsoleDashboard() {
     // Seed fingerprint from the current URL without clearing on first mount.
     invalidateAuthorizedFeedsIfContextChanged();
 
-    window.addEventListener("popstate", syncConfiguredContext);
-
-    const { history } = window;
-    const originalPushState = history.pushState.bind(history);
-    const originalReplaceState = history.replaceState.bind(history);
-    history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
-      originalPushState(data, unused, url);
-      syncConfiguredContext();
-    }) as History["pushState"];
-    history.replaceState = ((data: unknown, unused: string, url?: string | URL | null) => {
-      originalReplaceState(data, unused, url);
-      syncConfiguredContext();
-    }) as History["replaceState"];
-
-    return () => {
-      window.removeEventListener("popstate", syncConfiguredContext);
-      history.pushState = originalPushState;
-      history.replaceState = originalReplaceState;
-    };
+    return subscribeToHistoryNavigation(syncConfiguredContext);
   }, [invalidateAuthorizedFeedsIfContextChanged, loadCapabilities, loadOverview]);
 
   const pollDashboardSummary = useCallback(() => {
