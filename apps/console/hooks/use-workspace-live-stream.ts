@@ -17,6 +17,32 @@ import {
   trimLogEntries,
 } from "@/components/console-dashboard-shared";
 
+/**
+ * End offset of the tail snapshot already rendered for this stream.
+ * Denial diagnostics are not byte coverage. A reconnect that replays a live
+ * frame from before this offset must not append it: the tail write only drops
+ * live entries that are already in the list when it flushes.
+ */
+function coveredTailByteOffset(
+  entries: readonly LogEntry[],
+  workspaceId: string,
+  streamId: string,
+): number {
+  let covered = 0;
+  for (const entry of entries) {
+    if (
+      entry.kind !== "tail" ||
+      entry.workspaceId !== workspaceId ||
+      entry.streamId !== streamId ||
+      entry.key.startsWith("tail-error:")
+    ) {
+      continue;
+    }
+    covered = Math.max(covered, entry.offset + entry.data.length);
+  }
+  return covered;
+}
+
 type StreamState = "idle" | "connecting" | "live" | "error";
 
 type UseWorkspaceLiveStreamArgs = {
@@ -343,6 +369,12 @@ export function useWorkspaceLiveStream({
           if (streamAuthDenied()) {
             return current;
           }
+          // Tail recovery and this frame are separate updates. If the snapshot
+          // flushed first, appending a replay from offset 0 paints lines the
+          // tail already replaced.
+          if (frame.offset < coveredTailByteOffset(current, frame.workspace_id, frame.stream_id)) {
+            return current;
+          }
           return trimLogEntries(
             [
               ...current,
@@ -366,9 +398,13 @@ export function useWorkspaceLiveStream({
           if (streamAuthDenied()) {
             return current;
           }
+          const known = current[frame.stream_id] ?? 0;
+          if (frame.offset < known) {
+            return current;
+          }
           return {
             ...current,
-            [frame.stream_id]: Math.max(current[frame.stream_id] ?? 0, frame.next_offset ?? 0),
+            [frame.stream_id]: Math.max(known, frame.next_offset ?? 0),
           };
         });
         return;
