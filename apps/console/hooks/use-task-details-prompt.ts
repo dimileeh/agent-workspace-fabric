@@ -26,7 +26,13 @@ type ResolvedPrompt = Exclude<TaskDetailsPromptState, { status: "closed" } | { s
 
 type AppliedPrompt = {
   identity: string;
+  visit: number;
   state: ResolvedPrompt;
+};
+
+type PromptVisit = {
+  identity: string | null;
+  id: number;
 };
 
 function structuredErrorMessage(detail: unknown): string {
@@ -128,13 +134,23 @@ function useTaskDetailsContextFingerprint(): { location: string; router: string 
 /**
  * Loads the open task-details modal's authorized prompt.
  * Overview rows deliberately omit task_prompt; this hook does not write it back.
- * A response is applied only for the generation, workspace, and context that started it.
+ * A response is applied only for the visit, generation, workspace, and context that started it.
+ * The same identity from an earlier visit does not satisfy the current one.
  */
 export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPromptState {
   const { location, router } = useTaskDetailsContextFingerprint();
   const identity = workspaceId === null ? null : JSON.stringify([workspaceId, location, router]);
   const [applied, setApplied] = useState<AppliedPrompt | null>(null);
+  const [visit, setVisit] = useState<PromptVisit>({ identity, id: 0 });
   const generationRef = useRef(0);
+  // Bump during render so A→B→A cannot paint the previous success before the
+  // effect for the new visit runs. The modal stays mounted across workspace
+  // prop changes, and the dialog does not remount these controls.
+  const visitChanged = visit.identity !== identity;
+  const visitId = visitChanged ? visit.id + 1 : visit.id;
+  if (visitChanged) {
+    setVisit({ identity, id: visitId });
+  }
 
   useEffect(() => {
     if (workspaceId === null || identity === null) {
@@ -143,6 +159,7 @@ export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPro
     const generation = ++generationRef.current;
     const requestedId = workspaceId;
     const requestedIdentity = identity;
+    const requestedVisit = visitId;
     let cancelled = false;
     // Defer past Strict Mode's setup/cleanup/setup so the remount does not
     // issue a second detail read. Closing the modal clears this timer.
@@ -168,7 +185,7 @@ export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPro
         if (cancelled || generation !== generationRef.current) {
           return current;
         }
-        return { identity: requestedIdentity, state: next };
+        return { identity: requestedIdentity, visit: requestedVisit, state: next };
       });
     }
 
@@ -176,12 +193,12 @@ export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPro
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [identity, workspaceId]);
+  }, [identity, workspaceId, visitId]);
 
   if (identity === null) {
     return { status: "closed" };
   }
-  if (applied !== null && applied.identity === identity) {
+  if (applied !== null && applied.identity === identity && applied.visit === visitId) {
     return applied.state;
   }
   return { status: "loading" };

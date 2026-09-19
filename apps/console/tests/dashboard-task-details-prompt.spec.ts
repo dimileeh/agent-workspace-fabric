@@ -377,6 +377,84 @@ test("late detail responses cannot paint another workspace or a denied prompt", 
   expect(detailReads(reads).filter((url) => url.includes(bravo.workspace_id))).toHaveLength(1);
 });
 
+test("revisiting a workspace does not reuse the previous prompt while authorization is pending", async ({ page }) => {
+  const reads: string[] = [];
+  const pending: Array<{ id: string; release: () => void }> = [];
+  let alphaReads = 0;
+  const alpha = overviewItem("ws_prompt_revisit_a", "Revisit alpha", OVERVIEW_LEAK);
+  const bravo = overviewItem("ws_prompt_revisit_b", "Revisit bravo", "");
+  await mockAwfConsoleApi(page, { mode: "hosted", overviewItems: [alpha, bravo] });
+  await installDetailRoute(page, reads, async (route, id) => {
+    if (id === alpha.workspace_id) {
+      alphaReads += 1;
+      if (alphaReads === 1) {
+        await fulfillJson(route, { id, task_prompt: DETAIL_ALPHA });
+        return;
+      }
+    }
+    await new Promise<void>((resolve) => {
+      pending.push({ id, release: resolve });
+    });
+    if (id === alpha.workspace_id) {
+      await fulfillJson(
+        route,
+        {
+          detail: { message: "Synthetic permission revoked", token: REJECTED_SECRET },
+          task_prompt: DETAIL_ALPHA,
+        },
+        403,
+      );
+      return;
+    }
+    await fulfillJson(route, { id, task_prompt: DETAIL_BRAVO });
+  });
+
+  await openConsole(page, true);
+  const dialog = await openDetails(page, alpha.workspace_id);
+  const prompt = dialog.getByTestId("task-details-prompt");
+  await expect(prompt).toContainText(DETAIL_ALPHA);
+
+  // The dialog covers the rail but does not make those Details controls inert,
+  // so a second open changes the mounted modal's workspace without remounting it.
+  await page
+    .getByTestId(`workspace-card-${bravo.workspace_id}`)
+    .getByRole("button", { name: "Details", exact: true })
+    .evaluate((button: HTMLButtonElement) => {
+      button.click();
+    });
+  await expect(dialog.getByRole("heading", { name: bravo.title })).toBeVisible();
+  await expect.poll(() => detailReads(reads).filter((url) => url.includes(bravo.workspace_id)).length).toBe(1);
+  await expect(prompt.getByTestId("task-details-prompt-loading")).toBeVisible();
+  await expect(prompt).not.toContainText(DETAIL_ALPHA);
+
+  await page
+    .getByTestId(`workspace-card-${alpha.workspace_id}`)
+    .getByRole("button", { name: "Details", exact: true })
+    .evaluate((button: HTMLButtonElement) => {
+      button.click();
+    });
+  await expect(dialog.getByRole("heading", { name: alpha.title })).toBeVisible();
+  await expect(prompt.getByTestId("task-details-prompt-loading")).toBeVisible();
+  await expect(prompt).not.toContainText(DETAIL_ALPHA);
+  await expect(prompt).not.toContainText(DETAIL_BRAVO);
+  await expect(prompt).not.toContainText(OVERVIEW_LEAK);
+  await expect
+    .poll(() => detailReads(reads).filter((url) => url.includes(alpha.workspace_id)).length)
+    .toBe(2);
+
+  pending.find((hold) => hold.id === alpha.workspace_id)?.release();
+  await expect(prompt.getByTestId("task-details-prompt-denied")).toContainText("Synthetic permission revoked");
+  await expect(prompt).not.toContainText(DETAIL_ALPHA);
+  await expect(prompt).not.toContainText(REJECTED_SECRET);
+  await expect(prompt).not.toContainText(OVERVIEW_LEAK);
+
+  pending.find((hold) => hold.id === bravo.workspace_id)?.release();
+  await expect(prompt.getByTestId("task-details-prompt-denied")).toContainText("Synthetic permission revoked");
+  await expect(prompt).not.toContainText(DETAIL_BRAVO);
+  expect(detailReads(reads).filter((url) => url.includes(alpha.workspace_id))).toHaveLength(2);
+  expect(detailReads(reads).filter((url) => url.includes(bravo.workspace_id))).toHaveLength(1);
+});
+
 test("a late 200 after context change or a newer denial does not restore the prompt", async ({ page }) => {
   const reads: string[] = [];
   let releaseLate: (() => void) | undefined;
