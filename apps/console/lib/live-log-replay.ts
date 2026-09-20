@@ -208,11 +208,17 @@ export function entriesAfterTailSnapshot<T extends ReplayLogEntry>(
   return retained;
 }
 
-/** Advance the stream cursor only when the frame contains bytes past it. */
+/**
+ * Advance the stream cursor only when the frame contains bytes past it.
+ * Live frames omit next_offset. Their data is the redacted string appended
+ * to the log, so the end is offset plus that string's UTF-8 byte length.
+ * Frames that already carry next_offset, including replacement-decoded
+ * tails, keep that end instead.
+ */
 export function streamOffsetAfterLiveFrame(
   known: number,
-  frame: { offset: number; next_offset?: number },
+  frame: { offset: number; next_offset?: number; data: string },
 ): number {
-  const frameEnd = frame.next_offset ?? frame.offset;
+  const frameEnd = frameByteEnd(frame);
   return frameEnd > known ? frameEnd : known;
 }

@@ -37,6 +37,16 @@ test("a frame that starts inside the tail and continues past it keeps only the n
   assert.deepEqual(visible, { offset: 5, nextOffset: 8, data: "XYZ" });
 });
 
+test("a live payload without next_offset advances the cursor by its UTF-8 byte length", () => {
+  // Live LogFrame payloads omit next_offset. "café" is 4 code units and 5
+  // UTF-8 bytes; JavaScript string length would leave the reconnect cursor short.
+  assert.equal("café".length, 4);
+  assert.equal(streamOffsetAfterLiveFrame(0, { offset: 10, data: "café" }), 15);
+  assert.equal(streamOffsetAfterLiveFrame(12, { offset: 10, data: "café" }), 15);
+  assert.equal(streamOffsetAfterLiveFrame(15, { offset: 10, data: "café" }), 15);
+  assert.equal(streamOffsetAfterLiveFrame(20, { offset: 10, data: "café" }), 20);
+});
+
 test("multibyte tail coverage uses next_offset, not JavaScript string length", () => {
   // "café" is 4 UTF-16 code units and 5 UTF-8 bytes. A replay at byte 4 is
   // still inside the snapshot; string length would let it through.
