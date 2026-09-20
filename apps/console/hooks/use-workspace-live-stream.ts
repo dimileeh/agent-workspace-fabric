@@ -347,6 +347,8 @@ export function useWorkspaceLiveStream({
           // Tail recovery and this frame are separate updates. Keep only
           // bytes the snapshot has not already painted, including a suffix
           // when the replay starts inside the tail and continues past it.
+          // A frame stored before that snapshot commits is trimmed the same
+          // way when the tail lands (entriesAfterTailSnapshot).
           const visible = visibleLiveLogFrame(
             current,
             frame.workspace_id,

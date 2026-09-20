@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { streamOffsetAfterLiveFrame, visibleLiveLogFrame } from "./live-log-replay.ts";
+import {
+  entriesAfterTailSnapshot,
+  streamOffsetAfterLiveFrame,
+  visibleLiveLogFrame,
+} from "./live-log-replay.ts";
 
 function tail(streamId, data, offset, nextOffset) {
   return {
@@ -127,6 +131,115 @@ test("a covered partial character is not replayed as a replacement", () => {
     data: "é",
   });
   assert.equal(visible, null);
+});
+
+test("a reconnect frame stored before the tail keeps the suffix the snapshot does not contain", () => {
+  // The tail read through byte 9 is still in flight, so the reconnect frame
+  // is stored whole. When that tail commits, the post-9 suffix must remain.
+  const frame = { offset: 4, next_offset: 11, data: "shot\nHi" };
+  const visible = visibleLiveLogFrame([], "ws_logs", "active.stdout", frame);
+  assert.deepEqual(visible, { offset: 4, nextOffset: 11, data: "shot\nHi" });
+  const live = {
+    kind: "live",
+    key: `live:ws_logs:active.stdout:${visible.offset}:${visible.nextOffset}:3`,
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: visible.offset,
+    data: visible.data,
+    source: "agent",
+  };
+  const other = {
+    kind: "live",
+    key: "live:ws_logs:other.stdout:0:3:1",
+    workspaceId: "ws_logs",
+    streamId: "other.stdout",
+    offset: 0,
+    data: "abc",
+  };
+  const previousTail = tail("active.stdout", "snap", 0, 4);
+  const snapshot = tail("active.stdout", "snapshot\n", 0, 9);
+  const merged = entriesAfterTailSnapshot([previousTail, other, live], snapshot);
+  assert.equal(merged[0], other);
+  assert.equal(merged[1].source, "agent");
+  assert.deepEqual(
+    { kind: merged[1].kind, key: merged[1].key, offset: merged[1].offset, data: merged[1].data },
+    {
+      kind: "live",
+      key: "live:ws_logs:active.stdout:9:11:3",
+      offset: 9,
+      data: "Hi",
+    },
+  );
+  assert.equal(merged[2], snapshot);
+});
+
+test("a live entry the tail already covers is dropped, and one that starts at the boundary stays", () => {
+  const covered = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:0:9:1",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 0,
+    data: "snapshot\n",
+  };
+  const boundary = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:9:11:2",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 9,
+    data: "Hi",
+  };
+  const merged = entriesAfterTailSnapshot(
+    [covered, boundary],
+    tail("active.stdout", "snapshot\n", 0, 9),
+  );
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0], boundary);
+  assert.equal(merged[1].kind, "tail");
+});
+
+test("tail commit uses the stored byte end, not JavaScript string length, and does not slice a lossy frame", () => {
+  const multibyte = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:0:8:1",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 0,
+    data: "caféXYZ",
+  };
+  const lossy = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:1:5:2",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 1,
+    data: "\uFFFDXYZ",
+  };
+  const cafe = entriesAfterTailSnapshot([multibyte], tail("active.stdout", "café", 0, 5));
+  assert.deepEqual(
+    { offset: cafe[0].offset, data: cafe[0].data },
+    { offset: 5, data: "XYZ" },
+  );
+  const kept = entriesAfterTailSnapshot([lossy], tail("active.stdout", "é", 0, 2));
+  assert.equal(kept[0], lossy);
+});
+
+test("a live entry without a byte-end key is trimmed by its UTF-8 length", () => {
+  const live = {
+    kind: "live",
+    key: "live-without-end",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 0,
+    data: "abYZ",
+  };
+  const merged = entriesAfterTailSnapshot([live], tail("active.stdout", "ab", 0, 2));
+  assert.equal(merged[0].key, "live-without-end");
+  assert.deepEqual(
+    { offset: merged[0].offset, data: merged[0].data },
+    { offset: 2, data: "YZ" },
+  );
 });
 
 test("bounds that do not match the text are not used as a slice index", () => {

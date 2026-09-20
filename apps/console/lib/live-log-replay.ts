@@ -141,6 +141,73 @@ export function visibleLiveLogFrame(
   return { offset: range.textOffset + start, nextOffset: frameEnd, data };
 }
 
+type ReplayLogEntry = {
+  kind: "tail" | "live";
+  key: string;
+  workspaceId: string;
+  streamId: string;
+  offset: number;
+  data: string;
+};
+
+function storedLiveFrame(entry: ReplayLogEntry): LiveLogFrame {
+  const match = /:(\d+):(\d+):(\d+)$/.exec(entry.key);
+  if (match === null) {
+    return { offset: entry.offset, data: entry.data };
+  }
+  return {
+    offset: entry.offset,
+    next_offset: Number(match[2]),
+    data: entry.data,
+  };
+}
+
+function entryWithVisibleSuffix<T extends ReplayLogEntry>(entry: T, visible: LiveLogFrameView): T {
+  if (visible.offset === entry.offset && visible.data === entry.data) {
+    return entry;
+  }
+  return {
+    ...entry,
+    key: entry.key.replace(/:(\d+):(\d+):(\d+)$/, `:${visible.offset}:${visible.nextOffset}:$3`),
+    offset: visible.offset,
+    data: visible.data,
+  };
+}
+
+/**
+ * Commit a tail snapshot that may land after a reconnect frame was stored whole.
+ * A frame that starts inside the snapshot and continues past it keeps the
+ * uncovered suffix. Dropping every live entry whose start is below the
+ * snapshot end hides bytes the snapshot does not contain.
+ */
+export function entriesAfterTailSnapshot<T extends ReplayLogEntry>(
+  entries: readonly T[],
+  snapshot: T,
+): T[] {
+  const retained: T[] = [];
+  for (const entry of entries) {
+    if (entry.workspaceId !== snapshot.workspaceId || entry.streamId !== snapshot.streamId) {
+      retained.push(entry);
+      continue;
+    }
+    if (entry.kind !== "live") {
+      continue;
+    }
+    const visible = visibleLiveLogFrame(
+      [snapshot],
+      entry.workspaceId,
+      entry.streamId,
+      storedLiveFrame(entry),
+    );
+    if (visible === null) {
+      continue;
+    }
+    retained.push(entryWithVisibleSuffix(entry, visible));
+  }
+  retained.push(snapshot);
+  return retained;
+}
+
 /** Advance the stream cursor only when the frame contains bytes past it. */
 export function streamOffsetAfterLiveFrame(
   known: number,

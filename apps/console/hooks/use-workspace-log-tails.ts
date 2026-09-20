@@ -19,6 +19,7 @@ import {
   orderFullscreenWorkspaceIds,
 } from "@/lib/console-dashboard-derived";
 import { awfPath } from "@/lib/console-urls";
+import { entriesAfterTailSnapshot } from "@/lib/live-log-replay";
 import type { WorkspaceLogRead, WorkspaceLogStream, WorkspaceOverview } from "@/lib/types";
 import {
   type DetailState,
@@ -647,15 +648,7 @@ export function useWorkspaceLogTails({
             return current;
           }
           return trimLogEntries(
-            [
-              ...current.filter(
-                (entry) =>
-                  entry.workspaceId !== workspaceId ||
-                  entry.streamId !== stream.stream_id ||
-                  (entry.kind === "live" && entry.offset >= result.data.next_offset),
-              ),
-              tailEntry,
-            ],
+            entriesAfterTailSnapshot(current, tailEntry),
             selectedStreamIds,
           );
         });
