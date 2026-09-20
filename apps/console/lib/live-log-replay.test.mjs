@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   entriesAfterTailSnapshot,
   streamOffsetAfterLiveFrame,
+  streamOffsetAfterTailSnapshot,
   visibleLiveLogFrame,
 } from "./live-log-replay.ts";
 
@@ -262,4 +263,13 @@ test("bounds that do not match the text are not used as a slice index", () => {
     data: "\uFFFDXYZ",
   });
   assert.deepEqual(visible, { offset: 1, nextOffset: 5, data: "\uFFFDXYZ" });
+});
+
+test("a late tail snapshot does not rewind a cursor a live frame already advanced", () => {
+  // The tail read through N while a live frame through M > N committed first.
+  // The post-N live suffix stays visible, so the displayed cursor must stay at M.
+  assert.equal(streamOffsetAfterTailSnapshot(40, 30), 40);
+  assert.equal(streamOffsetAfterTailSnapshot(30, 40), 40);
+  assert.equal(streamOffsetAfterTailSnapshot(40, 40), 40);
+  assert.equal(streamOffsetAfterTailSnapshot(0, 0), 0);
 });

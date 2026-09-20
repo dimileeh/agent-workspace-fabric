@@ -1163,6 +1163,16 @@ test("recovered inspector tails apply while a sibling denial holds the latch", (
     /if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return current;\s*\}/,
     "Expected a successful inspector tail not to skip setLogEntries while the workspace latch is held",
   );
+  assert.match(
+    successBody,
+    /const known = current\[stream\.stream_id\] \?\? 0;\s*const next = streamOffsetAfterTailSnapshot\(known, result\.data\.next_offset\);\s*if \(current\[stream\.stream_id\] === next\) \{\s*return current;\s*\}/,
+    "Expected a late tail snapshot to keep the cursor at the max of its end and the current live offset",
+  );
+  assert.doesNotMatch(
+    successBody,
+    /\[stream\.stream_id\]: result\.data\.next_offset/,
+    "Expected a successful tail not to overwrite a newer live cursor with the older snapshot end",
+  );
 });
 
 test("automatic inspector tails skip unchanged stream metadata and do not supersede an in-flight read", () => {

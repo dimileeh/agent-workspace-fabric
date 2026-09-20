@@ -222,3 +222,13 @@ export function streamOffsetAfterLiveFrame(
   const frameEnd = frameByteEnd(frame);
   return frameEnd > known ? frameEnd : known;
 }
+
+/**
+ * Keep the displayed byte cursor monotonic when a tail snapshot commits.
+ * A live frame may already have advanced past this read while the response
+ * was still pending. Writing the snapshot end unconditionally would rewind
+ * the cursor even though the post-snapshot live suffix stays visible.
+ */
+export function streamOffsetAfterTailSnapshot(known: number, snapshotEnd: number): number {
+  return snapshotEnd > known ? snapshotEnd : known;
+}
