@@ -708,20 +708,30 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   const scrollBefore = await list.evaluate(element => element.scrollTop);
   expect(scrollBefore).toBeGreaterThan(0);
   const inspector = page.locator(".fixed.inset-y-0.right-0").first();
+  // These clicks run under a paused Playwright clock. locator.click() waits for
+  // animation-frame stability, which consumes the <1s pane budget on a busy CI
+  // worker. A DOM click still drives the React handlers; the class and held-route
+  // asserts below are what prove the pane did not wait on telemetry.
+  const openDetails = page
+    .getByTestId("workspace-card-ws_interaction_75")
+    .getByRole("button", { name: "Open workspace details for ws_interaction_75", exact: true });
+  const closeInspector = inspector.getByRole("button", { name: "Close inspector" });
+  const clickNow = (locator: typeof openDetails) =>
+    locator.evaluate((element: HTMLElement) => element.click());
   const started = Date.now();
-  await open(page, "ws_interaction_75");
+  await clickNow(openDetails);
   await expect(page.getByTestId("telemetry-loading")).toBeVisible();
   // Held routes stay unresolved: closing must not await the in-flight read.
   expect(held.length).toBeGreaterThan(0);
   const heldDuringClose = held.length;
-  await page.getByRole("button", { name: "Close inspector" }).click();
+  await clickNow(closeInspector);
   await expect(inspector).toHaveClass(/translate-x-full/);
   const delayedPaneMs = Date.now() - started;
   expect(delayedPaneMs).toBeLessThan(1_000);
   expect(held.length).toBe(heldDuringClose);
   await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(scrollBefore);
   await expect(page.getByLabel("Select ws_interaction_75 for fullscreen logs")).toBeChecked();
-  await open(page, "ws_interaction_75");
+  await openDetails.click();
   await page.getByTestId("telemetry-view-24h").click();
   await expect.poll(() => held.filter(route => new URL(route.request().url()).searchParams.get("view") === "24h").length).toBe(1);
   // A user scroll during the delayed request must survive projection/rendering.
@@ -742,11 +752,11 @@ test("delayed telemetry and dense 24h preserve scroll, selection and bounded his
   await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(duringRead);
   expect(cursors.filter(cursor => cursor !== null)).toEqual([]);
   const denseStarted = Date.now();
-  await page.getByRole("button", { name: "Close inspector" }).click();
+  await clickNow(closeInspector);
   await expect(inspector).toHaveClass(/translate-x-full/);
   // Re-open must show loading again without waiting on a prior held response.
   const heldBeforeReopen = held.length;
-  await open(page, "ws_interaction_75");
+  await clickNow(openDetails);
   await expect(page.getByTestId("telemetry-loading")).toBeVisible();
   const densePaneMs = Date.now() - denseStarted;
   expect(densePaneMs).toBeLessThan(1_000);

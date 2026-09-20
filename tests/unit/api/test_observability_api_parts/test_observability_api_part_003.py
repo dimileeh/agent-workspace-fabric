@@ -696,6 +696,69 @@ class TestWorkspaceWebSocket:
         assert websocket.closed_codes == []
 
     @pytest.mark.unit
+    async def test_initial_log_tail_publishes_boundary_safe_text_bounds(
+        self,
+        engine: AsyncEngine,
+        tmp_path: Path,
+    ) -> None:
+        """Initial tails must not ask clients to re-index a replacement decode."""
+        factory = make_session_factory(engine)
+        split = b"0123456789\xc3\xa9XYZ"
+        invalid = b"0123456789\xffYZ"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/ws.git",
+                branch_base="main",
+                task_title="Stream boundary-safe logs",
+                task_prompt="Check UTF-8 tail bounds.",
+                agent="codex",
+                test_commands=[],
+            )
+            log_repo = WorkspaceLogStreamRepository(session)
+            for stream_id, contents in (
+                ("split.stdout", split),
+                ("invalid.stdout", invalid),
+            ):
+                path = tmp_path / f"{stream_id}.log"
+                path.write_bytes(contents)
+                await log_repo.create_or_get(
+                    workspace_id=workspace.id,
+                    stream_id=stream_id,
+                    source="custom",
+                    name=stream_id,
+                    kind="stdout",
+                    path=str(path),
+                )
+                await log_repo.append_metadata(
+                    workspace_id=workspace.id,
+                    stream_id=stream_id,
+                    byte_delta=len(contents),
+                    line_delta=0,
+                )
+            await session.commit()
+            workspace_id = workspace.id
+
+        websocket = _FrameRecordingWebSocket()
+        sent = await ws_route._send_initial_state(
+            websocket,
+            factory,
+            workspace_id,
+            selected={"custom"},
+            seen_event_ids=set(),
+            tail_bytes=4,
+        )
+
+        assert sent is True
+        logs = {frame["stream_id"]: frame for frame in websocket.frames if frame["type"] == "log"}
+        assert logs["split.stdout"]["offset"] == 11
+        assert logs["split.stdout"]["next_offset"] == 15
+        assert logs["split.stdout"]["data"] == "XYZ"
+        assert logs["split.stdout"]["text_offset"] == 12
+        assert logs["split.stdout"]["text_next_offset"] == 15
+        assert "text_offset" not in logs["invalid.stdout"]
+        assert logs["invalid.stdout"]["data"] == "9\ufffdYZ"
+
+    @pytest.mark.unit
     async def test_initial_state_reports_missing_workspace(self, engine: AsyncEngine) -> None:
         websocket = _FrameRecordingWebSocket()
 

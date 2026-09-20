@@ -811,7 +811,7 @@ test("overview and workspace-detail errors clear only when their own feed succee
   );
   assert.match(
     dashboard,
-    /setLogEntries\(\[\]\);\s*setStreamOffsets\(\{\}\);\s*setWorkspaceDetailError\(null\);/,
+    /setLogEntries\(\(current\) => \(current\.length === 0 \? current : \[\]\)\);\s*setStreamOffsets\(\(current\) => \(Object\.keys\(current\)\.length === 0 \? current : \{\}\)\);\s*setWorkspaceDetailError\(\(current\) => \(current === null \? current : null\)\);/,
     "Expected selection changes to drop the previous workspace-detail error",
   );
 });
@@ -1162,6 +1162,16 @@ test("recovered inspector tails apply while a sibling denial holds the latch", (
     successBody,
     /if \(logListingAuthDeniedRef\.current \|\| logTailAuthDeniedRef\.current\) \{\s*return current;\s*\}/,
     "Expected a successful inspector tail not to skip setLogEntries while the workspace latch is held",
+  );
+  assert.match(
+    successBody,
+    /const known = current\[stream\.stream_id\] \?\? 0;\s*const next = streamOffsetAfterTailSnapshot\(known, result\.data\.next_offset\);\s*if \(current\[stream\.stream_id\] === next\) \{\s*return current;\s*\}/,
+    "Expected a late tail snapshot to keep the cursor at the max of its end and the current live offset",
+  );
+  assert.doesNotMatch(
+    successBody,
+    /\[stream\.stream_id\]: result\.data\.next_offset/,
+    "Expected a successful tail not to overwrite a newer live cursor with the older snapshot end",
   );
 });
 
@@ -3194,8 +3204,14 @@ test("configured context query changes clear authorized state before capability 
   );
   assert.match(
     dashboard,
-    /history\.(?:replace|push)State/,
+    /return subscribeToHistoryNavigation\(syncConfiguredContext\)/,
     "Expected soft history URL changes to be observed for context invalidation",
+  );
+  const historyNavigation = readFileSync(new URL("./history-navigation.ts", import.meta.url), "utf8");
+  assert.match(
+    historyNavigation,
+    /history\.pushState\s*=[\s\S]*?notifyListeners\(\)[\s\S]*?history\.replaceState\s*=[\s\S]*?notifyListeners\(\)/,
+    "Expected the shared subscriber to notify context invalidation on pushState and replaceState",
   );
   assert.match(
     dashboard,
@@ -3482,8 +3498,8 @@ test("inspector session reset clears before paint when switching workspaces", ()
   );
   assert.match(
     dashboard,
-    /setDetail\(emptyDetail\);[\s\S]*?setSelectedStreams\(\[\]\);[\s\S]*?setLogEntries\(\[\]\);[\s\S]*?setRetryState\(\{ status: "idle" \}\);[\s\S]*?setOperatorActionState\(\{ status: "idle" \}\);/,
-    "Expected the shared inspector session reset to clear detail, streams, logs, and action chrome",
+    /setDetail\(\(current\) => \(current === emptyDetail \? current : emptyDetail\)\);[\s\S]*?setSelectedStreams\(\(current\) => \(current\.length === 0 \? current : \[\]\)\);[\s\S]*?setLogEntries\(\(current\) => \(current\.length === 0 \? current : \[\]\)\);[\s\S]*?setRetryState\(\(current\) => \(current\.status === "idle" \? current : \{ status: "idle" \}\)\);[\s\S]*?setOperatorActionState\(\(current\) => \(current\.status === "idle" \? current : \{ status: "idle" \}\)\);/,
+    "Expected the shared inspector session reset to clear dirty detail, streams, logs, and action chrome without allocating a new identity when already clear",
   );
   assert.doesNotMatch(
     dashboard,

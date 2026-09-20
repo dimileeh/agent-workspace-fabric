@@ -19,6 +19,7 @@ import {
   orderFullscreenWorkspaceIds,
 } from "@/lib/console-dashboard-derived";
 import { awfPath } from "@/lib/console-urls";
+import { entriesAfterTailSnapshot, streamOffsetAfterTailSnapshot } from "@/lib/live-log-replay";
 import type { WorkspaceLogRead, WorkspaceLogStream, WorkspaceOverview } from "@/lib/types";
 import {
   type DetailState,
@@ -647,15 +648,7 @@ export function useWorkspaceLogTails({
             return current;
           }
           return trimLogEntries(
-            [
-              ...current.filter(
-                (entry) =>
-                  entry.workspaceId !== workspaceId ||
-                  entry.streamId !== stream.stream_id ||
-                  (entry.kind === "live" && entry.offset >= result.data.next_offset),
-              ),
-              tailEntry,
-            ],
+            entriesAfterTailSnapshot(current, tailEntry),
             selectedStreamIds,
           );
         });
@@ -663,9 +656,17 @@ export function useWorkspaceLogTails({
           if (!recoveredTailStillAuthorized()) {
             return current;
           }
+          // A live frame may have advanced past this snapshot while the read
+          // was in flight. Keep that newer cursor; the retained live suffix
+          // is already past the snapshot end.
+          const known = current[stream.stream_id] ?? 0;
+          const next = streamOffsetAfterTailSnapshot(known, result.data.next_offset);
+          if (current[stream.stream_id] === next) {
+            return current;
+          }
           return {
             ...current,
-            [stream.stream_id]: result.data.next_offset,
+            [stream.stream_id]: next,
           };
         });
       } finally {

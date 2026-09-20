@@ -1,0 +1,220 @@
+"use client";
+
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useSearchParams } from "next/navigation";
+
+import { apiGet } from "@/components/console-dashboard-shared";
+import { awfPath, configuredContextFingerprint } from "@/lib/console-urls";
+import { subscribeToHistoryNavigation } from "@/lib/history-navigation";
+import type { ApiEnvelope, Workspace } from "@/lib/types";
+
+export type TaskDetailsPromptState =
+  | { status: "closed" }
+  | { status: "loading" }
+  | { status: "ready"; prompt: string }
+  | { status: "denied"; message: string }
+  | { status: "missing"; message: string }
+  | { status: "error"; message: string };
+
+const MISSING_MESSAGE = "Workspace detail was not found.";
+const DENIED_FALLBACK = "Task prompt access was denied.";
+const ERROR_FALLBACK = "Unable to load the task prompt.";
+const MISMATCH_MESSAGE = "Task prompt response did not match this workspace.";
+const MALFORMED_PROMPT_MESSAGE = "Task prompt response was malformed.";
+
+type ResolvedPrompt = Exclude<TaskDetailsPromptState, { status: "closed" } | { status: "loading" }>;
+
+type AppliedPrompt = {
+  identity: string;
+  visit: number;
+  state: ResolvedPrompt;
+};
+
+type PromptVisit = {
+  identity: string | null;
+  id: number;
+};
+
+function structuredErrorMessage(detail: unknown): string {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return "";
+  }
+  const body = detail as {
+    detail?: { message?: unknown } | string;
+    message?: unknown;
+  };
+  if (typeof body.detail === "string" && body.detail.trim()) {
+    return body.detail.trim();
+  }
+  if (
+    body.detail &&
+    typeof body.detail === "object" &&
+    typeof body.detail.message === "string" &&
+    body.detail.message.trim()
+  ) {
+    return body.detail.message.trim();
+  }
+  if (typeof body.message === "string" && body.message.trim()) {
+    return body.message.trim();
+  }
+  return "";
+}
+
+function responseWorkspaceId(data: unknown): string | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  const id = (data as { id?: unknown }).id;
+  // Empty and whitespace-only ids are not a workspace identity, even if they
+  // happen to equal the requested id.
+  if (typeof id !== "string" || id.trim() === "") {
+    return null;
+  }
+  return id;
+}
+
+function classifyDetail(result: ApiEnvelope<Workspace>, requestedId: string): ResolvedPrompt {
+  if (!result.ok) {
+    if (result.status === 401 || result.status === 403) {
+      return {
+        status: "denied",
+        message: structuredErrorMessage(result.detail) || DENIED_FALLBACK,
+      };
+    }
+    if (result.status === 404) {
+      return { status: "missing", message: MISSING_MESSAGE };
+    }
+    if (result.status === 0) {
+      return { status: "error", message: result.message.trim() || ERROR_FALLBACK };
+    }
+    return {
+      status: "error",
+      message: structuredErrorMessage(result.detail) || ERROR_FALLBACK,
+    };
+  }
+
+  // apiGet does not validate the payload. Accept a prompt only when the body
+  // names this workspace and task_prompt is a string. Missing, empty, or
+  // non-string ids are not a match. A missing or non-string task_prompt is a
+  // malformed contract, not an empty prompt; empty and whitespace-only strings
+  // remain the absent presentation.
+  const data: unknown = result.data;
+  const responseId = responseWorkspaceId(data);
+  if (responseId === null || responseId !== requestedId) {
+    return { status: "error", message: MISMATCH_MESSAGE };
+  }
+  const taskPrompt = (data as { task_prompt?: unknown }).task_prompt;
+  if (typeof taskPrompt !== "string") {
+    return { status: "error", message: MALFORMED_PROMPT_MESSAGE };
+  }
+  return {
+    status: "ready",
+    prompt: taskPrompt.trim() ? taskPrompt : "",
+  };
+}
+
+function readLocationFingerprint(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return configuredContextFingerprint(window.location.search);
+}
+
+function useTaskDetailsContextFingerprint(): { location: string; router: string } {
+  const searchParams = useSearchParams();
+  const router = configuredContextFingerprint(`?${searchParams.toString()}`);
+  const location = useSyncExternalStore(
+    subscribeToHistoryNavigation,
+    readLocationFingerprint,
+    () => router,
+  );
+  return { location, router };
+}
+
+/**
+ * Loads the open task-details modal's authorized prompt.
+ * Overview rows deliberately omit task_prompt; this hook does not write it back.
+ * A response is applied only for the visit, generation, workspace, and context that started it.
+ * The same identity from an earlier visit does not satisfy the current one.
+ */
+export function useTaskDetailsPrompt(workspaceId: string | null): TaskDetailsPromptState {
+  const { location, router } = useTaskDetailsContextFingerprint();
+  const identity = workspaceId === null ? null : JSON.stringify([workspaceId, location, router]);
+  const [applied, setApplied] = useState<AppliedPrompt | null>(null);
+  const [visit, setVisit] = useState<PromptVisit>({ identity, id: 0 });
+  const generationRef = useRef(0);
+  const activeVisitRef = useRef(0);
+  // Bump during render so A→B→A cannot paint the previous success before the
+  // effect for the new visit runs. The modal stays mounted across workspace
+  // prop changes, and the dialog does not remount these controls.
+  const visitChanged = visit.identity !== identity;
+  const visitId = visitChanged ? visit.id + 1 : visit.id;
+  if (visitChanged) {
+    setVisit({ identity, id: visitId });
+    // Drop the previous visit's prompt now. A matching identity must not keep
+    // it on screen, including when access was revoked between visits.
+    if (applied !== null) {
+      setApplied(null);
+    }
+  }
+  // Sync before passive effects. An in-flight apply can resume in the
+  // microtask after this layout pass and before generation is bumped.
+  useLayoutEffect(() => {
+    activeVisitRef.current = visitId;
+  }, [visitId]);
+
+  useEffect(() => {
+    if (workspaceId === null || identity === null) {
+      return;
+    }
+    const generation = ++generationRef.current;
+    const requestedId = workspaceId;
+    const requestedIdentity = identity;
+    const requestedVisit = visitId;
+    let cancelled = false;
+    // Defer past Strict Mode's setup/cleanup/setup so the remount does not
+    // issue a second detail read. Closing the modal clears this timer.
+    const timer = window.setTimeout(() => {
+      void readDetail();
+    }, 0);
+
+    async function readDetail() {
+      if (cancelled || generation !== generationRef.current) {
+        return;
+      }
+      const requestedFingerprint = readLocationFingerprint();
+      const result = await apiGet<Workspace>(awfPath(`workspaces/${encodeURIComponent(requestedId)}`));
+      if (
+        cancelled ||
+        generation !== generationRef.current ||
+        readLocationFingerprint() !== requestedFingerprint
+      ) {
+        return;
+      }
+      const next = classifyDetail(result, requestedId);
+      setApplied((current) => {
+        if (
+          cancelled ||
+          generation !== generationRef.current ||
+          requestedVisit !== activeVisitRef.current
+        ) {
+          return current;
+        }
+        return { identity: requestedIdentity, visit: requestedVisit, state: next };
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [identity, workspaceId, visitId]);
+
+  if (identity === null) {
+    return { status: "closed" };
+  }
+  if (applied !== null && applied.identity === identity && applied.visit === visitId) {
+    return applied.state;
+  }
+  return { status: "loading" };
+}
