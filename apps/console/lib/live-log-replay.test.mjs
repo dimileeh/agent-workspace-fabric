@@ -266,6 +266,59 @@ test("bounds that do not match the text are not used as a slice index", () => {
   assert.deepEqual(visible, { offset: 1, nextOffset: 5, data: "\uFFFDXYZ" });
 });
 
+test("tail that stops at the aligned text start keeps that payload", () => {
+  // Bytes [0, 2) are é. The reconnect text "XYZ" starts at byte 2, so a tail
+  // through é must not drop or duplicate it, and the stored span stays 2..5.
+  const live = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:1:6:1",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 1,
+    data: "XYZ",
+    textOffset: 2,
+    textNextOffset: 5,
+  };
+  const merged = entriesAfterTailSnapshot([live], tail("active.stdout", "é", 0, 2));
+  assert.deepEqual(
+    {
+      key: merged[0].key,
+      offset: merged[0].offset,
+      data: merged[0].data,
+      textOffset: merged[0].textOffset,
+      textNextOffset: merged[0].textNextOffset,
+    },
+    {
+      key: "live:ws_logs:active.stdout:2:6:1",
+      offset: 2,
+      data: "XYZ",
+      textOffset: 2,
+      textNextOffset: 5,
+    },
+  );
+});
+
+test("bounds survive a tail that has not reached the text and still slice later", () => {
+  const live = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:1:6:1",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 1,
+    data: "XYZ",
+    textOffset: 2,
+    textNextOffset: 5,
+  };
+  const held = entriesAfterTailSnapshot([live], tail("active.stdout", "?", 0, 1));
+  assert.equal(held[0].textOffset, 2);
+  assert.equal(held[0].textNextOffset, 5);
+  assert.equal(held[0].data, "XYZ");
+  const merged = entriesAfterTailSnapshot([held[0]], tail("active.stdout", "éX", 0, 3));
+  assert.equal(merged[0].data, "YZ");
+  assert.equal(merged[0].textOffset, 3);
+  assert.equal(merged[0].textNextOffset, 5);
+});
+
 test("tail commit keeps the uncovered suffix of a stored boundary-aligned frame", () => {
   // Reconnect window started on the continuation byte of é and included a
   // trailing incomplete sequence. Core's text is only "XYZ" (bytes 2..5), but

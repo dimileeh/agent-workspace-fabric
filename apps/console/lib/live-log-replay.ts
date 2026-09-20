@@ -155,10 +155,15 @@ type ReplayLogEntry = {
 function textSpanForData(
   offset: number,
   data: string,
+  knownEnd?: number,
 ): { textOffset: number; textNextOffset: number } {
+  const encodedEnd = offset + new TextEncoder().encode(data).length;
+  // A suffix cut from a boundary-aligned frame must keep that frame's text
+  // end. Re-encoding agrees with it for a faithful slice; any other known end
+  // does not describe `data` and cannot be used as the stored span.
   return {
     textOffset: offset,
-    textNextOffset: offset + new TextEncoder().encode(data).length,
+    textNextOffset: knownEnd === encodedEnd ? knownEnd : encodedEnd,
   };
 }
 
@@ -203,7 +208,7 @@ function entryWithVisibleSuffix<T extends ReplayLogEntry>(entry: T, visible: Liv
   if (visible.offset === entry.offset && visible.data === entry.data) {
     return entry;
   }
-  const bounds = textSpanForData(visible.offset, visible.data);
+  const bounds = textSpanForData(visible.offset, visible.data, entry.textNextOffset);
   return {
     ...entry,
     key: entry.key.replace(/:(\d+):(\d+):(\d+)$/, `:${visible.offset}:${visible.nextOffset}:$3`),
