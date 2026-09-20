@@ -7,7 +7,11 @@ import {
   resolveWorkspaceStreamSubscription,
 } from "@/lib/console-capabilities";
 import { awfPath } from "@/lib/console-urls";
-import { streamOffsetAfterLiveFrame, visibleLiveLogFrame } from "@/lib/live-log-replay";
+import {
+  streamOffsetAfterLiveFrame,
+  textBoundsForStoredLiveEntry,
+  visibleLiveLogFrame,
+} from "@/lib/live-log-replay";
 import type { ConsoleCapabilities } from "@/lib/types";
 import {
   type DetailState,
@@ -358,6 +362,7 @@ export function useWorkspaceLiveStream({
           if (visible === null) {
             return current;
           }
+          const textBounds = textBoundsForStoredLiveEntry(frame, visible);
           return trimLogEntries(
             [
               ...current,
@@ -369,6 +374,7 @@ export function useWorkspaceLiveStream({
                 fd: frame.fd,
                 offset: visible.offset,
                 data: visible.data,
+                ...(textBounds ?? {}),
                 occurredAt: frame.occurred_at ?? new Date().toISOString(),
                 order: Date.parse(frame.occurred_at ?? "") || Date.now(),
                 kind: "live",

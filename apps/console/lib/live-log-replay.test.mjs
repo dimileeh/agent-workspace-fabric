@@ -5,6 +5,7 @@ import {
   entriesAfterTailSnapshot,
   streamOffsetAfterLiveFrame,
   streamOffsetAfterTailSnapshot,
+  textBoundsForStoredLiveEntry,
   visibleLiveLogFrame,
 } from "./live-log-replay.ts";
 
@@ -263,6 +264,96 @@ test("bounds that do not match the text are not used as a slice index", () => {
     data: "\uFFFDXYZ",
   });
   assert.deepEqual(visible, { offset: 1, nextOffset: 5, data: "\uFFFDXYZ" });
+});
+
+test("tail commit keeps the uncovered suffix of a stored boundary-aligned frame", () => {
+  // Reconnect window started on the continuation byte of é and included a
+  // trailing incomplete sequence. Core's text is only "XYZ" (bytes 2..5), but
+  // the stored key still records the raw window 1..6. The tail already painted
+  // through X, so replaying the whole payload would duplicate that character.
+  const live = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:1:6:1",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 1,
+    data: "XYZ",
+    textOffset: 2,
+    textNextOffset: 5,
+  };
+  const merged = entriesAfterTailSnapshot([live], tail("active.stdout", "éX", 0, 3));
+  assert.equal(merged.length, 2);
+  assert.deepEqual(
+    {
+      key: merged[0].key,
+      offset: merged[0].offset,
+      data: merged[0].data,
+      textOffset: merged[0].textOffset,
+      textNextOffset: merged[0].textNextOffset,
+    },
+    {
+      key: "live:ws_logs:active.stdout:3:6:1",
+      offset: 3,
+      data: "YZ",
+      textOffset: 3,
+      textNextOffset: 5,
+    },
+  );
+  const again = entriesAfterTailSnapshot([merged[0]], tail("active.stdout", "éXY", 0, 4));
+  assert.equal(again[0].data, "Z");
+  assert.equal(again[0].offset, 4);
+  assert.equal(again[0].textOffset, 4);
+  assert.equal(again[0].textNextOffset, 5);
+});
+
+test("tail commit drops boundary-aligned text the snapshot already contains", () => {
+  // The raw window still ends on an incomplete byte past the snapshot, but the
+  // published text ends at the snapshot. Keeping the payload duplicates "XYZ".
+  const live = {
+    kind: "live",
+    key: "live:ws_logs:active.stdout:1:6:1",
+    workspaceId: "ws_logs",
+    streamId: "active.stdout",
+    offset: 1,
+    data: "XYZ",
+    textOffset: 2,
+    textNextOffset: 5,
+  };
+  const merged = entriesAfterTailSnapshot([live], tail("active.stdout", "éXYZ", 0, 5));
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].kind, "tail");
+});
+
+test("stored text bounds are kept only while they still describe the payload", () => {
+  const frame = {
+    offset: 1,
+    next_offset: 6,
+    text_offset: 2,
+    text_next_offset: 5,
+    data: "XYZ",
+  };
+  assert.deepEqual(textBoundsForStoredLiveEntry(frame, { offset: 1, nextOffset: 6, data: "XYZ" }), {
+    textOffset: 2,
+    textNextOffset: 5,
+  });
+  assert.equal(
+    textBoundsForStoredLiveEntry(
+      { offset: 1, next_offset: 6, data: "XYZ" },
+      { offset: 1, nextOffset: 6, data: "XYZ" },
+    ),
+    null,
+  );
+  assert.equal(
+    textBoundsForStoredLiveEntry(
+      { offset: 1, next_offset: 6, text_offset: 2, data: "XYZ" },
+      { offset: 1, nextOffset: 6, data: "XYZ" },
+    ),
+    null,
+  );
+  assert.deepEqual(
+    textBoundsForStoredLiveEntry(frame, { offset: 3, nextOffset: 6, data: "YZ" }),
+    { textOffset: 3, textNextOffset: 5 },
+  );
 });
 
 test("a late tail snapshot does not rewind a cursor a live frame already advanced", () => {

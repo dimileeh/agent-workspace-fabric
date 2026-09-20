@@ -148,29 +148,69 @@ type ReplayLogEntry = {
   streamId: string;
   offset: number;
   data: string;
+  textOffset?: number;
+  textNextOffset?: number;
 };
+
+function textSpanForData(
+  offset: number,
+  data: string,
+): { textOffset: number; textNextOffset: number } {
+  return {
+    textOffset: offset,
+    textNextOffset: offset + new TextEncoder().encode(data).length,
+  };
+}
+
+/**
+ * Bounds that still name `visible.data`.
+ *
+ * Server text bounds describe the original payload. A suffix trimmed before
+ * the entry is stored is a different span, and inventing bounds for an
+ * untrimmed payload would hide a lossy window that must not be sliced.
+ */
+export function textBoundsForStoredLiveEntry(
+  frame: { data: string; text_offset?: number; text_next_offset?: number },
+  visible: LiveLogFrameView,
+): { textOffset: number; textNextOffset: number } | null {
+  if (visible.data !== frame.data) {
+    return textSpanForData(visible.offset, visible.data);
+  }
+  if (typeof frame.text_offset !== "number" || typeof frame.text_next_offset !== "number") {
+    return null;
+  }
+  return { textOffset: frame.text_offset, textNextOffset: frame.text_next_offset };
+}
 
 function storedLiveFrame(entry: ReplayLogEntry): LiveLogFrame {
   const match = /:(\d+):(\d+):(\d+)$/.exec(entry.key);
-  if (match === null) {
-    return { offset: entry.offset, data: entry.data };
+  const frame: LiveLogFrame =
+    match === null
+      ? { offset: entry.offset, data: entry.data }
+      : {
+          offset: entry.offset,
+          next_offset: Number(match[2]),
+          data: entry.data,
+        };
+  if (typeof entry.textOffset === "number" && typeof entry.textNextOffset === "number") {
+    frame.text_offset = entry.textOffset;
+    frame.text_next_offset = entry.textNextOffset;
   }
-  return {
-    offset: entry.offset,
-    next_offset: Number(match[2]),
-    data: entry.data,
-  };
+  return frame;
 }
 
 function entryWithVisibleSuffix<T extends ReplayLogEntry>(entry: T, visible: LiveLogFrameView): T {
   if (visible.offset === entry.offset && visible.data === entry.data) {
     return entry;
   }
+  const bounds = textSpanForData(visible.offset, visible.data);
   return {
     ...entry,
     key: entry.key.replace(/:(\d+):(\d+):(\d+)$/, `:${visible.offset}:${visible.nextOffset}:$3`),
     offset: visible.offset,
     data: visible.data,
+    textOffset: bounds.textOffset,
+    textNextOffset: bounds.textNextOffset,
   };
 }
 

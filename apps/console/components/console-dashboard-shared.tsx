@@ -227,6 +227,9 @@ export type LogEntry = {
   occurredAt: string;
   order: number;
   kind: "tail" | "live";
+  /** Boundary-safe file range for `data`, when it differs from the raw window. */
+  textOffset?: number;
+  textNextOffset?: number;
 };
 
 export type LogStreamActivity = {
