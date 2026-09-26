@@ -86,21 +86,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    services:
-      postgres:
-        # Use the Docker Official Images mirror to avoid Docker Hub pull timeouts
-        # before the shard job can run any retryable steps.
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_USER: awf
-          POSTGRES_PASSWORD: awf_ci
-          POSTGRES_DB: awf
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U awf"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -139,6 +124,42 @@ jobs:
           docker version
           docker compose version
 
+      - name: Start PostgreSQL
+        run: |
+          set -euo pipefail
+          primary_image="public.ecr.aws/docker/library/postgres:16"
+          fallback_image="docker.io/library/postgres:16"
+          container_name="awf-ci-postgres"
+
+          if docker pull "$primary_image"; then
+            selected_image="$primary_image"
+          elif docker pull "$fallback_image"; then
+            echo "::warning title=PostgreSQL mirror pull failed::Using Docker Hub fallback after the ECR Public pull failed."
+            selected_image="$fallback_image"
+          else
+            echo "::error title=PostgreSQL image pull failed::Both the ECR Public mirror and Docker Hub fallback failed."
+            exit 1
+          fi
+
+          docker run --detach --name "$container_name" \
+            --env POSTGRES_USER=awf \
+            --env POSTGRES_PASSWORD=awf_ci \
+            --env POSTGRES_DB=awf \
+            --publish 5432:5432 \
+            "$selected_image"
+
+          for attempt in $(seq 1 30); do
+            if docker exec "$container_name" pg_isready -U awf; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs "$container_name"
+              echo "::error title=PostgreSQL readiness failed::PostgreSQL did not become ready after 60 seconds."
+              exit 1
+            fi
+            sleep 2
+          done
+
       - name: Run coverage shard
         env:
           CI: "true"
@@ -169,6 +190,10 @@ jobs:
           path: coverage-artifacts/.coverage.shard-${{ matrix.shard }}
           include-hidden-files: true
           retention-days: 14
+
+      - name: Stop PostgreSQL
+        if: ${{ always() }}
+        run: docker rm --force awf-ci-postgres >/dev/null 2>&1 || true
 
   python-full-coverage:
     runs-on: ubuntu-latest
