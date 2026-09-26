@@ -20,8 +20,6 @@ DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 GITHUB_HOSTED_RUNNER = "ubuntu-latest"
 POSTGRES_CI_IMAGE = "public.ecr.aws/docker/library/postgres:16"
-POSTGRES_CI_FALLBACK_IMAGE = "docker.io/library/postgres:16"
-POSTGRES_CI_CONTAINER = "awf-ci-postgres"
 SETUP_UV_VERSION = "0.5.31"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -181,27 +179,16 @@ def test_ci_has_parallel_python_coverage_shards() -> None:
         "matrix": {"shard": [1, 2, 3, 4, 5, 6, 7, 8]},
     }
 
-    assert "services" not in job
-
-    postgres_run = _step_run(job, "Start PostgreSQL")
-    assert f'primary_image="{POSTGRES_CI_IMAGE}"' in postgres_run
-    assert f'fallback_image="{POSTGRES_CI_FALLBACK_IMAGE}"' in postgres_run
-    assert f'container_name="{POSTGRES_CI_CONTAINER}"' in postgres_run
-    assert 'docker pull "$primary_image"' in postgres_run
-    assert 'docker pull "$fallback_image"' in postgres_run
-    assert 'docker run --detach --name "$container_name"' in postgres_run
-    assert "--env POSTGRES_USER=awf" in postgres_run
-    assert "--env POSTGRES_PASSWORD=awf_ci" in postgres_run
-    assert "--env POSTGRES_DB=awf" in postgres_run
-    assert "--publish 5432:5432" in postgres_run
-    assert 'docker exec "$container_name" pg_isready -U awf' in postgres_run
-    assert 'docker logs "$container_name"' in postgres_run
-
-    stop_step = _named_step(job, "Stop PostgreSQL")
-    assert stop_step.get("if") == "${{ always() }}"
-    stop_run = stop_step.get("run")
-    assert isinstance(stop_run, str)
-    assert f"docker rm --force {POSTGRES_CI_CONTAINER}" in stop_run
+    services = job.get("services", {})
+    assert isinstance(services, dict)
+    postgres = services.get("postgres")
+    assert isinstance(postgres, dict)
+    assert postgres.get("image") == POSTGRES_CI_IMAGE
+    assert postgres.get("env") == {
+        "POSTGRES_USER": "awf",
+        "POSTGRES_PASSWORD": "awf_ci",
+        "POSTGRES_DB": "awf",
+    }
 
     commands = _run_steps(job)
     assert "docker version" in commands
