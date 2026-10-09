@@ -1401,3 +1401,64 @@ async def test_a_bare_callee_realiased_within_one_module_fails_closed() -> None:
         "record_ready_queue_depth": cross_file._AMBIGUOUS_IMPORT_TARGET
     }
     assert not await _probe(_cross_package_probe(caller_text=caller), item_line=6)
+
+
+@pytest.mark.unit
+def test_an_aliased_bare_import_keeps_the_imported_symbols_name() -> None:
+    """``import actual as alias`` binds ``alias`` but names ``actual``.
+
+    The local name narrows the candidate path; the definition to look for inside
+    it is the imported symbol (PRRT_kwDOSJAM6s6q9WnP). An unaliased import, and
+    a name two imports bind to different symbols, carry no rename.
+    """
+    text = (
+        "from pkg.mod import actual as alias\n"
+        "from pkg.mod import plain\n"
+        "from pkg.mod import first as rebound\n"
+        "from pkg.other import second as rebound\n"
+    )
+    assert cross_file._bare_name_imported_definition_names(text, path=_CALLER) == {
+        "alias": "actual"
+    }
+
+
+@pytest.mark.unit
+async def test_an_aliased_bare_callee_resolves_to_the_imported_definition() -> None:
+    """A correction to the aliased callee's real definition is evidence.
+
+    ``from M import record_ready_queue_depth as record`` reaches ``M``'s
+    ``record_ready_queue_depth``, so searching ``M`` for ``def record`` would
+    reject the fix that edits it (PRRT_kwDOSJAM6s6q9WnP).
+    """
+    caller = (
+        "from pkg_b.observability.execution_platform_metrics import "
+        "record_ready_queue_depth as record\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record(payload)\n"
+    )
+
+    assert await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_alias_colliding_with_a_sibling_definition_fails_closed() -> None:
+    """An edit to the module's own ``unrelated_helper`` is not evidence.
+
+    The call site aliases ``record_ready_queue_depth`` to ``unrelated_helper``,
+    a name the same module also defines. Looking the local binding up in the
+    imported module would accept a correction to that sibling as proof the
+    reviewed call was fixed (PRRT_kwDOSJAM6s6q9WnP).
+    """
+    caller = (
+        "from pkg_b.observability.execution_platform_metrics import "
+        "record_ready_queue_depth as unrelated_helper\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    unrelated_helper(payload)\n"
+    )
+    probe = _cross_package_probe(caller_text=caller, diff=_OUT_OF_SPAN_DIFF)
+
+    assert not await _probe(probe, item_line=5)

@@ -342,6 +342,31 @@ def _bare_name_import_module_targets(
     }
 
 
+def _bare_name_imported_definition_names(file_text: str, *, path: str) -> dict[str, str]:
+    """Imported symbol each bare-callee binding in ``file_text`` actually names.
+
+    ``from pkg.mod import actual as alias`` makes ``alias()`` a call to
+    ``pkg.mod``'s ``actual``: the *local* name narrows the candidate path, but
+    the definition the span rule has to find is named ``actual``. Keeping only
+    the local name both rejects a real correction to ``actual`` and accepts an
+    edit to an unrelated ``alias`` that happens to live in the same module as
+    evidence about the call (PRRT_kwDOSJAM6s6q9WnP).
+
+    Only names whose imports agree on one imported symbol are mapped. A name
+    several imports bind to *different* symbols is a rebinding that already
+    fails closed on its path binding (see ``_AMBIGUOUS_IMPORT_TARGET``), so it
+    keeps its local name here rather than this reader picking one of them.
+    """
+    imported_names: dict[str, set[str]] = {}
+    for _module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+        imported_names.setdefault(bound, set()).add(imported)
+    return {
+        bound: next(iter(imported))
+        for bound, imported in imported_names.items()
+        if len(imported) == 1 and bound not in imported
+    }
+
+
 def _receiver_import_module_targets(
     file_text: str, *, path: str
 ) -> dict[str, frozenset[_ModuleTarget]]:
@@ -696,7 +721,10 @@ def _cross_file_callee_names(
     ``_importable_definition_spans_for_names``. Each ref is a
     ``(binding_key, name)`` pair, the key being the name whose import binding
     narrows the candidate path: a qualified callee binds through its receiver, a
-    bare callee through itself.
+    bare callee through itself. The two differ for an aliased bare callee, whose
+    key is the local binding while the definition to look for carries the
+    imported symbol's name (PRRT_kwDOSJAM6s6q9WnP); a qualified callee's name is
+    an attribute of its receiver, which no import renames.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
         _callee_refs_from_file_line,
@@ -708,7 +736,10 @@ def _cross_file_callee_names(
         for qualifier, name in refs
         if qualifier is not None and qualifier not in _IN_FILE_CALLEE_QUALIFIERS
     )
-    bare = frozenset((name, name) for qualifier, name in refs if qualifier is None)
+    imported = _bare_name_imported_definition_names(file_text, path=path)
+    bare = frozenset(
+        (name, imported.get(name, name)) for qualifier, name in refs if qualifier is None
+    )
     return qualified, bare
 
 
@@ -740,7 +771,11 @@ async def _commit_range_changes_callee_definition(
     module is not evidence about the call (PRRT_kwDOSJAM6s6q8-M1). A name two
     imports rebind resolves to one of them at runtime, so it is held to neither
     rather than to their union, whether or not both targets resolve to a path
-    (PRRT_kwDOSJAM6s6q8-Mw). A candidate that the range renamed is diffed against its
+    (PRRT_kwDOSJAM6s6q8-Mw). An aliased bare callee is looked for under the
+    *imported* symbol's name rather than its local binding, so a correction to
+    the definition it really reaches counts and an edit to an unrelated
+    same-named definition in that module does not (PRRT_kwDOSJAM6s6q9WnP).
+    A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. An overlap is accepted only when *that* callee is still
     reachable at ``right``, so a correction that deletes the definition — or its
