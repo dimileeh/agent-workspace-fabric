@@ -162,7 +162,7 @@ def test_selected_provider_preflight_blocks_missing_strict_auth(tmp_path: Path) 
 
     assert result["provider"] == "codex"
     assert result["agent"] == "codex"
-    assert result["model"] == "gpt-5.6-sol"
+    assert result["model"] == "gpt-6.1-sol"
     assert result["readiness_status"] == "blocked"
     assert result["auth_status"] == "fail"
     assert result["auth_source"] == "not_observed"

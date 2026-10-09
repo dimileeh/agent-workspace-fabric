@@ -14,7 +14,8 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # Claude Opus 5.5 is the current flagship; the pinned Claude Code CLI
         # (2.1.295) accepts the id and the low..max effort ladder unchanged.
         AgentRuntime.claude_code: AgentDefaults(model="claude-opus-5-5", effort="xhigh"),
-        AgentRuntime.codex: AgentDefaults(model="gpt-5.6-sol", effort="xhigh"),
+        # codex 0.162.0 ships the GPT-6 family; the xhigh effort ladder is unchanged.
+        AgentRuntime.codex: AgentDefaults(model="gpt-6.1-sol", effort="xhigh"),
         # Cursor Auto has provider-specific Cost/Balance/Intelligence routing
         # profiles, not a portable reasoning-effort flag. The account/team owns
         # the Auto profile; eligible teams can pass Cursor's parameterized

@@ -531,7 +531,7 @@ async def test_retry_endpoint_blocks_missing_provider_readiness(
     assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
     preflight = body["detail"]["provider_readiness_preflight"]
     assert preflight["provider"] == "codex"
-    assert preflight["model"] == "gpt-5.6-sol"
+    assert preflight["model"] == "gpt-6.1-sol"
     assert preflight["blocks_launch"] is True
 
 

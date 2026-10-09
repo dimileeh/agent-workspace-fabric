@@ -412,7 +412,7 @@ Default agent models and effort are centralized in
 | Agent | Default model | AWF effort |
 | --- | --- | --- |
 | `claude_code` | `claude-opus-5-5` | `xhigh` passed through to Claude Code |
-| `codex` | `gpt-5.6-sol` | `xhigh` via `model_reasoning_effort` |
+| `codex` | `gpt-6.1-sol` | `xhigh` via `model_reasoning_effort` |
 | `cursor` | `auto` | Unset. Cursor Auto uses provider-specific Cost, Balance, or Intelligence routing profiles rather than AWF reasoning effort. |
 | `antigravity` | `gemini-3.1-pro` | `high` emitted as `--effort high` in API-key mode; OAuth uses composite slugs |
 | `opencode` | `ollama/kimi-k3:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |

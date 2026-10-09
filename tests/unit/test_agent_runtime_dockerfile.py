@@ -211,7 +211,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     assert "codex --version || true" not in dockerfile
     assert (
         "codex exec --dangerously-bypass-approvals-and-sandbox "
-        "--model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
+        "--model gpt-6.1-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
     ) in dockerfile
 
     assert "gemini --version || true" not in dockerfile
