@@ -500,12 +500,73 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     return frozenset(bound)
 
 
+def _global_declared_names(scope: ast.AST) -> Iterator[str]:
+    """Names ``scope`` or anything nested in it declares ``global``.
+
+    ``global f`` exists only so an assignment reaches the module binding, so a
+    function carrying one rebinds ``f`` at module scope even though the
+    statement that does it sits in a body the module-scope reader never
+    descends into.
+    """
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Global):
+            yield from node.names
+
+
+def _module_scope_rebound_names(file_text: str, *, path: str) -> frozenset[str]:
+    """Names the module's own body binds besides its imports.
+
+    An import proves a callee's module only while the name still holds that
+    import, and a module global is rebindable from the module body as well as
+    from a function scope: ``from pkg.mod import validate`` followed by
+    ``validate = build_validator()`` leaves every later call — at module level
+    or inside a function that reads the global — reaching the reassigned
+    global, so a correction to ``pkg/mod.py``'s ``validate`` touches nothing the
+    anchored line calls (PRRT_kwDOSJAM6s6q9WnX). This lexical reader cannot
+    order the import against the rebinding, so any such name fails closed
+    rather than being read in textual order.
+
+    Collected module-wide rather than at the anchored line, because a module
+    global is in scope for the whole file. Import aliases are *not* collected —
+    they are the binding this gate exists to trust. Function and class bodies
+    are not descended into: their bindings are locals and class attributes, and
+    the function-scope ones are ``_locally_rebound_names_at_line``'s subject;
+    only a ``global`` declaration inside them reaches back out. A top-level
+    ``def`` / ``class`` of the name does shadow the import and is collected.
+    Text this reader cannot parse yields nothing, matching the companion reader
+    rather than failing every import-bound callee closed on a parse error.
+    """
+    if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
+        return frozenset()
+    try:
+        tree = ast.parse(file_text)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    bound: set[str] = set()
+    pending: list[ast.AST] = list(ast.iter_child_nodes(tree))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+            bound.add(node.name)
+            bound.update(_global_declared_names(node))
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        pending.extend(ast.iter_child_nodes(node))
+    return frozenset(bound)
+
+
 def _import_targets_without_locally_rebound(
     bindings: dict[str, frozenset[_ModuleTarget]], rebound: frozenset[str]
 ) -> dict[str, frozenset[_ModuleTarget]]:
     """``bindings`` with every locally rebound name held to the unmatchable target.
 
-    A name the anchored scope binds itself does not reach its import, so it is
+    A name the anchored scope — or the module body around it — binds itself
+    does not reach its import, so it is
     held to ``_AMBIGUOUS_IMPORT_TARGET`` exactly as a name two imports rebind
     is: unmatchable, and deliberately non-empty so the name does not fall back
     to the name-only rule and accept any changed file that happens to carry a
@@ -903,7 +964,9 @@ async def _commit_range_changes_callee_definition(
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
-    rebound = _locally_rebound_names_at_line(item_text, item_line, path=normalized_item)
+    rebound = _locally_rebound_names_at_line(
+        item_text, item_line, path=normalized_item
+    ) | _module_scope_rebound_names(item_text, path=normalized_item)
     bare_bindings = _import_targets_without_locally_rebound(
         _bare_name_import_module_targets(item_text, path=normalized_item), rebound
     )

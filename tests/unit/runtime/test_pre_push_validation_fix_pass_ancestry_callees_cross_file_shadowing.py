@@ -2,9 +2,10 @@
 
 Unit tests for the one thing an import binding cannot prove on its own: that
 the name still *holds* that import where the review is anchored. A parameter,
-a local assignment or a nested definition of the same name leaves the call
-reaching the local binding, so the imported module's same-named definition is
-not the callee a correction has to touch (PRRT_kwDOSJAM6s6q9WnX). Kept beside
+a local assignment, a nested definition or a module-level reassignment of the
+same name leaves the call reaching that binding instead, so the imported
+module's same-named definition is not the callee a correction has to touch
+(PRRT_kwDOSJAM6s6q9WnX). Kept beside
 ``test_pre_push_validation_fix_pass_ancestry_callees_cross_file.py`` so both
 stay under the first-party file line limit.
 """
@@ -230,3 +231,129 @@ def test_a_rebound_name_is_held_to_the_unmatchable_target() -> None:
 
     assert held["record"] == cross_file._AMBIGUOUS_IMPORT_TARGET
     assert held["other"] == bindings["other"]
+
+
+# The imported bare callee is reassigned at *module* level, so the call on
+# line 8 reaches that module global rather than the imported definition — and a
+# module global is visible inside the function too.
+_MODULE_ASSIGNMENT_SHADOW_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "record_ready_queue_depth = build_recorder()\n"
+    "\n"
+    "\n"
+    "def refresh(pool):\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+)
+
+# The same shape for a receiver a plain ``import`` would otherwise prove to be
+# the imported module.
+_MODULE_RECEIVER_SHADOW_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "\n"
+    "metrics = Collector()\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_module_level_assignment_shadowing_the_import_fails_closed() -> None:
+    """A module global rebinding the import is not the callee either.
+
+    ``from pkg.mod import f`` followed by ``f = build()`` leaves every later
+    call — at module level or inside a function that reads the global —
+    reaching the reassigned global, so editing ``pkg/mod.py``'s ``f`` changes
+    nothing the anchored line calls (PRRT_kwDOSJAM6s6q9WnX).
+    """
+    probe = _cross_package_probe(caller_text=_MODULE_ASSIGNMENT_SHADOW_TEXT)
+
+    assert not await _probe(probe, item_line=8)
+
+
+@pytest.mark.unit
+async def test_a_module_level_assignment_shadowing_a_receiver_fails_closed() -> None:
+    """The receiver form of the module-global rebinding."""
+    probe = _receiver_probe(caller_text=_MODULE_RECEIVER_SHADOW_TEXT)
+
+    assert not await _probe(probe, item_line=7)
+
+
+@pytest.mark.unit
+def test_module_scope_rebindings_are_read_but_import_aliases_are_not() -> None:
+    """Every module-scope binding form counts, except the imports themselves.
+
+    An ``import`` statement *is* the binding this reader exists to trust, so its
+    own aliases are not reported; a conditional or loop body at module level is
+    still module scope, and neither a function body nor a lambda's parameters
+    are.
+    """
+    text = (
+        "import pkg.late as late\n"
+        "from pkg import imported\n"
+        "assigned = 1\n"
+        "annotated: int = 2\n"
+        "assigned += 1\n"
+        "for looped in assigned:\n"
+        "    with open(looped) as opened:\n"
+        "        pass\n"
+        "try:\n"
+        "    pass\n"
+        "except ValueError as caught:\n"
+        "    pass\n"
+        "if (walrus := assigned):\n"
+        "    pass\n"
+        "handler = lambda lambda_param: lambda_param\n"
+        "\n"
+        "\n"
+        "def refresh():\n"
+        "    local_only = 1\n"
+        "    return local_only\n"
+        "\n"
+        "\n"
+        "class Collector:\n"
+        "    attribute = None\n"
+    )
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset(
+        {
+            "assigned",
+            "annotated",
+            "looped",
+            "opened",
+            "caught",
+            "walrus",
+            "handler",
+            "refresh",
+            "Collector",
+        }
+    )
+
+
+@pytest.mark.unit
+def test_a_global_declaration_counts_as_a_module_scope_rebinding() -> None:
+    """``global f`` exists to assign ``f``, so the module binding is not proof."""
+    text = (
+        "from pkg import record\n"
+        "\n"
+        "\n"
+        "def install(recorder):\n"
+        "    global record\n"
+        "    record = recorder\n"
+    )
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset(
+        {"install", "record"}
+    )
+
+
+@pytest.mark.unit
+def test_unreadable_call_sites_report_no_module_scope_bindings() -> None:
+    """A non-Python path and unparseable text both leave the bindings untouched."""
+    assert cross_file._module_scope_rebound_names("record = 1\n", path="src/web/app.ts") == (
+        frozenset()
+    )
+    assert cross_file._module_scope_rebound_names("record = (\n", path=_CALLER) == frozenset()
