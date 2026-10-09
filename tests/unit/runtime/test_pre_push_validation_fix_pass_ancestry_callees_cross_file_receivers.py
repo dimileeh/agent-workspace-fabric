@@ -136,3 +136,85 @@ def test_only_plain_imports_prove_a_receiver_is_a_module() -> None:
         )
         == frozenset()
     )
+
+
+# A caller shallow enough that ``from ..`` climbs past the repo root, so the
+# import reader cannot resolve the module it rebinds ``metrics`` to.
+_REBOUND_CALLER = "pkg_a/caller.py"
+_REBOUND_CALLEE = "pkg_b/observability/execution_platform_metrics.py"
+
+_REBOUND_CALLER_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "from .. import metrics\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+_PROVEN_CALLER_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+# A body-only change inside the module-level callee of ``_SHADOWED_METHOD_TEXT``.
+_REBOUND_CALLEE_DIFF = (
+    f"--- a/{_REBOUND_CALLEE}\n"
+    f"+++ b/{_REBOUND_CALLEE}\n"
+    "@@ -10 +10 @@\n"
+    "-    GAUGE.set(len(payload.entries))\n"
+    "+    GAUGE.set(payload.ready_depth())\n"
+)
+
+
+def _rebound_receiver_probe(*, caller_text: str) -> _Probe:
+    return _Probe(
+        texts={
+            (_LEFT, _REBOUND_CALLER): caller_text,
+            (_LEFT, _REBOUND_CALLEE): _SHADOWED_METHOD_TEXT,
+        },
+        changed_paths=(_REBOUND_CALLEE,),
+        diffs={_REBOUND_CALLEE: _REBOUND_CALLEE_DIFF},
+    )
+
+
+@pytest.mark.unit
+async def test_an_unresolvable_relative_import_unproves_a_module_receiver() -> None:
+    """A ``from`` import the reader cannot resolve still rebinds the receiver.
+
+    ``from .. import metrics`` here climbs past the repo root, so no module path
+    comes out of it — but it rebinds ``metrics`` all the same, which leaves the
+    plain ``import`` no longer proof that the receiver is that module. Counting
+    the unresolvable statement as one of the name's identities is what makes the
+    receiver fail closed instead of resolving against the plain import's module
+    (PRRT_kwDOSJAM6s6q8-M1).
+    """
+    probe = _rebound_receiver_probe(caller_text=_REBOUND_CALLER_TEXT)
+
+    assert not await _probe(probe, item_path=_REBOUND_CALLER, item_line=6)
+
+
+@pytest.mark.unit
+async def test_the_same_receiver_resolves_when_nothing_rebinds_it() -> None:
+    """The paired accept: without the rebinding the module receiver still resolves."""
+    probe = _rebound_receiver_probe(caller_text=_PROVEN_CALLER_TEXT)
+
+    assert await _probe(probe, item_path=_REBOUND_CALLER, item_line=5)
+
+
+@pytest.mark.unit
+def test_an_unresolvable_import_counts_as_a_rebinding_of_the_name() -> None:
+    """The receiver is neither a proven module nor bound to the plain import."""
+    assert (
+        cross_file._module_bound_receiver_names(_REBOUND_CALLER_TEXT, path=_REBOUND_CALLER)
+        == frozenset()
+    )
+    assert (
+        cross_file._receiver_import_module_targets(_REBOUND_CALLER_TEXT, path=_REBOUND_CALLER)[
+            "metrics"
+        ]
+        == cross_file._AMBIGUOUS_IMPORT_TARGET
+    )

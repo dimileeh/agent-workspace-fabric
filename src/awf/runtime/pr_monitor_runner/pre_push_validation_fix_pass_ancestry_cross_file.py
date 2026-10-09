@@ -92,6 +92,30 @@ _ModuleTarget = tuple[str, bool]
 # from no candidate — every changed file fails closed for that name.
 _AMBIGUOUS_IMPORT_TARGET: frozenset[_ModuleTarget] = frozenset({("", False)})
 
+# Stand-in module path for a ``from`` import this reader cannot resolve to a
+# path — a relative import whose dots climb past the repo root. The statement
+# still *rebinds* the name, so it has to count as one of the identities the
+# target builders weigh: dropping it outright would leave the name holding
+# another import's target, and would let a plain ``import`` still claim the name
+# as a *proven module* receiver even though the call site reaches whatever the
+# unresolvable import bound (PRRT_kwDOSJAM6s6q8-M1). It is not a path any
+# candidate can match, so it only ever makes a name fail closed.
+_UNRESOLVED_IMPORT_MODULE = "?"
+
+
+def _import_binding_identity(module_path: str | None, imported: str) -> str:
+    """The definition identity a ``from`` import binds a name to.
+
+    Two statements binding one name to the same identity are a repeat of the
+    same import; binding it to two identities is a rebinding, which fails closed
+    (see ``_AMBIGUOUS_IMPORT_TARGET``). An unresolvable module path keeps a
+    distinct identity rather than disappearing (see
+    ``_UNRESOLVED_IMPORT_MODULE``).
+    """
+    if module_path is None:
+        return f"{_UNRESOLVED_IMPORT_MODULE}/{imported}"
+    return f"{module_path}/{imported}"
+
 
 def _module_path_segments(path: str) -> list[str]:
     """``path`` as directory segments, with a Python module suffix dropped."""
@@ -176,7 +200,9 @@ def _import_head_bracket_depths(lines: list[str]) -> list[int]:
     return depths
 
 
-def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[str, str, str]]:
+def _iter_from_import_bindings(
+    file_text: str, *, path: str
+) -> Iterator[tuple[str | None, str, str]]:
     """``(module_path, bound, imported)`` for each ``from`` import in ``file_text``.
 
     Both ``from M import ...`` and the relative ``from .M import ...`` form are
@@ -195,6 +221,12 @@ def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[s
     (PRRT_kwDOSJAM6s6q8MXB). Heads are read only at bracket depth 0, which is
     where a logical line starts, so a head the scan's interpolation retention
     left readable binds nothing either.
+
+    ``module_path`` is None when the statement's target cannot be resolved to a
+    path (a relative import climbing past the repo root). The names it binds are
+    still yielded, because the statement rebinds them whether or not this reader
+    can follow it: callers that need a path skip those bindings, while the ones
+    that judge *rebinding* count them (PRRT_kwDOSJAM6s6q8-M1).
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return
@@ -223,8 +255,6 @@ def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[s
         while targets.count("(") > targets.count(")") and index < len(lines):
             targets += " " + _import_line_without_comment(lines[index]).strip()
             index += 1
-        if module_path is None:
-            continue
         for bound, imported in _imported_binding_names(targets):
             yield module_path, bound, imported
 
@@ -237,6 +267,8 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     """
     bindings: dict[str, set[str]] = {}
     for module_path, bound, _imported in _iter_from_import_bindings(file_text, path=path):
+        if module_path is None:
+            continue
         bindings.setdefault(bound, set()).add(module_path)
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
@@ -299,7 +331,7 @@ def _bare_name_import_module_targets(
     """
     identities: dict[str, set[str]] = {}
     for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
-        identities.setdefault(bound, set()).add(f"{module_path}/{imported}")
+        identities.setdefault(bound, set()).add(_import_binding_identity(module_path, imported))
     return {
         name: (
             _AMBIGUOUS_IMPORT_TARGET
@@ -336,7 +368,9 @@ def _receiver_import_module_targets(
     targets: dict[str, set[_ModuleTarget]] = {}
     bound_modules: dict[str, set[str]] = {}
     for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
-        bound_modules.setdefault(bound, set()).add(f"{module_path}/{imported}")
+        bound_modules.setdefault(bound, set()).add(_import_binding_identity(module_path, imported))
+        if module_path is None:
+            continue
         targets.setdefault(bound, set()).update(
             ((f"{module_path}/{imported}", False), (module_path, True))
         )
@@ -365,7 +399,10 @@ def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]
     ``_receiver_import_module_targets``) — and so does a receiver no import
     binds, which keeps the name-only rule the #1019 fixes depend on. A name
     both forms bind is rebound rather than proven, so it is not claimed here and
-    fails closed on ``_AMBIGUOUS_IMPORT_TARGET`` instead.
+    fails closed on ``_AMBIGUOUS_IMPORT_TARGET`` instead — including when the
+    ``from`` import's own target is unresolvable, since such a statement rebinds
+    the name all the same and so disproves the plain import's module identity
+    just as a resolvable one does.
     """
     from_bound = {
         bound for _module_path, bound, _imported in _iter_from_import_bindings(file_text, path=path)
@@ -700,8 +737,9 @@ async def _commit_range_changes_callee_definition(
     package (PRRT_kwDOSJAM6s6q8MW9). The receiver's binding *kind* is kept too:
     a receiver a plain ``import`` proves to be a module reaches only
     module-level definitions, so editing a same-named method of a class in that
-    module is not evidence about the call (PRRT_kwDOSJAM6s6q8-M1). A name two imports rebind resolves to one
-    of them at runtime, so it is held to neither rather than to their union
+    module is not evidence about the call (PRRT_kwDOSJAM6s6q8-M1). A name two
+    imports rebind resolves to one of them at runtime, so it is held to neither
+    rather than to their union, whether or not both targets resolve to a path
     (PRRT_kwDOSJAM6s6q8-Mw). A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. An overlap is accepted only when *that* callee is still
