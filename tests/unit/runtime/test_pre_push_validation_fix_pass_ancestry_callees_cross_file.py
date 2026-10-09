@@ -744,6 +744,45 @@ async def test_parenthesized_import_blocks_bind_every_name_they_list() -> None:
 
 
 @pytest.mark.unit
+async def test_a_comment_inside_an_import_block_does_not_drop_later_names() -> None:
+    """A ``#`` comment ends at its own line, not at the import block's closer.
+
+    The wrapped target list is joined line by line, so a comment beside one name
+    must not swallow the names below it — those would fall back to the name-only
+    rule and accept an unrelated same-named definition (PRRT_kwDOSJAM6s6q8BmK).
+    """
+    caller = (
+        "from pkg_c.unrelated import (  # noqa: F401\n"
+        "    helper,  # kept for the legacy call path\n"
+        "    record_ready_queue_depth,\n"
+        ")\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=8)
+
+
+@pytest.mark.unit
+def test_import_comments_are_stripped_per_line_before_the_names_are_read() -> None:
+    """Each physical line loses its own comment; the bindings below survive."""
+    assert cross_file._bare_name_import_module_paths(
+        "from pkg.mod import (  # noqa: F401\n"
+        "    alpha,  # a trailing note (with a paren)\n"
+        "    beta as gamma,\n"
+        ")\n"
+        "from pkg.other import delta  # another note\n",
+        path="src/pkg/caller.py",
+    ) == {
+        "alpha": frozenset({"pkg/mod"}),
+        "gamma": frozenset({"pkg/mod"}),
+        "delta": frozenset({"pkg/other"}),
+    }
+
+
+@pytest.mark.unit
 def test_a_module_path_deeper_than_the_candidate_cannot_match() -> None:
     """An import of a deep submodule is not satisfied by a shallower file."""
     assert not cross_file._candidate_is_under_module_path(

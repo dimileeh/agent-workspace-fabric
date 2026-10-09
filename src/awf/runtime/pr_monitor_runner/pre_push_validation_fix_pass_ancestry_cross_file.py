@@ -80,6 +80,20 @@ def _module_path_segments(path: str) -> list[str]:
     return [segment for segment in normalized.split("/") if segment]
 
 
+def _import_line_without_comment(line: str) -> str:
+    """``line`` up to its first ``#``.
+
+    A comment ends at its own physical line, but a parenthesized target list is
+    joined line by line, so it has to be dropped *before* the join — otherwise
+    one ``# note`` swallows every name listed below it, those names never bind,
+    and the gate silently falls back to the name-only rule that accepts an
+    unrelated same-named definition (PRRT_kwDOSJAM6s6q8BmK). An import target
+    list cannot hold a string literal, so scanning for a bare ``#`` is exact.
+    """
+    head, _hash, _comment = line.partition("#")
+    return head
+
+
 def _imported_binding_names(targets: str) -> list[str]:
     """Names an import target list binds, following ``orig as alias``."""
     names: list[str] = []
@@ -117,9 +131,11 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     target module as a ``/``-joined path prefix, resolved against ``path``'s own
     directory for the relative form. Star imports and plain ``import M`` carry
     no name→path link, so the names they bind stay out of the map and keep the
-    name-only rule (PRRT_kwDOSJAM6s6q7bSI). An import head quoted inside a
-    docstring can only *add* a binding, which narrows rather than widens the
-    gate, so the scan is deliberately lexical.
+    name-only rule (PRRT_kwDOSJAM6s6q7bSI). Each physical line is read without
+    its trailing comment so a ``# note`` beside one name does not drop the names
+    below it (PRRT_kwDOSJAM6s6q8BmK). An import head quoted inside a docstring
+    can only *add* a binding, which narrows rather than widens the gate, so the
+    scan is deliberately lexical.
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return {}
@@ -128,7 +144,7 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     lines = file_text.splitlines()
     index = 0
     while index < len(lines):
-        line = lines[index]
+        line = _import_line_without_comment(lines[index])
         absolute = _ABSOLUTE_FROM_IMPORT_RE.match(line)
         relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(line)
         index += 1
@@ -143,7 +159,7 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
         # Consume the wrapped target list even when the head did not resolve,
         # so its names are not re-read as import heads on the next pass.
         while targets.count("(") > targets.count(")") and index < len(lines):
-            targets += " " + lines[index].strip()
+            targets += " " + _import_line_without_comment(lines[index]).strip()
             index += 1
         if module_path is None:
             continue
