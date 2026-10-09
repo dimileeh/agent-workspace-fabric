@@ -629,10 +629,44 @@ async def test_parenthesized_import_blocks_bind_every_name_they_list() -> None:
 def test_a_module_path_deeper_than_the_candidate_cannot_match() -> None:
     """An import of a deep submodule is not satisfied by a shallower file."""
     assert not cross_file._candidate_is_under_module_path(
-        "src/pkg_b/metrics.py", "pkg_b/metrics/collectors/ready_queue"
+        "src/pkg_b/metrics.py", "pkg_b/metrics/collectors/ready_queue", call_site=_CALLER
     )
-    assert not cross_file._candidate_is_under_module_path("src/pkg_b/metrics.py", "")
-    assert cross_file._candidate_is_under_module_path("src/pkg_b/metrics.py", "pkg_b/metrics")
+    assert not cross_file._candidate_is_under_module_path(
+        "src/pkg_b/metrics.py", "", call_site=_CALLER
+    )
+    assert cross_file._candidate_is_under_module_path(
+        "src/pkg_b/metrics.py", "pkg_b/metrics", call_site=_CALLER
+    )
+
+
+@pytest.mark.unit
+async def test_a_mirrored_path_outside_the_call_site_root_is_not_evidence() -> None:
+    """The imported run must sit under a root the call site itself shares.
+
+    ``tests/pkg_b/observability/execution_platform_metrics.py`` mirrors the
+    imported module's segments under an unrelated root, so a module-level
+    ``record_ready_queue_depth`` edited there is not reachable from the
+    production import and must not satisfy the gate (PRRT_kwDOSJAM6s6q791s).
+    """
+    mirrored = "tests/pkg_b/observability/execution_platform_metrics.py"
+    probe = _Probe(
+        texts={(_LEFT, _CALLER): _CALLER_TEXT, (_LEFT, mirrored): _CALLEE_TEXT},
+        changed_paths=(mirrored,),
+        diffs={mirrored: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, mirrored)},
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+def test_the_shared_root_may_be_empty_or_the_whole_call_site_package() -> None:
+    """Both ends at the repo root, and a nested namespace, still match."""
+    assert cross_file._candidate_is_under_module_path(
+        "pkg_b/metrics.py", "pkg_b/metrics", call_site="pkg_a/service.py"
+    )
+    assert cross_file._candidate_is_under_module_path(
+        "src/pkg_a/services/pkg_b/metrics.py", "pkg_b/metrics", call_site=_CALLER
+    )
 
 
 @pytest.mark.unit

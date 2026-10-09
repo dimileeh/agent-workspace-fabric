@@ -196,21 +196,28 @@ def _qualifier_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     return {name: frozenset(paths) for name, paths in merged.items()}
 
 
-def _candidate_is_under_module_path(candidate: str, module_path: str) -> bool:
+def _candidate_is_under_module_path(candidate: str, module_path: str, *, call_site: str) -> bool:
     """True when ``candidate`` is the imported module's file or sits inside it.
 
     Matched as a contiguous segment run so a source root (``src/``) is tolerated
     and a package import whose ``__init__`` re-exports the callee still reaches
-    the submodule that defines it. A facade that re-exports *across* packages is
-    not followed and fails closed, leaving the item on the #928 escalation path
-    rather than accepting a path the call site cannot be shown to reach.
+    the submodule that defines it. The run's prefix must be a prefix of
+    ``call_site``'s own directory, which is the only root the absolute import at
+    that call site is shown to resolve against: a mirrored path under an
+    unrelated root (``tests/pkg_b/metrics.py`` for ``from pkg_b.metrics import
+    ...``) is not importable from the call site, so an ambiguous root fails
+    closed (PRRT_kwDOSJAM6s6q791s). A facade that re-exports *across* packages
+    is not followed and fails closed either, leaving the item on the #928
+    escalation path rather than accepting a path the call site cannot be shown
+    to reach.
     """
     segments = _module_path_segments(candidate)
     wanted = _module_path_segments(module_path)
     if not wanted or len(wanted) > len(segments):
         return False
+    roots = _module_path_segments(call_site)[:-1]
     return any(
-        segments[start : start + len(wanted)] == wanted
+        segments[start : start + len(wanted)] == wanted and segments[:start] == roots[:start]
         for start in range(len(segments) - len(wanted) + 1)
     )
 
@@ -219,6 +226,8 @@ def _callee_names_bound_to_candidate(
     refs: frozenset[tuple[str, str]],
     bindings: dict[str, frozenset[str]],
     candidate: str,
+    *,
+    call_site: str,
 ) -> frozenset[str]:
     """Callee names whose binding key, when readable, admits ``candidate``.
 
@@ -230,7 +239,8 @@ def _callee_names_bound_to_candidate(
         for key, name in refs
         if not bindings.get(key)
         or any(
-            _candidate_is_under_module_path(candidate, module_path) for module_path in bindings[key]
+            _candidate_is_under_module_path(candidate, module_path, call_site=call_site)
+            for module_path in bindings[key]
         )
     )
 
@@ -436,8 +446,12 @@ async def _commit_range_changes_callee_definition(
     bare_bindings = _bare_name_import_module_paths(item_text, path=normalized_item)
     qualifier_bindings = _qualifier_import_module_paths(item_text, path=normalized_item)
     for candidate in candidates:
-        candidate_names = _callee_names_bound_to_candidate(names, qualifier_bindings, candidate)
-        candidate_bare = _callee_names_bound_to_candidate(bare_names, bare_bindings, candidate)
+        candidate_names = _callee_names_bound_to_candidate(
+            names, qualifier_bindings, candidate, call_site=normalized_item
+        )
+        candidate_bare = _callee_names_bound_to_candidate(
+            bare_names, bare_bindings, candidate, call_site=normalized_item
+        )
         if not (candidate_names or candidate_bare):
             continue
         candidate_text = await _path_text_at_ref(
