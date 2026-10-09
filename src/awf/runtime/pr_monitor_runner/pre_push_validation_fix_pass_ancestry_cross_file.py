@@ -520,9 +520,10 @@ async def _commit_range_changes_callee_definition(
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
     gate exists for. A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
-    change to its body. An overlap is accepted only when the callee is still
+    change to its body. An overlap is accepted only when *that* callee is still
     reachable at ``right``, so a correction that deletes the definition — or its
-    whole file — is not read as a fix of a caller that still calls it
+    whole file — is not read as a fix of a caller that still calls it, and a
+    surviving sibling callee from the same module does not stand in for it
     (PRRT_kwDOSJAM6s6q8MWy). ``item_path`` itself is skipped: a same-path change
     is what the line-anchored and path-level gates already answer. Fails closed
     on any unreadable Git output.
@@ -577,10 +578,21 @@ async def _commit_range_changes_callee_definition(
         )
         if not candidate_text:
             continue
-        spans = _importable_definition_spans_for_names(
-            candidate_text, candidate_names, path=candidate, bare_names=candidate_bare
-        )
-        if not spans:
+        # Spans are resolved one callee at a time so the survival check is held
+        # to the name whose definition the range actually touched: the anchored
+        # line can bind several callees to the same candidate, and a surviving
+        # sibling is no evidence that the deleted one's caller was fixed
+        # (PRRT_kwDOSJAM6s6q8MWy).
+        per_callee: list[tuple[frozenset[str], frozenset[str], list[tuple[int, int]]]] = []
+        for name in sorted(candidate_names | candidate_bare):
+            one = frozenset({name})
+            one_names, one_bare = candidate_names & one, candidate_bare & one
+            spans = _importable_definition_spans_for_names(
+                candidate_text, one_names, path=candidate, bare_names=one_bare
+            )
+            if spans:
+                per_callee.append((one_names, one_bare, spans))
+        if not per_callee:
             continue
         diff_text = await _path_diff_text_in_commit_range(
             self,
@@ -592,23 +604,23 @@ async def _commit_range_changes_callee_definition(
         )
         if diff_text is None:
             continue
-        for start, end in spans:
-            if not (
+        for one_names, one_bare, spans in per_callee:
+            # Survival is a property of the callee, not of one of its spans, so
+            # the first overlap settles this name; another callee bound to the
+            # same candidate may still carry its own evidence.
+            if not any(
                 _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=candidate_text)
                 or _diff_adds_decorators_above_span(diff_text, start)
+                for start, end in spans
             ):
                 continue
-            # Survival is a property of the candidate, not of one span, so the
-            # first overlap settles this file; any remaining candidate may still
-            # carry its own evidence.
             if await _callee_definition_survives_at_right(
                 self,
                 worktree_path=worktree_path,
                 right=right,
                 path=rename_map.get(candidate) or candidate,
-                names=candidate_names,
-                bare_names=candidate_bare,
+                names=one_names,
+                bare_names=one_bare,
             ):
                 return True
-            break
     return False

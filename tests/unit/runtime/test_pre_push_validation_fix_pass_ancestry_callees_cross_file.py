@@ -1203,3 +1203,55 @@ async def test_a_callee_definition_moved_inside_its_file_is_still_evidence() -> 
     )
 
     assert await _probe(probe)
+
+
+# The anchored line calls two helpers from the same module, so one candidate
+# path carries two callee names.
+_TWO_CALLEE_CALLER_TEXT = (
+    "from pkg_b.observability.execution_platform_metrics import "
+    "record_ready_queue_depth, unrelated_helper\n"
+    "\n"
+    "\n"
+    "def refresh_ready_queue_metrics(pool):\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload, unrelated_helper())\n"
+    "    return payload\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_surviving_sibling_callee_is_not_evidence_for_a_deleted_one() -> None:
+    """The callee whose span the range touched is the one that has to survive.
+
+    ``unrelated_helper`` is still defined on ``right`` while
+    ``record_ready_queue_depth`` — whose span the deletion hunk overlaps — is
+    gone, and the anchored line still calls both. Checking survival against the
+    candidate's whole name set would let the sibling vouch for the deletion
+    (PRRT_kwDOSJAM6s6q8MWy).
+    """
+    probe = _Probe(
+        texts={
+            (_LEFT, _CALLER): _TWO_CALLEE_CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+            (_RIGHT, _CALLEE_MODULE): _CALLEE_TEXT_WITHOUT_DEFINITION,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: _DEFINITION_DELETION_DIFF},
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_one_of_two_callees_changed_in_place_is_still_evidence() -> None:
+    """A body edit inside one of two bound callees still resolves per name."""
+    probe = _Probe(
+        texts={
+            (_LEFT, _CALLER): _TWO_CALLEE_CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: _IN_SPAN_DIFF},
+    )
+
+    assert await _probe(probe)
