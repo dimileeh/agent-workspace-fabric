@@ -25,6 +25,7 @@ from typing import Any, cast
 
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
+    _DECORATOR_BASENAME_RE,
     _definition_head_is_assignment,
     _definition_is_nested_in_other,
     _definition_span_is_class,
@@ -265,6 +266,39 @@ def _definition_is_reachable_from_module_scope(
     )
 
 
+def _definition_span_start_with_decorators(file_text: str, start: int) -> int:
+    """``start`` moved up over the definition's contiguous decorator stack.
+
+    A correction that changes only a decorator — ``@staticmethod`` to
+    ``@classmethod``, a retry/auth decorator's arguments — changes the callee
+    without touching its ``def`` line or body, so the decorators have to sit
+    inside the span the overlap check runs against (PRRT_kwDOSJAM6s6q791u).
+    Blank/comment gaps and multiline decorator call tails stay inside the stack;
+    ordinary code above an undecorated head does not (an unbalanced closer only
+    keeps the walk alive while a decorator head is still pending below).
+    """
+    lines = file_text.splitlines()
+    if start < 2 or start > len(lines):
+        return start
+    extended = start
+    depth = 0
+    for idx in range(start - 2, -1, -1):
+        raw = lines[idx]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        depth += stripped.count(")") + stripped.count("]") + stripped.count("}")
+        depth -= stripped.count("(") + stripped.count("[") + stripped.count("{")
+        if depth <= 0 and _DECORATOR_BASENAME_RE.match(raw) is not None:
+            extended = idx + 1
+            depth = 0
+            continue
+        if depth > 0:
+            continue
+        break
+    return extended
+
+
 def _importable_definition_spans_for_names(
     file_text: str,
     names: frozenset[str],
@@ -288,6 +322,9 @@ def _importable_definition_spans_for_names(
 
     Function-local closures, indented JS/TS heads and indented assignment
     bindings are block-scoped or unreachable and fail closed under both rules.
+
+    Each span starts at the head's topmost contiguous decorator, so a correction
+    that only swaps a decorator still overlaps the callee's definition.
     """
     if not (names or bare_names) or not file_text:
         return []
@@ -307,7 +344,7 @@ def _importable_definition_spans_for_names(
                 continue
         elif _definition_is_nested_in_other(all_spans, start=start, indent=indent):
             continue
-        spans.append((start, end))
+        spans.append((_definition_span_start_with_decorators(file_text, start), end))
     return spans
 
 

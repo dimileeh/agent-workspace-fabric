@@ -314,6 +314,40 @@ def test_docstring_decoys_stay_masked() -> None:
     )
 
 
+@pytest.mark.unit
+def test_contiguous_decorators_belong_to_the_definition_span() -> None:
+    """A decorator-only correction must land inside the callee's span.
+
+    ``@staticmethod`` → ``@classmethod`` and retry/auth decorator edits change
+    the callee without touching its ``def`` line or body, so the span starts at
+    the topmost contiguous decorator (PRRT_kwDOSJAM6s6q791u). Multiline
+    decorator call tails and blank/comment gaps stay inside the stack.
+    """
+    text = (
+        "GAUGE = None\n"
+        "\n"
+        "@retry(\n"
+        "    times=3,\n"
+        ")\n"
+        "# keep the gauge hot\n"
+        "@audit\n"
+        "def record_ready_queue_depth(payload):\n"
+        "    return GAUGE\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        text, frozenset({"record_ready_queue_depth"}), path=_CALLEE_MODULE
+    ) == [(3, 9)]
+
+
+@pytest.mark.unit
+def test_statements_above_an_undecorated_definition_stay_outside_the_span() -> None:
+    """Only decorators extend the head: ordinary code above it is not the callee."""
+    text = "VALUE = compute(\n    1,\n)\ndef record_ready_queue_depth(payload):\n    return VALUE\n"
+    assert cross_file._importable_definition_spans_for_names(
+        text, frozenset({"record_ready_queue_depth"}), path=_CALLEE_MODULE
+    ) == [(4, 5)]
+
+
 # --- _commit_range_changes_callee_definition ---------------------
 
 
@@ -333,6 +367,31 @@ async def test_a_change_outside_the_definition_span_is_not_evidence() -> None:
     probe = _cross_package_probe(diff=_OUT_OF_SPAN_DIFF)
 
     assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_decorator_only_change_to_the_callee_is_evidence() -> None:
+    """Switching the callee's decorator is a change to the callee's definition."""
+    callee = (
+        "GAUGE = None\n"
+        "\n"
+        "\n"
+        "@staticmethod\n"
+        "def record_ready_queue_depth(payload):\n"
+        "    return GAUGE\n"
+    )
+    probe = _cross_package_probe(
+        callee_text=callee,
+        diff=(
+            f"--- a/{_CALLEE_MODULE}\n"
+            f"+++ b/{_CALLEE_MODULE}\n"
+            "@@ -4 +4 @@\n"
+            "-@staticmethod\n"
+            "+@classmethod\n"
+        ),
+    )
+
+    assert await _probe(probe)
 
 
 @pytest.mark.unit
