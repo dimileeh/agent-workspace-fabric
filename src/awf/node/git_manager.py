@@ -35,6 +35,7 @@ from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.node import git_manager_detached as _git_manager_detached
 from awf.node import git_manager_linked as _git_manager_linked
+from awf.node import git_manager_mirror as _git_manager_mirror
 from awf.node import git_manager_ownership as _git_manager_ownership
 from awf.node.git_manager_head_object import verify_head_object_exists as verify_head_object_exists
 
@@ -93,7 +94,16 @@ mirror_path_for_registered_worktree = _git_manager_linked.mirror_path_for_regist
 _path_within_root = _git_manager_linked._path_within_root
 _is_bare_registered_mirror_candidate = _git_manager_linked._is_bare_registered_mirror_candidate
 
-_GITHUB_PULL_HEAD_REF = re.compile(r"^refs/pull/([1-9][0-9]*)/head$")
+# Re-export mirror naming + ref-storage hardening helpers (see
+# ``git_manager_mirror`` for why the mirror's ref namespaces need more than a
+# point-in-time chown).
+_SLUG_RE = _git_manager_mirror._SLUG_RE
+_GITHUB_PULL_HEAD_REF = _git_manager_mirror._GITHUB_PULL_HEAD_REF
+_checkout_tracking_ref = _git_manager_mirror._checkout_tracking_ref
+_slugify_repo = _git_manager_mirror._slugify_repo
+apply_mirror_ref_default_acls = _git_manager_mirror.apply_mirror_ref_default_acls
+ensure_mirror_ref_packing_disabled = _git_manager_mirror.ensure_mirror_ref_packing_disabled
+
 # Path-safety guard for the ``worktrees/<workspace_id>`` sink is containment,
 # not id format. Orphan GC classifies every on-disk ``ws_…`` directory, so a
 # narrower grammar strands legacy/synthetic paths: the sink raises
@@ -603,6 +613,11 @@ class GitManager:
 
         async with lock:
             if mirror_path.exists():
+                # Before the fetch, because the fetch is what fires root-side
+                # auto-gc: a mirror created before #1033 would otherwise get its
+                # loose ref directories packed away and recreated root-owned
+                # under a running agent.
+                await ensure_mirror_ref_packing_disabled(mirror_path, self._run)
                 await self._run(
                     ["git", "--git-dir", str(mirror_path), "remote", "update", "--prune"],
                     operation="mirror.update",
@@ -613,6 +628,7 @@ class GitManager:
                 ["git", "clone", "--mirror", repo_url, str(mirror_path)],
                 operation="mirror.clone",
             )
+            await ensure_mirror_ref_packing_disabled(mirror_path, self._run)
             # ``git clone --mirror`` sets ``remote.origin.mirror=true`` which
             # refuses refspec pushes from any worktree attached to this bare
             # repo (``fatal: --mirror can't be combined with refspecs``). Strip
@@ -1250,31 +1266,6 @@ class GitManager:
         )
 
 
-_SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-
-
-def _checkout_tracking_ref(base_branch: str) -> tuple[str, str | None]:
-    pull_ref = _GITHUB_PULL_HEAD_REF.fullmatch(base_branch)
-    if pull_ref is None:
-        return f"origin/{base_branch}", None
-
-    pr_number = pull_ref.group(1)
-    tracking_ref = f"refs/remotes/origin/pull/{pr_number}/head"
-    return tracking_ref, f"+refs/pull/{pr_number}/head:{tracking_ref}"
-
-
-def _slugify_repo(repo_url: str) -> str:
-    """Produce a short readable piece of a repo URL for filesystem naming.
-
-    We take the last path segment (typically ``owner/name.git``) and sanitize it.
-    The SHA suffix added by the caller ensures uniqueness.
-    """
-    tail = repo_url.rstrip("/").split("/")[-1]
-    if tail.endswith(".git"):
-        tail = tail[:-4]
-    return _SLUG_RE.sub("-", tail) or "repo"
-
-
 def _agent_writable_git_targets(
     *,
     layout_mirror: Path,
@@ -1346,6 +1337,10 @@ def repair_agent_writable_worktree(
             )
         )
     _chown_targets(tuple(targets), uid, gid)
+    if mirror is not None:
+        # The chown above is a point-in-time fix; the inheritable default ACL is
+        # what keeps a root-recreated ref namespace agent-writable (#1033).
+        apply_mirror_ref_default_acls(mirror, uid)
 
 
 async def read_mirror_origin_url(mirror_path: Path) -> str | None:
