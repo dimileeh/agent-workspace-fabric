@@ -116,6 +116,11 @@ async def ensure_mirror_ref_packing_disabled(
     setting, so a failure is logged with its reason code and reported to the
     caller instead of failing a provision. Nothing is retried and nothing is
     swallowed.
+
+    Unlike the ownership/ACL layers this is **not** gated on ``geteuid() == 0``:
+    writing a mirror's own local config needs no privilege, and a non-root
+    control plane whose uid differs from the agent's is precisely the host that
+    still needs root-side ``pack-refs`` kept away from its loose refs.
     """
     # Late import: ``git_manager`` loads this module while defining its types.
     from awf.node.git_manager import GitOperationError

@@ -163,8 +163,10 @@ point-in-time chown of `refs/`/`logs/` loses that race by construction
 3. the agent then fails its own `git commit` with `EACCES` creating
    `refs/heads/<ns>/<ws>.lock`, which reads as an AWF infrastructure failure.
 
-The invariant is therefore three layers, all root-only and all additive to the
-chown baseline:
+The invariant is therefore three layers, all additive to the chown baseline.
+Layers 2 and 3 are root-only — they `chown`/`setfacl` directories the control
+plane created as root, which only root can do, so both are gated on
+`os.geteuid() == 0`. Layer 1 is uid-independent (see below).
 
 1. **`gc.packRefs=false`** in every AWF-managed mirror's local config, applied
    by `ensure_mirror` both when the mirror is cloned and when an existing
@@ -173,6 +175,14 @@ chown baseline:
    expiry keep running on these long-lived, constantly-fetched mirrors.
    `gc.auto=0` is deliberately *not* set: it would stop mirror housekeeping
    altogether and trade this race for unbounded loose-object growth.
+   This layer is deliberately **not** gated on `geteuid()`: unlike layers 2
+   and 3 it needs no privilege (a local config write into a mirror the process
+   already owns) and nothing about it is uid-specific. Gating it would leave
+   exactly the non-root control plane whose uid differs from the agent's — a
+   worker run on the host against containerized agents — with packed refs and
+   the #1033 race, which is the opposite of the intent. A write that does fail
+   is advisory and reason-coded (`MIRROR_REF_PACKING_CONFIG_FAILED`) rather
+   than fatal, so no host needs a pre-check.
 2. **A default POSIX ACL** (`setfacl -d -m u:1000:rwx`) on every directory in
    the mirror's `refs/` and `logs/` trees, applied by
    `repair_agent_writable_worktree` right after the chown. Directories git
