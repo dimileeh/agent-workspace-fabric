@@ -19,6 +19,7 @@ and because the cross-file rule reads as one unit.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -41,6 +42,104 @@ _IN_FILE_CALLEE_QUALIFIERS = frozenset({"self", "cls", "this"})
 # range touches one to three files; the cap only stops a pathological range from
 # turning the fourth evidence gate into an unbounded fan of Git reads.
 _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS = 25
+
+# Suffixes whose bare-name bindings the import reader below understands. A bare
+# callee in any other language keeps the name-only rule.
+_PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
+
+# ``from pkg.mod import a, b as c`` — absolute targets only. A leading dot
+# (relative) or a plain ``import pkg.mod`` binds nothing that narrows a
+# candidate path, so neither is matched here.
+_ABSOLUTE_FROM_IMPORT_RE = re.compile(
+    r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import[ \t]+(.+)$"
+)
+
+
+def _module_path_segments(path: str) -> list[str]:
+    """``path`` as directory segments, with a Python module suffix dropped."""
+    normalized = path.replace("\\", "/")
+    stem, _dot, suffix = normalized.rpartition(".")
+    if stem and f".{suffix.lower()}" in _PYTHON_CALL_SITE_SUFFIXES:
+        normalized = stem
+    return [segment for segment in normalized.split("/") if segment]
+
+
+def _imported_binding_names(targets: str) -> list[str]:
+    """Names an import target list binds, following ``orig as alias``."""
+    names: list[str] = []
+    for piece in targets.replace("(", " ").replace(")", " ").split(","):
+        parts = piece.split()
+        if not parts or parts[0] == "*":
+            continue
+        names.append(parts[2] if len(parts) >= 3 and parts[1] == "as" else parts[0])
+    return names
+
+
+def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+    """Module paths each name in ``file_text`` is bound to by an absolute import.
+
+    Only absolute ``from M import ...`` statements are read, including the
+    parenthesized multi-line form; the value is ``M`` as a ``/``-joined path
+    prefix. Relative imports, star imports and plain ``import M`` carry no
+    name→path link, so the names they bind stay out of the map and keep the
+    name-only rule (PRRT_kwDOSJAM6s6q7bSI). An import head quoted inside a
+    docstring can only *add* a binding, which narrows rather than widens the
+    gate, so the scan is deliberately lexical.
+    """
+    if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
+        return {}
+    bindings: dict[str, set[str]] = {}
+    lines = file_text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = _ABSOLUTE_FROM_IMPORT_RE.match(lines[index])
+        index += 1
+        if match is None:
+            continue
+        module, targets = match.group(1), match.group(2)
+        while targets.count("(") > targets.count(")") and index < len(lines):
+            targets += " " + lines[index].strip()
+            index += 1
+        module_path = module.replace(".", "/")
+        for bound in _imported_binding_names(targets):
+            bindings.setdefault(bound, set()).add(module_path)
+    return {name: frozenset(paths) for name, paths in bindings.items()}
+
+
+def _candidate_is_under_module_path(candidate: str, module_path: str) -> bool:
+    """True when ``candidate`` is the imported module's file or sits inside it.
+
+    Matched as a contiguous segment run so a source root (``src/``) is tolerated
+    and a package import whose ``__init__`` re-exports the callee still reaches
+    the submodule that defines it. A facade that re-exports *across* packages is
+    not followed and fails closed, leaving the item on the #928 escalation path
+    rather than accepting a path the call site cannot be shown to reach.
+    """
+    segments = _module_path_segments(candidate)
+    wanted = _module_path_segments(module_path)
+    if not wanted or len(wanted) > len(segments):
+        return False
+    return any(
+        segments[start : start + len(wanted)] == wanted
+        for start in range(len(segments) - len(wanted) + 1)
+    )
+
+
+def _bare_names_bound_to_candidate(
+    bare_names: frozenset[str],
+    bindings: dict[str, frozenset[str]],
+    candidate: str,
+) -> frozenset[str]:
+    """Bare callees whose import binding, when readable, admits ``candidate``."""
+    return frozenset(
+        name
+        for name in bare_names
+        if not bindings.get(name)
+        or any(
+            _candidate_is_under_module_path(candidate, module_path)
+            for module_path in bindings[name]
+        )
+    )
 
 
 def _definition_is_reachable_from_module_scope(
@@ -193,7 +292,11 @@ async def _commit_range_changes_callee_definition(
     ``left`` — the side ``-U0`` hunk headers and the definition spans are both
     expressed in — then, for each other path the range changed, requires a
     module-reachable definition of one of those names whose span the range's
-    diff overlaps. A candidate that the range renamed is diffed against its
+    diff overlaps. A bare callee is additionally held to the module its own
+    ``from`` import names, so a same-named definition in a module the call site
+    never imported is not evidence (PRRT_kwDOSJAM6s6q7bSI); attribute-qualified
+    callees keep resolving by name, their receiver being an instance as often as
+    a module. A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. ``item_path`` itself is skipped: a same-path change is
     what the line-anchored and path-level gates already answer. Fails closed on
@@ -233,14 +336,18 @@ async def _commit_range_changes_callee_definition(
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
+    bare_bindings = _bare_name_import_module_paths(item_text, path=normalized_item)
     for candidate in candidates:
+        candidate_bare = _bare_names_bound_to_candidate(bare_names, bare_bindings, candidate)
+        if not (names or candidate_bare):
+            continue
         candidate_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
         )
         if not candidate_text:
             continue
         spans = _importable_definition_spans_for_names(
-            candidate_text, names, path=candidate, bare_names=bare_names
+            candidate_text, names, path=candidate, bare_names=candidate_bare
         )
         if not spans:
             continue

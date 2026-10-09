@@ -410,6 +410,139 @@ async def test_bare_call_site_is_not_linked_to_an_unrelated_class_method() -> No
     assert not await _probe(probe)
 
 
+_UNRELATED_SAME_NAME = "src/pkg_c/unrelated.py"
+
+
+def _unrelated_same_name_probe(*, caller_text: str = _CALLER_TEXT) -> _Probe:
+    """A commit range that changed a same-named def in a module nobody imported."""
+    return _Probe(
+        texts={
+            (_LEFT, _CALLER): caller_text,
+            (_LEFT, _UNRELATED_SAME_NAME): _CALLEE_TEXT,
+        },
+        changed_paths=(_UNRELATED_SAME_NAME,),
+        diffs={_UNRELATED_SAME_NAME: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, _UNRELATED_SAME_NAME)},
+    )
+
+
+@pytest.mark.unit
+async def test_bare_callee_import_binding_rejects_an_unrelated_same_named_def() -> None:
+    """A bare callee resolves only under the module its import names.
+
+    ``from pkg_b.observability.execution_platform_metrics import
+    record_ready_queue_depth`` cannot reach another module-level
+    ``record_ready_queue_depth``, so editing one in ``pkg_c`` is not evidence
+    that the reviewed call site was fixed (PRRT_kwDOSJAM6s6q7bSI).
+    """
+    assert not await _probe(_unrelated_same_name_probe())
+
+
+@pytest.mark.unit
+async def test_bare_callee_accepts_a_definition_under_the_imported_package() -> None:
+    """A package import re-exporting the callee still resolves to its submodule."""
+    caller = (
+        "from pkg_b.observability import record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_bare_callee_alias_binding_follows_the_aliased_module() -> None:
+    """``import helper as record`` binds the *alias*, so the alias' module wins."""
+    caller = (
+        "from pkg_c.unrelated import helper as record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_bare_callee_without_a_resolvable_import_keeps_the_name_only_rule() -> None:
+    """Star, relative and absent bindings carry no path to match, so stay as-is.
+
+    A relative import targets the call site's own package, which the package-level
+    gate already answers before this one runs; a star import binds no name AWF can
+    read. Neither narrows the candidate, so both keep the name-only rule rather
+    than failing closed and re-parking the #1019 fixes.
+    """
+    for header in (
+        "from pkg_b.observability.execution_platform_metrics import *",
+        "from .execution_platform_metrics import record_ready_queue_depth",
+        "import pkg_b.observability.execution_platform_metrics",
+    ):
+        caller = f"{header}\n\n\ndef refresh(payload):\n    record_ready_queue_depth(payload)\n"
+
+        assert await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_parenthesized_import_blocks_bind_every_name_they_list() -> None:
+    """The wrapped ``from M import (a, b)`` form is the one ruff emits."""
+    caller = (
+        "from pkg_c.unrelated import (\n"
+        "    helper,\n"
+        "    record_ready_queue_depth,\n"
+        ")\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=8)
+
+
+@pytest.mark.unit
+def test_a_module_path_deeper_than_the_candidate_cannot_match() -> None:
+    """An import of a deep submodule is not satisfied by a shallower file."""
+    assert not cross_file._candidate_is_under_module_path(
+        "src/pkg_b/metrics.py", "pkg_b/metrics/collectors/ready_queue"
+    )
+    assert not cross_file._candidate_is_under_module_path("src/pkg_b/metrics.py", "")
+    assert cross_file._candidate_is_under_module_path("src/pkg_b/metrics.py", "pkg_b/metrics")
+
+
+@pytest.mark.unit
+async def test_non_python_call_sites_keep_the_name_only_rule() -> None:
+    """The binding reader only understands Python imports; JS/TS is unchanged."""
+    caller_path = "src/pkg_a/services/pools.ts"
+    callee_path = "src/pkg_b/metrics.ts"
+    caller = (
+        "import { helper } from './other';\n"
+        "\n"
+        "export function refresh(value) {\n"
+        "  return helper(value);\n"
+        "}\n"
+    )
+    probe = _Probe(
+        texts={
+            (_LEFT, caller_path): caller,
+            (_LEFT, callee_path): "const helper = (value) => {\n  return value;\n};\n",
+        },
+        changed_paths=(callee_path,),
+        diffs={
+            callee_path: (
+                f"--- a/{callee_path}\n"
+                f"+++ b/{callee_path}\n"
+                "@@ -2 +2 @@\n"
+                "-  return value;\n"
+                "+  return value.depth;\n"
+            )
+        },
+    )
+
+    assert await _probe(probe, item_path=caller_path, item_line=4)
+
+
 @pytest.mark.unit
 async def test_unreadable_inputs_fail_closed() -> None:
     """An unreadable reviewed file, an empty path/line, or a failed diff → False."""
@@ -439,9 +572,18 @@ async def test_only_the_reviewed_path_changed_is_not_evidence() -> None:
 async def test_candidate_path_count_is_capped() -> None:
     """A pathological range is bounded; the callee past the cap is not probed."""
     bulk = tuple(f"src/pkg_c/mod_{index:03d}.py" for index in range(40))
+    # Imported as a package so every bulk candidate clears the bare-name import
+    # binding and the cap stays the only thing bounding the read fan.
+    caller = (
+        "from pkg_c import record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
     probe = _Probe(
         texts={
-            (_LEFT, _CALLER): _CALLER_TEXT,
+            (_LEFT, _CALLER): caller,
             **{(_LEFT, path): "VALUE = 1\n" for path in bulk},
             (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
         },
@@ -449,7 +591,7 @@ async def test_candidate_path_count_is_capped() -> None:
         diffs={_CALLEE_MODULE: _IN_SPAN_DIFF},
     )
 
-    assert not await _probe(probe)
+    assert not await _probe(probe, item_line=5)
     assert len(probe.shows) == 1 + cross_file._MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS
     assert _CALLEE_MODULE not in probe.shows
 
