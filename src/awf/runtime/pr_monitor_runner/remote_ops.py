@@ -160,6 +160,11 @@ class _GitPushResult:
     recovered_by_resync: bool = False
     reason_code: str = _GIT_PUSH_FAILED_REASON
     failure_reason: FailureReason = FailureReason.infrastructure_failure
+    operation: str = "git push"
+    """What the failure evidence should say was attempted. The envelope is also
+    the terminal result shape for monitor steps that never push (an agent
+    verdict-protocol breach, for example), and reporting ``git push`` for those
+    sent operators looking for a push that was never attempted (#1020)."""
     details: Mapping[str, object] | None = None
     paused_into_blocked: bool = False
     """The push site paused the workspace into ``blocked`` for an operator
@@ -259,7 +264,7 @@ class _GitPushResult:
     def failure_evidence(self: Any) -> dict[str, object]:
         """Build structured evidence for a failed push operation."""
         evidence: dict[str, object] = {
-            "operation": "git push",
+            "operation": self.operation,
             "returncode": self.returncode,
             "error_message": self.error_message or "<no output>",
             "reason_code": self.reason_code,

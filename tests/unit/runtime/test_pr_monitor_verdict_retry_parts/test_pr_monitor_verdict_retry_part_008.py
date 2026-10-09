@@ -27,7 +27,7 @@ import structlog
 
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult
 from awf.common.github_client import RepoRef
-from awf.runtime.pr_monitor import ReviewThread
+from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner import (
     comment_verdict,
     comment_verdict_correction,
@@ -39,7 +39,6 @@ from awf.runtime.pr_monitor_runner import (
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
     AGENT_NON_FIXED_WITH_MUTATION,
-    AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     AGENT_NON_FIX_CITES_OWN_COMMIT,
@@ -47,6 +46,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     verdict_reason_cites_own_commit,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
+from awf.runtime.pr_monitor_runner.notify_human_details import (
+    _needs_human_reason_state_key,
+)
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -150,7 +152,12 @@ def _thread(thread_id: str) -> ReviewThread:
     )
 
 
-async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
+async def _address(
+    runner: _VerdictRunner,
+    thread: ReviewThread,
+    *,
+    state: MonitorState | None = None,
+) -> str:
     return await _address_thread(
         runner,  # type: ignore[arg-type]
         workspace_id="ws_protocol",
@@ -159,6 +166,7 @@ async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
         thread=thread,
         compose_project="awf_ws_protocol",
         compose_file=Path("compose.yml"),
+        state=state,
         operation_start_head=_ITEM_START_HEAD,
     )
 
@@ -400,7 +408,12 @@ async def test_correction_false_positive_citing_item_start_commit_still_rolls_ba
 async def test_correction_that_mutates_and_cites_own_commit_still_rejected(
     tmp_path: Path,
 ) -> None:
-    """Guard: ``AGENT_NON_FIXED_WITH_MUTATION`` keeps precedence over self-citation."""
+    """Guard: ``AGENT_NON_FIXED_WITH_MUTATION`` keeps precedence over self-citation.
+
+    The mutation gate runs first, so the self-citation rule never gets to turn
+    this into ``fix_committed``: the commit is rolled back and the item parks
+    under the mutation reason code (#1020).
+    """
     (tmp_path / "ws_protocol").mkdir()
     correction_head = "c" * 40
     runner = _VerdictRunner(
@@ -415,10 +428,14 @@ async def test_correction_that_mutates_and_cites_own_commit_still_rejected(
         line_touched=False,
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address(runner, _thread("thread_mutating_correction"))
+    state = MonitorState()
+    verdict = await _address(runner, _thread("thread_mutating_correction"), state=state)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
+    assert verdict == "needs_human"
+    parked_reason = state.threads_addressed_ids[
+        _needs_human_reason_state_key("thread_mutating_correction")
+    ]
+    assert AGENT_NON_FIXED_WITH_MUTATION in parked_reason
     assert runner.reset_targets == [_ITEM_START_HEAD]
 
 
