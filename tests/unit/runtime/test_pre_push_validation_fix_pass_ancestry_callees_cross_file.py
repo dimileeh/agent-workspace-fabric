@@ -1255,3 +1255,90 @@ async def test_one_of_two_callees_changed_in_place_is_still_evidence() -> None:
     )
 
     assert await _probe(probe)
+
+
+_RECEIVER_SIBLING = "src/pkg_b/observability/unrelated.py"
+
+
+@pytest.mark.unit
+async def test_receiver_import_rejects_a_sibling_under_its_own_package() -> None:
+    """``from pkg import metrics`` binds ``metrics``, not everything under ``pkg``.
+
+    ``metrics.record_ready_queue_depth()`` can only reach the imported object or
+    submodule, so a same-named module-level definition edited in a *sibling*
+    module of the same package is not evidence that the reviewed call site was
+    fixed — resolving the receiver to its containing package would accept it
+    (PRRT_kwDOSJAM6s6q8MW9).
+    """
+    caller = (
+        "from pkg_b.observability import execution_platform_metrics as metrics\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    metrics.record_ready_queue_depth(payload)\n"
+    )
+    probe = _Probe(
+        texts={(_LEFT, _CALLER): caller, (_LEFT, _RECEIVER_SIBLING): _CALLEE_TEXT},
+        changed_paths=(_RECEIVER_SIBLING,),
+        diffs={_RECEIVER_SIBLING: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, _RECEIVER_SIBLING)},
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_receiver_import_accepts_the_importing_module_s_own_file() -> None:
+    """A receiver may be an object the imported module itself defines.
+
+    ``from pkg_b.observability import collector`` can bind a class declared in
+    ``pkg_b/observability.py``, so a change to ``collector``'s method there is
+    still evidence even though the receiver is not a submodule.
+    """
+    module_file = "src/pkg_b/observability.py"
+    caller = (
+        "from pkg_b.observability import collector\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    collector.record_ready_queue_depth(payload)\n"
+    )
+    probe = _Probe(
+        texts={(_LEFT, _CALLER): caller, (_LEFT, module_file): _CALLEE_TEXT},
+        changed_paths=(module_file,),
+        diffs={module_file: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, module_file)},
+    )
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+def test_receiver_targets_keep_the_imported_name_and_pin_its_package() -> None:
+    """``from M import R`` offers ``M/R`` with descendants, plus ``M`` exactly."""
+    # ``True`` pins the target to the module's own file; ``False`` keeps the
+    # package-re-export tolerance (see ``_ModuleTarget``).
+    assert cross_file._receiver_import_module_targets(
+        "from pkg.obs import metrics\nimport pkg.other as alt\n", path="src/pkg_a/caller.py"
+    ) == {
+        "metrics": frozenset({("pkg/obs/metrics", False), ("pkg/obs", True)}),
+        "alt": frozenset({("pkg/other", False)}),
+    }
+    # The aliased form resolves through the *imported* name, not the alias.
+    assert cross_file._receiver_import_module_targets(
+        "from pkg.obs import metrics as m\n", path="src/pkg_a/caller.py"
+    ) == {"m": frozenset({("pkg/obs/metrics", False), ("pkg/obs", True)})}
+
+
+@pytest.mark.unit
+def test_an_exact_module_target_matches_only_that_module_s_own_file() -> None:
+    """``exact`` accepts ``M.py`` and ``M/__init__.py`` but no sibling under ``M``."""
+    for candidate in ("src/pkg_b/obs.py", "src/pkg_b/obs/__init__.py"):
+        assert cross_file._candidate_is_under_module_path(
+            candidate, "pkg_b/obs", call_site=_CALLER, exact=True
+        )
+    assert not cross_file._candidate_is_under_module_path(
+        "src/pkg_b/obs/unrelated.py", "pkg_b/obs", call_site=_CALLER, exact=True
+    )
+    # Without ``exact`` the same sibling stays in scope for a bare callee.
+    assert cross_file._candidate_is_under_module_path(
+        "src/pkg_b/obs/unrelated.py", "pkg_b/obs", call_site=_CALLER
+    )

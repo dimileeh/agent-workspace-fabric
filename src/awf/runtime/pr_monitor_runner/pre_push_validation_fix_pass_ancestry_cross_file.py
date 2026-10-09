@@ -20,6 +20,7 @@ and because the cross-file rule reads as one unit.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -52,7 +53,7 @@ _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 # ``from pkg.mod import a, b as c`` — absolute targets. A plain ``import
 # pkg.mod`` binds ``pkg`` rather than the callee, so it narrows no *bare*
 # candidate path and is not matched here; relative targets are read below, and
-# the plain form is read for receivers by ``_plain_import_module_paths``.
+# the plain form is read for receivers by ``_receiver_import_module_targets``.
 _ABSOLUTE_FROM_IMPORT_RE = re.compile(
     r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import[ \t]+(.+)$"
 )
@@ -69,6 +70,14 @@ _RELATIVE_FROM_IMPORT_RE = re.compile(
 # ``alias.record(...)`` call through, so it does narrow a *qualified* callee.
 _PLAIN_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+(.+)$")
 _DOTTED_MODULE_RE = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
+
+# ``(module_path, exact)``: a module path a name is bound to, and whether the
+# match is pinned to that module's own file. ``False`` keeps the re-export
+# tolerance a package import needs (``from pkg import x`` may bind something
+# ``pkg/__init__.py`` re-exported from ``pkg/sub.py``); ``True`` admits only
+# ``pkg.py`` / ``pkg/__init__.py``, which is what an imported receiver's
+# identity requires of its *containing* package.
+_ModuleTarget = tuple[str, bool]
 
 
 def _module_path_segments(path: str) -> list[str]:
@@ -95,14 +104,20 @@ def _import_line_without_comment(line: str) -> str:
     return head
 
 
-def _imported_binding_names(targets: str) -> list[str]:
-    """Names an import target list binds, following ``orig as alias``."""
-    names: list[str] = []
+def _imported_binding_names(targets: str) -> list[tuple[str, str]]:
+    """``(bound, imported)`` pairs an import target list binds.
+
+    The two differ under ``orig as alias``: the call site refers to ``alias``,
+    while ``orig`` is the name inside the target module — which is the identity
+    a receiver resolves through, so both are kept.
+    """
+    names: list[tuple[str, str]] = []
     for piece in targets.replace("(", " ").replace(")", " ").split(","):
         parts = piece.split()
         if not parts or parts[0] == "*":
             continue
-        names.append(parts[2] if len(parts) >= 3 and parts[1] == "as" else parts[0])
+        aliased = len(parts) >= 3 and parts[1] == "as"
+        names.append((parts[2] if aliased else parts[0], parts[0]))
     return names
 
 
@@ -124,14 +139,14 @@ def _relative_import_module_path(path: str, dots: str, module: str | None) -> st
     return "/".join([*base, *tail]) or None
 
 
-def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
-    """Module paths each name in ``file_text`` is bound to by a ``from`` import.
+def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[str, str, str]]:
+    """``(module_path, bound, imported)`` for each ``from`` import in ``file_text``.
 
     Both ``from M import ...`` and the relative ``from .M import ...`` form are
-    read, including the parenthesized multi-line variant; the value is the
+    read, including the parenthesized multi-line variant; ``module_path`` is the
     target module as a ``/``-joined path prefix, resolved against ``path``'s own
     directory for the relative form. Star imports and plain ``import M`` carry
-    no name→path link, so the names they bind stay out of the map and keep the
+    no name→path link, so the names they bind are not yielded and keep the
     name-only rule (PRRT_kwDOSJAM6s6q7bSI). Each physical line is read without
     its trailing comment so a ``# note`` beside one name does not drop the names
     below it (PRRT_kwDOSJAM6s6q8BmK). An import head quoted inside a docstring
@@ -139,8 +154,7 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     scan is deliberately lexical.
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
-        return {}
-    bindings: dict[str, set[str]] = {}
+        return
     module_path: str | None
     lines = file_text.splitlines()
     index = 0
@@ -164,8 +178,19 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
             index += 1
         if module_path is None:
             continue
-        for bound in _imported_binding_names(targets):
-            bindings.setdefault(bound, set()).add(module_path)
+        for bound, imported in _imported_binding_names(targets):
+            yield module_path, bound, imported
+
+
+def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+    """Module paths each name in ``file_text`` is bound to by a ``from`` import.
+
+    A *bare* callee is reached through the module it was imported from, so that
+    module is the whole binding; the imported name adds nothing to it.
+    """
+    bindings: dict[str, set[str]] = {}
+    for module_path, bound, _imported in _iter_from_import_bindings(file_text, path=path):
+        bindings.setdefault(bound, set()).add(module_path)
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
 
@@ -199,26 +224,52 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
 
-def _qualifier_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
-    """Module paths each *receiver* name at a call site is bound to.
+def _bare_name_import_module_targets(
+    file_text: str, *, path: str
+) -> dict[str, frozenset[_ModuleTarget]]:
+    """Bare-callee ``from`` import bindings as descendant-tolerant targets.
 
-    A qualified callee (``metrics.record()``) reaches its definition through its
-    receiver, so both ``from pkg import metrics`` (the module the name was
-    imported from) and ``import pkg.metrics`` (the module itself) narrow which
-    changed path can hold that definition (PRRT_kwDOSJAM6s6q7bSI). A receiver
-    with no readable binding — a parameter, an attribute, a star import — keeps
-    the name-only rule rather than re-parking the #1019 fixes.
+    ``from pkg import record`` may bind something ``pkg/__init__.py`` re-exports
+    from a submodule, so the callee's definition is allowed anywhere under the
+    imported module's path.
     """
-    merged: dict[str, set[str]] = {
-        name: set(paths)
+    return {
+        name: frozenset((module_path, False) for module_path in paths)
         for name, paths in _bare_name_import_module_paths(file_text, path=path).items()
     }
+
+
+def _receiver_import_module_targets(
+    file_text: str, *, path: str
+) -> dict[str, frozenset[_ModuleTarget]]:
+    """Module targets each *receiver* name at a call site is bound to.
+
+    A qualified callee (``metrics.record()``) reaches its definition through its
+    receiver, so the receiver's own import narrows which changed path can hold
+    that definition (PRRT_kwDOSJAM6s6q7bSI). ``import pkg.metrics`` binds the
+    module itself. ``from pkg import metrics`` keeps the *imported name's*
+    identity rather than collapsing to its package: the receiver is either the
+    submodule ``pkg/metrics`` — whose own ``__init__`` may re-export the callee
+    — or an object ``pkg`` itself defines, so only ``pkg``'s own module file
+    satisfies that second reading and a same-named definition in a sibling
+    submodule such as ``pkg/unrelated.py``, which the receiver cannot reach,
+    fails closed (PRRT_kwDOSJAM6s6q8MW9). A receiver with no readable binding —
+    a parameter, an attribute, a star import — keeps the name-only rule rather
+    than re-parking the #1019 fixes.
+    """
+    targets: dict[str, set[_ModuleTarget]] = {}
+    for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+        targets.setdefault(bound, set()).update(
+            ((f"{module_path}/{imported}", False), (module_path, True))
+        )
     for name, paths in _plain_import_module_paths(file_text, path=path).items():
-        merged.setdefault(name, set()).update(paths)
-    return {name: frozenset(paths) for name, paths in merged.items()}
+        targets.setdefault(name, set()).update((module_path, False) for module_path in paths)
+    return {name: frozenset(found) for name, found in targets.items()}
 
 
-def _candidate_is_under_module_path(candidate: str, module_path: str, *, call_site: str) -> bool:
+def _candidate_is_under_module_path(
+    candidate: str, module_path: str, *, call_site: str, exact: bool = False
+) -> bool:
     """True when ``candidate`` is the imported module's file or sits inside it.
 
     Matched as a contiguous segment run so a source root (``src/``) is tolerated
@@ -232,21 +283,30 @@ def _candidate_is_under_module_path(candidate: str, module_path: str, *, call_si
     is not followed and fails closed either, leaving the item on the #928
     escalation path rather than accepting a path the call site cannot be shown
     to reach.
+
+    ``exact`` drops the descendant tolerance: the run must end at ``candidate``,
+    so only that module's own file — ``M.py`` or the package's ``M/__init__.py``
+    — matches and a sibling submodule under it does not
+    (PRRT_kwDOSJAM6s6q8MW9).
     """
     segments = _module_path_segments(candidate)
+    if exact and segments[-1:] == ["__init__"]:
+        segments = segments[:-1]
     wanted = _module_path_segments(module_path)
     if not wanted or len(wanted) > len(segments):
         return False
     roots = _module_path_segments(call_site)[:-1]
+    last = len(segments) - len(wanted)
+    starts = [last] if exact else range(last + 1)
     return any(
         segments[start : start + len(wanted)] == wanted and segments[:start] == roots[:start]
-        for start in range(len(segments) - len(wanted) + 1)
+        for start in starts
     )
 
 
 def _callee_names_bound_to_candidate(
     refs: frozenset[tuple[str, str]],
-    bindings: dict[str, frozenset[str]],
+    bindings: dict[str, frozenset[_ModuleTarget]],
     candidate: str,
     *,
     call_site: str,
@@ -261,8 +321,10 @@ def _callee_names_bound_to_candidate(
         for key, name in refs
         if not bindings.get(key)
         or any(
-            _candidate_is_under_module_path(candidate, module_path, call_site=call_site)
-            for module_path in bindings[key]
+            _candidate_is_under_module_path(
+                candidate, module_path, call_site=call_site, exact=exact
+            )
+            for module_path, exact in bindings[key]
         )
     )
 
@@ -518,7 +580,9 @@ async def _commit_range_changes_callee_definition(
     through its receiver — so a same-named definition in a module the call site
     never imported is not evidence (PRRT_kwDOSJAM6s6q7bSI). A callee whose
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
-    gate exists for. A candidate that the range renamed is diffed against its
+    gate exists for; a receiver imported by name resolves to that name's own
+    module or to the importing module's file, not to any sibling under its
+    package (PRRT_kwDOSJAM6s6q8MW9). A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. An overlap is accepted only when *that* callee is still
     reachable at ``right``, so a correction that deletes the definition — or its
@@ -562,11 +626,11 @@ async def _commit_range_changes_callee_definition(
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
-    bare_bindings = _bare_name_import_module_paths(item_text, path=normalized_item)
-    qualifier_bindings = _qualifier_import_module_paths(item_text, path=normalized_item)
+    bare_bindings = _bare_name_import_module_targets(item_text, path=normalized_item)
+    receiver_bindings = _receiver_import_module_targets(item_text, path=normalized_item)
     for candidate in candidates:
         candidate_names = _callee_names_bound_to_candidate(
-            names, qualifier_bindings, candidate, call_site=normalized_item
+            names, receiver_bindings, candidate, call_site=normalized_item
         )
         candidate_bare = _callee_names_bound_to_candidate(
             bare_names, bare_bindings, candidate, call_site=normalized_item
