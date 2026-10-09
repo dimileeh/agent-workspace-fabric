@@ -36,9 +36,12 @@ from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
     MergeStateStatus,
+    MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
     ReviewThread,
+    decide,
 )
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
@@ -110,6 +113,30 @@ def _park_reason(reason_code: str) -> str:
         f"Agent verdict: false_positive. "
         f"Agent reason: the reviewer is wrong about the guard"
     )
+
+
+def _assert_next_poll_hands_the_parked_item_to_a_human(state: MonitorState) -> None:
+    """The park must survive the batch: no merging over the refused thread.
+
+    Publishing the accepted commits is only half of #1020 — the parked item is
+    still unresolved on the forge, and the feature (auto-merge) variant must
+    answer ``NotifyHuman`` on the next otherwise-green poll instead of merging
+    the PR with the refused thread open.
+    """
+    green_with_parked_thread = PRStatus(
+        number=42,
+        head_sha=_ITEM_HEADS[2],
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(_thread(_PARKED_THREAD_ID, 4),),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    action = decide(green_with_parked_thread, state, MonitorConfig(auto_merge=True))
+
+    assert isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
@@ -221,6 +248,7 @@ async def test_parked_mutating_item_still_publishes_the_batch(
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
     assert ws.status == WorkspaceStatus.monitoring_pr.value
+    _assert_next_poll_hands_the_parked_item_to_a_human(state)
 
 
 def _chain(state: MonitorState) -> list[dict[str, object]]:
@@ -509,3 +537,4 @@ async def test_real_verdict_protocol_park_publishes_the_batch_end_to_end(
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
     assert ws.status == WorkspaceStatus.monitoring_pr.value
+    _assert_next_poll_hands_the_parked_item_to_a_human(state)
