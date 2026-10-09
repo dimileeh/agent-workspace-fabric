@@ -1342,3 +1342,48 @@ def test_an_exact_module_target_matches_only_that_module_s_own_file() -> None:
     assert cross_file._candidate_is_under_module_path(
         "src/pkg_b/obs/unrelated.py", "pkg_b/obs", call_site=_CALLER
     )
+
+
+@pytest.mark.unit
+async def test_an_import_quoted_in_a_docstring_binds_no_decoy_module() -> None:
+    """A docstring example's import must not union a decoy module in.
+
+    The caller really imports the callee from ``pkg_c.unrelated``; the usage
+    example in its docstring names ``pkg_b.observability``. A lexical scan would
+    union both, and since any stored path satisfies the candidate match, editing
+    the *example's* module would read as a fix of a call site that still routes
+    to ``pkg_c`` (PRRT_kwDOSJAM6s6q8MXB).
+    """
+    caller = (
+        "from pkg_c.unrelated import record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        '    """Refresh the gauge.\n'
+        "\n"
+        "    Example:\n"
+        "        from pkg_b.observability import record_ready_queue_depth\n"
+        '    """\n'
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=10)
+
+
+@pytest.mark.unit
+def test_import_readers_skip_heads_inside_string_literals() -> None:
+    """Both readers run over the comment/string-masked scan lines."""
+    text = (
+        "from pkg.mod import alpha\n"
+        "import pkg.real\n"
+        'DOC = """\n'
+        "from pkg.decoy import alpha\n"
+        "import pkg.decoy\n"
+        '"""\n'
+    )
+    assert cross_file._bare_name_import_module_paths(text, path="src/pkg/caller.py") == {
+        "alpha": frozenset({"pkg/mod"})
+    }
+    assert cross_file._plain_import_module_paths(text, path="src/pkg/caller.py") == {
+        "real": frozenset({"pkg/real"})
+    }

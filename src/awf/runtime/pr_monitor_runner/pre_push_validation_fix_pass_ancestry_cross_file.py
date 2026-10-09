@@ -29,6 +29,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _DECORATOR_BASENAME_RE,
     _ENCLOSING_DEFINITION_RE,
     _definition_head_is_assignment,
+    _definition_head_scan_lines,
     _definition_is_nested_in_other,
     _definition_span_is_class,
     _iter_definition_spans,
@@ -149,14 +150,18 @@ def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[s
     no name→path link, so the names they bind are not yielded and keep the
     name-only rule (PRRT_kwDOSJAM6s6q7bSI). Each physical line is read without
     its trailing comment so a ``# note`` beside one name does not drop the names
-    below it (PRRT_kwDOSJAM6s6q8BmK). An import head quoted inside a docstring
-    can only *add* a binding, which narrows rather than widens the gate, so the
-    scan is deliberately lexical.
+    below it (PRRT_kwDOSJAM6s6q8BmK). The scan runs over the same
+    comment/string-masked lines definition discovery uses, so an import head
+    quoted inside a docstring example binds nothing: it would otherwise union a
+    decoy module into a readable binding, and because any stored path satisfies
+    the candidate match, a correction to the *example's* module would then
+    satisfy this gate for a call site that still routes elsewhere
+    (PRRT_kwDOSJAM6s6q8MXB).
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return
     module_path: str | None
-    lines = file_text.splitlines()
+    lines = _definition_head_scan_lines(file_text, path=path)
     index = 0
     while index < len(lines):
         line = _import_line_without_comment(lines[index])
@@ -205,13 +210,15 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     keeps the name-only rule. The comma split runs over the statement without
     its trailing comment, so a comma inside a ``# note`` cannot bind the word
     after it to a module the call site never imported — that receiver would then
-    fail closed against every changed file (PRRT_kwDOSJAM6s6q8BmK).
+    fail closed against every changed file (PRRT_kwDOSJAM6s6q8BmK). Lines come
+    from the comment/string-masked scan, so a quoted ``import`` inside a
+    docstring binds no receiver either (PRRT_kwDOSJAM6s6q8MXB).
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return {}
     bindings: dict[str, set[str]] = {}
-    for raw_line in file_text.splitlines():
-        head = _PLAIN_IMPORT_RE.match(_import_line_without_comment(raw_line))
+    for scan_line in _definition_head_scan_lines(file_text, path=path):
+        head = _PLAIN_IMPORT_RE.match(_import_line_without_comment(scan_line))
         if head is None:
             continue
         for piece in head.group(1).split(","):
