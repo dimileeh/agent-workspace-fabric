@@ -11,7 +11,9 @@ from awf.db.enums import AgentRuntime
 
 DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
     {
-        AgentRuntime.claude_code: AgentDefaults(model="claude-opus-5", effort="xhigh"),
+        # Claude Opus 5.5 is the current flagship; the pinned Claude Code CLI
+        # (2.1.295) accepts the id and the low..max effort ladder unchanged.
+        AgentRuntime.claude_code: AgentDefaults(model="claude-opus-5-5", effort="xhigh"),
         AgentRuntime.codex: AgentDefaults(model="gpt-5.6-sol", effort="xhigh"),
         # Cursor Auto has provider-specific Cost/Balance/Intelligence routing
         # profiles, not a portable reasoning-effort flag. The account/team owns
@@ -22,7 +24,10 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # in ANTIGRAVITY_API_KEY_MODE_MODELS. Keep the live default pro-class;
         # the adapter emits the required separate effort only in API-key mode.
         AgentRuntime.antigravity: AgentDefaults(model="gemini-3.1-pro", effort="high"),
-        AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
+        # Kimi K3 on Ollama Cloud: same tools/thinking/vision capabilities as the
+        # previous K2.6 default, so the effort-keyed OpenCode variant/thinking
+        # config in adapters/opencode.py applies unchanged.
+        AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k3:cloud", effort="xhigh"),
         # The Grok Build CLI reports grok-build as the current default coding model.
         AgentRuntime.grok: AgentDefaults(model="grok-build", effort="xhigh"),
     }

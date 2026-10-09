@@ -72,7 +72,7 @@ def _ollama_ok(url: str, *, timeout: float) -> Any:
     }:
         return SimpleNamespace(
             status_code=200,
-            text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
+            text='{"models":[{"name":"kimi-k3:cloud"}]}',
         )
     raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -292,10 +292,10 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
 
     cases = [
         ("codex", "codex", "gpt-custom", "ok"),
-        ("claude_code", "claude_code", "claude-opus-5", "ok"),
+        ("claude_code", "claude_code", "claude-opus-5-5", "ok"),
         ("cursor", "cursor", "auto", "ok"),
         ("antigravity", "antigravity", "gemini-3.1-pro", "ok"),
-        ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
+        ("opencode", "opencode", "ollama/kimi-k3:cloud", "ok"),
         ("grok", "grok", "grok-build", "ok"),
     ]
     for agent, provider, expected_model, expected_probe_status in cases:
@@ -1384,7 +1384,7 @@ def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
         if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
-                text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
+                text='{"models":[{"name":"kimi-k3:cloud"}]}',
             )
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 

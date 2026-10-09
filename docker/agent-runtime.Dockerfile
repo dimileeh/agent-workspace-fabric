@@ -97,9 +97,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && docker buildx version
 
 # ── Stage 3: GitHub CLI ───────────────────────────────────────────────────
-ARG GH_VERSION=2.92.0
-ARG GH_AMD64_SHA256=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8
-ARG GH_ARM64_SHA256=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b
+ARG GH_VERSION=2.102.0
+ARG GH_AMD64_SHA256=7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0
+ARG GH_ARM64_SHA256=5006962696f01e1624b3fcf1f9d8e1a11547f24bf067dd2a0371b7b421945237
 RUN set -eux; \
     gh_arch="$(dpkg --print-architecture)"; \
     gh_asset="gh_${GH_VERSION}_linux_${gh_arch}.deb"; \
@@ -145,23 +145,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 #
 # npm-backed CLIs are pinned to a version. Bump via PR so we can verify the
 # output format hasn't drifted in the adapters.
-ARG CODEX_VERSION=0.153.4
-# 2.1.226+ is required for Claude Opus 5 (the default model in defaults.py);
-# older CLIs reject `--model claude-opus-5`. Keep this >= the default model's
-# minimum supported CLI.
-ARG CLAUDE_CODE_VERSION=2.1.263
-ARG OPENCODE_VERSION=1.18.29
-ARG GROK_VERSION=1.0.13
-ARG CURSOR_VERSION=2026.09.02-c22c1a3
-ARG CURSOR_X64_SHA256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c
-ARG CURSOR_ARM64_SHA256=fb7bc635be6172ebcf68f907fd9217e3614da51916455c6d7fdb66690997884c
+ARG CODEX_VERSION=0.162.0
+# Must stay >= a release that accepts the default model in defaults.py; older
+# CLIs reject newer model ids. 2.1.295 is verified to accept
+# `--model claude-opus-5-5` (issue #1038).
+ARG CLAUDE_CODE_VERSION=2.1.295
+ARG OPENCODE_VERSION=1.18.35
+ARG GROK_VERSION=1.0.50
+ARG CURSOR_VERSION=2026.10.01-e373342
+ARG CURSOR_X64_SHA256=a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8
+ARG CURSOR_ARM64_SHA256=785c5f6bf2a60eb1121e27ed8c14f5ee07ed1b5b6692324f2d9a997238245eb5
 # Antigravity CLI (agy). Pinned by GitHub release asset + sha256 per arch.
-ARG ANTIGRAVITY_VERSION=1.1.27
-ARG ANTIGRAVITY_AMD64_SHA256=f874d4f6b8a73c2df660f580f25fb656fcb6e64adbfd746e6692e837fd9a20be
-ARG ANTIGRAVITY_ARM64_SHA256=97fc9fe5a6067406cd02cbe4ae6e362c9623a24d33bec486911246c17ceb6a94
+ARG ANTIGRAVITY_VERSION=1.3.2
+ARG ANTIGRAVITY_AMD64_SHA256=bf8504c72097c97de77d271b160bdb10b956031cf79cf95d96cb948df161c25f
+ARG ANTIGRAVITY_ARM64_SHA256=f904ce9ca50ee7d2010bd8063a864ce37c31585c710af451bab66be6e4b59a74
 # Usage collector. Pinned (not fetched via runtime npx/bunx) so AWF's
 # per-workspace usage sampler reads local provider usage files offline.
-ARG CCUSAGE_VERSION=20.0.20
+ARG CCUSAGE_VERSION=20.0.26
 
 # Install a pinned Cursor CLI release only after verifying its architecture-
 # specific checksum. The official convenience installer is mutable.

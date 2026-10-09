@@ -156,7 +156,7 @@ class TestTaskList:
         assert legacy["agent_effort"] == "xhigh"
         assert legacy["agent_model_source"] == "default"
         assert legacy["agent_effort_source"] == "default"
-        assert attempt["agent_model"] == "ollama/kimi-k2.6:cloud"
+        assert attempt["agent_model"] == "ollama/kimi-k3:cloud"
         assert attempt["agent_effort"] == "xhigh"
         assert attempt["agent_model_source"] == "default"
         assert attempt["agent_effort_source"] == "default"

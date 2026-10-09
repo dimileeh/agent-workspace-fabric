@@ -403,8 +403,8 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
         (AgentRuntime.codex, "gpt-5.6-sol", "xhigh"),
         (AgentRuntime.cursor, "auto", None),
         (AgentRuntime.antigravity, "gemini-3.1-pro", "high"),
-        (AgentRuntime.claude_code, "claude-opus-5", "xhigh"),
-        (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud", "xhigh"),
+        (AgentRuntime.claude_code, "claude-opus-5-5", "xhigh"),
+        (AgentRuntime.opencode, "ollama/kimi-k3:cloud", "xhigh"),
     ],
 )
 def test_effective_agent_identity_uses_central_defaults(
@@ -476,7 +476,7 @@ def test_effective_agent_identity_prefers_explicit_effort_policy() -> None:
         task_policy={"agent_effort": "max"},
     )
 
-    assert identity.model == "claude-opus-5"
+    assert identity.model == "claude-opus-5-5"
     assert identity.model_source == "default"
     assert identity.effort == "max"
     assert identity.effort_source == "task_policy"
