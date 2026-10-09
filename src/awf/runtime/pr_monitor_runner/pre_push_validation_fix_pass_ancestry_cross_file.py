@@ -394,6 +394,38 @@ def _importable_definition_spans_for_names(
     return spans
 
 
+async def _callee_definition_survives_at_right(
+    self: Any,
+    *,
+    worktree_path: Path,
+    right: str,
+    path: str,
+    names: frozenset[str],
+    bare_names: frozenset[str],
+) -> bool:
+    """True when ``path`` still holds a reachable definition of the callee at ``right``.
+
+    The spans the overlap check runs against are read at ``left``, so a
+    correction that *deletes* the callee — its whole file, or just its
+    definition out of a surviving file — produces a deletion hunk overlapping
+    the old span and would otherwise read as evidence that the reviewed call
+    site was fixed, while the unchanged caller now references a missing callee
+    (PRRT_kwDOSJAM6s6q8MWy). ``path`` is the candidate's rename target when the
+    range moved it, so an already-accepted move keeps resolving. Fails closed
+    when the right-side text is unreadable.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _path_text_at_ref,
+    )
+
+    right_text = await _path_text_at_ref(self, worktree_path=worktree_path, ref=right, path=path)
+    if not right_text:
+        return False
+    return bool(
+        _importable_definition_spans_for_names(right_text, names, path=path, bare_names=bare_names)
+    )
+
+
 async def _path_diff_text_in_commit_range(
     self: Any,
     *,
@@ -488,9 +520,12 @@ async def _commit_range_changes_callee_definition(
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
     gate exists for. A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
-    change to its body. ``item_path`` itself is skipped: a same-path change is
-    what the line-anchored and path-level gates already answer. Fails closed on
-    any unreadable Git output.
+    change to its body. An overlap is accepted only when the callee is still
+    reachable at ``right``, so a correction that deletes the definition — or its
+    whole file — is not read as a fix of a caller that still calls it
+    (PRRT_kwDOSJAM6s6q8MWy). ``item_path`` itself is skipped: a same-path change
+    is what the line-anchored and path-level gates already answer. Fails closed
+    on any unreadable Git output.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _changed_paths_in_commit_range,
@@ -558,8 +593,22 @@ async def _commit_range_changes_callee_definition(
         if diff_text is None:
             continue
         for start, end in spans:
-            if _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=candidate_text):
+            if not (
+                _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=candidate_text)
+                or _diff_adds_decorators_above_span(diff_text, start)
+            ):
+                continue
+            # Survival is a property of the candidate, not of one span, so the
+            # first overlap settles this file; any remaining candidate may still
+            # carry its own evidence.
+            if await _callee_definition_survives_at_right(
+                self,
+                worktree_path=worktree_path,
+                right=right,
+                path=rename_map.get(candidate) or candidate,
+                names=candidate_names,
+                bare_names=candidate_bare,
+            ):
                 return True
-            if _diff_adds_decorators_above_span(diff_text, start):
-                return True
+            break
     return False

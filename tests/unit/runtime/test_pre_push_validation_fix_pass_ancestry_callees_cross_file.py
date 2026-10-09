@@ -96,7 +96,15 @@ class _Probe:
         if "show" in cmd:
             ref, _, path = cmd[-1].partition(":")
             self.shows.append(path)
-            text = self.texts.get((ref, path))
+            if (ref, path) in self.texts:
+                text = self.texts[(ref, path)]
+            elif ref == _RIGHT:
+                # The accepted candidate is read back on the right to check the
+                # callee survived the correction; unless a case says the
+                # definition went away, the right side still holds it.
+                text = self.texts.get((_LEFT, path))
+            else:
+                text = None
             if text is None:
                 return CommandResult(returncode=128, stdout="", stderr="no such path")
             return CommandResult(returncode=0, stdout=text, stderr="")
@@ -1018,9 +1026,13 @@ class _RenameProbe:
         self.name_status_z = name_status_z
         self.diffs = diffs
         self.diff_pathspecs: list[tuple[str, ...]] = []
+        self.shows: list[tuple[str, str]] = []
         self.texts = {
             (_LEFT, _CALLER): _CALLER_TEXT,
             (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+            # The move carries the definition to its rename target, which is
+            # where the survival read looks for it (PRRT_kwDOSJAM6s6q8MWy).
+            (_RIGHT, _CALLEE_MODULE_RENAMED): _CALLEE_TEXT,
         }
         self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
 
@@ -1030,6 +1042,7 @@ class _RenameProbe:
         del kwargs
         if "show" in cmd:
             ref, _, path = cmd[-1].partition(":")
+            self.shows.append((ref, path))
             text = self.texts.get((ref, path))
             if text is None:
                 return CommandResult(returncode=128, stdout="", stderr="no such path")
@@ -1082,6 +1095,8 @@ async def test_rename_that_also_changes_the_callee_body_is_evidence() -> None:
     )
 
     assert await _probe(probe)
+    # The callee's survival is read at the rename target, not at the old path.
+    assert (_RIGHT, _CALLEE_MODULE_RENAMED) in probe.shows
 
 
 @pytest.mark.unit
@@ -1090,3 +1105,101 @@ async def test_rename_aware_diff_failure_fails_closed() -> None:
     probe = _RenameProbe(name_status_z=_RENAME_NAME_STATUS_Z, diffs={})
 
     assert not await _probe(probe)
+
+
+# --- the callee must survive the correction (PRRT_kwDOSJAM6s6q8MWy) ----------
+
+# Deleting the callee's whole file: the changed-path set still carries the path,
+# its definition spans still read back at ``left``, and the deletion hunk
+# overlaps every one of them.
+_WHOLE_FILE_DELETION_DIFF = (
+    f"diff --git a/{_CALLEE_MODULE} b/{_CALLEE_MODULE}\n"
+    "deleted file mode 100644\n"
+    f"--- a/{_CALLEE_MODULE}\n"
+    "+++ /dev/null\n"
+    f"@@ -1,{len(_CALLEE_TEXT.splitlines())} +0,0 @@\n"
+    + "".join(f"-{line}\n" for line in _CALLEE_TEXT.splitlines())
+)
+
+# Deleting just the callee's definition (old lines 4-7) out of a surviving file.
+_DEFINITION_DELETION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -4,4 +3,0 @@\n"
+    "-def record_ready_queue_depth(payload):\n"
+    '-    """Record the ready-queue depth."""\n'
+    "-    GAUGE.set(len(payload.entries))\n"
+    "-    return None\n"
+)
+
+_CALLEE_TEXT_WITHOUT_DEFINITION = "GAUGE = None\n\n\ndef unrelated_helper():\n    return 0\n"
+
+
+@pytest.mark.unit
+async def test_a_deleted_callee_file_is_not_evidence() -> None:
+    """Deleting the callee's file leaves the unchanged caller calling nothing.
+
+    The overlap alone would resolve the comment as fixed even though the
+    reviewed call site now references a missing callee, so the definition has to
+    still be reachable on ``right`` (PRRT_kwDOSJAM6s6q8MWy). The status letter is
+    deliberately not what the guard reads: the right-side read is the one fact
+    that holds for a whole-file deletion and a definition-only deletion alike.
+    """
+    probe = _Probe(
+        texts={
+            (_LEFT, _CALLER): _CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+            (_RIGHT, _CALLEE_MODULE): None,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: _WHOLE_FILE_DELETION_DIFF},
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_deleting_only_the_callee_definition_is_not_evidence() -> None:
+    """A surviving file that no longer defines the callee is not a fix either."""
+    probe = _Probe(
+        texts={
+            (_LEFT, _CALLER): _CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+            (_RIGHT, _CALLEE_MODULE): _CALLEE_TEXT_WITHOUT_DEFINITION,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: _DEFINITION_DELETION_DIFF},
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_callee_definition_moved_inside_its_file_is_still_evidence() -> None:
+    """A definition the correction moved within its own file survives on ``right``.
+
+    The old span's deletion hunk overlaps, and the callee is still reachable
+    from module scope afterwards, so this stays the #1019 evidence shape.
+    """
+    moved = (
+        "GAUGE = None\n"
+        "\n"
+        "\n"
+        "def unrelated_helper():\n"
+        "    return 0\n"
+        "\n"
+        "\n"
+        "def record_ready_queue_depth(payload):\n"
+        "    GAUGE.set(payload.ready_depth())\n"
+    )
+    probe = _Probe(
+        texts={
+            (_LEFT, _CALLER): _CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+            (_RIGHT, _CALLEE_MODULE): moved,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: _DEFINITION_DELETION_DIFF},
+    )
+
+    assert await _probe(probe)
