@@ -751,27 +751,42 @@ def _importable_definition_spans_for_names(
 
     Each span starts at the head's topmost contiguous decorator, so a correction
     that only swaps a decorator still overlaps the callee's definition.
+
+    When the file binds one name at module scope more than once, only the last
+    of those definitions is returned: the module body binds the name to the
+    definition it executes last, so an earlier same-named definition is dead
+    code the importing call site cannot reach, and a correction confined to it
+    changes nothing that call does (PRRT_kwDOSJAM6s6q9Wnf). This is the rule
+    attempt 0's ``_resolve_callee_definition_span`` already applies in-file.
+    Members of module-level classes are *not* folded this way — a same-named
+    method of a different class is a distinct attribute, which an instance
+    receiver may well be calling, not a shadowing pair.
     """
     if not (names or bare_names) or not file_text:
         return []
     all_spans = _iter_definition_spans(file_text, path=path)
     js_ts = _path_allows_js_private_fields(path)
-    spans: list[tuple[int, int]] = []
+    collected: list[tuple[str, int, bool, tuple[int, int]]] = []
     for name, start, end, indent in all_spans:
         qualified = name in names
         if not qualified and name not in bare_names:
             continue
         if indent > 0 and (js_ts or _definition_head_is_assignment(file_text, start)):
             continue
+        nested = _definition_is_nested_in_other(all_spans, start=start, indent=indent)
         if qualified:
             if not _definition_is_reachable_from_module_scope(
                 file_text, all_spans, start=start, indent=indent
             ):
                 continue
-        elif _definition_is_nested_in_other(all_spans, start=start, indent=indent):
+        elif nested:
             continue
-        spans.append((_definition_span_start_with_decorators(file_text, start), end))
-    return spans
+        span = (_definition_span_start_with_decorators(file_text, start), end)
+        collected.append((name, start, nested, span))
+    effective = {
+        name: start for name, start, nested, _span in collected if not nested
+    }  # last head wins
+    return [span for name, start, nested, span in collected if nested or effective[name] == start]
 
 
 async def _callee_definition_survives_at_right(

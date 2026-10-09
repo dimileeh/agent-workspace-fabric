@@ -357,3 +357,92 @@ def test_unreadable_call_sites_report_no_module_scope_bindings() -> None:
         frozenset()
     )
     assert cross_file._module_scope_rebound_names("record = (\n", path=_CALLER) == frozenset()
+
+
+# The candidate module binds the imported name twice at module level: the first
+# definition is dead, because the import reaches the last one executed.
+_DUPLICATE_DEFINITION_CALLEE_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "def record_ready_queue_depth(payload):\n"
+    "    return len(payload.entries)\n"
+)
+
+# A body-only change inside the dead first definition's span (old line 2).
+_DEAD_DEFINITION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -2 +2 @@\n"
+    "-    return None\n"
+    "+    return 0\n"
+)
+
+# The same change inside the effective definition's span (old line 6).
+_EFFECTIVE_DEFINITION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -6 +6 @@\n"
+    "-    return len(payload.entries)\n"
+    "+    return payload.ready_depth()\n"
+)
+
+
+@pytest.mark.unit
+def test_only_the_effective_module_scope_definition_is_importable() -> None:
+    """Duplicate module-level definitions resolve to the last one executed.
+
+    Python binds the imported name to the definition the module body runs last,
+    so an earlier same-named definition is dead code no caller can reach and a
+    correction confined to it is not a change to the callee
+    (PRRT_kwDOSJAM6s6q9Wnf). Mirrors the same-file reader's rule in
+    ``_resolve_callee_definition_span``. Members of distinct module-level
+    classes are distinct attributes, not a shadowing pair, so both survive for
+    an attribute-qualified callee.
+    """
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_DEFINITION_CALLEE_TEXT,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(5, 6)]
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_DEFINITION_CALLEE_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(5, 6)]
+
+    two_classes = (
+        "class Primary:\n"
+        "    def record(self, payload):\n"
+        "        return payload\n"
+        "\n"
+        "\n"
+        "class Secondary:\n"
+        "    def record(self, payload):\n"
+        "        return None\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        two_classes, frozenset({"record"}), path=_CALLEE_MODULE
+    ) == [(2, 5), (7, 8)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_dead_duplicate_definition_is_not_evidence() -> None:
+    """Editing the shadowed definition leaves the called one untouched."""
+    probe = _cross_package_probe(
+        callee_text=_DUPLICATE_DEFINITION_CALLEE_TEXT, diff=_DEAD_DEFINITION_DIFF
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_change_to_the_effective_duplicate_definition_is_evidence() -> None:
+    """The paired accept: the surviving last definition is the real callee."""
+    probe = _cross_package_probe(
+        callee_text=_DUPLICATE_DEFINITION_CALLEE_TEXT, diff=_EFFECTIVE_DEFINITION_DIFF
+    )
+
+    assert await _probe(probe)
