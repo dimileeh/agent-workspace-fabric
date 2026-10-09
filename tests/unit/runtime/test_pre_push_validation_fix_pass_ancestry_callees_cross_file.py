@@ -1502,3 +1502,30 @@ def test_an_import_repeated_for_the_same_module_still_binds_it() -> None:
         "record": frozenset({("pkg/obs/record", False), ("pkg/obs", True)}),
         "obs": frozenset({("pkg/obs", False)}),
     }
+
+
+@pytest.mark.unit
+async def test_a_bare_callee_realiased_within_one_module_fails_closed() -> None:
+    """Rebinding inside one module is still a rebinding, so it fails closed.
+
+    ``from M import record_ready_queue_depth`` followed by ``from M import
+    unrelated_helper as record_ready_queue_depth`` leaves the call reaching
+    ``M``'s ``unrelated_helper``. Judging the rebinding on the module alone
+    would call this one binding and accept a correction to the shadowed
+    same-named definition under ``M`` as evidence about a callee the range never
+    touched, exactly as unioning two modules did (PRRT_kwDOSJAM6s6q8-Mw).
+    """
+    import_head = "from pkg_b.observability.execution_platform_metrics import "
+    caller = (
+        f"{import_head}record_ready_queue_depth\n"
+        f"{import_head}unrelated_helper as record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert cross_file._bare_name_import_module_targets(caller, path=_CALLER) == {
+        "record_ready_queue_depth": cross_file._AMBIGUOUS_IMPORT_TARGET
+    }
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=6)

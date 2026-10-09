@@ -285,15 +285,25 @@ def _bare_name_import_module_targets(
 
     ``from pkg import record`` may bind something ``pkg/__init__.py`` re-exports
     from a submodule, so the callee's definition is allowed anywhere under the
-    imported module's path. A name two imports bind to *different* modules is
-    rebound rather than widened, so it fails closed (see
-    ``_AMBIGUOUS_IMPORT_TARGET``); repeating the same module is not a rebinding
+    imported module's path. A name two imports bind to *different* definitions
+    is rebound rather than widened, so it fails closed (see
+    ``_AMBIGUOUS_IMPORT_TARGET``); repeating the same import is not a rebinding
     and keeps its path.
+
+    Rebinding is judged on the ``module/imported`` identity rather than on the
+    module alone, the way ``_receiver_import_module_targets`` judges it: ``from
+    pkg import record`` followed by ``from pkg import helper as record`` leaves
+    the call reaching ``pkg``'s ``helper``, so a correction to a *same-named*
+    ``record`` under ``pkg`` is no more evidence about the effective binding
+    than a shadowed definition in another package is (PRRT_kwDOSJAM6s6q8-Mw).
     """
+    identities: dict[str, set[str]] = {}
+    for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+        identities.setdefault(bound, set()).add(f"{module_path}/{imported}")
     return {
         name: (
             _AMBIGUOUS_IMPORT_TARGET
-            if len(paths) > 1
+            if len(identities[name]) > 1
             else frozenset((module_path, False) for module_path in paths)
         )
         for name, paths in _bare_name_import_module_paths(file_text, path=path).items()
