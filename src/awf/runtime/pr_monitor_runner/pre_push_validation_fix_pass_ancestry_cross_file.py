@@ -140,6 +140,30 @@ def _relative_import_module_path(path: str, dots: str, module: str | None) -> st
     return "/".join([*base, *tail]) or None
 
 
+def _import_head_bracket_depths(lines: list[str]) -> list[int]:
+    """Open-bracket depth each masked line begins at.
+
+    An ``import`` head starts a logical line, so it can never sit inside an open
+    bracket. The masked scan deliberately keeps f-string / template ``{...}``
+    bodies scannable so interpolated calls stay visible to callee discovery,
+    which leaves an import head quoted inside a *multi-line* interpolation
+    readable as code. It is still inside the interpolation's brace, so holding
+    heads to depth 0 drops that last decoy binding (PRRT_kwDOSJAM6s6q8MXB); a
+    real import's parenthesized target list is unaffected because its head is
+    itself at depth 0.
+    """
+    depths: list[int] = []
+    depth = 0
+    for line in lines:
+        depths.append(depth)
+        for char in line:
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth = max(depth - 1, 0)
+    return depths
+
+
 def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[str, str, str]]:
     """``(module_path, bound, imported)`` for each ``from`` import in ``file_text``.
 
@@ -156,14 +180,20 @@ def _iter_from_import_bindings(file_text: str, *, path: str) -> Iterator[tuple[s
     decoy module into a readable binding, and because any stored path satisfies
     the candidate match, a correction to the *example's* module would then
     satisfy this gate for a call site that still routes elsewhere
-    (PRRT_kwDOSJAM6s6q8MXB).
+    (PRRT_kwDOSJAM6s6q8MXB). Heads are read only at bracket depth 0, which is
+    where a logical line starts, so a head the scan's interpolation retention
+    left readable binds nothing either.
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return
     module_path: str | None
     lines = _definition_head_scan_lines(file_text, path=path)
+    depths = _import_head_bracket_depths(lines)
     index = 0
     while index < len(lines):
+        if depths[index]:
+            index += 1
+            continue
         line = _import_line_without_comment(lines[index])
         absolute = _ABSOLUTE_FROM_IMPORT_RE.match(line)
         relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(line)
@@ -212,12 +242,17 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     after it to a module the call site never imported — that receiver would then
     fail closed against every changed file (PRRT_kwDOSJAM6s6q8BmK). Lines come
     from the comment/string-masked scan, so a quoted ``import`` inside a
-    docstring binds no receiver either (PRRT_kwDOSJAM6s6q8MXB).
+    docstring binds no receiver either (PRRT_kwDOSJAM6s6q8MXB), and a head read
+    back from inside a retained interpolation is skipped with it.
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return {}
     bindings: dict[str, set[str]] = {}
-    for scan_line in _definition_head_scan_lines(file_text, path=path):
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
+    depths = _import_head_bracket_depths(scan_lines)
+    for depth, scan_line in zip(depths, scan_lines, strict=True):
+        if depth:
+            continue
         head = _PLAIN_IMPORT_RE.match(_import_line_without_comment(scan_line))
         if head is None:
             continue

@@ -1387,3 +1387,39 @@ def test_import_readers_skip_heads_inside_string_literals() -> None:
     assert cross_file._plain_import_module_paths(text, path="src/pkg/caller.py") == {
         "real": frozenset({"pkg/real"})
     }
+
+
+@pytest.mark.unit
+def test_import_readers_skip_heads_inside_retained_interpolations() -> None:
+    """A head left readable by interpolation retention still binds nothing.
+
+    The masked scan keeps f-string ``{...}`` bodies scannable so interpolated
+    calls stay visible, which leaves an import head quoted inside a multi-line
+    interpolation looking like code. It is still inside the interpolation's
+    brace, and an import head never sits inside an open bracket, so the decoy
+    module must not reach either binding (PRRT_kwDOSJAM6s6q8MXB).
+    """
+    text = (
+        "from pkg.mod import alpha\n"
+        "import pkg.real\n"
+        'DOC = f"""{\n'
+        "from pkg.decoy import alpha\n"
+        "import pkg.decoy\n"
+        '}"""\n'
+    )
+    assert cross_file._bare_name_import_module_paths(text, path="src/pkg/caller.py") == {
+        "alpha": frozenset({"pkg/mod"})
+    }
+    assert cross_file._plain_import_module_paths(text, path="src/pkg/caller.py") == {
+        "real": frozenset({"pkg/real"})
+    }
+
+
+@pytest.mark.unit
+def test_a_parenthesized_import_head_still_binds_every_wrapped_name() -> None:
+    """Holding heads to bracket depth 0 keeps the wrapped target list readable."""
+    text = "from pkg.mod import (\n    alpha,\n    beta,\n)\n"
+    assert cross_file._bare_name_import_module_paths(text, path="src/pkg/caller.py") == {
+        "alpha": frozenset({"pkg/mod"}),
+        "beta": frozenset({"pkg/mod"}),
+    }
