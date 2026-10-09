@@ -15,6 +15,7 @@ from awf.adapters.base import AgentAdapter, register_adapter
 from awf.db.enums import AgentRuntime
 
 OPENCODE_OLLAMA_CLOUD_MODELS = (
+    "kimi-k3:cloud",
     "kimi-k2.6:cloud",
     "glm-5.1:cloud",
     "gemma4:31b-cloud",
@@ -27,6 +28,11 @@ daemon is the source of truth for which models are usable; the selected model
 is always threaded into ``provider.ollama.models`` (see
 ``_opencode_config_for_effort``) so OpenCode never rejects a model the daemon
 can serve. The tuple only supplies the default model when none is requested.
+
+The first entry is the no-model fallback. It is resolved by a different path
+than the central ``DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model``, but
+both should name the same model: the executor Ollama preflight mirrors this
+fallback to decide what to probe/pull, so bump the two together.
 """
 
 DEFAULT_OLLAMA_OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"

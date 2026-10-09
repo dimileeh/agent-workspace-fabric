@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
@@ -25,6 +26,7 @@ from awf.adapters.opencode import (
     _variant_for_effort,
 )
 from awf.common.commands import FakeCommandRunner
+from awf.db.enums import AgentRuntime
 from awf.service import provider_readiness_helpers
 
 from .test_adapters import (
@@ -432,9 +434,20 @@ class TestOpenCodeAdapter:
 
         args = runner.calls[0].args
         assert "--model" in args
-        assert "ollama/kimi-k2.6:cloud" in args
+        assert "ollama/kimi-k3:cloud" in args
         assert "--variant" not in args
         assert "--thinking" not in args
+
+    @pytest.mark.unit
+    def test_cloud_model_fallback_head_matches_central_opencode_default(self) -> None:
+        # The adapter's no-model fallback (tuple head) and the central shipped
+        # default are resolved by different paths, but the executor Ollama
+        # preflight mirrors the adapter fallback to pick what it probes/pulls.
+        # They must name the same model or the preflight probes a model the
+        # agent will not launch.
+        assert _qualified_model(OPENCODE_OLLAMA_CLOUD_MODELS[0]) == _qualified_model(
+            DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model
+        )
 
     @pytest.mark.unit
     def test_opencode_effort_helpers_cover_default_and_high_paths(self) -> None:
