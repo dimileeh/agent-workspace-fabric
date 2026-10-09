@@ -466,6 +466,78 @@ async def test_bare_callee_alias_binding_follows_the_aliased_module() -> None:
 
 
 @pytest.mark.unit
+async def test_qualified_receiver_binding_rejects_an_unrelated_same_named_def() -> None:
+    """A receiver resolves only under the module its own import names.
+
+    ``from pkg_b.observability import ... as metrics`` cannot reach a
+    ``record_ready_queue_depth`` defined in ``pkg_c``, so editing that one is no
+    more evidence for ``metrics.record_ready_queue_depth()`` than for the bare
+    call shape (PRRT_kwDOSJAM6s6q7bSI).
+    """
+    caller = (
+        "from pkg_b.observability import execution_platform_metrics as metrics\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    metrics.record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_qualified_receiver_bound_by_a_plain_import_resolves_to_that_module() -> None:
+    """``import pkg.mod`` binds the receiver ``pkg.mod.record()`` calls through."""
+    caller = (
+        "import pkg_b.observability.execution_platform_metrics\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    pkg_b.observability.execution_platform_metrics"
+        ".record_ready_queue_depth(payload)\n"
+    )
+
+    assert await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+    assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_qualified_receiver_alias_follows_the_aliased_module() -> None:
+    """``import pkg_c.unrelated as metrics`` binds the *alias* to ``pkg_c``."""
+    caller = (
+        "import pkg_c.unrelated as metrics\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    metrics.record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_qualified_receiver_without_a_binding_keeps_the_name_only_rule() -> None:
+    """A receiver that is a parameter rather than an import narrows nothing.
+
+    Its definition's module is unknowable without type resolution, so the #1019
+    shape keeps resolving by name instead of being re-parked as needs_human.
+    """
+    caller = "def refresh(payload, metrics):\n    metrics.record_ready_queue_depth(payload)\n"
+
+    assert await _probe(_cross_package_probe(caller_text=caller), item_line=2)
+
+
+@pytest.mark.unit
+def test_plain_import_bindings_skip_pieces_that_are_not_module_names() -> None:
+    """Only dotted module names bind; the trailing-comma/garbage pieces do not."""
+    assert cross_file._plain_import_module_paths(
+        "import a.b  # note\nimport a.b as c\nimport (\n", path="m.py"
+    ) == {"b": frozenset({"a/b"}), "c": frozenset({"a/b"})}
+    # Non-Python call sites keep the name-only rule for receivers too.
+    assert cross_file._plain_import_module_paths("import a.b\n", path="m.ts") == {}
+
+
+@pytest.mark.unit
 async def test_bare_callee_without_a_resolvable_import_keeps_the_name_only_rule() -> None:
     """Star, over-deep and plain-``import`` bindings carry no path to match.
 

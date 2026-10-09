@@ -48,8 +48,9 @@ _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS = 25
 _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 
 # ``from pkg.mod import a, b as c`` — absolute targets. A plain ``import
-# pkg.mod`` binds ``pkg`` rather than the callee, so it narrows no candidate
-# path and is not matched here; relative targets are read below instead.
+# pkg.mod`` binds ``pkg`` rather than the callee, so it narrows no *bare*
+# candidate path and is not matched here; relative targets are read below, and
+# the plain form is read for receivers by ``_plain_import_module_paths``.
 _ABSOLUTE_FROM_IMPORT_RE = re.compile(
     r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import[ \t]+(.+)$"
 )
@@ -60,6 +61,12 @@ _ABSOLUTE_FROM_IMPORT_RE = re.compile(
 _RELATIVE_FROM_IMPORT_RE = re.compile(
     r"^[ \t]*from[ \t]+(\.+)(\w+(?:\.\w+)*)?[ \t]+import[ \t]+(.+)$"
 )
+
+# ``import pkg.mod`` / ``import pkg.mod as alias`` — the statement binds a
+# module, which is the receiver shape ``pkg.mod.record(...)`` and
+# ``alias.record(...)`` call through, so it does narrow a *qualified* callee.
+_PLAIN_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+(.+)$")
+_DOTTED_MODULE_RE = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
 
 
 def _module_path_segments(path: str) -> list[str]:
@@ -143,6 +150,52 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
 
+def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+    """Module paths each name a plain ``import`` statement binds as a receiver.
+
+    ``import pkg.mod`` is called through as ``pkg.mod.record(...)``, so the
+    receiver captured at the anchored line is the import's last segment;
+    ``import pkg.mod as alias`` renames that receiver. Either way the imported
+    module's own path is what a qualified callee reaches through it. Pieces that
+    are not a dotted module name are skipped, and a name no plain import binds
+    keeps the name-only rule.
+    """
+    if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
+        return {}
+    bindings: dict[str, set[str]] = {}
+    for line in file_text.splitlines():
+        head = _PLAIN_IMPORT_RE.match(line)
+        if head is None:
+            continue
+        for piece in head.group(1).split(","):
+            parts = piece.split()
+            if not parts or _DOTTED_MODULE_RE.fullmatch(parts[0]) is None:
+                continue
+            segments = parts[0].split(".")
+            alias = parts[2] if len(parts) >= 3 and parts[1] == "as" else segments[-1]
+            bindings.setdefault(alias, set()).add("/".join(segments))
+    return {name: frozenset(paths) for name, paths in bindings.items()}
+
+
+def _qualifier_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+    """Module paths each *receiver* name at a call site is bound to.
+
+    A qualified callee (``metrics.record()``) reaches its definition through its
+    receiver, so both ``from pkg import metrics`` (the module the name was
+    imported from) and ``import pkg.metrics`` (the module itself) narrow which
+    changed path can hold that definition (PRRT_kwDOSJAM6s6q7bSI). A receiver
+    with no readable binding — a parameter, an attribute, a star import — keeps
+    the name-only rule rather than re-parking the #1019 fixes.
+    """
+    merged: dict[str, set[str]] = {
+        name: set(paths)
+        for name, paths in _bare_name_import_module_paths(file_text, path=path).items()
+    }
+    for name, paths in _plain_import_module_paths(file_text, path=path).items():
+        merged.setdefault(name, set()).update(paths)
+    return {name: frozenset(paths) for name, paths in merged.items()}
+
+
 def _candidate_is_under_module_path(candidate: str, module_path: str) -> bool:
     """True when ``candidate`` is the imported module's file or sits inside it.
 
@@ -162,19 +215,22 @@ def _candidate_is_under_module_path(candidate: str, module_path: str) -> bool:
     )
 
 
-def _bare_names_bound_to_candidate(
-    bare_names: frozenset[str],
+def _callee_names_bound_to_candidate(
+    refs: frozenset[tuple[str, str]],
     bindings: dict[str, frozenset[str]],
     candidate: str,
 ) -> frozenset[str]:
-    """Bare callees whose import binding, when readable, admits ``candidate``."""
+    """Callee names whose binding key, when readable, admits ``candidate``.
+
+    The key is a bare callee's own name or a qualified callee's receiver; a key
+    with no readable import binding keeps the name-only rule.
+    """
     return frozenset(
         name
-        for name in bare_names
-        if not bindings.get(name)
+        for key, name in refs
+        if not bindings.get(key)
         or any(
-            _candidate_is_under_module_path(candidate, module_path)
-            for module_path in bindings[name]
+            _candidate_is_under_module_path(candidate, module_path) for module_path in bindings[key]
         )
     )
 
@@ -293,12 +349,15 @@ async def _path_diff_text_in_commit_range(
 
 def _cross_file_callee_names(
     file_text: str, line: int, *, path: str
-) -> tuple[frozenset[str], frozenset[str]]:
-    """Callee names at ``line`` that may resolve in another file.
+) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
+    """Callee refs at ``line`` that may resolve in another file.
 
     Returns ``(attribute_qualified, bare)`` separately because the two call
     shapes reach different definitions across a module boundary — see
-    ``_importable_definition_spans_for_names``.
+    ``_importable_definition_spans_for_names``. Each ref is a
+    ``(binding_key, name)`` pair, the key being the name whose import binding
+    narrows the candidate path: a qualified callee binds through its receiver, a
+    bare callee through itself.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
         _callee_refs_from_file_line,
@@ -306,11 +365,11 @@ def _cross_file_callee_names(
 
     refs = _callee_refs_from_file_line(file_text, line, path=path)
     qualified = frozenset(
-        name
+        (qualifier, name)
         for qualifier, name in refs
         if qualifier is not None and qualifier not in _IN_FILE_CALLEE_QUALIFIERS
     )
-    bare = frozenset(name for qualifier, name in refs if qualifier is None)
+    bare = frozenset((name, name) for qualifier, name in refs if qualifier is None)
     return qualified, bare
 
 
@@ -329,11 +388,12 @@ async def _commit_range_changes_callee_definition(
     ``left`` — the side ``-U0`` hunk headers and the definition spans are both
     expressed in — then, for each other path the range changed, requires a
     module-reachable definition of one of those names whose span the range's
-    diff overlaps. A bare callee is additionally held to the module its own
-    ``from`` import names, so a same-named definition in a module the call site
-    never imported is not evidence (PRRT_kwDOSJAM6s6q7bSI); attribute-qualified
-    callees keep resolving by name, their receiver being an instance as often as
-    a module. A candidate that the range renamed is diffed against its
+    diff overlaps. Each callee is additionally held to the module its own import
+    binds — a bare callee through its ``from`` import, a qualified callee
+    through its receiver — so a same-named definition in a module the call site
+    never imported is not evidence (PRRT_kwDOSJAM6s6q7bSI). A callee whose
+    binding is unreadable keeps the name-only rule, which is the #1019 shape the
+    gate exists for. A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. ``item_path`` itself is skipped: a same-path change is
     what the line-anchored and path-level gates already answer. Fails closed on
@@ -374,9 +434,11 @@ async def _commit_range_changes_callee_definition(
         self, worktree_path=worktree_path, left=left, right=right
     )
     bare_bindings = _bare_name_import_module_paths(item_text, path=normalized_item)
+    qualifier_bindings = _qualifier_import_module_paths(item_text, path=normalized_item)
     for candidate in candidates:
-        candidate_bare = _bare_names_bound_to_candidate(bare_names, bare_bindings, candidate)
-        if not (names or candidate_bare):
+        candidate_names = _callee_names_bound_to_candidate(names, qualifier_bindings, candidate)
+        candidate_bare = _callee_names_bound_to_candidate(bare_names, bare_bindings, candidate)
+        if not (candidate_names or candidate_bare):
             continue
         candidate_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
@@ -384,7 +446,7 @@ async def _commit_range_changes_callee_definition(
         if not candidate_text:
             continue
         spans = _importable_definition_spans_for_names(
-            candidate_text, names, path=candidate, bare_names=candidate_bare
+            candidate_text, candidate_names, path=candidate, bare_names=candidate_bare
         )
         if not spans:
             continue
