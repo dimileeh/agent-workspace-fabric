@@ -841,7 +841,7 @@ def test_observability_payloads_include_identity_lifecycle_and_usage() -> None:
     )
     identity_usage = workspace_identity_usage_payload(workspace)
 
-    assert observability["agent_model"] == "ollama/kimi-k2.6:cloud"
+    assert observability["agent_model"] == "ollama/kimi-k3:cloud"
     assert observability["agent_effort"] == "max"
     assert observability["agent_effort_source"] == "task_policy"
     assert observability["lifecycle"][0] == {
@@ -853,7 +853,7 @@ def test_observability_payloads_include_identity_lifecycle_and_usage() -> None:
         "status": "active",
     }
     assert observability["llm_usage"]["status"] == "unavailable"
-    assert identity_usage["agent_model"] == "ollama/kimi-k2.6:cloud"
+    assert identity_usage["agent_model"] == "ollama/kimi-k3:cloud"
     assert identity_usage["llm_usage"]["reason"] == "usage_not_reported"
 
 

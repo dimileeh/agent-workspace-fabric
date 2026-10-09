@@ -837,7 +837,7 @@ class TestHappyPathPart001:
 
         await executor.execute(ws_id)
 
-        assert captured == [("ollama/glm-5.1:cloud", "xhigh", "ollama/kimi-k2.6:cloud")]
+        assert captured == [("ollama/glm-5.1:cloud", "xhigh", "ollama/kimi-k3:cloud")]
 
     @pytest.mark.unit
     async def test_planning_profile_runs_plan_execute_compare_before_validation(
