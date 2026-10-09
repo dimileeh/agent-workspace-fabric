@@ -103,10 +103,11 @@ async def test_reattempt_non_fixed_with_mutation_rolls_back_only_to_the_preserve
     )
     runner.current_head = _PRESERVED_HEAD
 
-    with pytest.raises(comment_verdict.AgentVerdictProtocolError) as caught:
-        await _invoke_reattempt(runner, state=_state_after_preserved_timeout())
+    result = await _invoke_reattempt(runner, state=_state_after_preserved_timeout())
 
-    assert caught.value.reason_code == comment_verdict.AGENT_NON_FIXED_WITH_MUTATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert comment_verdict.AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert runner.reset_targets == [_PRESERVED_HEAD]
     assert runner.current_head == _PRESERVED_HEAD
 
