@@ -646,6 +646,35 @@ async def test_qualified_receiver_without_a_binding_keeps_the_name_only_rule() -
 
 
 @pytest.mark.unit
+async def test_a_comment_on_a_plain_import_binds_no_receiver_of_its_own() -> None:
+    """A ``#`` comment ends the statement; words inside it bind no receiver.
+
+    The plain-``import`` reader splits on commas too, so a comma in a trailing
+    comment would bind the following word to a module path the call site never
+    imported. That receiver then fails closed against every changed file and a
+    correct cross-file fix is re-parked as needs_human — the mirror image of the
+    ``from``-import comment defect (PRRT_kwDOSJAM6s6q8BmK).
+    """
+    caller = (
+        "import json  # legacy, metrics is injected\n"
+        "\n"
+        "\n"
+        "def refresh(payload, metrics):\n"
+        "    metrics.record_ready_queue_depth(payload)\n"
+    )
+
+    assert await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+def test_plain_import_comments_are_stripped_before_the_pieces_are_read() -> None:
+    """Only the statement's own dotted names bind; its comment text does not."""
+    assert cross_file._plain_import_module_paths(
+        "import json  # legacy, metrics is injected\n", path="src/pkg/caller.py"
+    ) == {"json": frozenset({"json"})}
+
+
+@pytest.mark.unit
 def test_plain_import_bindings_skip_pieces_that_are_not_module_names() -> None:
     """Only dotted module names bind; the trailing-comma/garbage pieces do not."""
     assert cross_file._plain_import_module_paths(

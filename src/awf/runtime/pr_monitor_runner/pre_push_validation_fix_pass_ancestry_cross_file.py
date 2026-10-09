@@ -87,8 +87,9 @@ def _import_line_without_comment(line: str) -> str:
     joined line by line, so it has to be dropped *before* the join — otherwise
     one ``# note`` swallows every name listed below it, those names never bind,
     and the gate silently falls back to the name-only rule that accepts an
-    unrelated same-named definition (PRRT_kwDOSJAM6s6q8BmK). An import target
-    list cannot hold a string literal, so scanning for a bare ``#`` is exact.
+    unrelated same-named definition (PRRT_kwDOSJAM6s6q8BmK). Both import readers
+    split on commas, so both strip the comment first. An import statement cannot
+    hold a string literal, so scanning for a bare ``#`` is exact.
     """
     head, _hash, _comment = line.partition("#")
     return head
@@ -176,13 +177,16 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     ``import pkg.mod as alias`` renames that receiver. Either way the imported
     module's own path is what a qualified callee reaches through it. Pieces that
     are not a dotted module name are skipped, and a name no plain import binds
-    keeps the name-only rule.
+    keeps the name-only rule. The comma split runs over the statement without
+    its trailing comment, so a comma inside a ``# note`` cannot bind the word
+    after it to a module the call site never imported — that receiver would then
+    fail closed against every changed file (PRRT_kwDOSJAM6s6q8BmK).
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return {}
     bindings: dict[str, set[str]] = {}
-    for line in file_text.splitlines():
-        head = _PLAIN_IMPORT_RE.match(line)
+    for raw_line in file_text.splitlines():
+        head = _PLAIN_IMPORT_RE.match(_import_line_without_comment(raw_line))
         if head is None:
             continue
         for piece in head.group(1).split(","):
