@@ -14,6 +14,7 @@ ARG DOCKER_BUILDX_PLUGIN_VERSION=0.34.1-1~debian.12~bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        acl \
         ca-certificates \
         curl \
         git \

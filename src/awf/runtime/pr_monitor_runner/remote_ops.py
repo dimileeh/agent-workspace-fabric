@@ -944,6 +944,28 @@ async def _run_sync_base(
         *merge_args,
         clear_identity_overrides=True,
     )
+    if rc == 0 and not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="sync_base_post_merge_ref_write",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        # A clean merge commit is a ROOT-side ref write into the shared mirror's
+        # ``refs/heads/<namespace>/`` and its reflog. If git had packed that
+        # namespace's loose refs away, root just recreated the directory
+        # ``755 root:root`` — after this attempt's ownership repair already ran —
+        # and the agent's own ``git commit`` would fail with ``EACCES`` on the
+        # ref lock (#1033). Fail closed like the post-commit repair in
+        # ``_commit_dirty_worktree``: pushing over an unrepaired shared mirror
+        # hides exactly the class of failure this guards.
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="agent runtime ownership repair failed after the sync-base merge commit",
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
     if rc != 0:
         status_rc, status_out, status_stderr = await _git("status", "--porcelain")
         conflicting_files = tuple(
