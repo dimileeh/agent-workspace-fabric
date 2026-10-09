@@ -1423,3 +1423,82 @@ def test_a_parenthesized_import_head_still_binds_every_wrapped_name() -> None:
         "alpha": frozenset({"pkg/mod"}),
         "beta": frozenset({"pkg/mod"}),
     }
+
+
+@pytest.mark.unit
+async def test_a_rebound_bare_callee_fails_closed_against_both_modules() -> None:
+    """A re-imported bare name resolves to one module, so neither is evidence.
+
+    ``from pkg_b... import record_ready_queue_depth`` followed by ``from
+    pkg_c.unrelated import record_ready_queue_depth`` leaves the call bound to
+    the second module only. Unioning both paths would accept a correction to the
+    *shadowed* ``pkg_b`` definition while the runtime callee in ``pkg_c`` stays
+    unchanged, so an ambiguous binding fails closed (PRRT_kwDOSJAM6s6q8-Mw).
+    """
+    caller = (
+        "from pkg_b.observability.execution_platform_metrics import record_ready_queue_depth\n"
+        "from pkg_c.unrelated import record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert cross_file._bare_name_import_module_targets(caller, path=_CALLER) == {
+        "record_ready_queue_depth": cross_file._AMBIGUOUS_IMPORT_TARGET
+    }
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=6)
+
+
+@pytest.mark.unit
+async def test_a_rebound_receiver_fails_closed_against_both_modules() -> None:
+    """A receiver bound twice reaches one module, so no changed path matches.
+
+    The ``from``/plain mix is the same defect through the receiver key: the call
+    goes through the last binding, so accepting the first module's edit would
+    resolve a thread whose runtime callee is untouched (PRRT_kwDOSJAM6s6q8-Mw).
+    """
+    module_file = "src/pkg_b/observability.py"
+    caller = (
+        "from pkg_b.observability import collector\n"
+        "import pkg_c.collector as collector\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    collector.record_ready_queue_depth(payload)\n"
+    )
+    probe = _Probe(
+        texts={(_LEFT, _CALLER): caller, (_LEFT, module_file): _CALLEE_TEXT},
+        changed_paths=(module_file,),
+        diffs={module_file: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, module_file)},
+    )
+
+    assert cross_file._receiver_import_module_targets(caller, path=_CALLER) == {
+        "collector": cross_file._AMBIGUOUS_IMPORT_TARGET
+    }
+    assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+def test_an_import_repeated_for_the_same_module_still_binds_it() -> None:
+    """Only a *rebinding* is ambiguous; the same target twice keeps its path.
+
+    A name imported from one module under both ``TYPE_CHECKING`` and the runtime
+    branch binds that module either way, so it must not fail closed.
+    """
+    text = (
+        "from pkg.obs import metrics\n"
+        "from pkg.obs import metrics\n"
+        "from pkg.obs import record\n"
+        "import pkg.obs\n"
+        "import pkg.obs as obs\n"
+    )
+    assert cross_file._bare_name_import_module_targets(text, path="src/pkg_a/caller.py") == {
+        "metrics": frozenset({("pkg/obs", False)}),
+        "record": frozenset({("pkg/obs", False)}),
+    }
+    assert cross_file._receiver_import_module_targets(text, path="src/pkg_a/caller.py") == {
+        "metrics": frozenset({("pkg/obs/metrics", False), ("pkg/obs", True)}),
+        "record": frozenset({("pkg/obs/record", False), ("pkg/obs", True)}),
+        "obs": frozenset({("pkg/obs", False)}),
+    }

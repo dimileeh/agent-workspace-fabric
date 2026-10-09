@@ -80,6 +80,18 @@ _DOTTED_MODULE_RE = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
 # identity requires of its *containing* package.
 _ModuleTarget = tuple[str, bool]
 
+# The binding of a name more than one import statement rebinds. Python keeps
+# only the last one, and this lexical reader cannot tell which statement runs
+# last (a conditional or function-local import need not be the textually final
+# one), so such a name is held to this unmatchable target instead of the union
+# of its modules: unioning would accept a correction to the *shadowed*
+# definition as evidence while the callee the call site actually reaches stays
+# unchanged (PRRT_kwDOSJAM6s6q8-Mw). It is deliberately non-empty, so
+# ``_callee_names_bound_to_candidate`` does not fall back to the name-only rule,
+# and its module path is empty, which ``_candidate_is_under_module_path`` admits
+# from no candidate — every changed file fails closed for that name.
+_AMBIGUOUS_IMPORT_TARGET: frozenset[_ModuleTarget] = frozenset({("", False)})
+
 
 def _module_path_segments(path: str) -> list[str]:
     """``path`` as directory segments, with a Python module suffix dropped."""
@@ -273,10 +285,17 @@ def _bare_name_import_module_targets(
 
     ``from pkg import record`` may bind something ``pkg/__init__.py`` re-exports
     from a submodule, so the callee's definition is allowed anywhere under the
-    imported module's path.
+    imported module's path. A name two imports bind to *different* modules is
+    rebound rather than widened, so it fails closed (see
+    ``_AMBIGUOUS_IMPORT_TARGET``); repeating the same module is not a rebinding
+    and keeps its path.
     """
     return {
-        name: frozenset((module_path, False) for module_path in paths)
+        name: (
+            _AMBIGUOUS_IMPORT_TARGET
+            if len(paths) > 1
+            else frozenset((module_path, False) for module_path in paths)
+        )
         for name, paths in _bare_name_import_module_paths(file_text, path=path).items()
     }
 
@@ -297,16 +316,27 @@ def _receiver_import_module_targets(
     submodule such as ``pkg/unrelated.py``, which the receiver cannot reach,
     fails closed (PRRT_kwDOSJAM6s6q8MW9). A receiver with no readable binding —
     a parameter, an attribute, a star import — keeps the name-only rule rather
-    than re-parking the #1019 fixes.
+    than re-parking the #1019 fixes. A receiver several imports bind to
+    different modules keeps only its last binding at runtime, so it fails closed
+    instead of offering every module it was ever bound to (see
+    ``_AMBIGUOUS_IMPORT_TARGET``); the two targets one ``from`` import yields are
+    two readings of that single binding, not a rebinding, so they are counted as
+    the one module they came from.
     """
     targets: dict[str, set[_ModuleTarget]] = {}
+    bound_modules: dict[str, set[str]] = {}
     for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+        bound_modules.setdefault(bound, set()).add(f"{module_path}/{imported}")
         targets.setdefault(bound, set()).update(
             ((f"{module_path}/{imported}", False), (module_path, True))
         )
     for name, paths in _plain_import_module_paths(file_text, path=path).items():
+        bound_modules.setdefault(name, set()).update(paths)
         targets.setdefault(name, set()).update((module_path, False) for module_path in paths)
-    return {name: frozenset(found) for name, found in targets.items()}
+    return {
+        name: (_AMBIGUOUS_IMPORT_TARGET if len(bound_modules[name]) > 1 else frozenset(found))
+        for name, found in targets.items()
+    }
 
 
 def _candidate_is_under_module_path(
@@ -329,7 +359,9 @@ def _candidate_is_under_module_path(
     ``exact`` drops the descendant tolerance: the run must end at ``candidate``,
     so only that module's own file — ``M.py`` or the package's ``M/__init__.py``
     — matches and a sibling submodule under it does not
-    (PRRT_kwDOSJAM6s6q8MW9).
+    (PRRT_kwDOSJAM6s6q8MW9). An empty ``module_path`` names no module and so
+    matches nothing, which is what makes ``_AMBIGUOUS_IMPORT_TARGET`` fail
+    closed.
     """
     segments = _module_path_segments(candidate)
     if exact and segments[-1:] == ["__init__"]:
@@ -624,7 +656,9 @@ async def _commit_range_changes_callee_definition(
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
     gate exists for; a receiver imported by name resolves to that name's own
     module or to the importing module's file, not to any sibling under its
-    package (PRRT_kwDOSJAM6s6q8MW9). A candidate that the range renamed is diffed against its
+    package (PRRT_kwDOSJAM6s6q8MW9). A name two imports rebind resolves to one
+    of them at runtime, so it is held to neither rather than to their union
+    (PRRT_kwDOSJAM6s6q8-Mw). A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. An overlap is accepted only when *that* callee is still
     reachable at ``right``, so a correction that deletes the definition — or its
