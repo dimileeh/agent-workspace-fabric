@@ -25,6 +25,7 @@ from typing import Any, cast
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _definition_head_is_assignment,
+    _definition_is_nested_in_other,
     _definition_span_is_class,
     _iter_definition_spans,
     _path_allows_js_private_fields,
@@ -67,30 +68,42 @@ def _importable_definition_spans_for_names(
     names: frozenset[str],
     *,
     path: str | None = None,
+    bare_names: frozenset[str] = frozenset(),
 ) -> list[tuple[int, int]]:
-    """Spans of ``names``' definitions in ``file_text`` reachable from module scope.
+    """Spans in ``file_text`` another module could reach as the named callee.
 
     Returns ``(start, end)`` line spans for every ``def`` / ``class`` /
-    ``function`` / arrow head whose name is in ``names`` and that another module
-    could actually reach: module-level heads, and direct members of a
-    module-level class. Function-local closures, indented JS/TS heads and
-    indented assignment bindings are block-scoped or unreachable and fail closed
-    — the same exclusions ``_resolve_callee_definition_span`` applies to
-    module-scope candidates.
+    ``function`` / arrow head whose name matches, under the reachability rule
+    its *call shape* allows. ``names`` are attribute-qualified callees
+    (``metrics.record()``), whose receiver may be a module or an instance, so a
+    direct member of a module-level class counts alongside a module-level head.
+    ``bare_names`` are bare callees (``record()``), which another module can
+    only reach through a module-scope binding — ``Class.method`` is reachable as
+    an attribute but never as bare ``method`` — so a class member fails closed
+    for them (PRRT_kwDOSJAM6s6q699Q), matching the module-scope candidate rule
+    attempt 0's ``_resolve_callee_definition_span`` applies to bare calls. A
+    name called both ways on the anchored line keeps the attribute rule.
+
+    Function-local closures, indented JS/TS heads and indented assignment
+    bindings are block-scoped or unreachable and fail closed under both rules.
     """
-    if not names or not file_text:
+    if not (names or bare_names) or not file_text:
         return []
     all_spans = _iter_definition_spans(file_text, path=path)
     js_ts = _path_allows_js_private_fields(path)
     spans: list[tuple[int, int]] = []
     for name, start, end, indent in all_spans:
-        if name not in names:
+        qualified = name in names
+        if not qualified and name not in bare_names:
             continue
         if indent > 0 and (js_ts or _definition_head_is_assignment(file_text, start)):
             continue
-        if not _definition_is_reachable_from_module_scope(
-            file_text, all_spans, start=start, indent=indent
-        ):
+        if qualified:
+            if not _definition_is_reachable_from_module_scope(
+                file_text, all_spans, start=start, indent=indent
+            ):
+                continue
+        elif _definition_is_nested_in_other(all_spans, start=start, indent=indent):
             continue
         spans.append((start, end))
     return spans
@@ -142,17 +155,27 @@ async def _path_diff_text_in_commit_range(
     return cast(str, result.stdout or "")
 
 
-def _cross_file_callee_names(file_text: str, line: int, *, path: str) -> frozenset[str]:
-    """Callee names at ``line`` that may resolve in another file."""
+def _cross_file_callee_names(
+    file_text: str, line: int, *, path: str
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Callee names at ``line`` that may resolve in another file.
+
+    Returns ``(attribute_qualified, bare)`` separately because the two call
+    shapes reach different definitions across a module boundary — see
+    ``_importable_definition_spans_for_names``.
+    """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
         _callee_refs_from_file_line,
     )
 
-    return frozenset(
+    refs = _callee_refs_from_file_line(file_text, line, path=path)
+    qualified = frozenset(
         name
-        for qualifier, name in _callee_refs_from_file_line(file_text, line, path=path)
-        if qualifier is None or qualifier not in _IN_FILE_CALLEE_QUALIFIERS
+        for qualifier, name in refs
+        if qualifier is not None and qualifier not in _IN_FILE_CALLEE_QUALIFIERS
     )
+    bare = frozenset(name for qualifier, name in refs if qualifier is None)
+    return qualified, bare
 
 
 async def _commit_range_changes_callee_definition(
@@ -192,8 +215,8 @@ async def _commit_range_changes_callee_definition(
     )
     if not item_text:
         return False
-    names = _cross_file_callee_names(item_text, item_line, path=normalized_item)
-    if not names:
+    names, bare_names = _cross_file_callee_names(item_text, item_line, path=normalized_item)
+    if not (names or bare_names):
         return False
     candidates = [
         normalized
@@ -216,7 +239,9 @@ async def _commit_range_changes_callee_definition(
         )
         if not candidate_text:
             continue
-        spans = _importable_definition_spans_for_names(candidate_text, names, path=candidate)
+        spans = _importable_definition_spans_for_names(
+            candidate_text, names, path=candidate, bare_names=bare_names
+        )
         if not spans:
             continue
         diff_text = await _path_diff_text_in_commit_range(

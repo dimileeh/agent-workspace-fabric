@@ -208,6 +208,51 @@ def test_class_members_are_importable_but_function_locals_are_not() -> None:
 
 
 @pytest.mark.unit
+def test_bare_callee_names_do_not_link_class_methods() -> None:
+    """A bare cross-module call binds a module-scope name, never ``Class.method``.
+
+    ``from mod import record`` cannot reach a method of ``mod.Collector``, so an
+    unrelated same-named method must not satisfy the gate for a bare ``record()``
+    call site (PRRT_kwDOSJAM6s6q699Q). Attribute receivers keep resolving it:
+    ``collector.record()`` is exactly that shape.
+    """
+    text = (
+        "class Collector:\n"
+        "    def record(self, payload):\n"
+        "        return payload\n"
+        "\n"
+        "\n"
+        "def record_module_level(payload):\n"
+        "    return payload\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text, frozenset(), path="src/pkg/c.py", bare_names=frozenset({"record"})
+        )
+        == []
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        text, frozenset({"record"}), path="src/pkg/c.py"
+    ) == [(2, 5)]
+    # A module-level def is reachable for both call shapes.
+    assert cross_file._importable_definition_spans_for_names(
+        text, frozenset(), path="src/pkg/c.py", bare_names=frozenset({"record_module_level"})
+    ) == [(6, 7)]
+
+
+@pytest.mark.unit
+def test_a_name_called_both_bare_and_qualified_keeps_the_attribute_rule() -> None:
+    """One anchored line may hold both shapes; the attribute shape still resolves."""
+    text = "class Collector:\n    def record(self, payload):\n        return payload\n"
+    assert cross_file._importable_definition_spans_for_names(
+        text,
+        frozenset({"record"}),
+        path="src/pkg/c.py",
+        bare_names=frozenset({"record"}),
+    ) == [(2, 3)]
+
+
+@pytest.mark.unit
 def test_block_scoped_and_unmatched_names_are_rejected() -> None:
     """Indented JS/TS or assignment heads are block-scoped; misses return ``[]``."""
     js = "if (flag) {\n  function helper() {\n    return 1;\n  }\n}\n"
@@ -341,6 +386,28 @@ async def test_non_self_attribute_qualifiers_still_resolve_by_name() -> None:
     probe = _cross_package_probe(caller_text=caller)
 
     assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_bare_call_site_is_not_linked_to_an_unrelated_class_method() -> None:
+    """A bare ``record_ready_queue_depth()`` must not link a same-named method."""
+    callee = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return payload\n"
+    )
+    probe = _cross_package_probe(
+        callee_text=callee,
+        diff=(
+            f"--- a/{_CALLEE_MODULE}\n"
+            f"+++ b/{_CALLEE_MODULE}\n"
+            "@@ -3 +3 @@\n"
+            "-        return payload\n"
+            "+        return payload.entries\n"
+        ),
+    )
+
+    assert not await _probe(probe)
 
 
 @pytest.mark.unit
