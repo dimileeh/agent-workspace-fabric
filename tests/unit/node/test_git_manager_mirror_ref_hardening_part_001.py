@@ -79,6 +79,16 @@ class _WarningLog:
         return [event for event, _fields in self.events]
 
 
+def _open_fd_count() -> int:
+    """How many descriptors this process holds open right now."""
+    return len(list(Path("/proc/self/fd").iterdir()))
+
+
+def _resolved(paths: set[Path]) -> set[Path]:
+    """Resolve expected directories the way a pinned descriptor reports them."""
+    return {path.resolve() for path in paths}
+
+
 def _capture_warnings(monkeypatch: pytest.MonkeyPatch) -> _WarningLog:
     """Swap the module logger for a recorder."""
     log = _WarningLog()
@@ -91,6 +101,8 @@ class _RecordedSetfacl:
 
     def __init__(self, returncode: int = 0, stderr: str = "") -> None:
         self.calls: list[list[str]] = []
+        self.pass_fds: list[tuple[int, ...]] = []
+        self.pinned: list[Path] = []
         self._returncode = returncode
         self._stderr = stderr
         self._passthrough = subprocess.run
@@ -100,10 +112,14 @@ class _RecordedSetfacl:
         args: list[str],
         **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        """Intercept ``setfacl`` and record it."""
+        """Intercept ``setfacl`` and record it with the directories it pinned."""
         if Path(args[0]).name != "setfacl":
             return self._passthrough(args, **kwargs)  # type: ignore[call-overload,no-any-return]
         self.calls.append(list(args))
+        self.pass_fds.append(tuple(kwargs.get("pass_fds") or ()))
+        # The fake runs in-process while the descriptors are still open, so the
+        # magic links still name the directories the walk pinned.
+        self.pinned.extend(Path(arg).readlink() for arg in args[4:])
         return subprocess.CompletedProcess(
             args=list(args),
             returncode=self._returncode,
@@ -112,11 +128,12 @@ class _RecordedSetfacl:
         )
 
     def acl_paths(self) -> set[Path]:
-        """Every path a default ACL was requested for."""
-        paths: set[Path] = set()
-        for call in self.calls:
-            paths.update(Path(arg) for arg in call[4:])
-        return paths
+        """Every directory a default ACL was requested for."""
+        return set(self.pinned)
+
+    def argument_fds(self) -> list[int]:
+        """The descriptor numbers named by the recorded ``/proc/self/fd`` paths."""
+        return [int(Path(arg).name) for call in self.calls for arg in call[4:]]
 
 
 def _install_fake_setfacl(
@@ -239,17 +256,22 @@ def test_default_acls_cover_ref_and_log_directories_only(
     applied = git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID)
 
     assert applied is True
-    assert recorder.acl_paths() == {
-        mirror / "refs",
-        mirror / "refs" / "heads",
-        namespace,
-        mirror / "logs",
-        mirror / "logs" / "refs",
-        log_namespace,
-    }
+    assert recorder.acl_paths() == _resolved(
+        {
+            mirror / "refs",
+            mirror / "refs" / "heads",
+            namespace,
+            mirror / "logs",
+            mirror / "logs" / "refs",
+            log_namespace,
+        }
+    )
     for call in recorder.calls:
         assert call[0] == _SETFACL
         assert call[1:4] == ["-d", "-m", f"u:{_AGENT_UID}:rwx"]
+        # Pinned descriptors, not mutable pathnames, and handed to the child.
+        assert all(arg.startswith("/proc/self/fd/") for arg in call[4:])
+    assert recorder.pass_fds == [tuple(recorder.argument_fds())]
 
 
 @pytest.mark.unit
@@ -265,7 +287,132 @@ def test_default_acls_never_follow_a_symlinked_ref_directory(
     recorder = _install_fake_setfacl(monkeypatch)
 
     assert git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID) is True
-    assert recorder.acl_paths() == {mirror / "refs", mirror / "refs" / "heads"}
+    assert recorder.acl_paths() == _resolved({mirror / "refs", mirror / "refs" / "heads"})
+
+
+@pytest.mark.unit
+def test_default_acls_pin_directories_against_a_post_check_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ref directory swapped for a symlink after the walk must not be granted.
+
+    The agent owns these directories, so it can replace one — or an ancestor of
+    one — with a symlink between the walk and the root-side ``setfacl``, which
+    follows symlinks given on its command line. The ACL must still land on the
+    directory that was validated, never on the symlink target.
+    """
+    mirror = tmp_path / "mirror.git"
+    heads = mirror / "refs" / "heads"
+    heads.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    heads_inode = heads.stat().st_ino
+    pinned_inodes: list[int] = []
+
+    def _swap_then_record(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Swap the walked directory for an outside symlink, then read the argv."""
+        if not heads.is_symlink():
+            heads.rmdir()
+            heads.symlink_to(outside, target_is_directory=True)
+        pinned_inodes.extend(os.fstat(int(Path(arg).name)).st_ino for arg in args[4:])
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_manager_mirror.shutil, "which", lambda _name: _SETFACL)
+    monkeypatch.setattr(git_manager_mirror.subprocess, "run", _swap_then_record)
+
+    assert git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID) is True
+    assert heads_inode in pinned_inodes
+    assert outside.stat().st_ino not in pinned_inodes
+
+
+@pytest.mark.unit
+def test_default_acls_batch_pinned_descriptors_without_leaking_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batching bounds argv and open descriptors, and releases them as it goes."""
+    mirror = tmp_path / "mirror.git"
+    for namespace in ("alpha", "beta"):
+        (mirror / "refs" / "heads" / namespace).mkdir(parents=True)
+    monkeypatch.setattr(git_manager_mirror, "_SETFACL_PATH_BATCH", 2)
+    recorder = _install_fake_setfacl(monkeypatch)
+    open_descriptors = _open_fd_count()
+
+    applied = git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID)
+
+    assert applied is True
+    assert [len(call) - 4 for call in recorder.calls] == [2, 2]
+    assert recorder.acl_paths() == _resolved(
+        {
+            mirror / "refs",
+            mirror / "refs" / "heads",
+            mirror / "refs" / "heads" / "alpha",
+            mirror / "refs" / "heads" / "beta",
+        }
+    )
+    assert _open_fd_count() == open_descriptors
+
+
+@pytest.mark.unit
+def test_default_acls_report_a_failing_batch_without_stopping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch that ``setfacl`` rejects is reported, and later batches still run."""
+    mirror = tmp_path / "mirror.git"
+    for namespace in ("alpha", "beta"):
+        (mirror / "refs" / "heads" / namespace).mkdir(parents=True)
+    monkeypatch.setattr(git_manager_mirror, "_SETFACL_PATH_BATCH", 2)
+    recorder = _install_fake_setfacl(monkeypatch, returncode=1, stderr="Operation not supported")
+    log = _capture_warnings(monkeypatch)
+
+    applied = git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID)
+
+    assert applied is False
+    assert len(recorder.calls) == 2
+    assert log.names() == ["mirror.ref_default_acl_failed"] * 2
+
+
+@pytest.mark.unit
+def test_pinned_walk_closes_descriptors_when_the_caller_stops_early(tmp_path: Path) -> None:
+    """Abandoning the walk must not leak the descriptors it is still holding."""
+    mirror = tmp_path / "mirror.git"
+    (mirror / "refs" / "heads" / "feature-sync").mkdir(parents=True)
+    open_descriptors = _open_fd_count()
+
+    directories = git_manager_mirror._walk_pinned_acl_dir_fds(mirror)  # noqa: SLF001
+    first = next(directories)
+    os.close(first)
+    directories.close()
+
+    assert _open_fd_count() == open_descriptors
+
+
+@pytest.mark.unit
+def test_default_acls_skip_a_mirror_that_vanished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mirror removed before the repair runs is nothing to grant, not a crash."""
+    recorder = _install_fake_setfacl(monkeypatch)
+
+    assert git_manager_mirror.apply_mirror_ref_default_acls(tmp_path / "gone.git", 1000) is True
+    assert recorder.calls == []
+
+
+@pytest.mark.unit
+def test_default_acls_skip_a_ref_directory_that_becomes_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable pinned directory is skipped; the walk must not raise."""
+    mirror = tmp_path / "mirror.git"
+    (mirror / "refs" / "heads").mkdir(parents=True)
+    recorder = _install_fake_setfacl(monkeypatch)
+
+    def _unreadable(_dir_fd: int) -> list[str]:
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(git_manager_mirror.os, "listdir", _unreadable)
+
+    assert git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID) is True
+    assert recorder.acl_paths() == _resolved({mirror / "refs"})
 
 
 @pytest.mark.unit

@@ -20,7 +20,9 @@ that race by construction (#1033):
 So the mirror gets two durable defences on top of the chown baseline:
 ``gc.packRefs=false`` (step 1 never happens) and a **default POSIX ACL** on the
 ``refs/``/``logs/`` directory trees (directories root creates in step 2 inherit
-agent write access). Both are best effort and reason-coded: a mirror that
+agent write access), applied through descriptors the walk pins with
+``O_NOFOLLOW`` so an agent cannot redirect the root-side ``setfacl`` out of the
+mirror with a symlink. Both are best effort and reason-coded: a mirror that
 cannot be hardened keeps working with the pre-#1033 race window, which the
 post-ref-write ownership repair still covers.
 
@@ -34,7 +36,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator, Iterator
 from functools import lru_cache
 from pathlib import Path
 
@@ -65,8 +67,15 @@ MIRROR_REF_DEFAULT_ACL_FAILED_REASON = "MIRROR_REF_DEFAULT_ACL_FAILED"
 
 _SETFACL_TIMEOUT_SECONDS = 20.0
 # ``setfacl`` takes the paths as argv, so batch them to stay clear of ARG_MAX on
-# mirrors with many ref namespaces.
+# mirrors with many ref namespaces. The batch also bounds how many pinned
+# descriptors are held open at once.
 _SETFACL_PATH_BATCH = 64
+# The mirror directory itself lives in root-owned control-plane layout, so it is
+# opened by path. Everything below it is agent-writable, so each component is
+# opened relative to its already pinned parent with ``O_NOFOLLOW``: that is what
+# keeps a symlink — final component *or* ancestor — out of the walk.
+_ACL_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+_ACL_CHILD_DIR_FLAGS = _ACL_DIR_FLAGS | os.O_NOFOLLOW
 
 # ``GitManager._run``: raises ``GitOperationError`` on a non-zero exit.
 _MirrorGitRunner = Callable[..., Awaitable[object]]
@@ -148,31 +157,85 @@ def _setfacl_executable() -> str | None:
     return setfacl
 
 
-def _mirror_default_acl_directories(mirror_path: Path) -> tuple[Path, ...]:
-    """Enumerate the mirror ref/log directories that need the default ACL.
+def _open_mirror_dir(mirror_path: Path) -> int | None:
+    """Pin the mirror directory, or ``None`` when it cannot be opened."""
+    try:
+        return os.open(mirror_path, _ACL_DIR_FLAGS)
+    except OSError:
+        return None
 
-    Every directory in the tree, not just the top-level child: the default ACL
-    has to sit on ``refs/heads/`` for a root-recreated ``refs/heads/<ns>/`` to
-    inherit it (the recreated directory then inherits a default ACL of its own).
-    Regular files are excluded — ``setfacl -d`` rejects them — and so are
-    symlinks, whose targets may live outside the mirror.
+
+def _open_pinned_child_dir(name: str, parent_fd: int) -> int | None:
+    """Pin ``name`` under an already pinned parent without following links.
+
+    ``None`` covers every entry that must not be given the ACL: a regular file
+    (``ENOTDIR``, and ``setfacl -d`` rejects files anyway), a symlink
+    (``ELOOP`` from ``O_NOFOLLOW`` — its target may live outside the mirror),
+    and an entry that disappeared or is unopenable mid-walk.
     """
-    directories: list[Path] = []
-    for child in MIRROR_REF_DEFAULT_ACL_CHILDREN:
-        root = mirror_path / child
-        if root.is_symlink() or not root.is_dir():
-            continue
-        # ``os.walk`` yields each directory once, so the collected set needs no
-        # deduplication: ``root`` plus every nested directory name.
-        directories.append(root)
-        for walk_root, dir_names, _files in os.walk(root, followlinks=False):
-            for name in dir_names:
-                candidate = Path(walk_root) / name
-                # A symlinked ref directory can point outside the mirror and
-                # ``setfacl`` would follow it, so grant nothing through it.
-                if not candidate.is_symlink():
-                    directories.append(candidate)
-    return tuple(directories)
+    try:
+        return os.open(name, _ACL_CHILD_DIR_FLAGS, dir_fd=parent_fd)
+    except OSError:
+        return None
+
+
+def _list_pinned_dir(dir_fd: int) -> list[str]:
+    """Names in an already pinned directory; empty when it cannot be read."""
+    try:
+        return os.listdir(dir_fd)
+    except OSError:
+        return []
+
+
+def _walk_pinned_acl_dir_fds(mirror_path: Path) -> Generator[int, None, None]:
+    """Yield one pinned descriptor per mirror ref/log directory needing the ACL.
+
+    Every directory in the trees, not just the top-level child: the default
+    ACL has to sit on ``refs/heads/`` for a root-recreated ``refs/heads/<ns>/``
+    to inherit it (the recreated directory then carries a default ACL of its
+    own).
+
+    Descriptors rather than pathnames because these trees are agent-writable:
+    a pathname can be re-pointed between the check and the root-side
+    ``setfacl``, while a descriptor opened with ``O_NOFOLLOW`` relative to its
+    already pinned parent still names the directory that was validated.
+    Ownership of a yielded descriptor passes to the caller; descriptors still
+    being traversed are closed here, including when the caller stops early.
+    """
+    mirror_fd = _open_mirror_dir(mirror_path)
+    if mirror_fd is None:
+        return
+    stack: list[tuple[int, Iterator[str]]] = []
+    try:
+        for child in MIRROR_REF_DEFAULT_ACL_CHILDREN:
+            root_fd = _open_pinned_child_dir(child, mirror_fd)
+            if root_fd is None:
+                continue
+            stack.append((root_fd, iter(_list_pinned_dir(root_fd))))
+            # Post-order, and iterative because ref-tree depth is agent-chosen:
+            # a directory is handed over only once its own entries have been
+            # opened, so the walk never needs that descriptor again.
+            while stack:
+                parent_fd, names = stack[-1]
+                name = next(names, None)
+                if name is None:
+                    stack.pop()
+                    yield parent_fd
+                    continue
+                child_fd = _open_pinned_child_dir(name, parent_fd)
+                if child_fd is not None:
+                    stack.append((child_fd, iter(_list_pinned_dir(child_fd))))
+    finally:
+        for pending_fd, _names in stack:
+            os.close(pending_fd)
+        os.close(mirror_fd)
+
+
+def _close_pinned(dir_fds: list[int]) -> None:
+    """Close and forget a batch of pinned descriptors."""
+    for dir_fd in dir_fds:
+        os.close(dir_fd)
+    dir_fds.clear()
 
 
 def apply_mirror_ref_default_acls(mirror_path: Path, uid: int) -> bool:
@@ -184,6 +247,11 @@ def apply_mirror_ref_default_acls(mirror_path: Path, uid: int) -> bool:
     agent able to take its ref lock (#1033). The recursive chown stays the
     baseline; this is the layer that survives the race.
 
+    The ACL is applied through descriptors pinned by the walk, never through a
+    pathname: the agent owns these directories, so a pathname handed to a
+    root-side ``setfacl`` could be swapped for a symlink first and grant
+    ``uid`` inheritable access outside the mirror.
+
     Best effort by design: ``setfacl`` may be missing from the control-plane
     image, or the filesystem may not support ACLs (Docker Desktop's macOS file
     sharing, a ``noacl`` mount). Then a reason-coded warning is logged and
@@ -193,12 +261,22 @@ def apply_mirror_ref_default_acls(mirror_path: Path, uid: int) -> bool:
     if setfacl is None:
         return False
 
-    directories = _mirror_default_acl_directories(mirror_path)
     applied = True
-    for start in range(0, len(directories), _SETFACL_PATH_BATCH):
-        batch = directories[start : start + _SETFACL_PATH_BATCH]
-        if not _set_default_acl(setfacl, uid=uid, mirror_path=mirror_path, paths=batch):
+    batch: list[int] = []
+    directories = _walk_pinned_acl_dir_fds(mirror_path)
+    try:
+        for dir_fd in directories:
+            batch.append(dir_fd)
+            if len(batch) < _SETFACL_PATH_BATCH:
+                continue
+            if not _set_default_acl(setfacl, uid=uid, mirror_path=mirror_path, dir_fds=batch):
+                applied = False
+            _close_pinned(batch)
+        if batch and not _set_default_acl(setfacl, uid=uid, mirror_path=mirror_path, dir_fds=batch):
             applied = False
+    finally:
+        _close_pinned(batch)
+        directories.close()
     return applied
 
 
@@ -207,10 +285,16 @@ def _set_default_acl(
     *,
     uid: int,
     mirror_path: Path,
-    paths: tuple[Path, ...],
+    dir_fds: list[int],
 ) -> bool:
-    """Run one ``setfacl -d`` batch, reporting failures without raising."""
-    argv = [setfacl, "-d", "-m", f"u:{uid}:rwx", *(str(path) for path in paths)]
+    """Run one ``setfacl -d`` batch on pinned descriptors, never raising.
+
+    The arguments are ``/proc/self/fd/<fd>`` magic links resolved in the
+    child's own descriptor table — ``pass_fds`` hands the descriptors over with
+    their numbers intact — so the ACL lands on the directory the walk pinned
+    instead of on whatever the pathname resolves to at exec time.
+    """
+    argv = [setfacl, "-d", "-m", f"u:{uid}:rwx", *(f"/proc/self/fd/{fd}" for fd in dir_fds)]
     try:
         completed = subprocess.run(
             argv,
@@ -218,13 +302,14 @@ def _set_default_acl(
             text=True,
             timeout=_SETFACL_TIMEOUT_SECONDS,
             check=False,
+            pass_fds=tuple(dir_fds),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning(
             "mirror.ref_default_acl_failed",
             mirror_path=str(mirror_path),
             reason_code=MIRROR_REF_DEFAULT_ACL_FAILED_REASON,
-            directory_count=len(paths),
+            directory_count=len(dir_fds),
             error=redact_secrets(str(exc)),
         )
         return False
@@ -233,7 +318,7 @@ def _set_default_acl(
             "mirror.ref_default_acl_failed",
             mirror_path=str(mirror_path),
             reason_code=MIRROR_REF_DEFAULT_ACL_FAILED_REASON,
-            directory_count=len(paths),
+            directory_count=len(dir_fds),
             returncode=completed.returncode,
             stderr=redact_secrets((completed.stderr or "").strip()[-400:]),
         )

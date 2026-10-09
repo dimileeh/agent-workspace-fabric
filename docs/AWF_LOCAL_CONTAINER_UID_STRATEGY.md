@@ -182,6 +182,12 @@ chown baseline:
    directory then carries a default ACL of its own. The effective mask is the
    directory's creation mode intersected with the ACL entry, and git creates ref
    directories with `0777 & ~umask`, so the agent keeps `rwx`.
+   The walk opens every component below the mirror with `O_NOFOLLOW` relative
+   to its already pinned parent and hands `setfacl` the resulting
+   `/proc/self/fd/<fd>` links (via `pass_fds`) instead of pathnames: these
+   trees are agent-writable, and `setfacl` follows symlinks given on its
+   command line, so a pathname could be swapped for a symlink after the check
+   and grant uid 1000 inheritable access outside the mirror.
    The object database is never given an ACL (same reason as the chown
    exclusion: `aa866959`).
 3. **Re-running the cheap refs/logs ownership repair after control-plane ref
@@ -354,7 +360,9 @@ The decision is locked by the following tests:
   — locks the shared-mirror ref-namespace invariant: `gc.packRefs=false` on
   cloned *and* re-ensured mirrors, the default-ACL directory set (`refs/` and
   `logs/` trees only, never `objects/`), the graceful fallback when `setfacl`
-  or filesystem ACL support is missing, and the #1033 race itself — a
+  or filesystem ACL support is missing, the descriptor pinning (a ref directory
+  swapped for an outside symlink after the walk is still ACLed by inode, and
+  the walk leaks no descriptors), and the #1033 race itself — a
   namespace recreated root-owned after the repair is chowned back and
   re-ACLed by the repair that follows the next control-plane ref write.
 - `tests/unit/runtime/test_sync_base_post_merge_ownership_repair_part_001.py`
