@@ -47,11 +47,18 @@ _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS = 25
 # callee in any other language keeps the name-only rule.
 _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 
-# ``from pkg.mod import a, b as c`` — absolute targets only. A leading dot
-# (relative) or a plain ``import pkg.mod`` binds nothing that narrows a
-# candidate path, so neither is matched here.
+# ``from pkg.mod import a, b as c`` — absolute targets. A plain ``import
+# pkg.mod`` binds ``pkg`` rather than the callee, so it narrows no candidate
+# path and is not matched here; relative targets are read below instead.
 _ABSOLUTE_FROM_IMPORT_RE = re.compile(
     r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import[ \t]+(.+)$"
+)
+
+# ``from .mod import x`` / ``from ..pkg.mod import x`` / ``from . import x`` —
+# the leading dots and the optional module tail, resolved against the call
+# site's own directory by ``_relative_import_module_path``.
+_RELATIVE_FROM_IMPORT_RE = re.compile(
+    r"^[ \t]*from[ \t]+(\.+)(\w+(?:\.\w+)*)?[ \t]+import[ \t]+(.+)$"
 )
 
 
@@ -75,13 +82,32 @@ def _imported_binding_names(targets: str) -> list[str]:
     return names
 
 
-def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
-    """Module paths each name in ``file_text`` is bound to by an absolute import.
+def _relative_import_module_path(path: str, dots: str, module: str | None) -> str | None:
+    """A relative import's target as a ``/``-joined path prefix, or None.
 
-    Only absolute ``from M import ...`` statements are read, including the
-    parenthesized multi-line form; the value is ``M`` as a ``/``-joined path
-    prefix. Relative imports, star imports and plain ``import M`` carry no
-    name→path link, so the names they bind stay out of the map and keep the
+    One dot names ``path``'s own directory and each extra dot climbs one level,
+    so the target is positional rather than name-based: it needs no package
+    root to resolve. Returns None when the climb passes the repo root or when
+    the dots name a directory with no segments, leaving the callee on the
+    name-only rule rather than inventing a path it may not reach.
+    """
+    package = _module_path_segments(path)[:-1]
+    ascend = len(dots) - 1
+    if ascend > len(package):
+        return None
+    base = package[: len(package) - ascend]
+    tail = module.split(".") if module else []
+    return "/".join([*base, *tail]) or None
+
+
+def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+    """Module paths each name in ``file_text`` is bound to by a ``from`` import.
+
+    Both ``from M import ...`` and the relative ``from .M import ...`` form are
+    read, including the parenthesized multi-line variant; the value is the
+    target module as a ``/``-joined path prefix, resolved against ``path``'s own
+    directory for the relative form. Star imports and plain ``import M`` carry
+    no name→path link, so the names they bind stay out of the map and keep the
     name-only rule (PRRT_kwDOSJAM6s6q7bSI). An import head quoted inside a
     docstring can only *add* a binding, which narrows rather than widens the
     gate, so the scan is deliberately lexical.
@@ -89,18 +115,29 @@ def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, fr
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return {}
     bindings: dict[str, set[str]] = {}
+    module_path: str | None
     lines = file_text.splitlines()
     index = 0
     while index < len(lines):
-        match = _ABSOLUTE_FROM_IMPORT_RE.match(lines[index])
+        line = lines[index]
+        absolute = _ABSOLUTE_FROM_IMPORT_RE.match(line)
+        relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(line)
         index += 1
-        if match is None:
+        if absolute is not None:
+            module_path = absolute.group(1).replace(".", "/")
+            targets = absolute.group(2)
+        elif relative is not None:
+            module_path = _relative_import_module_path(path, relative.group(1), relative.group(2))
+            targets = relative.group(3)
+        else:
             continue
-        module, targets = match.group(1), match.group(2)
+        # Consume the wrapped target list even when the head did not resolve,
+        # so its names are not re-read as import heads on the next pass.
         while targets.count("(") > targets.count(")") and index < len(lines):
             targets += " " + lines[index].strip()
             index += 1
-        module_path = module.replace(".", "/")
+        if module_path is None:
+            continue
         for bound in _imported_binding_names(targets):
             bindings.setdefault(bound, set()).add(module_path)
     return {name: frozenset(paths) for name, paths in bindings.items()}

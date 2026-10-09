@@ -467,21 +467,73 @@ async def test_bare_callee_alias_binding_follows_the_aliased_module() -> None:
 
 @pytest.mark.unit
 async def test_bare_callee_without_a_resolvable_import_keeps_the_name_only_rule() -> None:
-    """Star, relative and absent bindings carry no path to match, so stay as-is.
+    """Star, over-deep and plain-``import`` bindings carry no path to match.
 
-    A relative import targets the call site's own package, which the package-level
-    gate already answers before this one runs; a star import binds no name AWF can
-    read. Neither narrows the candidate, so both keep the name-only rule rather
+    A star import binds no name AWF can read, a relative import that climbs past
+    the repo root resolves to nothing, and ``import M`` binds ``M`` rather than
+    the callee. None narrows the candidate, so all keep the name-only rule rather
     than failing closed and re-parking the #1019 fixes.
     """
     for header in (
         "from pkg_b.observability.execution_platform_metrics import *",
-        "from .execution_platform_metrics import record_ready_queue_depth",
+        "from ......execution_platform_metrics import record_ready_queue_depth",
         "import pkg_b.observability.execution_platform_metrics",
     ):
         caller = f"{header}\n\n\ndef refresh(payload):\n    record_ready_queue_depth(payload)\n"
 
         assert await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_relative_import_binding_rejects_a_module_it_cannot_reach() -> None:
+    """``from .sibling import x`` resolves against the call site's own directory.
+
+    The target is the caller's package, so a same-named definition in another
+    package is no more reachable than through a mismatched absolute import
+    (PRRT_kwDOSJAM6s6q7bSI).
+    """
+    caller = (
+        "from .execution_platform_metrics import record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_cross_package_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+async def test_relative_import_accepts_the_module_its_dots_climb_to() -> None:
+    """A relative import that does reach the callee's module still resolves.
+
+    ``src/pkg_a/services/job_pools.py`` + ``from ...pkg_b...`` climbs to ``src/``,
+    which is exactly where the changed callee module lives.
+    """
+    caller = (
+        "from ...pkg_b.observability.execution_platform_metrics import (\n"
+        "    record_ready_queue_depth,\n"
+        ")\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert await _probe(_cross_package_probe(caller_text=caller), item_line=7)
+
+
+@pytest.mark.unit
+def test_relative_import_targets_resolve_against_the_call_site_directory() -> None:
+    """``from . import x`` binds the package itself; a too-deep climb binds nothing."""
+    assert cross_file._relative_import_module_path(_CALLER, ".", None) == "src/pkg_a/services"
+    assert (
+        cross_file._relative_import_module_path(_CALLER, "..", "obs.metrics")
+        == "src/pkg_a/obs/metrics"
+    )
+    assert cross_file._relative_import_module_path(_CALLER, "." * 5, "metrics") is None
+    # A module at the repo root has no package segments for ``from . import`` to name.
+    assert cross_file._relative_import_module_path("job_pools.py", ".", None) is None
 
 
 @pytest.mark.unit
