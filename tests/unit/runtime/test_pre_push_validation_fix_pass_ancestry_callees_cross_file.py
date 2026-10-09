@@ -1031,8 +1031,11 @@ async def test_receiver_import_accepts_the_importing_module_s_own_file() -> None
     """A receiver may be an object the imported module itself defines.
 
     ``from pkg_b.observability import collector`` can bind a class declared in
-    ``pkg_b/observability.py``, so a change to ``collector``'s method there is
-    still evidence even though the receiver is not a submodule.
+    ``pkg_b/observability.py``, so a change to ``collector``'s own method there
+    is still evidence even though the receiver is not a submodule. The callee
+    has to be a member of that imported symbol — see
+    ``test_an_imported_object_receiver_rejects_another_class_s_method`` in the
+    receiver-binding sibling module (PRRT_kwDOSJAM6s6q-L4H).
     """
     module_file = "src/pkg_b/observability.py"
     caller = (
@@ -1042,10 +1045,28 @@ async def test_receiver_import_accepts_the_importing_module_s_own_file() -> None
         "def refresh(payload):\n"
         "    collector.record_ready_queue_depth(payload)\n"
     )
+    # ``collector.record_ready_queue_depth`` spans lines 5-7 of its own module.
+    module_text = (
+        "GAUGE = None\n"
+        "\n"
+        "\n"
+        "class collector:\n"
+        "    def record_ready_queue_depth(payload):\n"
+        "        GAUGE.set(len(payload.entries))\n"
+        "        return None\n"
+    )
     probe = _Probe(
-        texts={(_LEFT, _CALLER): caller, (_LEFT, module_file): _CALLEE_TEXT},
+        texts={(_LEFT, _CALLER): caller, (_LEFT, module_file): module_text},
         changed_paths=(module_file,),
-        diffs={module_file: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, module_file)},
+        diffs={
+            module_file: (
+                f"--- a/{module_file}\n"
+                f"+++ b/{module_file}\n"
+                "@@ -6 +6 @@\n"
+                "-        GAUGE.set(len(payload.entries))\n"
+                "+        GAUGE.set(payload.ready_depth())\n"
+            )
+        },
     )
 
     assert await _probe(probe, item_line=5)
@@ -1059,13 +1080,13 @@ def test_receiver_targets_keep_the_imported_name_and_pin_its_package() -> None:
     assert cross_file._receiver_import_module_targets(
         "from pkg.obs import metrics\nimport pkg.other as alt\n", path="src/pkg_a/caller.py"
     ) == {
-        "metrics": frozenset({("pkg/obs/metrics", False), ("pkg/obs", True)}),
-        "alt": frozenset({("pkg/other", False)}),
+        "metrics": frozenset({("pkg/obs/metrics", False, None), ("pkg/obs", True, "metrics")}),
+        "alt": frozenset({("pkg/other", False, None)}),
     }
     # The aliased form resolves through the *imported* name, not the alias.
     assert cross_file._receiver_import_module_targets(
         "from pkg.obs import metrics as m\n", path="src/pkg_a/caller.py"
-    ) == {"m": frozenset({("pkg/obs/metrics", False), ("pkg/obs", True)})}
+    ) == {"m": frozenset({("pkg/obs/metrics", False, None), ("pkg/obs", True, "metrics")})}
 
 
 @pytest.mark.unit
@@ -1234,13 +1255,13 @@ def test_an_import_repeated_for_the_same_module_still_binds_it() -> None:
         "import pkg.obs as obs\n"
     )
     assert cross_file._bare_name_import_module_targets(text, path="src/pkg_a/caller.py") == {
-        "metrics": frozenset({("pkg/obs", False)}),
-        "record": frozenset({("pkg/obs", False)}),
+        "metrics": frozenset({("pkg/obs", False, None)}),
+        "record": frozenset({("pkg/obs", False, None)}),
     }
     assert cross_file._receiver_import_module_targets(text, path="src/pkg_a/caller.py") == {
-        "metrics": frozenset({("pkg/obs/metrics", False), ("pkg/obs", True)}),
-        "record": frozenset({("pkg/obs/record", False), ("pkg/obs", True)}),
-        "obs": frozenset({("pkg/obs", False)}),
+        "metrics": frozenset({("pkg/obs/metrics", False, None), ("pkg/obs", True, "metrics")}),
+        "record": frozenset({("pkg/obs/record", False, None), ("pkg/obs", True, "record")}),
+        "obs": frozenset({("pkg/obs", False, None)}),
     }
 
 
@@ -1262,7 +1283,7 @@ def test_a_dotted_plain_import_does_not_rebind_a_same_named_bare_callee() -> Non
         "metrics": frozenset({"vendor/metrics"})
     }
     assert cross_file._bare_name_import_module_targets(text, path=_CALLER) == {
-        "metrics": frozenset({("pkg/obs", False)})
+        "metrics": frozenset({("pkg/obs", False, None)})
     }
 
 

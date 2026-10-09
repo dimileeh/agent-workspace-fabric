@@ -74,13 +74,17 @@ _RELATIVE_FROM_IMPORT_RE = re.compile(
 _PLAIN_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+(.+)$")
 _DOTTED_MODULE_RE = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
 
-# ``(module_path, exact)``: a module path a name is bound to, and whether the
-# match is pinned to that module's own file. ``False`` keeps the re-export
-# tolerance a package import needs (``from pkg import x`` may bind something
-# ``pkg/__init__.py`` re-exported from ``pkg/sub.py``); ``True`` admits only
-# ``pkg.py`` / ``pkg/__init__.py``, which is what an imported receiver's
-# identity requires of its *containing* package.
-_ModuleTarget = tuple[str, bool]
+# ``(module_path, exact, enclosed_by)``: a module path a name is bound to,
+# whether the match is pinned to that module's own file, and the symbol that
+# must *enclose* the callee's definition under this reading. ``exact=False``
+# keeps the re-export tolerance a package import needs (``from pkg import x``
+# may bind something ``pkg/__init__.py`` re-exported from ``pkg/sub.py``);
+# ``True`` admits only ``pkg.py`` / ``pkg/__init__.py``, which is what an
+# imported receiver's identity requires of its *containing* package.
+# ``enclosed_by`` is None for every target that places no scope requirement of
+# its own, and the imported symbol for the receiver reading whose module file
+# the target admits — see ``_receiver_import_module_targets``.
+_ModuleTarget = tuple[str, bool, str | None]
 
 # The binding of a name more than one import statement rebinds. Python keeps
 # only the last one, and this lexical reader cannot tell which statement runs
@@ -92,7 +96,7 @@ _ModuleTarget = tuple[str, bool]
 # ``_callee_names_bound_to_candidate`` does not fall back to the name-only rule,
 # and its module path is empty, which ``_candidate_is_under_module_path`` admits
 # from no candidate — every changed file fails closed for that name.
-_AMBIGUOUS_IMPORT_TARGET: frozenset[_ModuleTarget] = frozenset({("", False)})
+_AMBIGUOUS_IMPORT_TARGET: frozenset[_ModuleTarget] = frozenset({("", False, None)})
 
 # Stand-in module path for a ``from`` import this reader cannot resolve to a
 # path — a relative import whose dots climb past the repo root. The statement
@@ -356,7 +360,7 @@ def _bare_name_import_module_targets(
         name: (
             _AMBIGUOUS_IMPORT_TARGET
             if len(identities[name]) > 1
-            else frozenset((module_path, False) for module_path in paths)
+            else frozenset((module_path, False, None) for module_path in paths)
         )
         for name, paths in _bare_name_import_module_paths(file_text, path=path).items()
     }
@@ -401,7 +405,11 @@ def _receiver_import_module_targets(
     — or an object ``pkg`` itself defines, so only ``pkg``'s own module file
     satisfies that second reading and a same-named definition in a sibling
     submodule such as ``pkg/unrelated.py``, which the receiver cannot reach,
-    fails closed (PRRT_kwDOSJAM6s6q8MW9). A receiver with no readable binding —
+    fails closed (PRRT_kwDOSJAM6s6q8MW9). That second reading also carries the
+    *imported symbol* with it: the object is the one ``pkg`` binds under that
+    name, so the callee has to be a member of it and a same-named method of
+    another class in ``pkg.py`` is not evidence about the call
+    (PRRT_kwDOSJAM6s6q-L4H). A receiver with no readable binding —
     a parameter, an attribute, a star import — keeps the name-only rule rather
     than re-parking the #1019 fixes. A receiver several imports bind to
     different modules keeps only its last binding at runtime, so it fails closed
@@ -420,13 +428,13 @@ def _receiver_import_module_targets(
         if module_path is None:
             continue
         targets.setdefault(bound, set()).update(
-            ((f"{module_path}/{imported}", False), (module_path, True))
+            ((f"{module_path}/{imported}", False, None), (module_path, True, imported))
         )
     for name, paths in _plain_import_module_paths(file_text, path=path).items():
         bound_modules.setdefault(name, set()).update(
             _plain_import_binding_identity(module_path) for module_path in paths
         )
-        targets.setdefault(name, set()).update((module_path, False) for module_path in paths)
+        targets.setdefault(name, set()).update((module_path, False, None) for module_path in paths)
     return {
         name: (_AMBIGUOUS_IMPORT_TARGET if len(bound_modules[name]) > 1 else frozenset(found))
         for name, found in targets.items()
@@ -661,9 +669,52 @@ def _callee_names_bound_to_candidate(
             _candidate_is_under_module_path(
                 candidate, module_path, call_site=call_site, exact=exact
             )
-            for module_path, exact in bindings[key]
+            for module_path, exact, _enclosed_by in bindings[key]
         )
     )
+
+
+def _callee_enclosing_symbols_for_candidate(
+    refs: frozenset[tuple[str, str]],
+    bindings: dict[str, frozenset[_ModuleTarget]],
+    candidate: str,
+    *,
+    call_site: str,
+) -> dict[str, frozenset[str]]:
+    """Symbols that must enclose each callee's definition inside ``candidate``.
+
+    A receiver a ``from`` import binds is read two ways, and only one of them —
+    the object the imported module itself defines — admits that module's own
+    file. Under it the callee is a member of the *imported symbol*, so the span
+    rule has to be held to that symbol or ``Other.record`` satisfies the gate
+    for a ``Collector.record()`` call site (PRRT_kwDOSJAM6s6q-L4H).
+
+    A name is reported only when *every* admitting target of *every* ref that
+    carries it names an enclosing symbol; a ref with no readable binding, or a
+    target admitting ``candidate`` under a reading that places no such
+    requirement (a submodule receiver, a plain ``import``), leaves the name
+    unrestricted — the same name-only tolerance
+    :func:`_callee_names_bound_to_candidate` keeps.
+    """
+    required: dict[str, set[str]] = {}
+    unrestricted: set[str] = set()
+    for key, name in refs:
+        targets = bindings.get(key)
+        if not targets:
+            unrestricted.add(name)
+            continue
+        for module_path, exact, enclosed_by in targets:
+            if not _candidate_is_under_module_path(
+                candidate, module_path, call_site=call_site, exact=exact
+            ):
+                continue
+            if enclosed_by is None:
+                unrestricted.add(name)
+            else:
+                required.setdefault(name, set()).add(enclosed_by)
+    return {
+        name: frozenset(symbols) for name, symbols in required.items() if name not in unrestricted
+    }
 
 
 def _callee_names_bound_to_path(
@@ -675,20 +726,28 @@ def _callee_names_bound_to_path(
     receiver_bindings: dict[str, frozenset[_ModuleTarget]],
     bare_bindings: dict[str, frozenset[_ModuleTarget]],
     call_site: str,
-) -> tuple[frozenset[str], frozenset[str]]:
-    """``(qualified, bare)`` callee names whose import binding admits ``path``.
+) -> tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]:
+    """``(qualified, bare, enclosed_by)`` for the callees ``path`` is bound to.
+
+    The first two are the callee names whose import binding admits ``path``, by
+    call shape; ``enclosed_by`` holds the symbols a qualified name's definition
+    must sit under inside ``path`` (PRRT_kwDOSJAM6s6q-L4H).
 
     Applied to a changed path to pick its callees, and again to that path's
     rename target so a move is only evidence while the moved definition is
     still reachable through the same binding (PRRT_kwDOSJAM6s6q-L4B).
     """
+    qualified_refs = refs - module_refs
     qualified = _callee_names_bound_to_candidate(
-        refs - module_refs, receiver_bindings, path, call_site=call_site
+        qualified_refs, receiver_bindings, path, call_site=call_site
     )
     bare = _callee_names_bound_to_candidate(
         bare_refs, bare_bindings, path, call_site=call_site
     ) | _callee_names_bound_to_candidate(module_refs, receiver_bindings, path, call_site=call_site)
-    return qualified, bare
+    enclosed_by = _callee_enclosing_symbols_for_candidate(
+        qualified_refs, receiver_bindings, path, call_site=call_site
+    )
+    return qualified, bare, enclosed_by
 
 
 def _bindings_fail_closed_when_unbound(
@@ -714,7 +773,7 @@ def _caller_binding_resolver(
     refs: frozenset[tuple[str, str]],
     bare_refs: frozenset[tuple[str, str]],
     require_binding: bool = False,
-) -> Callable[[str], tuple[frozenset[str], frozenset[str]]]:
+) -> Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]]:
     """Bind ``refs`` to one caller text's imports, as a path-keyed callable.
 
     A receiver a plain ``import`` binds is a module, so its callee is held to
@@ -766,6 +825,29 @@ def _definition_is_reachable_from_module_scope(
         for _name, span_start, span_end, span_indent in all_spans
         if span_start < start <= span_end and span_indent < indent
     )
+
+
+def _definition_is_member_of_named_module_scope_definition(
+    all_spans: list[tuple[str, int, int, int]],
+    names: frozenset[str],
+    *,
+    start: int,
+    indent: int,
+) -> bool:
+    """True when ``start`` is a direct member of a module-level ``names`` head.
+
+    The scope a receiver's imported symbol pins: ``Collector.record()`` reaches
+    the ``record`` declared directly in a module-level ``Collector``, so a
+    member of a *different* class in that file, a module-level definition, and a
+    member of a same-named class nested inside another one are all something the
+    call site cannot reach (PRRT_kwDOSJAM6s6q-L4H).
+    """
+    enclosing = [
+        (span_indent, name)
+        for name, span_start, span_end, span_indent in all_spans
+        if span_start < start <= span_end and span_indent < indent
+    ]
+    return len(enclosing) == 1 and enclosing[0][0] == 0 and enclosing[0][1] in names
 
 
 def _definition_span_start_with_decorators(file_text: str, start: int) -> int:
@@ -832,6 +914,7 @@ def _importable_definition_spans_for_names(
     *,
     path: str | None = None,
     bare_names: frozenset[str] = frozenset(),
+    enclosed_by: dict[str, frozenset[str]] | None = None,
 ) -> list[tuple[int, int]]:
     """Spans in ``file_text`` another module could reach as the named callee.
 
@@ -840,6 +923,11 @@ def _importable_definition_spans_for_names(
     its *call shape* allows. ``names`` are attribute-qualified callees
     (``metrics.record()``), whose receiver may be a module or an instance, so a
     direct member of a module-level class counts alongside a module-level head.
+    ``enclosed_by`` narrows that for a name whose receiver import pins the
+    object it reaches through — ``from M import Collector`` matched against
+    ``M``'s own file — to a direct member of a module-level definition it names,
+    so a same-named method of another class in that file fails closed
+    (PRRT_kwDOSJAM6s6q-L4H).
     ``bare_names`` are the names held to the module-scope rule, under which
     ``Class.method`` is reachable as an attribute but never as a module-scope
     name, so a class member fails closed: bare callees (``record()``), which
@@ -885,6 +973,11 @@ def _importable_definition_spans_for_names(
                 file_text, all_spans, start=start, indent=indent
             ):
                 continue
+            pinned = (enclosed_by or {}).get(name)
+            if pinned is not None and not _definition_is_member_of_named_module_scope_definition(
+                all_spans, pinned, start=start, indent=indent
+            ):
+                continue
         elif nested:
             continue
         span = (_definition_span_start_with_decorators(file_text, start), end)
@@ -904,7 +997,7 @@ async def _caller_binding_after_correction(
     rebound: frozenset[str],
     refs: frozenset[tuple[str, str]],
     bare_refs: frozenset[tuple[str, str]],
-) -> Callable[[str], tuple[frozenset[str], frozenset[str]]] | None:
+) -> Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]] | None:
     """The caller's own import binding *after* the correction, or None if unreadable.
 
     One correction can move the callee and update this caller's import together;
@@ -942,6 +1035,7 @@ async def _callee_definition_survives_at_right(
     path: str,
     names: frozenset[str],
     bare_names: frozenset[str],
+    enclosed_by: dict[str, frozenset[str]],
 ) -> bool:
     """True when ``path`` still holds a reachable definition of the callee at ``right``.
 
@@ -962,7 +1056,9 @@ async def _callee_definition_survives_at_right(
     if not right_text:
         return False
     return bool(
-        _importable_definition_spans_for_names(right_text, names, path=path, bare_names=bare_names)
+        _importable_definition_spans_for_names(
+            right_text, names, path=path, bare_names=bare_names, enclosed_by=enclosed_by
+        )
     )
 
 
@@ -1069,7 +1165,10 @@ async def _commit_range_changes_callee_definition(
     package (PRRT_kwDOSJAM6s6q8MW9). The receiver's binding *kind* is kept too:
     a receiver a plain ``import`` proves to be a module reaches only
     module-level definitions, so editing a same-named method of a class in that
-    module is not evidence about the call (PRRT_kwDOSJAM6s6q8-M1). A name two
+    module is not evidence about the call (PRRT_kwDOSJAM6s6q8-M1); a receiver a
+    ``from`` import binds to an object of the imported module reaches only that
+    object's own members there, so a same-named method of another class in the
+    same file is not evidence either (PRRT_kwDOSJAM6s6q-L4H). A name two
     imports rebind resolves to one of them at runtime, so it is held to neither
     rather than to their union, whether or not both targets resolve to a path
     (PRRT_kwDOSJAM6s6q8-Mw). An aliased bare callee is looked for under the
@@ -1138,10 +1237,12 @@ async def _commit_range_changes_callee_definition(
         refs=names,
         bare_refs=bare_names,
     )
-    bound_to_after: Callable[[str], tuple[frozenset[str], frozenset[str]]] | None = None
+    bound_to_after: (
+        Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]] | None
+    ) = None
     read_binding_after = False
     for candidate in candidates:
-        candidate_names, candidate_bare = bound_to(candidate)
+        candidate_names, candidate_bare, enclosed_by = bound_to(candidate)
         rename_target = rename_map.get(candidate)
         if rename_target is not None and rename_target != candidate:
             # A move that carries the callee out of the module the *unchanged*
@@ -1152,7 +1253,7 @@ async def _commit_range_changes_callee_definition(
             # binding that can is the corrected caller's own, read once at
             # ``right``, and the move fails closed when neither reaches it
             # (PRRT_kwDOSJAM6s6q-L4B).
-            moved_names, moved_bare = bound_to(rename_target)
+            moved_names, moved_bare, _moved_enclosed_by = bound_to(rename_target)
             if not (candidate_names & moved_names or candidate_bare & moved_bare):
                 if not read_binding_after:
                     read_binding_after = True
@@ -1166,7 +1267,7 @@ async def _commit_range_changes_callee_definition(
                         bare_refs=bare_names,
                     )
                 if bound_to_after is not None:
-                    after_names, after_bare = bound_to_after(rename_target)
+                    after_names, after_bare, _after_enclosed_by = bound_to_after(rename_target)
                     moved_names |= after_names
                     moved_bare |= after_bare
             candidate_names &= moved_names
@@ -1188,7 +1289,11 @@ async def _commit_range_changes_callee_definition(
             one = frozenset({name})
             one_names, one_bare = candidate_names & one, candidate_bare & one
             spans = _importable_definition_spans_for_names(
-                candidate_text, one_names, path=candidate, bare_names=one_bare
+                candidate_text,
+                one_names,
+                path=candidate,
+                bare_names=one_bare,
+                enclosed_by=enclosed_by,
             )
             if spans:
                 per_callee.append((one_names, one_bare, spans))
@@ -1221,6 +1326,7 @@ async def _commit_range_changes_callee_definition(
                 path=rename_map.get(candidate) or candidate,
                 names=one_names,
                 bare_names=one_bare,
+                enclosed_by=enclosed_by,
             ):
                 return True
     return False

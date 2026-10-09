@@ -263,3 +263,131 @@ def test_the_two_import_forms_are_distinct_bindings_of_one_path() -> None:
         cross_file._receiver_import_module_targets(_DUAL_FORM_CALLER_TEXT, path=_CALLER)["metrics"]
         == cross_file._AMBIGUOUS_IMPORT_TARGET
     )
+
+
+# The importing module's own file, holding ``record_ready_queue_depth`` on two
+# module-level classes: the one the caller imports as a receiver, and an
+# unrelated neighbour that happens to expose the same method name.
+_IMPORTED_OBJECT_MODULE = "src/pkg_b/observability.py"
+
+_TWO_CLASS_TEXT = (
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return payload\n"
+    "\n"
+    "\n"
+    "class Other:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return payload\n"
+)
+
+# A body-only change inside ``Collector.record_ready_queue_depth`` (old line 3).
+_COLLECTOR_METHOD_DIFF = (
+    f"--- a/{_IMPORTED_OBJECT_MODULE}\n"
+    f"+++ b/{_IMPORTED_OBJECT_MODULE}\n"
+    "@@ -3 +3 @@\n"
+    "-        return payload\n"
+    "+        return payload.ready_depth()\n"
+)
+
+# The same edit against ``Other.record_ready_queue_depth`` (old line 8).
+_OTHER_METHOD_DIFF = (
+    f"--- a/{_IMPORTED_OBJECT_MODULE}\n"
+    f"+++ b/{_IMPORTED_OBJECT_MODULE}\n"
+    "@@ -8 +8 @@\n"
+    "-        return payload\n"
+    "+        return payload.ready_depth()\n"
+)
+
+_IMPORTED_CLASS_CALLER_TEXT = (
+    "from pkg_b.observability import Collector\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    Collector.record_ready_queue_depth(payload)\n"
+)
+
+
+def _imported_object_receiver_probe(*, diff: str, caller_text: str) -> _Probe:
+    return _Probe(
+        texts={
+            (_LEFT, _CALLER): caller_text,
+            (_LEFT, _IMPORTED_OBJECT_MODULE): _TWO_CLASS_TEXT,
+        },
+        changed_paths=(_IMPORTED_OBJECT_MODULE,),
+        diffs={_IMPORTED_OBJECT_MODULE: diff},
+    )
+
+
+@pytest.mark.unit
+async def test_an_imported_object_receiver_rejects_another_class_s_method() -> None:
+    """``from M import Collector`` binds ``Collector``, not every class in ``M``.
+
+    The importing module's own file satisfies the receiver's exact target, but
+    ``Collector.record_ready_queue_depth()`` reaches ``Collector``'s member
+    alone: editing ``Other.record_ready_queue_depth`` leaves the call site's
+    callee untouched, and the surviving ``Collector`` method would otherwise
+    carry the survival check too (PRRT_kwDOSJAM6s6q-L4H).
+    """
+    probe = _imported_object_receiver_probe(
+        diff=_OTHER_METHOD_DIFF, caller_text=_IMPORTED_CLASS_CALLER_TEXT
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_imported_object_receiver_resolves_its_own_method() -> None:
+    """The paired accept: the imported symbol's own member is still evidence."""
+    probe = _imported_object_receiver_probe(
+        diff=_COLLECTOR_METHOD_DIFF, caller_text=_IMPORTED_CLASS_CALLER_TEXT
+    )
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_imported_object_receiver_rejects_a_module_level_definition() -> None:
+    """A module-level ``def`` is no attribute of the object the import bound.
+
+    The exact target exists only for the reading where the receiver is an object
+    ``pkg_b/observability.py`` itself defines, so a module-level helper of the
+    same name there is not what ``Collector.record_ready_queue_depth()`` calls
+    (PRRT_kwDOSJAM6s6q-L4H). The submodule reading keeps its own target and is
+    unaffected.
+    """
+    module_level = "def record_ready_queue_depth(payload):\n    return payload\n\n\nclass Collector:\n    pass\n"
+    probe = _imported_object_receiver_probe(
+        diff=(
+            f"--- a/{_IMPORTED_OBJECT_MODULE}\n"
+            f"+++ b/{_IMPORTED_OBJECT_MODULE}\n"
+            "@@ -2 +2 @@\n"
+            "-    return payload\n"
+            "+    return payload.ready_depth()\n"
+        ),
+        caller_text=_IMPORTED_CLASS_CALLER_TEXT,
+    )
+    probe.texts[(_LEFT, _IMPORTED_OBJECT_MODULE)] = module_level
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_unbound_receiver_keeps_reaching_any_class_member() -> None:
+    """A receiver no import binds keeps the name-only rule across both classes."""
+    probe = _imported_object_receiver_probe(
+        diff=_OTHER_METHOD_DIFF,
+        caller_text="def refresh(Collector, payload):\n    Collector.record_ready_queue_depth(payload)\n",
+    )
+
+    assert await _probe(probe, item_line=2)
+
+
+@pytest.mark.unit
+def test_an_exact_receiver_target_carries_the_imported_symbol() -> None:
+    """The symbol the span has to sit under rides along with the exact target."""
+    assert cross_file._receiver_import_module_targets(
+        "from pkg.obs import Collector\n", path=_CALLER
+    ) == {
+        "Collector": frozenset({("pkg/obs/Collector", False, None), ("pkg/obs", True, "Collector")})
+    }
