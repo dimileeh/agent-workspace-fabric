@@ -903,8 +903,8 @@ class TestCentralDefaults:
 
     @pytest.mark.unit
     def test_defaults_map_uses_requested_models_and_runtime_specific_effort(self) -> None:
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-5"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.6-sol"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-5-5"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-6.1-sol"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.cursor] == AgentDefaults(
             model="auto",
             effort=None,
@@ -913,7 +913,7 @@ class TestCentralDefaults:
             model="gemini-3.1-pro",
             effort="high",
         )
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k3:cloud"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.grok].model == "grok-build"
         assert {
             defaults.effort
@@ -931,7 +931,7 @@ class TestCentralDefaults:
             defaults=DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex],
         )
 
-        assert codex._default_model == "gpt-5.6-sol"
+        assert codex._default_model == "gpt-6.1-sol"
         assert codex._default_effort == "xhigh"
 
 

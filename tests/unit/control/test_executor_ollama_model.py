@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.adapters.base import AgentDefaults
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     _qualified_model,
@@ -302,7 +303,7 @@ async def test_ensure_resolves_executor_config_model_override(
 
 
 @pytest.mark.unit
-async def test_ensure_falls_back_to_adapter_cloud_default_when_no_model_resolved(
+async def test_ensure_falls_back_to_adapter_cloud_default_when_no_default_resolves(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -311,6 +312,44 @@ async def test_ensure_falls_back_to_adapter_cloud_default_when_no_model_resolved
     model, the preflight must mirror the OpenCode adapter's final fallback to
     ``OPENCODE_OLLAMA_CLOUD_MODELS[0]`` — probing/pulling the model the agent will
     actually launch — instead of failing the workspace with ``MODEL_NOT_SELECTED``."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(factory, tmp_path)
+    # ``_defaults_for`` resolving to ``None`` is the only state in which no adapter
+    # default exists; an ``agent_defaults`` mapping that merely omits the runtime
+    # still resolves the shipped runtime default (see the test below).
+    monkeypatch.setattr(executor, "_defaults_for", lambda _agent: None)
+
+    seen: dict[str, Any] = {}
+
+    def _stub(*, model: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        seen["model"] = model
+        return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _stub)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(agent="opencode", task_policy={}),
+    )
+
+    assert proceed is True
+    assert seen["model"] == _qualified_model(OPENCODE_OLLAMA_CLOUD_MODELS[0])
+    snap = await _get_status(factory, workspace_id)
+    assert snap.status == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
+async def test_ensure_resolves_runtime_default_when_config_defaults_omit_runtime(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``agent_defaults`` mapping that omits ``opencode`` still resolves AWF's
+    shipped opencode default (``_defaults_for`` falls back to the central
+    defaults), so the preflight probes that model — *not* the adapter's static
+    ``OPENCODE_OLLAMA_CLOUD_MODELS[0]`` fallback, which only applies when no
+    default resolves at all. These two models are independent: the shipped default
+    moves with provider bumps while the adapter tuple head does not."""
     workspace_id = await _seed_running(factory)
     executor = _make_executor(factory, tmp_path, agent_defaults={})
 
@@ -328,7 +367,7 @@ async def test_ensure_falls_back_to_adapter_cloud_default_when_no_model_resolved
     )
 
     assert proceed is True
-    assert seen["model"] == _qualified_model(OPENCODE_OLLAMA_CLOUD_MODELS[0])
+    assert seen["model"] == _qualified_model(DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model)
     snap = await _get_status(factory, workspace_id)
     assert snap.status == WorkspaceStatus.running.value
 
