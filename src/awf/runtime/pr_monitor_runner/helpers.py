@@ -105,6 +105,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
     _BITBUCKET_TRANSIENT_HTTP_STATUSES,
     _FORGE_TRANSIENT_RETRY_COUNT_KEY_PREFIX,
+    _GIT_TLS_TRANSPORT_TRANSIENT_MARKERS,
     _NON_TRANSIENT_GITHUB_ERROR_MARKERS,
     _PENDING_CHECK_STATUSES,
     _PR_MONITOR_REASON_CODES_BY_STALE_REASON,
@@ -907,7 +908,15 @@ def _is_transient_bitbucket_client_error(exc: BitbucketClientError) -> bool:
 
 
 def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
-    """Classify git transport failures caused by transient GitHub outages."""
+    """Classify git transport failures caused by transient GitHub outages.
+
+    Covers the shared GitHub marker set (5xx, DNS, timeouts, connection resets)
+    plus git's own TLS/SSL transport wording (#1017), which no GitHub API marker
+    spells. The strong permanent markers, the bare-``bad credentials`` guard and
+    the remote-tracking ref-lock race all still run first, so a deterministic
+    not-found / not-logged-in / bad-credential fetch failure keeps failing fast
+    even when its stderr also mentions TLS.
+    """
 
     text = str(exc).lower()
     if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
@@ -921,7 +930,13 @@ def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:
         return False
     if any(marker in text for marker in _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS):
         return True
-    return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
+    return any(
+        marker in text
+        for marker in (
+            *_TRANSIENT_GITHUB_ERROR_MARKERS,
+            *_GIT_TLS_TRANSPORT_TRANSIENT_MARKERS,
+        )
+    )
 
 
 def _base_fetch_retry_count_key(context: str) -> str:

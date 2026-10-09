@@ -52,6 +52,20 @@ _NON_TRANSIENT_GITHUB_ERROR_MARKERS = NON_TRANSIENT_GITHUB_ERROR_MARKERS
 _TRANSIENT_GITHUB_ERROR_MARKERS = TRANSIENT_GITHUB_ERROR_MARKERS
 _AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS
 
+# #1017: git's own TLS/SSL transport wording. A TLS session that drops mid-fetch is
+# the same transient class as the DNS (#336) and 5xx markers, but none of the GitHub
+# API markers spell it, so an exit-128 ``git fetch`` on a GnuTLS/OpenSSL drop used to
+# terminate the monitor instead of entering the bounded base-fetch retry budget.
+# Deliberately NOT included: bare ``unable to access '<url>'`` and ``RPC failed`` —
+# both also prefix deterministic 403/404 faults, which must keep failing fast.
+_GIT_TLS_TRANSPORT_TRANSIENT_MARKERS = (
+    "gnutls recv error",
+    "gnutls_handshake",
+    "tls connection was non-properly terminated",
+    "ssl_read:",
+    "ssl_write:",
+)
+
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
 _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON = "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
