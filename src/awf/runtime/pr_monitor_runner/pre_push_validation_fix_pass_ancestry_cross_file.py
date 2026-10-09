@@ -1045,8 +1045,11 @@ async def _callee_definition_survives_at_right(
     the old span and would otherwise read as evidence that the reviewed call
     site was fixed, while the unchanged caller now references a missing callee
     (PRRT_kwDOSJAM6s6q8MWy). ``path`` is the candidate's rename target when the
-    range moved it, so an already-accepted move keeps resolving. Fails closed
-    when the right-side text is unreadable.
+    range moved it, so an already-accepted move keeps resolving — and
+    ``enclosed_by`` is then that target's own requirement, because a receiver
+    pinned to the imported symbol in one path need not be pinned in the other
+    (PRRT_kwDOSJAM6s6q-L4H). Fails closed when the right-side text is
+    unreadable.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _path_text_at_ref,
@@ -1243,6 +1246,12 @@ async def _commit_range_changes_callee_definition(
     read_binding_after = False
     for candidate in candidates:
         candidate_names, candidate_bare, enclosed_by = bound_to(candidate)
+        # The scope a pinned callee must sit under belongs to the path being
+        # read, so the survival read at ``right`` — which runs against the
+        # rename target when the range moved the candidate — carries that
+        # target's own requirement rather than the old path's
+        # (PRRT_kwDOSJAM6s6q-L4H).
+        survival_enclosed_by = enclosed_by
         rename_target = rename_map.get(candidate)
         if rename_target is not None and rename_target != candidate:
             # A move that carries the callee out of the module the *unchanged*
@@ -1253,7 +1262,7 @@ async def _commit_range_changes_callee_definition(
             # binding that can is the corrected caller's own, read once at
             # ``right``, and the move fails closed when neither reaches it
             # (PRRT_kwDOSJAM6s6q-L4B).
-            moved_names, moved_bare, _moved_enclosed_by = bound_to(rename_target)
+            moved_names, moved_bare, moved_enclosed_by = bound_to(rename_target)
             if not (candidate_names & moved_names or candidate_bare & moved_bare):
                 if not read_binding_after:
                     read_binding_after = True
@@ -1267,11 +1276,16 @@ async def _commit_range_changes_callee_definition(
                         bare_refs=bare_names,
                     )
                 if bound_to_after is not None:
-                    after_names, after_bare, _after_enclosed_by = bound_to_after(rename_target)
+                    after_names, after_bare, after_enclosed_by = bound_to_after(rename_target)
                     moved_names |= after_names
                     moved_bare |= after_bare
+                    # The corrected caller's reading is the one that admitted
+                    # the target, so its requirement takes precedence for a
+                    # name both readings carry.
+                    moved_enclosed_by = {**moved_enclosed_by, **after_enclosed_by}
             candidate_names &= moved_names
             candidate_bare &= moved_bare
+            survival_enclosed_by = moved_enclosed_by
         if not (candidate_names or candidate_bare):
             continue
         candidate_text = await _path_text_at_ref(
@@ -1326,7 +1340,7 @@ async def _commit_range_changes_callee_definition(
                 path=rename_map.get(candidate) or candidate,
                 names=one_names,
                 bare_names=one_bare,
-                enclosed_by=enclosed_by,
+                enclosed_by=survival_enclosed_by,
             ):
                 return True
     return False

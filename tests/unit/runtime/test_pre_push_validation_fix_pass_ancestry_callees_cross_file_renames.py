@@ -289,3 +289,106 @@ async def test_the_corrected_callers_binding_is_read_once_for_all_moves() -> Non
 
     assert not await _probe(probe)
     assert probe.shows.count((_RIGHT, _CALLER)) == 1
+
+
+# A receiver bound by ``from pkg import module``: it reads either as the
+# submodule or as an object the package's own ``__init__`` defines, and only
+# the second reading pins the callee to the imported symbol
+# (PRRT_kwDOSJAM6s6q-L4H).
+_RECEIVER_CALLER_TEXT = (
+    "from pkg_b.observability import metrics\n"
+    "\n"
+    "\n"
+    "def refresh_ready_queue_metrics(pool):\n"
+    "    payload = pool.snapshot()\n"
+    "    metrics.record(payload)\n"
+    "    return payload\n"
+)
+
+_RECEIVER_SUBMODULE = "src/pkg_b/observability/metrics.py"
+_RECEIVER_PACKAGE_INIT = "src/pkg_b/observability/__init__.py"
+
+# ``record`` at module scope in the submodule — what the submodule reading of
+# the receiver reaches. Its body sits on old line 6.
+_RECEIVER_SUBMODULE_TEXT = _CALLEE_TEXT.replace("record_ready_queue_depth", "record")
+
+# ``record`` as a member of a module-level ``metrics`` class in the package's
+# own ``__init__`` — what the imported-object reading reaches. Same old line 6.
+_RECEIVER_PACKAGE_INIT_TEXT = (
+    "GAUGE = None\n"
+    "\n"
+    "\n"
+    "class metrics:\n"
+    "    def record(self, payload):\n"
+    "        GAUGE.set(len(payload.entries))\n"
+    "        return None\n"
+)
+
+# The same file after the move, holding a *different* class's ``record``: the
+# receiver cannot reach it, so it is not evidence about the call site.
+_FOREIGN_CLASS_RECORD_TEXT = (
+    "GAUGE = None\n"
+    "\n"
+    "\n"
+    "class Other:\n"
+    "    def record(self, payload):\n"
+    "        GAUGE.set(payload.ready_depth())\n"
+    "        return None\n"
+)
+
+
+def _receiver_rename_probe(*, old_path: str, new_path: str, old_text: str, new_text: str):
+    """A probe for a receiver-bound callee whose module the range renames."""
+    return _RenameProbe(
+        name_status_z=f"R095\0{old_path}\0{new_path}\0",
+        diffs={(old_path, new_path): _rename_with_body_change_diff(new_path)},
+        rename_target=new_path,
+        extra_texts={
+            (_LEFT, _CALLER): _RECEIVER_CALLER_TEXT,
+            (_LEFT, old_path): old_text,
+            (_RIGHT, new_path): new_text,
+        },
+    )
+
+
+@pytest.mark.unit
+async def test_rename_target_pins_the_callee_to_the_imported_receiver() -> None:
+    """A moved callee must survive under the *target* path's own receiver pin.
+
+    The old path is the submodule the receiver may be, so it carries no scope
+    requirement; the rename target is the package's own ``__init__``, which the
+    receiver only reaches as the object ``pkg_b.observability`` binds under
+    ``metrics``. Reusing the old path's unrestricted requirement there would
+    let a same-named method of an unrelated class stand in for a callee the
+    move left behind (PRRT_kwDOSJAM6s6q-L4H).
+    """
+    probe = _receiver_rename_probe(
+        old_path=_RECEIVER_SUBMODULE,
+        new_path=_RECEIVER_PACKAGE_INIT,
+        old_text=_RECEIVER_SUBMODULE_TEXT,
+        new_text=_FOREIGN_CLASS_RECORD_TEXT,
+    )
+
+    assert not await _probe(probe)
+    # Rejected on the survival read at the target, after the overlap was found.
+    assert (_RIGHT, _RECEIVER_PACKAGE_INIT) in probe.shows
+
+
+@pytest.mark.unit
+async def test_rename_target_the_receiver_reaches_unpinned_is_evidence() -> None:
+    """The target's own reading can also be the *looser* of the two.
+
+    Here the move runs the other way: the callee leaves the package
+    ``__init__``, where the receiver's imported-object reading pinned it to the
+    ``metrics`` class, for the submodule that reading's sibling reaches at
+    module scope. Holding the target to the old path's pin would fail a
+    complete fix closed (PRRT_kwDOSJAM6s6q-L4H).
+    """
+    probe = _receiver_rename_probe(
+        old_path=_RECEIVER_PACKAGE_INIT,
+        new_path=_RECEIVER_SUBMODULE,
+        old_text=_RECEIVER_PACKAGE_INIT_TEXT,
+        new_text=_RECEIVER_SUBMODULE_TEXT,
+    )
+
+    assert await _probe(probe)
