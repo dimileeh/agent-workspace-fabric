@@ -326,6 +326,52 @@ def test_default_acls_pin_directories_against_a_post_check_symlink_swap(
 
 
 @pytest.mark.unit
+def test_default_acls_pin_targets_against_a_post_check_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapping an *ancestor* must not redirect a deeper ACL target.
+
+    ``setfacl --physical`` refuses only a symlinked final component, so a
+    pathname-based walk stays redirectable: the agent can replace
+    ``refs/heads`` once ``refs/heads/<namespace>`` has been enumerated and have
+    root grant ``u:1000:rwx`` on a same-named decoy outside the mirror. Each
+    target is pinned relative to its already pinned parent, so the ACL lands on
+    the validated inode no matter what the pathname resolves to at exec time.
+    """
+    mirror = tmp_path / "mirror.git"
+    namespace = mirror / "refs" / "heads" / "feature-sync"
+    namespace.mkdir(parents=True)
+    decoy = tmp_path / "outside" / "feature-sync"
+    decoy.mkdir(parents=True)
+    namespace_inode = namespace.stat().st_ino
+    decoy_inode = decoy.stat().st_ino
+    pinned_inodes: list[int] = []
+
+    def _target_inode(arg: str) -> int:
+        """The inode the child acts on: a pinned descriptor, else the pathname."""
+        target = Path(arg)
+        if target.parent == Path("/proc/self/fd"):
+            return os.fstat(int(target.name)).st_ino
+        return target.stat().st_ino
+
+    def _swap_ancestor(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Re-point ``refs/heads`` outside the mirror, then read argv's targets."""
+        heads = mirror / "refs" / "heads"
+        if not heads.is_symlink():
+            heads.rename(mirror / "refs" / "heads.pinned")
+            heads.symlink_to(decoy.parent, target_is_directory=True)
+        pinned_inodes.extend(_target_inode(arg) for arg in args[4:])
+        return subprocess.CompletedProcess(args=list(args), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_manager_mirror.shutil, "which", lambda _name: _SETFACL)
+    monkeypatch.setattr(git_manager_mirror.subprocess, "run", _swap_ancestor)
+
+    assert git_manager_mirror.apply_mirror_ref_default_acls(mirror, _AGENT_UID) is True
+    assert namespace_inode in pinned_inodes
+    assert decoy_inode not in pinned_inodes
+
+
+@pytest.mark.unit
 def test_default_acls_batch_pinned_descriptors_without_leaking_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
