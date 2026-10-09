@@ -218,3 +218,48 @@ def test_an_unresolvable_import_counts_as_a_rebinding_of_the_name() -> None:
         ]
         == cross_file._AMBIGUOUS_IMPORT_TARGET
     )
+
+
+# The two import forms whose *paths* coincide: ``import pkg.mod as metrics``
+# binds the submodule, while ``from pkg import mod as metrics`` binds whatever
+# ``pkg`` exposes under that name. Both describe ``pkg/mod``, so a rebinding
+# guard keyed on the path alone cannot see the second statement.
+_DUAL_FORM_CALLER_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "from pkg_b.observability import execution_platform_metrics as metrics\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_from_import_of_the_same_path_unproves_a_module_receiver() -> None:
+    """``import pkg.mod`` plus ``from pkg import mod`` rebinds the receiver.
+
+    The two statements bind ``metrics`` to different objects even though their
+    module paths are the same string, so the plain ``import`` is no longer proof
+    that the receiver is that module — and the class-member tolerance
+    ``_module_bound_receiver_names`` drops for a rebound name must not come back
+    through a guard that reads the pair as one repeated import. Otherwise a
+    correction to ``Collector.record_ready_queue_depth`` alone satisfies this
+    gate for a call site whose callee may never have been a class member
+    (PRRT_kwDOSJAM6s6q9Xo3).
+    """
+    probe = _plain_import_receiver_probe(diff=_METHOD_ONLY_DIFF)
+    probe.texts[(_LEFT, _CALLER)] = _DUAL_FORM_CALLER_TEXT
+
+    assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+def test_the_two_import_forms_are_distinct_bindings_of_one_path() -> None:
+    """The receiver is neither a proven module nor bound to either import."""
+    assert (
+        cross_file._module_bound_receiver_names(_DUAL_FORM_CALLER_TEXT, path=_CALLER) == frozenset()
+    )
+    assert (
+        cross_file._receiver_import_module_targets(_DUAL_FORM_CALLER_TEXT, path=_CALLER)["metrics"]
+        == cross_file._AMBIGUOUS_IMPORT_TARGET
+    )

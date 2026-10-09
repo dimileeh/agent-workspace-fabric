@@ -118,6 +118,24 @@ def _import_binding_identity(module_path: str | None, imported: str) -> str:
     return f"{module_path}/{imported}"
 
 
+def _plain_import_binding_identity(module_path: str) -> str:
+    """The definition identity a plain ``import`` binds a receiver name to.
+
+    Namespaced apart from ``_import_binding_identity`` because the two forms
+    bind *different* objects even when their module paths spell the same
+    string: ``import pkg.mod as m`` binds the submodule, while ``from pkg
+    import mod as m`` binds whatever ``pkg`` exposes under that name. Sharing
+    one string would read the pair as a repeat of a single import, so the
+    rebinding guard would not fire — while
+    ``_module_bound_receiver_names`` has already dropped the proven-module
+    restriction for a name both forms bind, leaving the receiver *more*
+    tolerant than the plain import alone and accepting a same-named class
+    method as evidence (PRRT_kwDOSJAM6s6q9Xo3). The ``import `` prefix cannot
+    collide with a ``from`` identity, whose own prefix is a dotted module path.
+    """
+    return f"import {module_path}"
+
+
 def _module_path_segments(path: str) -> list[str]:
     """``path`` as directory segments, with a Python module suffix dropped."""
     normalized = path.replace("\\", "/")
@@ -389,7 +407,10 @@ def _receiver_import_module_targets(
     instead of offering every module it was ever bound to (see
     ``_AMBIGUOUS_IMPORT_TARGET``); the two targets one ``from`` import yields are
     two readings of that single binding, not a rebinding, so they are counted as
-    the one module they came from.
+    the one module they came from. The two *forms* are counted apart even when
+    their module paths coincide, because ``import pkg.mod as m`` and ``from pkg
+    import mod as m`` bind different objects (see
+    ``_plain_import_binding_identity``).
     """
     targets: dict[str, set[_ModuleTarget]] = {}
     bound_modules: dict[str, set[str]] = {}
@@ -401,7 +422,9 @@ def _receiver_import_module_targets(
             ((f"{module_path}/{imported}", False), (module_path, True))
         )
     for name, paths in _plain_import_module_paths(file_text, path=path).items():
-        bound_modules.setdefault(name, set()).update(paths)
+        bound_modules.setdefault(name, set()).update(
+            _plain_import_binding_identity(module_path) for module_path in paths
+        )
         targets.setdefault(name, set()).update((module_path, False) for module_path in paths)
     return {
         name: (_AMBIGUOUS_IMPORT_TARGET if len(bound_modules[name]) > 1 else frozenset(found))
