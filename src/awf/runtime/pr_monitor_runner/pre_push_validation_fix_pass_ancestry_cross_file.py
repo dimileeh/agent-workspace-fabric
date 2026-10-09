@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -691,6 +691,63 @@ def _callee_names_bound_to_path(
     return qualified, bare
 
 
+def _bindings_fail_closed_when_unbound(
+    bindings: dict[str, frozenset[_ModuleTarget]], keys: frozenset[str]
+) -> dict[str, frozenset[_ModuleTarget]]:
+    """``bindings`` with every key in ``keys`` it does not bind held unmatchable.
+
+    The name-only rule in :func:`_callee_names_bound_to_candidate` exists for a
+    call site whose import this reader cannot see. It must not hand a rename
+    target a second, binding-free chance at acceptance, so a key with no
+    readable import fails closed on ``_AMBIGUOUS_IMPORT_TARGET`` instead
+    (PRRT_kwDOSJAM6s6q-L4B).
+    """
+    unbound: dict[str, frozenset[_ModuleTarget]] = dict.fromkeys(keys, _AMBIGUOUS_IMPORT_TARGET)
+    return unbound | {key: targets for key, targets in bindings.items() if targets}
+
+
+def _caller_binding_resolver(
+    caller_text: str,
+    *,
+    call_site: str,
+    rebound: frozenset[str],
+    refs: frozenset[tuple[str, str]],
+    bare_refs: frozenset[tuple[str, str]],
+    require_binding: bool = False,
+) -> Callable[[str], tuple[frozenset[str], frozenset[str]]]:
+    """Bind ``refs`` to one caller text's imports, as a path-keyed callable.
+
+    A receiver a plain ``import`` binds is a module, so its callee is held to
+    module scope like a bare one; every other receiver may be an instance and
+    keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
+    ``require_binding`` drops the name-only fallback, for the re-read that has
+    to *prove* a rename target reachable rather than merely not refute it.
+    """
+    bare_bindings = _import_targets_without_locally_rebound(
+        _bare_name_import_module_targets(caller_text, path=call_site), rebound
+    )
+    receiver_bindings = _import_targets_without_locally_rebound(
+        _receiver_import_module_targets(caller_text, path=call_site), rebound
+    )
+    if require_binding:
+        bare_bindings = _bindings_fail_closed_when_unbound(
+            bare_bindings, frozenset(key for key, _ in bare_refs)
+        )
+        receiver_bindings = _bindings_fail_closed_when_unbound(
+            receiver_bindings, frozenset(key for key, _ in refs)
+        )
+    module_receivers = _module_bound_receiver_names(caller_text, path=call_site)
+    return partial(
+        _callee_names_bound_to_path,
+        refs=refs,
+        bare_refs=bare_refs,
+        module_refs=frozenset(ref for ref in refs if ref[0] in module_receivers),
+        receiver_bindings=receiver_bindings,
+        bare_bindings=bare_bindings,
+        call_site=call_site,
+    )
+
+
 def _definition_is_reachable_from_module_scope(
     file_text: str,
     all_spans: list[tuple[str, int, int, int]],
@@ -836,6 +893,45 @@ def _importable_definition_spans_for_names(
         name: start for name, start, nested, _span in collected if not nested
     }  # last head wins
     return [span for name, start, nested, span in collected if nested or effective[name] == start]
+
+
+async def _caller_binding_after_correction(
+    self: Any,
+    *,
+    worktree_path: Path,
+    right: str,
+    call_site: str,
+    rebound: frozenset[str],
+    refs: frozenset[tuple[str, str]],
+    bare_refs: frozenset[tuple[str, str]],
+) -> Callable[[str], tuple[frozenset[str], frozenset[str]]] | None:
+    """The caller's own import binding *after* the correction, or None if unreadable.
+
+    One correction can move the callee and update this caller's import together;
+    the binding that then has to admit the rename target is the corrected
+    caller's, not the stale left-side one, so holding the move to the left-side
+    binding alone would fail a complete fix closed. Names the left side rebinds
+    stay unmatchable here too, and a caller whose right-side text is unreadable
+    — or which no longer imports the callee at all — fails closed rather than
+    falling back to the name-only rule (PRRT_kwDOSJAM6s6q-L4B).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _path_text_at_ref,
+    )
+
+    caller_text = await _path_text_at_ref(
+        self, worktree_path=worktree_path, ref=right, path=call_site
+    )
+    if not caller_text:
+        return None
+    return _caller_binding_resolver(
+        caller_text,
+        call_site=call_site,
+        rebound=rebound,
+        refs=refs,
+        bare_refs=bare_refs,
+        require_binding=True,
+    )
 
 
 async def _callee_definition_survives_at_right(
@@ -986,9 +1082,10 @@ async def _commit_range_changes_callee_definition(
     the imported module's same-named definition (PRRT_kwDOSJAM6s6q9WnX).
     A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
-    change to its body; that target is held to the same import binding the old
-    path satisfied, so a move *out* of the module the unchanged caller imports
-    fails closed instead of reading a now-broken import as a fix
+    change to its body; that target is held to an import binding that reaches it
+    — the one the old path satisfied, or the corrected caller's own — so a move
+    *out* of the module the caller still imports fails closed instead of reading
+    a now-broken import as a fix
     (PRRT_kwDOSJAM6s6q-L4B). An overlap is accepted only when *that* callee is still
     reachable at ``right``, so a correction that deletes the definition — or its
     whole file — is not read as a fix of a caller that still calls it, and a
@@ -1034,26 +1131,15 @@ async def _commit_range_changes_callee_definition(
     rebound = _locally_rebound_names_at_line(
         item_text, item_line, path=normalized_item
     ) | _module_scope_rebound_names(item_text, path=normalized_item)
-    bare_bindings = _import_targets_without_locally_rebound(
-        _bare_name_import_module_targets(item_text, path=normalized_item), rebound
-    )
-    receiver_bindings = _import_targets_without_locally_rebound(
-        _receiver_import_module_targets(item_text, path=normalized_item), rebound
-    )
-    # A receiver a plain ``import`` binds is a module, so its callee is held to
-    # module scope like a bare one; every other receiver may be an instance and
-    # keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
-    module_receivers = _module_bound_receiver_names(item_text, path=normalized_item)
-    module_refs = frozenset(ref for ref in names if ref[0] in module_receivers)
-    bound_to = partial(
-        _callee_names_bound_to_path,
+    bound_to = _caller_binding_resolver(
+        item_text,
+        call_site=normalized_item,
+        rebound=rebound,
         refs=names,
         bare_refs=bare_names,
-        module_refs=module_refs,
-        receiver_bindings=receiver_bindings,
-        bare_bindings=bare_bindings,
-        call_site=normalized_item,
     )
+    bound_to_after: Callable[[str], tuple[frozenset[str], frozenset[str]]] | None = None
+    read_binding_after = False
     for candidate in candidates:
         candidate_names, candidate_bare = bound_to(candidate)
         rename_target = rename_map.get(candidate)
@@ -1062,9 +1148,27 @@ async def _commit_range_changes_callee_definition(
             # caller's import binds leaves that import resolving to nothing, so
             # following the rename target would read a broken call site as
             # fixed. The target is held to the same binding that admitted the
-            # old path, and fails closed when it no longer satisfies it
+            # old path; when that binding no longer reaches it, the only other
+            # binding that can is the corrected caller's own, read once at
+            # ``right``, and the move fails closed when neither reaches it
             # (PRRT_kwDOSJAM6s6q-L4B).
             moved_names, moved_bare = bound_to(rename_target)
+            if not (candidate_names & moved_names or candidate_bare & moved_bare):
+                if not read_binding_after:
+                    read_binding_after = True
+                    bound_to_after = await _caller_binding_after_correction(
+                        self,
+                        worktree_path=worktree_path,
+                        right=right,
+                        call_site=rename_map.get(normalized_item) or normalized_item,
+                        rebound=rebound,
+                        refs=names,
+                        bare_refs=bare_names,
+                    )
+                if bound_to_after is not None:
+                    after_names, after_bare = bound_to_after(rename_target)
+                    moved_names |= after_names
+                    moved_bare |= after_bare
             candidate_names &= moved_names
             candidate_bare &= moved_bare
         if not (candidate_names or candidate_bare):

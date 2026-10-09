@@ -83,6 +83,7 @@ class _RenameProbe:
         name_status_z: str,
         diffs: dict[tuple[str, ...], str | None],
         rename_target: str = _CALLEE_MODULE_RENAMED,
+        extra_texts: dict[tuple[str, str], str] | None = None,
     ) -> None:
         self.name_status_z = name_status_z
         self.diffs = diffs
@@ -94,6 +95,7 @@ class _RenameProbe:
             # The move carries the definition to its rename target, which is
             # where the survival read looks for it (PRRT_kwDOSJAM6s6q8MWy).
             (_RIGHT, rename_target): _CALLEE_TEXT,
+            **(extra_texts or {}),
         }
         self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
 
@@ -199,3 +201,91 @@ async def test_rename_out_of_the_callers_import_module_is_not_evidence() -> None
     assert not await _probe(probe)
     # Rejected on the binding, before any overlap is read.
     assert not probe.diff_pathspecs
+
+
+# The same correction that moves the callee also updates this caller's import.
+_CALLER_TEXT_REIMPORTED = _CALLER_TEXT.replace(
+    "pkg_b.observability.execution_platform_metrics",
+    "pkg_b.metrics.execution_platform_metrics",
+)
+
+
+@pytest.mark.unit
+async def test_rename_the_caller_reimports_in_the_same_range_is_evidence() -> None:
+    """A move the corrected caller re-imports is still a fix of the call site.
+
+    The left-side import no longer reaches the rename target, but this caller is
+    not the unchanged one the fail-closed rule protects: the same range updates
+    its import to the new module, so the callee stays reachable and the body
+    edit inside its span is real evidence (PRRT_kwDOSJAM6s6q-L4B).
+    """
+    probe = _RenameProbe(
+        name_status_z=_name_status_z_rename(_CALLEE_MODULE_MOVED_OUT) + f"M\0{_CALLER}\0",
+        diffs={
+            (
+                _CALLEE_MODULE,
+                _CALLEE_MODULE_MOVED_OUT,
+            ): _rename_with_body_change_diff(_CALLEE_MODULE_MOVED_OUT),
+        },
+        rename_target=_CALLEE_MODULE_MOVED_OUT,
+        extra_texts={(_RIGHT, _CALLER): _CALLER_TEXT_REIMPORTED},
+    )
+
+    assert await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_rename_the_caller_drops_the_import_for_is_not_evidence() -> None:
+    """A changed caller with no readable import for the callee fails closed.
+
+    The right-side re-read exists for a caller whose import the correction
+    *moved with* the callee; a caller that simply no longer imports the name
+    must not fall back to the name-only rule and accept an arbitrary rename
+    target (PRRT_kwDOSJAM6s6q-L4B).
+    """
+    probe = _RenameProbe(
+        name_status_z=_name_status_z_rename(_CALLEE_MODULE_MOVED_OUT) + f"M\0{_CALLER}\0",
+        diffs={
+            (
+                _CALLEE_MODULE,
+                _CALLEE_MODULE_MOVED_OUT,
+            ): _rename_with_body_change_diff(_CALLEE_MODULE_MOVED_OUT),
+        },
+        rename_target=_CALLEE_MODULE_MOVED_OUT,
+        extra_texts={
+            (_RIGHT, _CALLER): _CALLER_TEXT.split("\n", 1)[1],
+        },
+    )
+
+    assert not await _probe(probe)
+
+
+# A second file the same range renames, so the loop meets more than one move.
+_SIBLING_MODULE = "src/pkg_b/observability/execution_platform_helpers.py"
+_SIBLING_MOVED_OUT = "src/pkg_b/metrics/execution_platform_helpers.py"
+
+
+@pytest.mark.unit
+async def test_the_corrected_callers_binding_is_read_once_for_all_moves() -> None:
+    """Several moves in one range share a single right-side read of the caller.
+
+    The binding that can still admit a move is a property of the caller, not of
+    the candidate, so re-reading it per renamed candidate would cost one ``git
+    show`` each (PRRT_kwDOSJAM6s6q-L4B).
+    """
+    probe = _RenameProbe(
+        name_status_z=(
+            _name_status_z_rename(_CALLEE_MODULE_MOVED_OUT)
+            + f"R095\0{_SIBLING_MODULE}\0{_SIBLING_MOVED_OUT}\0"
+        ),
+        diffs={
+            (
+                _CALLEE_MODULE,
+                _CALLEE_MODULE_MOVED_OUT,
+            ): _rename_with_body_change_diff(_CALLEE_MODULE_MOVED_OUT),
+        },
+        rename_target=_CALLEE_MODULE_MOVED_OUT,
+    )
+
+    assert not await _probe(probe)
+    assert probe.shows.count((_RIGHT, _CALLER)) == 1
