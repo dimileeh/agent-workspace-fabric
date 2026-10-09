@@ -291,8 +291,7 @@ RUN set -eux; \
       (by_id(1).result.protocolVersion == 1) and \
       (by_id(1).result._meta.agentVersion == $expected_version) and \
       ([by_id(1).result.authMethods[]?.id] | index("grok.com") != null) and \
-      (by_id(2).error.code == -32000) and \
-      (by_id(2).error.message == "Authentication required") and \
+      (any(.[]; .method == "_x.ai/session/setup" and .params.method == "session/new" and .params.phase == "auth")) and \
       (by_id(3).error.code == -32602) and \
       (by_id(3).error.data == "unknown session id") \
     ' "$grok_acp_output" >/dev/null; \

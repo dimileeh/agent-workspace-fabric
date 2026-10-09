@@ -243,7 +243,14 @@ def test_agent_runtime_checks_grok_acp_stdio_contract() -> None:
     assert '.result.authMethods[]?.id] | index("grok.com") != null' in dockerfile
     assert '"method":"authenticate","params":{"methodId":"grok.com"' in dockerfile
     assert "unsupported auth method" not in dockerfile
-    assert '.error.message == "Authentication required"' in dockerfile
+    # grok 1.0.50 stopped answering the unauthenticated ``session/new`` with an
+    # error and instead emits ``_x.ai/session/setup`` auth notifications, so the
+    # probe asserts the notification rather than a JSON-RPC error reply.
+    assert (
+        'any(.[]; .method == "_x.ai/session/setup" and .params.method == "session/new"'
+        ' and .params.phase == "auth")'
+    ) in dockerfile
+    assert "Authentication required" not in dockerfile
     assert '.error.data == "unknown session id"' in dockerfile
     assert dockerfile.index("@xai-official/grok@${GROK_VERSION}") < dockerfile.index(
         '"method":"initialize"'
