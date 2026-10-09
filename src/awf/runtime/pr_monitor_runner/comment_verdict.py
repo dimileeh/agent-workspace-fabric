@@ -33,6 +33,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     AGENT_NON_FIX_CITES_OWN_COMMIT as AGENT_NON_FIX_CITES_OWN_COMMIT,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    callee_definition_item_fix_evidence as callee_definition_item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_reason_cites_own_item_commit as correction_reason_cites_own_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -928,6 +931,36 @@ async def _run_item_verdict_protocol(
                         worktree_path=worktree_path,
                         item_start_head=item_start_head,
                         item_path=item_path,
+                        state=state,
+                        dirty_changes_committed=dirty_changes_committed,
+                    )
+                if (
+                    not logical_fix_evidence
+                    and protocol_attempt == 1
+                    and item_path is not None
+                    and item_line is not None
+                    and item_line > 0
+                ):
+                    # Call-site→definition evidence across files (#1019). All
+                    # three checks above have failed, so the item's own commit
+                    # range changes neither the anchored line, nor the reviewed
+                    # file, nor its package. Accept it when it changes the
+                    # *definition* of a callee referenced at the anchored line
+                    # in another file — the one relationship attempt 0 already
+                    # trusts, widened past the same-file restriction that parked
+                    # aira-agent PRs #1478 and #1491. Rationale, limits and the
+                    # fail-closed cases live in the helper's docstring. Same
+                    # guards as above plus a usable anchor line: with none there
+                    # is no call site, so ``item_line is None`` and the
+                    # ``item_line <= 0`` sentinel both stay fail-closed. Inside
+                    # the commit-sink ``try`` so it shares the rollback /
+                    # reason-code handlers.
+                    logical_fix_evidence = await callee_definition_item_fix_evidence(
+                        runner,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_path=item_path,
+                        item_line=item_line,
                         state=state,
                         dirty_changes_committed=dirty_changes_committed,
                     )
