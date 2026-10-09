@@ -19,6 +19,7 @@ and because the cross-file rule reads as one unit.
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -437,6 +438,85 @@ def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]
     )
 
 
+def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
+    """Names the function scope ``scope`` binds inside its own body.
+
+    Python locals are function-wide — a name assigned anywhere in a function is
+    local throughout it — so the whole subtree is read rather than only the
+    lines above the anchor. Parameters, assignment / loop / ``with`` targets,
+    caught exceptions, function-local imports and nested definitions all count.
+    Names a *nested* scope binds come out with them, which can only make a name
+    fail closed. ``scope``'s own name does not: a definition's name is bound in
+    the scope that *holds* it, so a method named like an imported helper does
+    not shadow that import for the calls in its own body.
+    """
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node.id
+        elif isinstance(node, ast.arg):
+            yield node.arg
+        elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+            if node is not scope:
+                yield node.name
+        elif isinstance(node, ast.alias):
+            yield node.asname or node.name.partition(".")[0]
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            yield node.name
+
+
+def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> frozenset[str]:
+    """Names a function scope enclosing ``line`` binds itself.
+
+    An import binding is proof about a call only while the name still *holds*
+    that import where the call is made. ``from pkg.mod import validate``
+    followed by ``def run(validate): validate()`` leaves the call reaching the
+    parameter, so a correction to ``pkg/mod.py``'s ``validate`` changes nothing
+    the anchored line calls and must not satisfy this gate
+    (PRRT_kwDOSJAM6s6q9WnX); the same goes for a local assignment, a loop or
+    ``with`` target, a function-local import and a nested definition of the
+    name.
+
+    Only function scopes shadow: a class body's binding is an attribute of the
+    class and is invisible to the calls inside its methods. A name *no* import
+    binds is not reported on by this reader at all — it keeps the name-only rule
+    the #1019 fixes and the parameter-receiver tolerance depend on, because an
+    unknown local is exactly the unreadable binding that rule exists for. Text
+    this reader cannot parse yields nothing, which leaves the lexical readers'
+    bindings as they were rather than failing every import-bound callee closed
+    on a parse error this probe cannot act on.
+    """
+    if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
+        return frozenset()
+    try:
+        tree = ast.parse(file_text)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)):
+            continue
+        if node.lineno <= line <= (node.end_lineno or node.lineno):
+            bound.update(_names_bound_in_scope(node))
+    return frozenset(bound)
+
+
+def _import_targets_without_locally_rebound(
+    bindings: dict[str, frozenset[_ModuleTarget]], rebound: frozenset[str]
+) -> dict[str, frozenset[_ModuleTarget]]:
+    """``bindings`` with every locally rebound name held to the unmatchable target.
+
+    A name the anchored scope binds itself does not reach its import, so it is
+    held to ``_AMBIGUOUS_IMPORT_TARGET`` exactly as a name two imports rebind
+    is: unmatchable, and deliberately non-empty so the name does not fall back
+    to the name-only rule and accept any changed file that happens to carry a
+    same-named definition (PRRT_kwDOSJAM6s6q9WnX).
+    """
+    return {
+        name: (_AMBIGUOUS_IMPORT_TARGET if name in rebound else targets)
+        for name, targets in bindings.items()
+    }
+
+
 def _candidate_is_under_module_path(
     candidate: str, module_path: str, *, call_site: str, exact: bool = False
 ) -> bool:
@@ -775,6 +855,10 @@ async def _commit_range_changes_callee_definition(
     *imported* symbol's name rather than its local binding, so a correction to
     the definition it really reaches counts and an edit to an unrelated
     same-named definition in that module does not (PRRT_kwDOSJAM6s6q9WnP).
+    A name the anchored line's own scope binds — a parameter, a local
+    assignment, a nested definition — reaches that binding rather than the
+    import, so it is held closed the same way instead of pointing the gate at
+    the imported module's same-named definition (PRRT_kwDOSJAM6s6q9WnX).
     A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
     change to its body. An overlap is accepted only when *that* callee is still
@@ -819,8 +903,13 @@ async def _commit_range_changes_callee_definition(
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
-    bare_bindings = _bare_name_import_module_targets(item_text, path=normalized_item)
-    receiver_bindings = _receiver_import_module_targets(item_text, path=normalized_item)
+    rebound = _locally_rebound_names_at_line(item_text, item_line, path=normalized_item)
+    bare_bindings = _import_targets_without_locally_rebound(
+        _bare_name_import_module_targets(item_text, path=normalized_item), rebound
+    )
+    receiver_bindings = _import_targets_without_locally_rebound(
+        _receiver_import_module_targets(item_text, path=normalized_item), rebound
+    )
     # A receiver a plain ``import`` binds is a module, so its callee is held to
     # module scope like a bare one; every other receiver may be an instance and
     # keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
