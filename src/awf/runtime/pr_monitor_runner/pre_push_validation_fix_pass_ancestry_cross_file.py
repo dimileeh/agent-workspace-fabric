@@ -349,6 +349,32 @@ def _receiver_import_module_targets(
     }
 
 
+def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]:
+    """Receiver names a plain ``import`` proves to be modules.
+
+    ``import pkg.metrics as metrics`` binds a module object, so
+    ``metrics.record()`` can only reach a *module-level* ``record`` in that
+    module: a ``Collector.record`` defined beside it is an attribute of the
+    class, never of the module, so a correction that edits only the method
+    leaves the call site's actual callee untouched (PRRT_kwDOSJAM6s6q8-M1).
+    Returning the receiver's binding *kind* is what lets the span rule below
+    hold such a callee to module scope.
+
+    A receiver a ``from`` import binds keeps the class-member tolerance — it may
+    be the submodule or an object the imported module defines (see
+    ``_receiver_import_module_targets``) — and so does a receiver no import
+    binds, which keeps the name-only rule the #1019 fixes depend on. A name
+    both forms bind is rebound rather than proven, so it is not claimed here and
+    fails closed on ``_AMBIGUOUS_IMPORT_TARGET`` instead.
+    """
+    from_bound = {
+        bound for _module_path, bound, _imported in _iter_from_import_bindings(file_text, path=path)
+    }
+    return frozenset(
+        name for name in _plain_import_module_paths(file_text, path=path) if name not in from_bound
+    )
+
+
 def _candidate_is_under_module_path(
     candidate: str, module_path: str, *, call_site: str, exact: bool = False
 ) -> bool:
@@ -505,12 +531,17 @@ def _importable_definition_spans_for_names(
     its *call shape* allows. ``names`` are attribute-qualified callees
     (``metrics.record()``), whose receiver may be a module or an instance, so a
     direct member of a module-level class counts alongside a module-level head.
-    ``bare_names`` are bare callees (``record()``), which another module can
-    only reach through a module-scope binding — ``Class.method`` is reachable as
-    an attribute but never as bare ``method`` — so a class member fails closed
-    for them (PRRT_kwDOSJAM6s6q699Q), matching the module-scope candidate rule
-    attempt 0's ``_resolve_callee_definition_span`` applies to bare calls. A
-    name called both ways on the anchored line keeps the attribute rule.
+    ``bare_names`` are the names held to the module-scope rule, under which
+    ``Class.method`` is reachable as an attribute but never as a module-scope
+    name, so a class member fails closed: bare callees (``record()``), which
+    another module can only reach through a module-scope binding
+    (PRRT_kwDOSJAM6s6q699Q) — matching the module-scope candidate rule attempt
+    0's ``_resolve_callee_definition_span`` applies to bare calls — and
+    qualified callees whose receiver a plain ``import`` proves to be a *module*
+    (``import pkg.metrics as metrics``), since a method of a class in that
+    module is not an attribute of the module and so is never that call's callee
+    (PRRT_kwDOSJAM6s6q8-M1); the caller sorts the two by binding kind. A name
+    called both ways on the anchored line keeps the attribute rule.
 
     Function-local closures, indented JS/TS heads and indented assignment
     bindings are block-scoped or unreachable and fail closed under both rules.
@@ -666,7 +697,10 @@ async def _commit_range_changes_callee_definition(
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
     gate exists for; a receiver imported by name resolves to that name's own
     module or to the importing module's file, not to any sibling under its
-    package (PRRT_kwDOSJAM6s6q8MW9). A name two imports rebind resolves to one
+    package (PRRT_kwDOSJAM6s6q8MW9). The receiver's binding *kind* is kept too:
+    a receiver a plain ``import`` proves to be a module reaches only
+    module-level definitions, so editing a same-named method of a class in that
+    module is not evidence about the call (PRRT_kwDOSJAM6s6q8-M1). A name two imports rebind resolves to one
     of them at runtime, so it is held to neither rather than to their union
     (PRRT_kwDOSJAM6s6q8-Mw). A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
@@ -714,12 +748,19 @@ async def _commit_range_changes_callee_definition(
     )
     bare_bindings = _bare_name_import_module_targets(item_text, path=normalized_item)
     receiver_bindings = _receiver_import_module_targets(item_text, path=normalized_item)
+    # A receiver a plain ``import`` binds is a module, so its callee is held to
+    # module scope like a bare one; every other receiver may be an instance and
+    # keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
+    module_receivers = _module_bound_receiver_names(item_text, path=normalized_item)
+    module_refs = frozenset(ref for ref in names if ref[0] in module_receivers)
     for candidate in candidates:
         candidate_names = _callee_names_bound_to_candidate(
-            names, receiver_bindings, candidate, call_site=normalized_item
+            names - module_refs, receiver_bindings, candidate, call_site=normalized_item
         )
         candidate_bare = _callee_names_bound_to_candidate(
             bare_names, bare_bindings, candidate, call_site=normalized_item
+        ) | _callee_names_bound_to_candidate(
+            module_refs, receiver_bindings, candidate, call_site=normalized_item
         )
         if not (candidate_names or candidate_bare):
             continue
