@@ -414,14 +414,15 @@ async def test_recovered_attempt0_probe_persists_item_start_head_for_rollback(
 
 
 @pytest.mark.unit
-async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_is_protocol_violation(
+async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_parks_the_item(
     tmp_path: Path,
 ) -> None:
     """Production regression: FIXED without evidence, then mutation + FALSE POSITIVE.
 
     Attempt 1 claims FIXED with no item-scoped evidence. The correction retry
     advances HEAD then reports FALSE POSITIVE. Rollback must restore the item
-    start, and the non-FIXED verdict must not be returned.
+    start, and the non-FIXED verdict must not be credited — the item parks for a
+    human instead of failing the workspace mid-batch (#1020).
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -437,11 +438,11 @@ async def test_correction_non_fixed_after_fixed_without_evidence_with_mutation_i
     )
     runner.current_head = item_start_head
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
@@ -515,7 +516,8 @@ async def test_correction_start_unreadable_head_detects_self_commit_mutation(
     ``_commit_dirty_worktree`` returns False on a clean tree, ``head_advanced``
     stays False when ``attempt_start_head`` is None, and residue is clean — so
     FALSE POSITIVE / DEFER / NEEDS_HUMAN would be accepted after rollback.
-    Carry forward the verified first-attempt tip so advance remains measurable.
+    Carry forward the verified first-attempt tip so advance remains measurable;
+    the measured mutation then parks the item (#1020).
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -545,11 +547,11 @@ async def test_correction_start_unreadable_head_detects_self_commit_mutation(
     )
     runner.current_head = item_start_head
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
@@ -799,7 +801,7 @@ async def test_correction_end_unreadable_head_fails_closed_after_self_commit(
         ("NEEDS_HUMAN",),
     ],
 )
-async def test_correction_non_fixed_with_head_advance_is_protocol_violation(
+async def test_correction_non_fixed_with_head_advance_parks_the_item(
     tmp_path: Path,
     correction_label: str,
 ) -> None:
@@ -819,17 +821,18 @@ async def test_correction_non_fixed_with_head_advance_is_protocol_violation(
     )
     runner.current_head = item_start_head
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
 
 
 @pytest.mark.unit
-async def test_correction_non_fixed_with_dirty_sink_without_head_advance_is_protocol_violation(
+async def test_correction_non_fixed_with_dirty_sink_without_head_advance_parks_the_item(
     tmp_path: Path,
 ) -> None:
     """Correction dirty_changes_committed with stable HEAD still fails closed.
@@ -851,10 +854,11 @@ async def test_correction_non_fixed_with_dirty_sink_without_head_advance_is_prot
     )
     runner.current_head = item_start_head
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert len(runner.prompts) == 2
     # No hard reset when HEAD already matches item start; cleanup may still run.
     assert runner.current_head == item_start_head
@@ -956,7 +960,7 @@ async def test_clean_correction_non_fixed_accepts_same_attempt_zero_stranded_res
         ("NEEDS_HUMAN",),
     ],
 )
-async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
+async def test_pre_sink_unreadable_head_parks_with_attempt_zero_residue(
     tmp_path: Path,
     correction_label: str,
 ) -> None:
@@ -967,7 +971,8 @@ async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
     a failed pre-sink ``rev-parse`` that retains ``attempt_start_head`` makes
     correction look unchanged. The later gate then attributes the post-sink
     HEAD advance to sinking attempt-0 residue and wrongly accepts non-FIXED.
-    Fail closed when pre-sink HEAD is unreadable.
+    Fail closed when pre-sink HEAD is unreadable — refusing the verdict and
+    parking the item (#1020).
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -1007,10 +1012,11 @@ async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
     runner._rev_parse_head = _pre_sink_unreadable
     runner._run_monitor_agent_with_service_recovery = _agent_self_commits_on_correction
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
     assert len(runner.prompts) == 2
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
@@ -1026,16 +1032,18 @@ async def test_pre_sink_unreadable_head_fails_closed_with_attempt_zero_residue(
         ("NEEDS_HUMAN",),
     ],
 )
-async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
+async def test_pre_sink_head_probe_oserror_logs_and_parks(
     tmp_path: Path,
     correction_label: str,
 ) -> None:
-    """Pre-sink HEAD OSError must log cause, chain, and fail closed like None.
+    """Pre-sink HEAD OSError must log its cause and fail closed like None.
 
     Review 5096023656: bare ``except Exception`` swallowed CancelledError and
     left no probe-failure evidence before the unreadable-head classification.
-    Review 5098769688: log a redacted cause alongside ``exc_type`` and chain
-    the probe exception onto the terminal protocol violation.
+    Review 5098769688: log a redacted cause alongside ``exc_type``. The probe
+    warning is where that cause survives now that a successful rollback parks
+    the item instead of raising (#1020); the chained ``__cause__`` is still
+    asserted on the rollback-failure arm in part 027.
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -1074,14 +1082,12 @@ async def test_pre_sink_head_probe_oserror_logs_and_fails_closed(
     runner._rev_parse_head = _pre_sink_oserror
     runner._run_monitor_agent_with_service_recovery = _agent_self_commits_on_correction
 
-    with (
-        structlog.testing.capture_logs() as captured,
-        pytest.raises(AgentVerdictProtocolError) as caught,
-    ):
-        await _invoke(runner)
+    with structlog.testing.capture_logs() as captured:
+        result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
-    assert caught.value.__cause__ is probe_error
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
     assert runner.reset_targets == [item_start_head]
     probe_logs = [
         entry
@@ -1136,14 +1142,12 @@ async def test_pre_sink_head_probe_oserror_redacts_secrets_in_live_log(
     runner._rev_parse_head = _pre_sink_oserror
     runner._run_monitor_agent_with_service_recovery = _agent_self_commits_on_correction
 
-    with (
-        structlog.testing.capture_logs() as captured,
-        pytest.raises(AgentVerdictProtocolError) as caught,
-    ):
-        await _invoke(runner)
+    with structlog.testing.capture_logs() as captured:
+        result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
-    assert caught.value.__cause__ is probe_error
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
     probe_logs = [
         entry
         for entry in captured
@@ -1196,7 +1200,7 @@ async def test_pre_sink_head_probe_cancelled_error_propagates(tmp_path: Path) ->
         ("NEEDS_HUMAN",),
     ],
 )
-async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_violation(
+async def test_correction_non_fixed_with_sink_false_stranded_dirty_parks_the_item(
     tmp_path: Path,
     correction_label: str,
 ) -> None:
@@ -1222,11 +1226,11 @@ async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_v
     )
     runner.current_head = item_start_head
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head
 
@@ -1240,7 +1244,7 @@ async def test_correction_non_fixed_with_sink_false_stranded_dirty_is_protocol_v
         ("NEEDS_HUMAN",),
     ],
 )
-async def test_correction_residue_probe_spawn_failure_rolls_back_via_fail_closed(
+async def test_correction_residue_probe_spawn_failure_rolls_back_and_parks(
     tmp_path: Path,
     correction_label: str,
 ) -> None:
@@ -1267,10 +1271,10 @@ async def test_correction_residue_probe_spawn_failure_rolls_back_via_fail_closed
     )
     runner.current_head = item_start_head
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_NON_FIXED_WITH_MUTATION
-    assert "non-fixed" in str(caught.value).lower() or "correction" in str(caught.value).lower()
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert len(runner.prompts) == 2
     assert runner.current_head == item_start_head

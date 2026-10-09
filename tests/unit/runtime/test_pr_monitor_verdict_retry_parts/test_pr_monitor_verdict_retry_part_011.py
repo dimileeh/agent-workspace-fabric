@@ -633,10 +633,11 @@ async def test_non_fixed_with_mutation_rollback_is_unchanged(tmp_path: Path) -> 
         dirty_after_attempt=[True, True],
     )
 
-    with pytest.raises(comment_verdict.AgentVerdictProtocolError) as caught:
-        await _invoke_item(runner, state=MonitorState())
+    result = await _invoke_item(runner, state=MonitorState())
 
-    assert caught.value.reason_code == comment_verdict.AGENT_NON_FIXED_WITH_MUTATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert comment_verdict.AGENT_NON_FIXED_WITH_MUTATION in result.reason
     assert runner.reset_targets == [_ITEM_START_HEAD]
 
 
