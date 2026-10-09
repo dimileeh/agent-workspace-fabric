@@ -103,13 +103,24 @@ async def _path_diff_text_in_commit_range(
     left: str,
     right: str,
     path: str,
+    rename_path: str | None = None,
 ) -> str | None:
-    """``git diff -U0 left right -- path``, or None when the diff cannot be read."""
+    """``git diff -U0 left right -- path [rename_path]``, or None when unreadable.
+
+    ``rename_path`` is ``path``'s rename target in the range, when it has one.
+    Both sides must sit in the pathspec or git cannot pair the move: pathspec
+    filtering runs before rename detection, so an old-path-only diff of a pure
+    rename reads as a whole-file deletion whose hunk overlaps every definition
+    span in the file. Passing both paths keeps a move with an unchanged body
+    hunkless, and keeps a move that also edits the body expressed as old-side
+    hunks in ``path``'s line numbering (PRRT_kwDOSJAM6s6q65JH).
+    """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _GIT_DIFF_FIND_RENAMES,
         _git_env_for_merge_safety_object_lookup,
     )
 
+    pathspec = [path] if rename_path is None else [path, rename_path]
     result = await self._deps.runner.run(
         git_worktree_command(
             worktree_path,
@@ -119,7 +130,7 @@ async def _path_diff_text_in_commit_range(
             left,
             right,
             "--",
-            path,
+            *pathspec,
         ),
         env=_git_env_for_merge_safety_object_lookup(),
     )
@@ -159,15 +170,18 @@ async def _commit_range_changes_callee_definition(
     ``left`` — the side ``-U0`` hunk headers and the definition spans are both
     expressed in — then, for each other path the range changed, requires a
     module-reachable definition of one of those names whose span the range's
-    diff overlaps. ``item_path`` itself is skipped: a same-path change is what
-    the line-anchored and path-level gates already answer. Fails closed on any
-    unreadable Git output.
+    diff overlaps. A candidate that the range renamed is diffed against its
+    rename target too, so a pure move of the callee's file is not mistaken for a
+    change to its body. ``item_path`` itself is skipped: a same-path change is
+    what the line-anchored and path-level gates already answer. Fails closed on
+    any unreadable Git output.
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _changed_paths_in_commit_range,
         _diff_hunk_overlaps_line_span,
         _normalize_evidence_item_path,
         _path_text_at_ref,
+        _rename_map_in_commit_range,
     )
 
     normalized_item = _normalize_evidence_item_path(item_path)
@@ -191,6 +205,11 @@ async def _commit_range_changes_callee_definition(
         )
         if normalized and normalized != normalized_item
     ][:_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS]
+    if not candidates:
+        return False
+    rename_map, _name_status_z = await _rename_map_in_commit_range(
+        self, worktree_path=worktree_path, left=left, right=right
+    )
     for candidate in candidates:
         candidate_text = await _path_text_at_ref(
             self, worktree_path=worktree_path, ref=left, path=candidate
@@ -201,7 +220,12 @@ async def _commit_range_changes_callee_definition(
         if not spans:
             continue
         diff_text = await _path_diff_text_in_commit_range(
-            self, worktree_path=worktree_path, left=left, right=right, path=candidate
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            path=candidate,
+            rename_path=rename_map.get(candidate),
         )
         if diff_text is None:
             continue

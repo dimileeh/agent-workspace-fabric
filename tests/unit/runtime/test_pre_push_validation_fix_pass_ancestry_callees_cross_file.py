@@ -414,3 +414,126 @@ async def test_raw_diff_bytes_are_preferred_over_replacement_decoded_stdout() ->
     )
 
     assert await _probe(probe)
+
+
+# --- rename-aware candidate diffs (PRRT_kwDOSJAM6s6q65JH) --------------------
+
+_CALLEE_MODULE_RENAMED = "src/pkg_b/metrics/execution_platform_metrics.py"
+
+# What git prints for the rename's *old* path alone: the pathspec filters the new
+# path out before rename detection, so the move reads as a whole-file deletion
+# whose hunk overlaps every definition span in the file.
+_RENAME_OLD_PATH_ONLY_DIFF = (
+    f"diff --git a/{_CALLEE_MODULE} b/{_CALLEE_MODULE}\n"
+    "deleted file mode 100644\n"
+    f"--- a/{_CALLEE_MODULE}\n"
+    "+++ /dev/null\n"
+    f"@@ -1,{len(_CALLEE_TEXT.splitlines())} +0,0 @@\n"
+    + "".join(f"-{line}\n" for line in _CALLEE_TEXT.splitlines())
+)
+
+# The same range diffed over *both* rename paths: a pure move has no hunks.
+_PURE_RENAME_DIFF = (
+    f"diff --git a/{_CALLEE_MODULE} b/{_CALLEE_MODULE_RENAMED}\n"
+    "similarity index 100%\n"
+    f"rename from {_CALLEE_MODULE}\n"
+    f"rename to {_CALLEE_MODULE_RENAMED}\n"
+)
+
+# A move that also edits the callee's body (old line 6) is still real evidence.
+_RENAME_WITH_BODY_CHANGE_DIFF = (
+    f"diff --git a/{_CALLEE_MODULE} b/{_CALLEE_MODULE_RENAMED}\n"
+    "similarity index 95%\n"
+    f"rename from {_CALLEE_MODULE}\n"
+    f"rename to {_CALLEE_MODULE_RENAMED}\n"
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE_RENAMED}\n"
+    "@@ -6 +6 @@\n"
+    "-    GAUGE.set(len(payload.entries))\n"
+    "+    GAUGE.set(payload.ready_depth())\n"
+)
+
+
+class _RenameProbe:
+    """Runner stub that keys diffs by the whole pathspec, not just its last path.
+
+    The rename-aware read passes ``-- <old> <new>``, so a probe keyed on
+    ``cmd[-1]`` alone cannot tell it apart from a new-path-only read.
+    """
+
+    def __init__(self, *, name_status_z: str, diffs: dict[tuple[str, ...], str | None]) -> None:
+        self.name_status_z = name_status_z
+        self.diffs = diffs
+        self.diff_pathspecs: list[tuple[str, ...]] = []
+        self.texts = {
+            (_LEFT, _CALLER): _CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+        }
+        self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
+
+    async def _run(self, cmd: list[str], **kwargs: object):
+        from awf.common.commands import CommandResult
+
+        del kwargs
+        if "show" in cmd:
+            ref, _, path = cmd[-1].partition(":")
+            text = self.texts.get((ref, path))
+            if text is None:
+                return CommandResult(returncode=128, stdout="", stderr="no such path")
+            return CommandResult(returncode=0, stdout=text, stderr="")
+        if "--name-status" in cmd:
+            return CommandResult(returncode=0, stdout=self.name_status_z, stderr="")
+        if "diff" in cmd:
+            pathspec = tuple(cmd[cmd.index("--") + 1 :])
+            self.diff_pathspecs.append(pathspec)
+            diff = self.diffs.get(pathspec)
+            if diff is None:
+                return CommandResult(returncode=1, stdout="", stderr="diff failed")
+            return CommandResult(returncode=0, stdout=diff, stderr="")
+        # rev-list / rev-parse: no per-commit rename edges to add.
+        return CommandResult(returncode=1, stdout="", stderr="unsupported")
+
+
+_RENAME_NAME_STATUS_Z = f"R095\0{_CALLEE_MODULE}\0{_CALLEE_MODULE_RENAMED}\0"
+
+
+@pytest.mark.unit
+async def test_pure_callee_file_rename_is_not_evidence() -> None:
+    """A moved callee whose body is unchanged must not satisfy the gate.
+
+    The changed-path set carries the rename's old path, and an old-path-only
+    diff reads as a whole-file deletion overlapping the callee's span. Diffing
+    both rename paths lets git pair the move, leaving no content hunk
+    (PRRT_kwDOSJAM6s6q65JH).
+    """
+    probe = _RenameProbe(
+        name_status_z=_RENAME_NAME_STATUS_Z,
+        diffs={
+            (_CALLEE_MODULE,): _RENAME_OLD_PATH_ONLY_DIFF,
+            (_CALLEE_MODULE, _CALLEE_MODULE_RENAMED): _PURE_RENAME_DIFF,
+        },
+    )
+
+    assert not await _probe(probe)
+    assert (_CALLEE_MODULE, _CALLEE_MODULE_RENAMED) in probe.diff_pathspecs
+
+
+@pytest.mark.unit
+async def test_rename_that_also_changes_the_callee_body_is_evidence() -> None:
+    """A move plus a real edit inside the definition still counts as FIXED evidence."""
+    probe = _RenameProbe(
+        name_status_z=_RENAME_NAME_STATUS_Z,
+        diffs={
+            (_CALLEE_MODULE, _CALLEE_MODULE_RENAMED): _RENAME_WITH_BODY_CHANGE_DIFF,
+        },
+    )
+
+    assert await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_rename_aware_diff_failure_fails_closed() -> None:
+    """An unreadable rename-aware diff is not evidence."""
+    probe = _RenameProbe(name_status_z=_RENAME_NAME_STATUS_Z, diffs={})
+
+    assert not await _probe(probe)
