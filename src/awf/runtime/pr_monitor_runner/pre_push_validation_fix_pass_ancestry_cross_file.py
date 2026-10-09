@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import re
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -665,6 +666,31 @@ def _callee_names_bound_to_candidate(
     )
 
 
+def _callee_names_bound_to_path(
+    path: str,
+    *,
+    refs: frozenset[tuple[str, str]],
+    bare_refs: frozenset[tuple[str, str]],
+    module_refs: frozenset[tuple[str, str]],
+    receiver_bindings: dict[str, frozenset[_ModuleTarget]],
+    bare_bindings: dict[str, frozenset[_ModuleTarget]],
+    call_site: str,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """``(qualified, bare)`` callee names whose import binding admits ``path``.
+
+    Applied to a changed path to pick its callees, and again to that path's
+    rename target so a move is only evidence while the moved definition is
+    still reachable through the same binding (PRRT_kwDOSJAM6s6q-L4B).
+    """
+    qualified = _callee_names_bound_to_candidate(
+        refs - module_refs, receiver_bindings, path, call_site=call_site
+    )
+    bare = _callee_names_bound_to_candidate(
+        bare_refs, bare_bindings, path, call_site=call_site
+    ) | _callee_names_bound_to_candidate(module_refs, receiver_bindings, path, call_site=call_site)
+    return qualified, bare
+
+
 def _definition_is_reachable_from_module_scope(
     file_text: str,
     all_spans: list[tuple[str, int, int, int]],
@@ -960,7 +986,10 @@ async def _commit_range_changes_callee_definition(
     the imported module's same-named definition (PRRT_kwDOSJAM6s6q9WnX).
     A candidate that the range renamed is diffed against its
     rename target too, so a pure move of the callee's file is not mistaken for a
-    change to its body. An overlap is accepted only when *that* callee is still
+    change to its body; that target is held to the same import binding the old
+    path satisfied, so a move *out* of the module the unchanged caller imports
+    fails closed instead of reading a now-broken import as a fix
+    (PRRT_kwDOSJAM6s6q-L4B). An overlap is accepted only when *that* callee is still
     reachable at ``right``, so a correction that deletes the definition — or its
     whole file — is not read as a fix of a caller that still calls it, and a
     surviving sibling callee from the same module does not stand in for it
@@ -1016,15 +1045,28 @@ async def _commit_range_changes_callee_definition(
     # keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
     module_receivers = _module_bound_receiver_names(item_text, path=normalized_item)
     module_refs = frozenset(ref for ref in names if ref[0] in module_receivers)
+    bound_to = partial(
+        _callee_names_bound_to_path,
+        refs=names,
+        bare_refs=bare_names,
+        module_refs=module_refs,
+        receiver_bindings=receiver_bindings,
+        bare_bindings=bare_bindings,
+        call_site=normalized_item,
+    )
     for candidate in candidates:
-        candidate_names = _callee_names_bound_to_candidate(
-            names - module_refs, receiver_bindings, candidate, call_site=normalized_item
-        )
-        candidate_bare = _callee_names_bound_to_candidate(
-            bare_names, bare_bindings, candidate, call_site=normalized_item
-        ) | _callee_names_bound_to_candidate(
-            module_refs, receiver_bindings, candidate, call_site=normalized_item
-        )
+        candidate_names, candidate_bare = bound_to(candidate)
+        rename_target = rename_map.get(candidate)
+        if rename_target is not None and rename_target != candidate:
+            # A move that carries the callee out of the module the *unchanged*
+            # caller's import binds leaves that import resolving to nothing, so
+            # following the rename target would read a broken call site as
+            # fixed. The target is held to the same binding that admitted the
+            # old path, and fails closed when it no longer satisfies it
+            # (PRRT_kwDOSJAM6s6q-L4B).
+            moved_names, moved_bare = bound_to(rename_target)
+            candidate_names &= moved_names
+            candidate_bare &= moved_bare
         if not (candidate_names or candidate_bare):
             continue
         candidate_text = await _path_text_at_ref(
