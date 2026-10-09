@@ -340,6 +340,15 @@ def test_contiguous_decorators_belong_to_the_definition_span() -> None:
 
 
 @pytest.mark.unit
+def test_a_decorator_stack_at_the_top_of_the_file_starts_the_span() -> None:
+    """The walk up the stack stops at the first line without running past it."""
+    text = "@audit\ndef record_ready_queue_depth(payload):\n    return None\n"
+    assert cross_file._importable_definition_spans_for_names(
+        text, frozenset({"record_ready_queue_depth"}), path=_CALLEE_MODULE
+    ) == [(1, 3)]
+
+
+@pytest.mark.unit
 def test_statements_above_an_undecorated_definition_stay_outside_the_span() -> None:
     """Only decorators extend the head: ordinary code above it is not the callee."""
     text = "VALUE = compute(\n    1,\n)\ndef record_ready_queue_depth(payload):\n    return VALUE\n"
@@ -392,6 +401,56 @@ async def test_a_decorator_only_change_to_the_callee_is_evidence() -> None:
     )
 
     assert await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_decorator_added_above_the_callee_is_evidence() -> None:
+    """Attaching a decorator to a previously bare callee changes its definition.
+
+    A pure insert is anchored *after* its old-side line, so adding
+    ``@retry(...)`` directly above the head reports the line before the span
+    start and no hunk overlaps the span (PRRT_kwDOSJAM6s6q791u).
+    """
+    callee = "GAUGE = None\n\n\ndef record_ready_queue_depth(payload):\n    return GAUGE\n"
+    probe = _cross_package_probe(
+        callee_text=callee,
+        diff=(f"--- a/{_CALLEE_MODULE}\n+++ b/{_CALLEE_MODULE}\n@@ -3,0 +4 @@\n+@retry(times=3)\n"),
+    )
+
+    assert await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_plain_statement_added_above_the_callee_is_not_evidence() -> None:
+    """The insert rule stays decorator-only: unrelated code above the head is not the callee."""
+    callee = "GAUGE = None\n\n\ndef record_ready_queue_depth(payload):\n    return GAUGE\n"
+    probe = _cross_package_probe(
+        callee_text=callee,
+        diff=(
+            f"--- a/{_CALLEE_MODULE}\n+++ b/{_CALLEE_MODULE}\n@@ -3,0 +4 @@\n+OTHER = compute()\n"
+        ),
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_decorated_helper_inserted_above_the_callee_is_not_evidence() -> None:
+    """An inserted definition of its own is a new neighbour, not a change to the callee."""
+    callee = "GAUGE = None\n\n\ndef record_ready_queue_depth(payload):\n    return GAUGE\n"
+    probe = _cross_package_probe(
+        callee_text=callee,
+        diff=(
+            f"--- a/{_CALLEE_MODULE}\n"
+            f"+++ b/{_CALLEE_MODULE}\n"
+            "@@ -3,0 +4,3 @@\n"
+            "+@audit\n"
+            "+def _unrelated_helper():\n"
+            "+    return None\n"
+        ),
+    )
+
+    assert not await _probe(probe)
 
 
 @pytest.mark.unit

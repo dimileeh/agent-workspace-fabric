@@ -26,6 +26,7 @@ from typing import Any, cast
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _DECORATOR_BASENAME_RE,
+    _ENCLOSING_DEFINITION_RE,
     _definition_head_is_assignment,
     _definition_is_nested_in_other,
     _definition_span_is_class,
@@ -299,6 +300,31 @@ def _definition_span_start_with_decorators(file_text: str, start: int) -> int:
     return extended
 
 
+def _diff_adds_decorators_above_span(diff_text: str, start: int) -> bool:
+    """True when the range attaches a new decorator stack directly above ``start``.
+
+    A unified diff anchors a pure insert *after* its old-side line, so decorating
+    a previously bare callee — adding ``@retry(...)`` / ``@staticmethod`` — reports
+    ``start - 1`` and overlaps no line of the definition span, even though the
+    inserted lines become part of that definition (PRRT_kwDOSJAM6s6q791u).
+    Accepted only when the insert carries a decorator and no definition head of
+    its own, so inserting an unrelated function above the callee is still not
+    evidence about the callee.
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _iter_unified_diff_old_hunks,
+    )
+
+    for old_start, old_count, added_lines in _iter_unified_diff_old_hunks(diff_text):
+        if old_count != 0 or old_start != start - 1:
+            continue
+        if any(_ENCLOSING_DEFINITION_RE.match(line) for line in added_lines):
+            continue
+        if any(_DECORATOR_BASENAME_RE.match(line) for line in added_lines):
+            return True
+    return False
+
+
 def _importable_definition_spans_for_names(
     file_text: str,
     names: frozenset[str],
@@ -513,5 +539,7 @@ async def _commit_range_changes_callee_definition(
             continue
         for start, end in spans:
             if _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=candidate_text):
+                return True
+            if _diff_adds_decorators_above_span(diff_text, start):
                 return True
     return False
