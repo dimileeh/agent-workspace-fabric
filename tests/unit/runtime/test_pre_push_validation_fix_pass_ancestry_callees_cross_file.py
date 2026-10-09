@@ -1377,6 +1377,28 @@ def test_an_import_repeated_for_the_same_module_still_binds_it() -> None:
 
 
 @pytest.mark.unit
+def test_a_dotted_plain_import_does_not_rebind_a_same_named_bare_callee() -> None:
+    """The receiver reader's last-segment binding is deliberately not a bare one.
+
+    ``import vendor.metrics`` binds ``vendor``; ``_plain_import_module_paths``
+    keys it under ``metrics`` because that is the token a *qualified* call site
+    writes ahead of the callee (``vendor.metrics.record()``). Feeding that
+    receiver-shaped approximation into the bare-name guard as a second binding
+    form — the symmetric reading of PRRT_kwDOSJAM6s6q9Xo3, which holds the two
+    forms of one path apart for *receivers* — would fail a bare ``metrics(...)``
+    closed over a statement that never rebinds it and re-park the #1019 fixes,
+    so the bare rule stays a ``from`` import reader.
+    """
+    text = "from pkg.obs import metrics\nimport vendor.metrics\n"
+    assert cross_file._plain_import_module_paths(text, path=_CALLER) == {
+        "metrics": frozenset({"vendor/metrics"})
+    }
+    assert cross_file._bare_name_import_module_targets(text, path=_CALLER) == {
+        "metrics": frozenset({("pkg/obs", False)})
+    }
+
+
+@pytest.mark.unit
 async def test_a_bare_callee_realiased_within_one_module_fails_closed() -> None:
     """Rebinding inside one module is still a rebinding, so it fails closed.
 
