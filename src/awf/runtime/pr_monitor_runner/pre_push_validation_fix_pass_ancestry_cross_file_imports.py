@@ -39,6 +39,12 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebindi
 # callee in any other language keeps the name-only rule.
 _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 
+# A Python identifier's first character: a word character that is not a digit,
+# which is the ASCII ``[A-Za-z_]`` plus every Unicode letter Python admits.
+# ``\w`` already carries the rest of the name, so holding only the first
+# character to ASCII is what would drop a Unicode module head.
+_IDENTIFIER_START = r"[^\W\d]"
+
 # ``from pkg.mod import a, b as c`` — absolute targets. A plain ``import
 # pkg.mod`` binds ``pkg`` rather than the callee, so it narrows no *bare*
 # candidate path and is not matched here; relative targets are read below, and
@@ -51,9 +57,14 @@ _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 # around a dotted name's separators and between a relative head's leading dots,
 # which ``_dotted_name_without_whitespace`` closes back up: ``from pkg . mod
 # import record`` is a real head too, and held to adjacency it matches nothing
-# and keeps that same name-only rule (PRRT_kwDOSJAM6s6rCLc7).
+# and keeps that same name-only rule (PRRT_kwDOSJAM6s6rCLc7). A module name
+# starts with any Unicode identifier character, so the head opens on
+# ``_IDENTIFIER_START`` rather than on ASCII letters: held to ASCII, the real
+# head ``from пакет.real import record`` matches nothing and keeps that same
+# name-only rule as well (PRRT_kwDOSJAM6s6rCPon).
 _ABSOLUTE_FROM_IMPORT_RE = re.compile(
-    r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:[ \t]*\.[ \t]*\w+)*)[ \t]+import(?:[ \t]+|(?=\())(.+)$"
+    rf"^[ \t]*from[ \t]+({_IDENTIFIER_START}\w*(?:[ \t]*\.[ \t]*\w+)*)"
+    r"[ \t]+import(?:[ \t]+|(?=\())(.+)$"
 )
 
 # ``from .mod import x`` / ``from ..pkg.mod import x`` / ``from . import x`` —
@@ -68,7 +79,11 @@ _RELATIVE_FROM_IMPORT_RE = re.compile(
 # module, which is the receiver shape ``pkg.mod.record(...)`` and
 # ``alias.record(...)`` call through, so it does narrow a *qualified* callee.
 _PLAIN_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+(.+)$")
-_DOTTED_MODULE_RE = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
+# Opened on ``_IDENTIFIER_START`` for the same reason the ``from`` head is: held
+# to ASCII, ``import пакет.real`` matches no module name, so the piece is
+# skipped, the receiver binds nothing and keeps the name-only rule that accepts
+# an unrelated same-named definition in another package (PRRT_kwDOSJAM6s6rCPon).
+_DOTTED_MODULE_RE = re.compile(rf"{_IDENTIFIER_START}\w*(?:\.\w+)*")
 
 # ``(module_path, exact, enclosed_by)``: a module path a name is bound to,
 # whether the match is pinned to that module's own file, and the symbol that

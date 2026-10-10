@@ -135,3 +135,56 @@ async def test_callee_imported_with_whitespace_around_dots_fails_closed() -> Non
     )
 
     assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+def test_import_heads_bind_unicode_module_names() -> None:
+    """A module name may start with any Unicode identifier character.
+
+    ``from пакет.real import record`` is valid Python, so the head has to
+    record the binding. Held to an ASCII-only first character it matches
+    nothing, ``record`` binds to no module and keeps the name-only rule, so a
+    correction to an unrelated same-named definition in another package
+    resolves the thread (PRRT_kwDOSJAM6s6rCPon). The plain form binds a
+    receiver on the same identifier rule.
+    """
+    assert cross_file._bare_name_import_module_paths(
+        "from пакет.real import record\nfrom café . mod import alpha as beta\n",
+        path="src/pkg/caller.py",
+    ) == {
+        "record": frozenset({"пакет/real"}),
+        "beta": frozenset({"café/mod"}),
+    }
+    assert cross_file._plain_import_module_paths(
+        "import пакет.real\nimport μονάδα.mod as m\n",
+        path="src/pkg/caller.py",
+    ) == {
+        "real": frozenset({"пакет/real"}),
+        "пакет": frozenset({"пакет"}),
+        "m": frozenset({"μονάδα/mod"}),
+    }
+    # A digit cannot start an identifier, so such a head is still not read.
+    assert (
+        cross_file._bare_name_import_module_paths(
+            "from 2pkg.mod import record\n", path="src/pkg/caller.py"
+        )
+        == {}
+    )
+    assert (
+        cross_file._plain_import_module_paths("import 2pkg.mod\n", path="src/pkg/caller.py") == {}
+    )
+
+
+@pytest.mark.unit
+async def test_callee_imported_from_unicode_module_fails_closed() -> None:
+    """The Unicode-named head binds its own module, so another package is not evidence."""
+    caller = (
+        "from пакет_b.observability.execution_platform_metrics import"
+        " record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=5)
