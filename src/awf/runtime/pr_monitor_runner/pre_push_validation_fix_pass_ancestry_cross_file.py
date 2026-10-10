@@ -30,6 +30,7 @@ from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _DECORATOR_BASENAME_RE,
     _ENCLOSING_DEFINITION_RE,
+    _definition_binding_scope,
     _definition_head_is_assignment,
     _definition_head_scan_lines,
     _definition_is_nested_in_other,
@@ -966,36 +967,40 @@ def _diff_adds_decorators_above_span(diff_text: str, start: int) -> bool:
     return False
 
 
-def _effective_module_scope_head_starts(
-    collected: list[tuple[str, int, int, bool, tuple[int, int]]],
-) -> dict[str, int]:
-    """The module-scope head each collected name is provably bound to.
+def _effective_scope_head_starts(
+    collected: list[tuple[str, int, int, tuple[int, int], tuple[int, int]]],
+) -> dict[tuple[int, str], int]:
+    """The head each collected name is provably bound to, within its own scope.
 
-    "Last head wins" holds because the module body executes its heads in
-    textual order — but an *indented* head runs only when its enclosing block
-    does, so a name defined in mutually exclusive branches
-    (``if sys.platform == "win32": def validate(...)`` / ``else: def
-    validate(...)``) is bound by the branch taken, not by textual order.
-    Crediting a correction confined to the textually later head would mark the
-    feedback fixed while the callable actually imported on the running platform
-    stays untouched — and the survival check would find that same inactive
-    head — so a name with more than one head whose last head is conditional is
-    omitted here and fails closed in both checks (PRRT_kwDOSJAM6s6q-6LP).
-    A lone head stays effective: conditional or not, it is the only binding the
-    call site could reach. A last head at module indent also stays effective:
-    it rebinds the name after any guarded head above it.
+    "Last head wins" holds because a module or class body executes its heads in
+    textual order — but a head indented deeper than that body runs only when
+    its enclosing block does, so a name defined in mutually exclusive branches
+    (``if sys.platform == "win32": def validate(...)`` / ``else:``) is bound by
+    the branch taken, not by textual order. Crediting a correction confined to
+    the textually later head would mark the feedback fixed while the callable
+    actually imported stays untouched — and the survival check would find that
+    same inactive head — so a name with more than one head whose last head is
+    conditional is omitted here and fails closed in both checks
+    (PRRT_kwDOSJAM6s6q-6LP). A lone head stays effective (conditional or not,
+    it is the only binding the call site could reach), as does a last head at
+    its scope's body indent, which rebinds the name after any guarded head.
+
+    Heads group by the scope that binds them, so a class member folds against
+    that same class's other definitions of the name — the later ``def`` is the
+    only attribute a receiver reaches — and never against a same-named method
+    of a *different* class, a distinct attribute (PRRT_kwDOSJAM6s6q_M0o).
     """
-    heads: dict[str, list[tuple[int, int]]] = {}
-    for name, start, indent, nested, _span in collected:
-        if nested:
-            continue
-        heads.setdefault(name, []).append((start, indent))
-    effective: dict[str, int] = {}
-    for name, name_heads in heads.items():
+    heads: dict[tuple[int, str], list[tuple[int, int]]] = {}
+    body_indents: dict[int, int] = {}
+    for name, start, indent, (scope_start, body_indent), _span in collected:
+        heads.setdefault((scope_start, name), []).append((start, indent))
+        body_indents[scope_start] = body_indent
+    effective: dict[tuple[int, str], int] = {}
+    for key, name_heads in heads.items():
         last_start, last_indent = max(name_heads)
-        if len(name_heads) > 1 and last_indent > 0:
+        if len(name_heads) > 1 and last_indent > body_indents[key[0]]:
             continue
-        effective[name] = last_start
+        effective[key] = last_start
     return effective
 
 
@@ -1037,30 +1042,27 @@ def _importable_definition_spans_for_names(
     Each span starts at the head's topmost contiguous decorator, so a correction
     that only swaps a decorator still overlaps the callee's definition.
 
-    When the file binds one name at module scope more than once, only the last
-    of those definitions is returned: the module body binds the name to the
+    When one scope binds one name more than once, only the last of those
+    definitions is returned: a module or class body binds the name to the
     definition it executes last, so an earlier same-named definition is dead
     code the importing call site cannot reach, and a correction confined to it
     changes nothing that call does (PRRT_kwDOSJAM6s6q9Wnf). This is the rule
     attempt 0's ``_resolve_callee_definition_span`` already applies in-file.
     Duplicates whose effective head that order cannot prove are withheld
-    entirely — see ``_effective_module_scope_head_starts``.
-    Members of module-level classes are *not* folded this way — a same-named
-    method of a different class is a distinct attribute, which an instance
-    receiver may well be calling, not a shadowing pair.
+    entirely, and the fold is per binding scope so same-named members of
+    distinct classes stay distinct — see ``_effective_scope_head_starts``.
     """
     if not (names or bare_names) or not file_text:
         return []
     all_spans = _iter_definition_spans(file_text, path=path)
     js_ts = _path_allows_js_private_fields(path)
-    collected: list[tuple[str, int, int, bool, tuple[int, int]]] = []
+    collected: list[tuple[str, int, int, tuple[int, int], tuple[int, int]]] = []
     for name, start, end, indent in all_spans:
         qualified = name in names
         if not qualified and name not in bare_names:
             continue
         if indent > 0 and (js_ts or _definition_head_is_assignment(file_text, start)):
             continue
-        nested = _definition_is_nested_in_other(all_spans, start=start, indent=indent)
         if qualified:
             if not _definition_is_reachable_from_module_scope(
                 file_text, all_spans, start=start, indent=indent
@@ -1071,15 +1073,16 @@ def _importable_definition_spans_for_names(
                 all_spans, pinned, start=start, indent=indent
             ):
                 continue
-        elif nested:
+        elif _definition_is_nested_in_other(all_spans, start=start, indent=indent):
             continue
         span = (_definition_span_start_with_decorators(file_text, start), end)
-        collected.append((name, start, indent, nested, span))
-    effective = _effective_module_scope_head_starts(collected)
+        scope = _definition_binding_scope(file_text, all_spans, start=start, indent=indent)
+        collected.append((name, start, indent, scope, span))
+    effective = _effective_scope_head_starts(collected)
     return [
         span
-        for name, start, _indent, nested, span in collected
-        if nested or effective.get(name) == start
+        for name, start, _indent, (scope_start, _body_indent), span in collected
+        if effective.get((scope_start, name)) == start
     ]
 
 

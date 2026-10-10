@@ -612,3 +612,127 @@ async def test_a_change_to_one_branch_of_a_duplicate_definition_is_not_evidence(
     )
 
     assert not await _probe(probe)
+
+
+# One module-level class defining the same method twice: the class body binds
+# the attribute to the later ``def``, so the earlier one is dead code no
+# receiver reaches (PRRT_kwDOSJAM6s6q_M0o).
+_DUPLICATE_METHOD_CALLEE_TEXT = (
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return None\n"
+    "\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return len(payload.entries)\n"
+)
+
+# The same method name declared twice inside the class, in mutually exclusive
+# branches: which one the attribute holds depends on the branch taken.
+_CONDITIONAL_METHOD_CALLEE_TEXT = (
+    "import sys\n"
+    "\n"
+    "\n"
+    "class Collector:\n"
+    "\n"
+    '    if sys.platform == "win32":\n'
+    "\n"
+    "        def record_ready_queue_depth(self, payload):\n"
+    "            return payload.windows_depth()\n"
+    "\n"
+    "    else:\n"
+    "\n"
+    "        def record_ready_queue_depth(self, payload):\n"
+    "            return len(payload.entries)\n"
+)
+
+_DUPLICATE_METHOD_CALLER_TEXT = (
+    "from pkg_b.observability.execution_platform_metrics import Collector\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    Collector.record_ready_queue_depth(payload)\n"
+)
+
+# A body-only change inside the dead first method's span (old line 3).
+_DEAD_METHOD_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -3 +3 @@\n"
+    "-        return None\n"
+    "+        return 0\n"
+)
+
+# The same change inside the effective method's span (old line 6).
+_EFFECTIVE_METHOD_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -6 +6 @@\n"
+    "-        return len(payload.entries)\n"
+    "+        return payload.ready_depth()\n"
+)
+
+
+def _duplicate_method_probe(*, diff: str) -> _Probe:
+    return _Probe(
+        texts={
+            (_LEFT, _CALLER): _DUPLICATE_METHOD_CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _DUPLICATE_METHOD_CALLEE_TEXT,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: diff},
+    )
+
+
+@pytest.mark.unit
+def test_only_the_effective_class_member_definition_is_importable() -> None:
+    """A class that defines one method twice binds the later ``def``.
+
+    The class body executes its heads in textual order just as a module body
+    does, so an earlier same-named method is dead code the attribute never
+    holds and a correction confined to it changes nothing the receiver calls
+    (PRRT_kwDOSJAM6s6q_M0o). Holds whether or not the receiver's import pins
+    the enclosing class.
+    """
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_METHOD_CALLEE_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(5, 6)]
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_METHOD_CALLEE_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+        enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+    ) == [(5, 6)]
+
+
+@pytest.mark.unit
+def test_conditionally_duplicated_class_members_fail_closed() -> None:
+    """Branch-guarded members leave no provable effective method.
+
+    A head indented deeper than its class body runs only when its enclosing
+    block does, so the textually last of two guarded ``def``s is not provably
+    the attribute the receiver reaches; every span of that name in that class
+    is withheld (PRRT_kwDOSJAM6s6q_M0o).
+    """
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            _CONDITIONAL_METHOD_CALLEE_TEXT,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_dead_duplicate_class_member_is_not_evidence() -> None:
+    """End to end: editing the shadowed method leaves the called one untouched."""
+    assert not await _probe(_duplicate_method_probe(diff=_DEAD_METHOD_DIFF), item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_change_to_the_effective_duplicate_class_member_is_evidence() -> None:
+    """The paired accept: the surviving last method is the real callee."""
+    assert await _probe(_duplicate_method_probe(diff=_EFFECTIVE_METHOD_DIFF), item_line=5)

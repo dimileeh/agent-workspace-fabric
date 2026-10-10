@@ -501,6 +501,39 @@ def _definition_is_nested_in_other(
     return any(s < start <= e and i < indent for _n, s, e, i in all_spans)
 
 
+def _definition_binding_scope(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    start: int,
+    indent: int,
+) -> tuple[int, int]:
+    """``(scope_start, body_indent)`` of the scope whose body binds ``start``.
+
+    ``scope_start`` is the innermost definition head enclosing ``start`` — the
+    class whose attribute a method becomes — and ``0`` for a module-scope head.
+    ``body_indent`` is the indent that scope's own statements sit at (``0`` at
+    module scope), so a head deeper than it is guarded by some intervening
+    block rather than run unconditionally with the scope's body. Taking the
+    minimum over the body keeps that reading conservative: an unusual
+    continuation line only ever makes a head look guarded, never unguarded.
+    """
+    enclosing = [
+        (span_indent, span_start, span_end)
+        for _name, span_start, span_end, span_indent in all_spans
+        if span_start < start <= span_end and span_indent < indent
+    ]
+    if not enclosing:
+        return (0, 0)
+    _scope_indent, scope_start, scope_end = max(enclosing)
+    body = [
+        _leading_indent(line)
+        for line in file_text.splitlines()[scope_start:scope_end]
+        if line.strip() and not line.lstrip().startswith(("#", "//"))
+    ]
+    return (scope_start, min(body, default=indent))
+
+
 def _definition_head_is_assignment(file_text: str, start_line: int) -> bool:
     """True when the definition head is an assignment (``const``/``let``/``var``/bare).
 
