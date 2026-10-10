@@ -165,6 +165,35 @@ def test_loop_context_and_import_targets_of_the_anchored_scope_are_read() -> Non
 
 
 @pytest.mark.unit
+def test_match_case_capture_targets_of_the_anchored_scope_are_read() -> None:
+    """A ``case`` capture binds the name without ever storing an ``ast.Name``.
+
+    Capture, star and mapping-rest targets are carried on the pattern nodes
+    themselves, so a reader that only looks for ``Store`` names would leave a
+    ``case record:`` holding its import and let a correction to the imported
+    definition satisfy a call that actually reaches the capture
+    (PRRT_kwDOSJAM6s6q-N1B). The wildcard ``_`` binds nothing and is not
+    reported.
+    """
+    text = (
+        "def refresh(event):\n"
+        "    match event:\n"
+        "        case [captured, *starred]:\n"
+        "            return captured, starred\n"
+        '        case {"kind": 1, **rest}:\n'
+        "            return rest\n"
+        "        case [1] as aliased:\n"
+        "            return aliased\n"
+        "        case _:\n"
+        "            return None\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 10, path=_CALLER) == frozenset(
+        {"event", "captured", "starred", "rest", "aliased"}
+    )
+
+
+@pytest.mark.unit
 def test_a_nested_definition_name_shadows_but_the_scope_s_own_name_does_not() -> None:
     """A nested ``def`` / ``class`` binds its name in the scope that holds it.
 
@@ -330,6 +359,33 @@ def test_module_scope_rebindings_are_read_but_import_aliases_are_not() -> None:
             "refresh",
             "Collector",
         }
+    )
+
+
+@pytest.mark.unit
+def test_module_scope_match_case_captures_are_read() -> None:
+    """A module-level ``case`` capture rebinds the import just as an assignment does.
+
+    ``match`` at module scope is module scope, and its capture targets are
+    pattern-node names rather than ``Store`` names, so they have to be read
+    explicitly or the rebinding goes unnoticed (PRRT_kwDOSJAM6s6q-N1B).
+    """
+    text = (
+        "from pkg import record\n"
+        "\n"
+        "match SETTINGS:\n"
+        "    case [record, *tail]:\n"
+        "        pass\n"
+        '    case {"kind": 1, **leftover}:\n'
+        "        pass\n"
+        "    case {} as whole:\n"
+        "        pass\n"
+        "    case _:\n"
+        "        pass\n"
+    )
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset(
+        {"record", "tail", "leftover", "whole"}
     )
 
 

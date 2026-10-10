@@ -476,7 +476,12 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
     Python locals are function-wide — a name assigned anywhere in a function is
     local throughout it — so the whole subtree is read rather than only the
     lines above the anchor. Parameters, assignment / loop / ``with`` targets,
-    caught exceptions, function-local imports and nested definitions all count.
+    caught exceptions, function-local imports and nested definitions all count,
+    and so do ``match`` / ``case`` capture, star and mapping-rest targets: those
+    carry their name on the pattern node rather than storing an ``ast.Name``, so
+    a reader that watched only ``Store`` names would leave a ``case record:``
+    still holding its import (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds
+    nothing and is skipped.
     Names a *nested* scope binds come out with them, which can only make a name
     fail closed. ``scope``'s own name does not: a definition's name is bound in
     the scope that *holds* it, so a method named like an imported helper does
@@ -492,8 +497,10 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
                 yield node.name
         elif isinstance(node, ast.alias):
             yield node.asname or node.name.partition(".")[0]
-        elif isinstance(node, ast.ExceptHandler) and node.name:
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             yield node.name
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            yield node.rest
 
 
 def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> frozenset[str]:
@@ -564,7 +571,10 @@ def _module_scope_rebound_names(file_text: str, *, path: str) -> frozenset[str]:
     are not descended into: their bindings are locals and class attributes, and
     the function-scope ones are ``_locally_rebound_names_at_line``'s subject;
     only a ``global`` declaration inside them reaches back out. A top-level
-    ``def`` / ``class`` of the name does shadow the import and is collected.
+    ``def`` / ``class`` of the name does shadow the import and is collected, as
+    do a module-level ``match`` statement's capture, star and mapping-rest
+    targets, whose names live on the pattern nodes instead of on an ``ast.Name``
+    store (PRRT_kwDOSJAM6s6q-N1B).
     Text this reader cannot parse yields nothing, matching the companion reader
     rather than failing every import-bound callee closed on a parse error.
     """
@@ -586,8 +596,10 @@ def _module_scope_rebound_names(file_text: str, *, path: str) -> frozenset[str]:
             continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             bound.add(node.id)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
         pending.extend(ast.iter_child_nodes(node))
     return frozenset(bound)
 
