@@ -18,6 +18,8 @@ from __future__ import annotations
 import ast
 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
+    _ANCHORED_SCOPES,
+    _FUNCTION_SCOPES,
     _definition_binding_scope,
     _leading_indent,
     _plain_assignment_rebound_scope_names,
@@ -190,3 +192,63 @@ def _without_shadowed_enclosing_definitions(
         if effective.get((scope_start, name)) != start or (scope_start, name) in rebound
     }
     return [entry for entry in collected if not enclosing[entry[1]] & shadowed]
+
+
+def _scope_own_import_names(scope: ast.AST) -> frozenset[str]:
+    """Names ``scope``'s own body binds with an ``import`` statement.
+
+    Child scopes are not descended into: a nested function's import is its own
+    local and a class body's is an attribute, neither of which makes the name
+    local to ``scope``. Callers read every scope enclosing the line, so a
+    nested function still contributes its own imports for the lines inside it.
+    A name the body declares ``global`` or ``nonlocal`` is dropped — the import
+    then writes that enclosing binding rather than a local one.
+    """
+    imported: set[str] = set()
+    declared: set[str] = set()
+    pending: list[ast.AST] = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (*_ANCHORED_SCOPES, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.alias):
+            imported.add(node.asname or node.name.partition(".")[0])
+            continue
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+    return frozenset(imported - declared)
+
+
+def _function_local_import_names_at_line(file_text: str, line: int) -> frozenset[str]:
+    """Names a function scope enclosing ``line`` binds with its own ``import``.
+
+    A lazy ``def run(): from pkg.mod import validate; validate()`` makes
+    ``validate`` local to ``run`` for the whole body, so a *module*-scope
+    rebinding of the global — a top-level ``def validate`` beside it, say —
+    cannot reach that call and must not hold the import to
+    ``_AMBIGUOUS_IMPORT_TARGET`` and park a correction confined to the imported
+    definition as ``needs_human`` (PRRT_kwDOSJAM6s6rAhm2). Only
+    ``_module_scope_rebound_names``'s verdict is softened this way: a scope
+    that binds the name some *other* way as well is still reported by
+    ``_locally_rebound_names_at_line``, and a second import of it still fails
+    closed through the import readers' own rebinding guard.
+
+    Class bodies are not read, by ``_scope_own_import_names`` — they carry no
+    function-wide local rule, so a call executing directly in one before the
+    import line still reaches the global and keeps failing closed. Text this
+    reader cannot parse yields nothing, which leaves the module-scope reader's
+    names standing rather than crediting an import that may not be there.
+    """
+    try:
+        tree = ast.parse(file_text)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    return frozenset(
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, _FUNCTION_SCOPES)
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+        for name in _scope_own_import_names(node)
+    )

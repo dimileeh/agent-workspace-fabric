@@ -17,6 +17,9 @@ import pytest
 from awf.runtime.pr_monitor_runner import (
     pre_push_validation_fix_pass_ancestry_cross_file as cross_file,
 )
+from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass_ancestry_rebinding as rebinding,
+)
 from tests.unit.runtime._pre_push_ancestry_cross_file_helpers import (
     _CALLEE_MODULE,
     _CALLEE_TEXT,
@@ -388,6 +391,98 @@ async def test_a_module_level_assignment_shadowing_a_receiver_fails_closed() -> 
     probe = _receiver_probe(caller_text=_MODULE_RECEIVER_SHADOW_TEXT)
 
     assert not await _probe(probe, item_line=7)
+
+
+# The module body defines the callee *and* the anchored function imports it
+# lazily: the local import makes the name local to ``refresh`` for the whole
+# body, so the module-level ``def`` is unreachable from the call on line 9.
+_LOCAL_IMPORT_OVER_MODULE_DEF_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "def refresh(pool):\n"
+    f"    {_IMPORT_LINE}"
+    "\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+)
+
+# The import sits in a *class* body instead, which has no function-wide local
+# rule, so a call executing directly in that body before the import line still
+# reaches the module-level definition and has to keep failing closed.
+_CLASS_BODY_IMPORT_OVER_MODULE_DEF_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "class Refresher:\n"
+    f"    {_IMPORT_LINE}"
+    "\n"
+    "    depth = record_ready_queue_depth(0)\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_lazy_import_outranks_a_module_level_definition() -> None:
+    """A function-local import is not invalidated by the module's own binding.
+
+    ``def record(...)`` at module level followed by ``def refresh(): from
+    pkg_b... import record; record()`` calls the *imported* definition — the
+    local import binds the name for the whole of ``refresh`` — so a correction
+    confined to that definition in another package is evidence about this call
+    site and must not park as ``needs_human`` (PRRT_kwDOSJAM6s6rAhm2).
+    """
+    probe = _cross_package_probe(caller_text=_LOCAL_IMPORT_OVER_MODULE_DEF_TEXT)
+
+    assert await _probe(probe, item_line=9)
+
+
+@pytest.mark.unit
+async def test_a_class_body_import_does_not_outrank_a_module_level_definition() -> None:
+    """Only a *function* scope makes its import local for the whole body."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_IMPORT_OVER_MODULE_DEF_TEXT)
+
+    assert not await _probe(probe, item_line=8)
+
+
+@pytest.mark.unit
+def test_function_local_import_names_are_read_for_the_enclosing_scopes() -> None:
+    """Every function scope holding the line contributes its own import names.
+
+    A nested function's import reaches the lines inside it, an enclosing one's
+    reaches them too, and a sibling scope's does not. A class body's import is
+    an attribute rather than a local, and a name the scope declares ``global``
+    is written back to the module binding instead of bound locally, so neither
+    is reported.
+    """
+    text = (
+        "def outer():\n"
+        "    import outer_bound\n"
+        "\n"
+        "    class Holder:\n"
+        "        import class_bound\n"
+        "\n"
+        "    def inner():\n"
+        "        global declared\n"
+        "        import inner_bound, declared\n"
+        "        from pkg.mod import aliased as renamed\n"
+        "        return inner_bound\n"
+        "\n"
+        "\n"
+        "def sibling():\n"
+        "    import sibling_bound\n"
+    )
+
+    assert rebinding._function_local_import_names_at_line(text, 11) == frozenset(
+        {"outer_bound", "inner_bound", "renamed"}
+    )
+
+
+@pytest.mark.unit
+def test_unparsable_text_reports_no_function_local_imports() -> None:
+    """A reader that cannot parse leaves the module-scope verdict untouched."""
+    assert rebinding._function_local_import_names_at_line("def f(\n", 1) == frozenset()
 
 
 @pytest.mark.unit

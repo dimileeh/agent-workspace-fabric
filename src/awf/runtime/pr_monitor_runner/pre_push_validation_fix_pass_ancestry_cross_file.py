@@ -48,6 +48,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _effective_scope_head_starts,
+    _function_local_import_names_at_line,
     _rebound_scope_names,
     _without_shadowed_enclosing_definitions,
 )
@@ -553,7 +554,10 @@ def _module_scope_rebound_names(file_text: str, *, path: str) -> frozenset[str]:
     they are the binding this gate exists to trust. Function and class bodies
     are not descended into: their bindings are locals and class attributes, and
     the function-scope ones are ``_locally_rebound_names_at_line``'s subject;
-    only a ``global`` declaration inside them reaches back out. A top-level
+    only a ``global`` declaration inside them reaches back out. A name the
+    anchored function imports itself is local for the whole of that body, so
+    the caller drops it from these names — see
+    ``_function_local_import_names_at_line``. A top-level
     ``def`` / ``class`` of the name does shadow the import and is collected, as
     do a module-level ``match`` statement's capture, star and mapping-rest
     targets, whose names live on the pattern nodes instead of on an ``ast.Name``
@@ -1344,9 +1348,13 @@ async def _commit_range_changes_callee_definition(
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
     )
-    rebound = _locally_rebound_names_at_line(
-        item_text, item_line, path=normalized_item
-    ) | _module_scope_rebound_names(item_text, path=normalized_item)
+    # A module-scope rebinding cannot reach a name the anchored function
+    # imports itself: that import binds the name for the whole body, so the
+    # global is unreachable there (PRRT_kwDOSJAM6s6rAhm2).
+    rebound = _locally_rebound_names_at_line(item_text, item_line, path=normalized_item) | (
+        _module_scope_rebound_names(item_text, path=normalized_item)
+        - _function_local_import_names_at_line(item_text, item_line)
+    )
     bound_to = _caller_binding_resolver(
         item_text,
         call_site=normalized_item,
