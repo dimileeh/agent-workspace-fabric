@@ -1207,3 +1207,59 @@ def test_resolve_callee_definition_span_rejects_block_scoped_js_assignment() -> 
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_receiver_chain_segments_report_the_full_dotted_chain() -> None:
+    """A chained receiver carries the whole chain; an unchained one is not reported.
+
+    ``api.metrics.record()`` captures only ``metrics`` as the callee's
+    qualifier, so the chain is what tells the cross-file gate which name the
+    file's imports can bind (PRRT_kwDOSJAM6s6q-6LK).
+    """
+    assert callees._receiver_chain_segments_from_anchor_line("    api.metrics.record(payload)") == {
+        "metrics": ("api", "metrics")
+    }
+    assert callees._receiver_chain_segments_from_anchor_line(
+        "    api?.metrics?.record(payload)"
+    ) == {"metrics": ("api", "metrics")}
+    assert callees._receiver_chain_segments_from_anchor_line("    metrics.record(payload)") == {}
+    assert callees._receiver_chain_segments_from_anchor_line("    record(payload)") == {}
+
+
+@pytest.mark.unit
+def test_a_receiver_read_two_ways_on_one_line_reports_no_chain() -> None:
+    """Two chains, or a chained and an unchained reading, leave the chain unknown."""
+    assert callees._receiver_chain_segments_from_anchor_line(
+        "    a.metrics.record(x) or b.metrics.record(y)"
+    ) == {"metrics": None}
+    assert callees._receiver_chain_segments_from_anchor_line(
+        "    api.metrics.record(x) or metrics.record(y)"
+    ) == {"metrics": None}
+
+
+@pytest.mark.unit
+def test_an_unreadable_receiver_chain_reports_no_chain() -> None:
+    """A chain whose links are not plain identifiers cannot be resolved."""
+    assert callees._receiver_chain_segments_from_anchor_line(
+        "    factory().metrics.record(payload)"
+    ) == {"metrics": None}
+    assert callees._receiver_chain_segments_from_anchor_line(
+        "    items[0].metrics.record(payload)"
+    ) == {"metrics": None}
+
+
+@pytest.mark.unit
+def test_receiver_chain_segments_from_file_line_reads_file_context() -> None:
+    """The file-context reader reattaches a split chain and fails closed off-file."""
+    split = (
+        "def refresh(payload):\n"
+        "    return (\n"
+        "        api.metrics\n"
+        "        .record(payload)\n"
+        "    )\n"
+    )
+    assert callees._receiver_chain_segments_from_file_line(split, 4, path="src/mod.py") == {
+        "metrics": ("api", "metrics")
+    }
+    assert callees._receiver_chain_segments_from_file_line(split, 99, path="src/mod.py") == {}

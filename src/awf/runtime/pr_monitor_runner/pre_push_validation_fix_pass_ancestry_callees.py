@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import functools
 import re
+from collections.abc import Iterator
+from typing import Final
 
 # JS/TS identifiers may include ``$`` (e.g. ``$helper``). Python ``\b`` treats
 # ``$`` as non-word, so ``$helper()`` would otherwise match as bare ``helper``
@@ -95,6 +98,16 @@ _ASSIGNMENT_DEFINITION_HEAD = (
     rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
+# A plain assignment binding simple targets: ``validate = replacement``,
+# ``const validate = replacement``, ``validate: Recorder = replacement``. Its
+# right-hand side carries no definition head of its own — those heads are
+# ``_ASSIGNMENT_DEFINITION_HEAD``'s subject and are read as definitions — so
+# this is the rebinding form definition discovery cannot see.
+_PLAIN_ASSIGNMENT_TARGETS_RE = re.compile(
+    rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?"
+    rf"({_JS_IDENT}(?:[ \t]*,[ \t]*{_JS_IDENT})*)"
+    rf"(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)"
+)
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
     rf"(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
@@ -109,6 +122,13 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     rf"|^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
     rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
+)
+# The dotted prefix before a chained callee's receiver: in
+# ``root.mid.receiver.name()`` group 1 is ``root.mid``, the part of the receiver
+# the callee's immediate qualifier hides. Only simple-identifier links are read,
+# so ``factory().receiver.name()`` leaves the chain unreadable.
+_RECEIVER_CHAIN_PREFIX_RE = re.compile(
+    rf"({_IDENT_BOUNDARY}{_JS_IDENT}(?:\s*\??\.\s*{_JS_IDENT})*)\s*\??\.\s*$"
 )
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 # JS/TS class instance receiver (gated by ``_path_allows_js_private_fields``).
@@ -347,6 +367,58 @@ def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> l
     return scan_lines
 
 
+def _plain_assignment_rebound_scope_names(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    path: str | None,
+    names: frozenset[str],
+    definition_head_starts: frozenset[int],
+) -> set[tuple[int, str]]:
+    """``(scope_start, name)`` pairs a plain assignment rebinds in that scope.
+
+    Definition discovery recognizes only definition *heads*, so a scope that
+    binds a name with ``validate = replacement`` after ``def validate`` leaves
+    the head looking like the name's single effective binding while importing
+    the name actually reaches ``replacement``. Every name a scope rebinds this
+    way is reported so the caller can fail it closed: this lexical reader
+    cannot order the assignment against the head any more than
+    ``_module_scope_rebound_names`` can, and a guarded assignment need not be
+    the binding that runs last (PRRT_kwDOSJAM6s6q_ywa).
+
+    ``definition_head_starts`` are the lines already read as definitions of
+    their own, which the last-head fold orders without help. Only statement
+    positions count — bracket depth is tracked across the file so a keyword
+    argument or a continuation-line parameter default (``validate=None,``) is
+    not read as a binding — and each target is attributed to the scope whose
+    body executes it, so a function-local assignment never shadows a
+    module-level definition.
+    """
+    raw_lines = file_text.splitlines()
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
+    rebound: set[tuple[int, str]] = set()
+    depth = 0
+    for idx, scan in enumerate(scan_lines):
+        at_statement_start = depth == 0
+        opened = scan.count("(") + scan.count("[") + scan.count("{")
+        closed = scan.count(")") + scan.count("]") + scan.count("}")
+        depth = max(0, depth + opened - closed)
+        line = idx + 1
+        if not at_statement_start or line in definition_head_starts:
+            continue
+        match = _PLAIN_ASSIGNMENT_TARGETS_RE.match(scan)
+        if match is None:
+            continue
+        targets = {target.strip() for target in match.group(1).split(",")} & names
+        if not targets:
+            continue
+        scope_start, _body_indent = _definition_binding_scope(
+            file_text, all_spans, start=line, indent=_leading_indent(raw_lines[idx])
+        )
+        rebound.update((scope_start, target) for target in targets)
+    return rebound
+
+
 def _enclosing_definition_identity(
     file_text: str, line: int, *, path: str | None = None
 ) -> tuple[str, int] | None:
@@ -492,6 +564,39 @@ def _definition_is_nested_in_other(
 ) -> bool:
     """True when ``start`` lies in the body of a shallower def/class/arrow."""
     return any(s < start <= e and i < indent for _n, s, e, i in all_spans)
+
+
+def _definition_binding_scope(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    start: int,
+    indent: int,
+) -> tuple[int, int]:
+    """``(scope_start, body_indent)`` of the scope whose body binds ``start``.
+
+    ``scope_start`` is the innermost definition head enclosing ``start`` — the
+    class whose attribute a method becomes — and ``0`` for a module-scope head.
+    ``body_indent`` is the indent that scope's own statements sit at (``0`` at
+    module scope), so a head deeper than it is guarded by some intervening
+    block rather than run unconditionally with the scope's body. Taking the
+    minimum over the body keeps that reading conservative: an unusual
+    continuation line only ever makes a head look guarded, never unguarded.
+    """
+    enclosing = [
+        (span_indent, span_start, span_end)
+        for _name, span_start, span_end, span_indent in all_spans
+        if span_start < start <= span_end and span_indent < indent
+    ]
+    if not enclosing:
+        return (0, 0)
+    _scope_indent, scope_start, scope_end = max(enclosing)
+    body = [
+        _leading_indent(line)
+        for line in file_text.splitlines()[scope_start:scope_end]
+        if line.strip() and not line.lstrip().startswith(("#", "//"))
+    ]
+    return (scope_start, min(body, default=indent))
 
 
 def _definition_head_is_assignment(file_text: str, start_line: int) -> bool:
@@ -1075,12 +1180,16 @@ def _bare_callee_follows_attribute_dot(scan_text: str, match_start: int) -> bool
     return _BARE_CALLEE_AFTER_ATTR_DOT_RE.search(scan_text[:match_start]) is not None
 
 
-def _callee_refs_from_anchor_line(
+def _callee_ref_matches_from_anchor_line(
     anchor_line: str, *, path: str | None = None
-) -> frozenset[tuple[str | None, str]]:
-    """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line."""
+) -> tuple[str, list[re.Match[str]]]:
+    """``(masked_scan_text, matches)`` for the call refs on a review-anchor line.
+
+    Shared by the ref reader and the receiver-chain reader so both see exactly
+    the same calls, and the same masked text their positions index into.
+    """
     if not anchor_line:
-        return frozenset()
+        return "", []
     scan_from = 0
     # A leading def/class/function signature's name is not a callee. Scan from
     # the signature's opening ``(`` so default-expression calls before the
@@ -1090,11 +1199,11 @@ def _callee_refs_from_anchor_line(
     if _ENCLOSING_DEFINITION_RE.match(anchor_line) is not None:
         colon = anchor_line.find(":")
         if colon < 0:
-            return frozenset()
+            return "", []
         open_paren = anchor_line.find("(")
         scan_from = open_paren if 0 <= open_paren < colon else colon + 1
     scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line, path=path)
-    refs: set[tuple[str | None, str]] = set()
+    matches: list[re.Match[str]] = []
     for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
@@ -1104,18 +1213,83 @@ def _callee_refs_from_anchor_line(
         # emit as bare ``helper`` and link an unrelated module ``def helper``.
         if qualifier is None and _bare_callee_follows_attribute_dot(scan_text, match.start()):
             continue
-        # Keep keyword-like receivers (e.g. ``match.helper()``). Erasing them to
-        # a bare name would let an unrelated module-level ``helper`` satisfy
-        # FIXED evidence; non-self/cls/this qualifiers already fail closed at
-        # resolve (``this`` only resolves on JS/TS paths).
-        refs.add((qualifier, name))
-    return frozenset(refs)
+        matches.append(match)
+    return scan_text, matches
+
+
+def _callee_refs_from_anchor_line(
+    anchor_line: str, *, path: str | None = None
+) -> frozenset[tuple[str | None, str]]:
+    """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line.
+
+    Keyword-like receivers are kept (e.g. ``match.helper()``). Erasing them to
+    a bare name would let an unrelated module-level ``helper`` satisfy FIXED
+    evidence; non-self/cls/this qualifiers already fail closed at resolve
+    (``this`` only resolves on JS/TS paths).
+    """
+    _scan_text, matches = _callee_ref_matches_from_anchor_line(anchor_line, path=path)
+    return frozenset((match.group(1), match.group(2)) for match in matches)
+
+
+def _receiver_chain_segments(prefix_text: str) -> tuple[str, ...] | None:
+    """The dotted receiver chain ``prefix_text`` ends with, or None.
+
+    ``?`` cannot appear in an identifier, so dropping it leaves the optional
+    chaining operator as a plain ``.`` separator.
+    """
+    match = _RECEIVER_CHAIN_PREFIX_RE.search(prefix_text)
+    if match is None:
+        return None
+    return tuple(segment.strip() for segment in match.group(1).replace("?", "").split("."))
+
+
+def _receiver_chain_segments_from_anchor_line(
+    anchor_line: str, *, path: str | None = None
+) -> dict[str, tuple[str, ...] | None]:
+    """Receiver chains of the *chained* callees on a review-anchor source line.
+
+    ``_callee_refs_from_anchor_line`` keeps only a callee's immediate
+    qualifier, so ``api.metrics.record()`` reports the receiver as ``metrics``
+    — a name no import binds, which would leave the callee on the name-only
+    rule and let any reachable ``record`` stand in as evidence
+    (PRRT_kwDOSJAM6s6q-6LK). Each chained receiver is mapped to the full dotted
+    chain it is reached through, ``("api", "metrics")`` here, whose first
+    segment is the name an import can bind and whose whole run may itself spell
+    an imported module. The chain is ``None`` when it is not a run of plain
+    identifiers (``factory().metrics.record()``), when the line gives one
+    receiver two different chains, or when the same receiver also appears
+    unchained — readings the caller holds closed instead of guessing.
+    """
+    scan_text, matches = _callee_ref_matches_from_anchor_line(anchor_line, path=path)
+    chained: dict[str, tuple[str, ...] | None] = {}
+    unchained: set[str] = set()
+    for match in matches:
+        qualifier = match.group(1)
+        if qualifier is None:
+            continue
+        if not _bare_callee_follows_attribute_dot(scan_text, match.start(1)):
+            unchained.add(qualifier)
+            continue
+        prefix = _receiver_chain_segments(scan_text[: match.start(1)])
+        chain = None if prefix is None else (*prefix, qualifier)
+        if chained.get(qualifier, chain) != chain:
+            chain = None
+        chained[qualifier] = chain
+    return {
+        qualifier: (None if qualifier in unchained else chain)
+        for qualifier, chain in chained.items()
+    }
 
 
 # Leading ``.`` or ``?.`` after a receiver split onto the prior line.
 _LEADING_DOT_RE = re.compile(r"^([ \t]*)\??\.")
 # Trailing receiver may end with ``.`` or ``?.`` when the call continues below.
-_TRAILING_RECEIVER_RE = re.compile(rf"({_IDENT_BOUNDARY}{_JS_IDENT})\s*(\??\.)?\s*$")
+# The whole dotted chain is captured, not just its last link, so a receiver
+# chain a formatter split across lines still reaches the reader that resolves
+# it to the name an import binds (PRRT_kwDOSJAM6s6q-6LK).
+_TRAILING_RECEIVER_RE = re.compile(
+    rf"({_IDENT_BOUNDARY}{_JS_IDENT}(?:\s*\??\.\s*{_JS_IDENT})*)\s*(\??\.)?\s*$"
+)
 _LEADING_BARE_CALL_RE = re.compile(rf"^([ \t]*)({_JS_IDENT})\s*(?:\?\.)?\s*\(")
 
 
@@ -1161,10 +1335,8 @@ def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -
     return line
 
 
-def _callee_refs_from_file_line(
-    file_text: str, line: int, *, path: str | None = None
-) -> frozenset[tuple[str | None, str]]:
-    """Extract callee refs from ``line`` using preceding file lexical context.
+def _masked_anchor_line(file_text: str, line: int, *, path: str | None = None) -> str | None:
+    """``line``'s masked text with a split receiver reattached, or None.
 
     Masking only the isolated review line loses open multiline string/docstring
     state from earlier lines, so call-shaped decoy text can become FIXED
@@ -1173,18 +1345,42 @@ def _callee_refs_from_file_line(
     attribute calls are not misread as bare names.
     """
     if line < 1 or not file_text:
-        return frozenset()
+        return None
     lines = file_text.splitlines()
     if line > len(lines):
-        return frozenset()
+        return None
     prefix = "\n".join(lines[:line])
     masked_prefix = _mask_comments_and_string_literals_for_callee_scan(prefix, path=path)
     masked_lines = masked_prefix.splitlines()
     # Masking preserves newlines, so line counts stay aligned with ``lines``.
     if line > len(masked_lines):  # pragma: no cover
+        return None
+    return _anchor_line_with_split_receiver(masked_lines, line - 1)
+
+
+def _callee_refs_from_file_line(
+    file_text: str, line: int, *, path: str | None = None
+) -> frozenset[tuple[str | None, str]]:
+    """Extract callee refs from ``line`` using preceding file lexical context."""
+    anchor = _masked_anchor_line(file_text, line, path=path)
+    if anchor is None:
         return frozenset()
-    anchor = _anchor_line_with_split_receiver(masked_lines, line - 1)
     return _callee_refs_from_anchor_line(anchor, path=path)
+
+
+def _receiver_chain_segments_from_file_line(
+    file_text: str, line: int, *, path: str | None = None
+) -> dict[str, tuple[str, ...] | None]:
+    """Receiver chains of ``line``'s chained callees, read with file context.
+
+    The companion of :func:`_callee_refs_from_file_line`: same anchor text, but
+    reporting which of its qualified callees reach their receiver through a
+    dotted chain, and what that chain spells (PRRT_kwDOSJAM6s6q-6LK).
+    """
+    anchor = _masked_anchor_line(file_text, line, path=path)
+    if anchor is None:
+        return {}
+    return _receiver_chain_segments_from_anchor_line(anchor, path=path)
 
 
 def _callee_names_from_anchor_line(anchor_line: str, *, path: str | None = None) -> frozenset[str]:
@@ -1212,3 +1408,93 @@ def _enclosing_definition_name(file_text: str, line: int, *, path: str | None = 
     """Return the nearest def/function/class name at or above ``line``."""
     identity = _enclosing_definition_identity(file_text, line, path=path)
     return None if identity is None else identity[0]
+
+
+# A comprehension is its own scope: its generator targets bind only inside it,
+# while a ``:=`` in its body assigns in the scope that holds it.
+_COMPREHENSION_SCOPES: Final = (ast.DictComp, ast.GeneratorExp, ast.ListComp, ast.SetComp)
+# Scopes an anchored line can sit in. A class body is absent on purpose: its
+# bindings are attributes, invisible to the calls inside its methods.
+_FUNCTION_SCOPES: Final = (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)
+_ANCHORED_SCOPES: Final = _FUNCTION_SCOPES + _COMPREHENSION_SCOPES
+
+
+def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
+    """Names the scope ``scope`` binds inside its own body.
+
+    Python locals are function-wide — a name assigned anywhere in a function is
+    local throughout it — so the whole body is read rather than only the lines
+    above the anchor. Parameters, assignment / loop / ``with`` targets, caught
+    exceptions, function-local imports and nested definitions all count, and so
+    do ``match`` / ``case`` capture, star and mapping-rest targets: those carry
+    their name on the pattern node rather than storing an ``ast.Name``, so a
+    reader that watched only ``Store`` names would leave a ``case record:``
+    still holding its import (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds
+    nothing and is skipped.
+
+    Child scopes are *not* descended into. A nested function's or lambda's
+    parameters and locals, a class body's attributes and a comprehension's
+    targets are bound in those scopes, not here, so counting them as locals
+    would mark an import shadowed that the anchored line still holds and reject
+    a correction that does change the callee it reaches (PRRT_kwDOSJAM6s6q_M0s).
+    What a child binds in *this* scope is still reported: a nested ``def`` /
+    ``class`` name, and every ``:=`` target in a child, because a comprehension
+    assigns its walruses in the scope holding it and a definition's decorators
+    and parameter defaults are evaluated where the definition appears. A walrus
+    buried in a child's *body* binds only there, but telling the two apart costs
+    more than the name is worth, so it keeps failing closed. ``scope``'s own
+    name is not reported — a
+    definition's name is bound in the scope that *holds* it, so a method named
+    like an imported helper does not shadow that import for the calls in its own
+    body. Neither is a ``nonlocal`` rebinding: it is legal only where an
+    enclosing function already binds the name, which that scope's own pass
+    reports. Callers anchor every scope enclosing the line, so an enclosing
+    function's locals still reach a call nested inside it.
+    """
+    pending: list[ast.AST] = list(ast.iter_child_nodes(scope))
+    if isinstance(scope, _COMPREHENSION_SCOPES):
+        pending.extend(generator.target for generator in scope.generators)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                yield node.name
+            pending.extend(
+                found.target for found in ast.walk(node) if isinstance(found, ast.NamedExpr)
+            )
+            continue
+        if isinstance(node, ast.comprehension):
+            pending.extend((node.iter, *node.ifs))
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node.id
+        elif isinstance(node, ast.arg):
+            yield node.arg
+        elif isinstance(node, ast.alias):
+            yield node.asname or node.name.partition(".")[0]
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            yield node.name
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            yield node.rest
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _anchored_class_scope(tree: ast.AST, line: int) -> ast.ClassDef | None:
+    """The class body ``line`` executes directly in, if any.
+
+    Such a line resolves through the class namespace, so the class body's own
+    bindings shadow an import for it (PRRT_kwDOSJAM6s6q_ywe). The innermost
+    scope wins, which is what keeps class attributes out of a method-body
+    lookup: a method, lambda or comprehension holds the lines inside *it*, a
+    class body never sees the one around it, and a tie resolves to the class.
+    """
+    holding = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (*_ANCHORED_SCOPES, ast.ClassDef))
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    innermost = max(
+        holding, key=lambda node: (node.lineno, -(node.end_lineno or node.lineno)), default=None
+    )
+    return innermost if isinstance(innermost, ast.ClassDef) else None

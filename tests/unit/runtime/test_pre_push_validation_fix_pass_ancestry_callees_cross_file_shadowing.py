@@ -1,0 +1,1148 @@
+"""Local-shadowing rules for cross-file callee evidence (issue #1019).
+
+Unit tests for the one thing an import binding cannot prove on its own: that
+the name still *holds* that import where the review is anchored. A parameter,
+a local assignment, a nested definition or a module-level reassignment of the
+same name leaves the call reaching that binding instead, so the imported
+module's same-named definition is not the callee a correction has to touch
+(PRRT_kwDOSJAM6s6q9WnX). Kept beside
+``test_pre_push_validation_fix_pass_ancestry_callees_cross_file.py`` so both
+stay under the first-party file line limit.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass_ancestry_cross_file as cross_file,
+)
+from tests.unit.runtime._pre_push_ancestry_cross_file_helpers import (
+    _CALLEE_MODULE,
+    _CALLEE_TEXT,
+    _CALLER,
+    _IN_SPAN_DIFF,
+    _LEFT,
+    _cross_package_probe,
+    _Probe,
+    _probe,
+)
+
+_IMPORT_LINE = (
+    "from pkg_b.observability.execution_platform_metrics import record_ready_queue_depth\n"
+)
+
+# The imported bare callee is also the enclosing function's parameter, so the
+# call on line 6 reaches the parameter, not the imported module's definition.
+_PARAMETER_SHADOW_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "def refresh(record_ready_queue_depth, pool):\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+)
+
+# The same shape through a local assignment instead of a parameter.
+_ASSIGNMENT_SHADOW_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "def refresh(pool):\n"
+    "    record_ready_queue_depth = pool.recorder\n"
+    "    record_ready_queue_depth(pool.snapshot())\n"
+)
+
+# A receiver a plain ``import`` would otherwise prove to be that module, bound
+# at the anchored scope to whatever the caller passes in.
+_RECEIVER_SHADOW_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "\n"
+    "\n"
+    "def refresh(metrics, payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+_RECEIVER_IMPORT_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+
+def _receiver_probe(*, caller_text: str) -> _Probe:
+    return _Probe(
+        texts={
+            (_LEFT, _CALLER): caller_text,
+            (_LEFT, _CALLEE_MODULE): _CALLEE_TEXT,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: _IN_SPAN_DIFF},
+    )
+
+
+@pytest.mark.unit
+async def test_a_parameter_shadowing_the_import_fails_the_bare_callee_closed() -> None:
+    """``from pkg.mod import f`` proves nothing about ``def run(f): f()``.
+
+    The correction edits ``record_ready_queue_depth`` in the imported module,
+    but the anchored line calls the parameter, so the callee it really reaches
+    is untouched and the item must not resolve on this evidence
+    (PRRT_kwDOSJAM6s6q9WnX).
+    """
+    probe = _cross_package_probe(caller_text=_PARAMETER_SHADOW_TEXT)
+
+    assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+async def test_a_local_assignment_shadowing_the_import_fails_closed() -> None:
+    """A local assignment binds the name function-wide, so the import is not held."""
+    probe = _cross_package_probe(caller_text=_ASSIGNMENT_SHADOW_TEXT)
+
+    assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+async def test_an_unshadowed_bare_callee_still_resolves() -> None:
+    """The paired accept: the #1019 shape keeps resolving across the two files."""
+    assert await _probe(_cross_package_probe())
+
+
+@pytest.mark.unit
+async def test_a_parameter_shadowing_a_module_receiver_fails_closed() -> None:
+    """A shadowed receiver is whatever the caller passes, not the imported module."""
+    assert not await _probe(_receiver_probe(caller_text=_RECEIVER_SHADOW_TEXT), item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_unshadowed_module_receiver_still_resolves() -> None:
+    """The paired accept for the receiver shape."""
+    assert await _probe(_receiver_probe(caller_text=_RECEIVER_IMPORT_TEXT), item_line=5)
+
+
+@pytest.mark.unit
+def test_parameters_and_locals_of_the_anchored_scope_are_read() -> None:
+    """Both binding forms are read, and only from a scope that encloses the line."""
+    text = (
+        "def refresh(param):\n"
+        "    assigned = param\n"
+        "    return assigned\n"
+        "\n"
+        "\n"
+        "def other(elsewhere):\n"
+        "    return elsewhere\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 2, path=_CALLER) == frozenset(
+        {"param", "assigned"}
+    )
+    assert cross_file._locally_rebound_names_at_line(text, 7, path=_CALLER) == frozenset(
+        {"elsewhere"}
+    )
+
+
+@pytest.mark.unit
+def test_loop_context_and_import_targets_of_the_anchored_scope_are_read() -> None:
+    """Loop, ``with``, ``except`` and function-local import targets all bind the name."""
+    text = (
+        "def refresh(paths):\n"
+        "    for looped in paths:\n"
+        "        with open(looped) as opened:\n"
+        "            try:\n"
+        "                import pkg.late as late\n"
+        "                from pkg import imported\n"
+        "            except ValueError as caught:\n"
+        "                return caught, late, imported, opened\n"
+        "    return None\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 8, path=_CALLER) == frozenset(
+        {"paths", "looped", "opened", "late", "imported", "caught"}
+    )
+
+
+@pytest.mark.unit
+def test_match_case_capture_targets_of_the_anchored_scope_are_read() -> None:
+    """A ``case`` capture binds the name without ever storing an ``ast.Name``.
+
+    Capture, star and mapping-rest targets are carried on the pattern nodes
+    themselves, so a reader that only looks for ``Store`` names would leave a
+    ``case record:`` holding its import and let a correction to the imported
+    definition satisfy a call that actually reaches the capture
+    (PRRT_kwDOSJAM6s6q-N1B). The wildcard ``_`` binds nothing and is not
+    reported.
+    """
+    text = (
+        "def refresh(event):\n"
+        "    match event:\n"
+        "        case [captured, *starred]:\n"
+        "            return captured, starred\n"
+        '        case {"kind": 1, **rest}:\n'
+        "            return rest\n"
+        "        case [1] as aliased:\n"
+        "            return aliased\n"
+        "        case _:\n"
+        "            return None\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 10, path=_CALLER) == frozenset(
+        {"event", "captured", "starred", "rest", "aliased"}
+    )
+
+
+@pytest.mark.unit
+def test_a_nested_definition_name_shadows_but_the_scope_s_own_name_does_not() -> None:
+    """A nested ``def`` / ``class`` binds its name in the scope that holds it.
+
+    The enclosing definition's own name is bound in *its* enclosing scope, not
+    inside it, so a method named like an imported helper does not shadow that
+    import for the calls in its own body.
+    """
+    text = (
+        "class Collector:\n"
+        "    def record(self):\n"
+        "        def helper():\n"
+        "            return 1\n"
+        "\n"
+        "        class Inner:\n"
+        "            pass\n"
+        "\n"
+        "        return helper(), Inner\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 9, path=_CALLER) == frozenset(
+        {"self", "helper", "Inner"}
+    )
+
+
+@pytest.mark.unit
+def test_a_lambda_parameter_shadows_at_its_own_line() -> None:
+    """A lambda opens a function scope too, so its parameter shadows the import."""
+    text = "handler = lambda record: record()\n"
+
+    assert cross_file._locally_rebound_names_at_line(text, 1, path=_CALLER) == frozenset({"record"})
+
+
+@pytest.mark.unit
+def test_a_class_body_binding_is_not_a_local_shadow() -> None:
+    """A class attribute is invisible to the calls inside the class's methods."""
+    text = (
+        "class Collector:\n    record = None\n\n    def refresh(self):\n        return record()\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 5, path=_CALLER) == frozenset({"self"})
+
+
+@pytest.mark.unit
+def test_unreadable_call_sites_report_no_local_bindings() -> None:
+    """A non-Python path and unparseable text both leave the bindings untouched."""
+    text = "def refresh(record):\n    return record()\n"
+
+    assert cross_file._locally_rebound_names_at_line(text, 2, path="src/web/app.ts") == frozenset()
+    assert (
+        cross_file._locally_rebound_names_at_line("def refresh(record:\n", 1, path=_CALLER)
+        == frozenset()
+    )
+
+
+@pytest.mark.unit
+def test_a_rebound_name_is_held_to_the_unmatchable_target() -> None:
+    """Fail closed rather than widening a shadowed name back to the name-only rule."""
+    bindings = {
+        "record": frozenset({("src/pkg_b/metrics", False)}),
+        "other": frozenset({("m", True)}),
+    }
+
+    held = cross_file._import_targets_without_locally_rebound(bindings, frozenset({"record"}))
+
+    assert held["record"] == cross_file._AMBIGUOUS_IMPORT_TARGET
+    assert held["other"] == bindings["other"]
+
+
+# The imported bare callee is reassigned at *module* level, so the call on
+# line 8 reaches that module global rather than the imported definition — and a
+# module global is visible inside the function too.
+_MODULE_ASSIGNMENT_SHADOW_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "record_ready_queue_depth = build_recorder()\n"
+    "\n"
+    "\n"
+    "def refresh(pool):\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+)
+
+# The same shape for a receiver a plain ``import`` would otherwise prove to be
+# the imported module.
+_MODULE_RECEIVER_SHADOW_TEXT = (
+    "import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "\n"
+    "metrics = Collector()\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_module_level_assignment_shadowing_the_import_fails_closed() -> None:
+    """A module global rebinding the import is not the callee either.
+
+    ``from pkg.mod import f`` followed by ``f = build()`` leaves every later
+    call — at module level or inside a function that reads the global —
+    reaching the reassigned global, so editing ``pkg/mod.py``'s ``f`` changes
+    nothing the anchored line calls (PRRT_kwDOSJAM6s6q9WnX).
+    """
+    probe = _cross_package_probe(caller_text=_MODULE_ASSIGNMENT_SHADOW_TEXT)
+
+    assert not await _probe(probe, item_line=8)
+
+
+@pytest.mark.unit
+async def test_a_module_level_assignment_shadowing_a_receiver_fails_closed() -> None:
+    """The receiver form of the module-global rebinding."""
+    probe = _receiver_probe(caller_text=_MODULE_RECEIVER_SHADOW_TEXT)
+
+    assert not await _probe(probe, item_line=7)
+
+
+@pytest.mark.unit
+def test_module_scope_rebindings_are_read_but_import_aliases_are_not() -> None:
+    """Every module-scope binding form counts, except the imports themselves.
+
+    An ``import`` statement *is* the binding this reader exists to trust, so its
+    own aliases are not reported; a conditional or loop body at module level is
+    still module scope, and neither a function body nor a lambda's parameters
+    are.
+    """
+    text = (
+        "import pkg.late as late\n"
+        "from pkg import imported\n"
+        "assigned = 1\n"
+        "annotated: int = 2\n"
+        "assigned += 1\n"
+        "for looped in assigned:\n"
+        "    with open(looped) as opened:\n"
+        "        pass\n"
+        "try:\n"
+        "    pass\n"
+        "except ValueError as caught:\n"
+        "    pass\n"
+        "if (walrus := assigned):\n"
+        "    pass\n"
+        "handler = lambda lambda_param: lambda_param\n"
+        "\n"
+        "\n"
+        "def refresh():\n"
+        "    local_only = 1\n"
+        "    return local_only\n"
+        "\n"
+        "\n"
+        "class Collector:\n"
+        "    attribute = None\n"
+    )
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset(
+        {
+            "assigned",
+            "annotated",
+            "looped",
+            "opened",
+            "caught",
+            "walrus",
+            "handler",
+            "refresh",
+            "Collector",
+        }
+    )
+
+
+@pytest.mark.unit
+def test_module_scope_match_case_captures_are_read() -> None:
+    """A module-level ``case`` capture rebinds the import just as an assignment does.
+
+    ``match`` at module scope is module scope, and its capture targets are
+    pattern-node names rather than ``Store`` names, so they have to be read
+    explicitly or the rebinding goes unnoticed (PRRT_kwDOSJAM6s6q-N1B).
+    """
+    text = (
+        "from pkg import record\n"
+        "\n"
+        "match SETTINGS:\n"
+        "    case [record, *tail]:\n"
+        "        pass\n"
+        '    case {"kind": 1, **leftover}:\n'
+        "        pass\n"
+        "    case {} as whole:\n"
+        "        pass\n"
+        "    case _:\n"
+        "        pass\n"
+    )
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset(
+        {"record", "tail", "leftover", "whole"}
+    )
+
+
+@pytest.mark.unit
+def test_a_global_declaration_counts_as_a_module_scope_rebinding() -> None:
+    """``global f`` exists to assign ``f``, so the module binding is not proof."""
+    text = (
+        "from pkg import record\n"
+        "\n"
+        "\n"
+        "def install(recorder):\n"
+        "    global record\n"
+        "    record = recorder\n"
+    )
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset(
+        {"install", "record"}
+    )
+
+
+@pytest.mark.unit
+def test_unreadable_call_sites_report_no_module_scope_bindings() -> None:
+    """A non-Python path and unparseable text both leave the bindings untouched."""
+    assert cross_file._module_scope_rebound_names("record = 1\n", path="src/web/app.ts") == (
+        frozenset()
+    )
+    assert cross_file._module_scope_rebound_names("record = (\n", path=_CALLER) == frozenset()
+
+
+# The candidate module binds the imported name twice at module level: the first
+# definition is dead, because the import reaches the last one executed.
+_DUPLICATE_DEFINITION_CALLEE_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "def record_ready_queue_depth(payload):\n"
+    "    return len(payload.entries)\n"
+)
+
+# A body-only change inside the dead first definition's span (old line 2).
+_DEAD_DEFINITION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -2 +2 @@\n"
+    "-    return None\n"
+    "+    return 0\n"
+)
+
+# The same change inside the effective definition's span (old line 6).
+_EFFECTIVE_DEFINITION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -6 +6 @@\n"
+    "-    return len(payload.entries)\n"
+    "+    return payload.ready_depth()\n"
+)
+
+
+@pytest.mark.unit
+def test_only_the_effective_module_scope_definition_is_importable() -> None:
+    """Duplicate module-level definitions resolve to the last one executed.
+
+    Python binds the imported name to the definition the module body runs last,
+    so an earlier same-named definition is dead code no caller can reach and a
+    correction confined to it is not a change to the callee
+    (PRRT_kwDOSJAM6s6q9Wnf). Mirrors the same-file reader's rule in
+    ``_resolve_callee_definition_span``. Members of distinct module-level
+    classes are distinct attributes, not a shadowing pair, so both survive for
+    an attribute-qualified callee.
+    """
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_DEFINITION_CALLEE_TEXT,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(5, 6)]
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_DEFINITION_CALLEE_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(5, 6)]
+
+    two_classes = (
+        "class Primary:\n"
+        "    def record(self, payload):\n"
+        "        return payload\n"
+        "\n"
+        "\n"
+        "class Secondary:\n"
+        "    def record(self, payload):\n"
+        "        return None\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        two_classes, frozenset({"record"}), path=_CALLEE_MODULE
+    ) == [(2, 5), (7, 8)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_dead_duplicate_definition_is_not_evidence() -> None:
+    """Editing the shadowed definition leaves the called one untouched."""
+    probe = _cross_package_probe(
+        callee_text=_DUPLICATE_DEFINITION_CALLEE_TEXT, diff=_DEAD_DEFINITION_DIFF
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+async def test_a_change_to_the_effective_duplicate_definition_is_evidence() -> None:
+    """The paired accept: the surviving last definition is the real callee."""
+    probe = _cross_package_probe(
+        callee_text=_DUPLICATE_DEFINITION_CALLEE_TEXT, diff=_EFFECTIVE_DEFINITION_DIFF
+    )
+
+    assert await _probe(probe)
+
+
+# The callee module defines the imported name twice, in mutually exclusive
+# branches: which definition the import reaches depends on the branch taken,
+# not on textual order.
+_CONDITIONAL_DUPLICATE_CALLEE_TEXT = (
+    "import sys\n"
+    "\n"
+    "\n"
+    'if sys.platform == "win32":\n'
+    "\n"
+    "    def record_ready_queue_depth(payload):\n"
+    "        return payload.windows_depth()\n"
+    "\n"
+    "else:\n"
+    "\n"
+    "    def record_ready_queue_depth(payload):\n"
+    "        return len(payload.entries)\n"
+)
+
+# A body-only change inside the textually last branch's definition (old line 12).
+_LAST_BRANCH_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -12 +12 @@\n"
+    "-        return len(payload.entries)\n"
+    "+        return payload.ready_depth()\n"
+)
+
+
+@pytest.mark.unit
+def test_conditionally_duplicated_definitions_fail_closed() -> None:
+    """Branch-guarded duplicates leave no provable effective definition.
+
+    ``if sys.platform == "win32": def validate(...)`` / ``else: def
+    validate(...)`` binds the name from the branch the module runs, so the
+    textually last head is not provably the one an importing call site reaches.
+    Crediting a correction confined to it would mark the item fixed while the
+    callable actually imported stays untouched, so every module-scope span of
+    such a name is withheld (PRRT_kwDOSJAM6s6q-6LP).
+    """
+    for names, bare_names in (
+        (frozenset(), frozenset({"record_ready_queue_depth"})),
+        (frozenset({"record_ready_queue_depth"}), frozenset()),
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                _CONDITIONAL_DUPLICATE_CALLEE_TEXT,
+                names,
+                path=_CALLEE_MODULE,
+                bare_names=bare_names,
+            )
+            == []
+        )
+
+
+@pytest.mark.unit
+def test_a_single_conditional_definition_stays_importable() -> None:
+    """One branch-guarded head is the only binding the call site can reach."""
+    single = (
+        "import sys\n"
+        "\n"
+        "\n"
+        "if sys.platform:\n"
+        "\n"
+        "    def record_ready_queue_depth(payload):\n"
+        "        return len(payload.entries)\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        single,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(6, 7)]
+
+
+@pytest.mark.unit
+def test_a_module_indent_last_head_still_shadows_a_conditional_one() -> None:
+    """An unconditional head after a guarded one always rebinds the name."""
+    rebound = (
+        "import sys\n"
+        "\n"
+        "\n"
+        "if sys.platform:\n"
+        "\n"
+        "    def record_ready_queue_depth(payload):\n"
+        "        return payload.guarded\n"
+        "\n"
+        "\n"
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        rebound,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(10, 11)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_one_branch_of_a_duplicate_definition_is_not_evidence() -> None:
+    """End to end: the guarded pair withholds evidence instead of resolving."""
+    probe = _cross_package_probe(
+        callee_text=_CONDITIONAL_DUPLICATE_CALLEE_TEXT, diff=_LAST_BRANCH_DIFF
+    )
+
+    assert not await _probe(probe)
+
+
+# One module-level class defining the same method twice: the class body binds
+# the attribute to the later ``def``, so the earlier one is dead code no
+# receiver reaches (PRRT_kwDOSJAM6s6q_M0o).
+_DUPLICATE_METHOD_CALLEE_TEXT = (
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return None\n"
+    "\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return len(payload.entries)\n"
+)
+
+# The same method name declared twice inside the class, in mutually exclusive
+# branches: which one the attribute holds depends on the branch taken.
+_CONDITIONAL_METHOD_CALLEE_TEXT = (
+    "import sys\n"
+    "\n"
+    "\n"
+    "class Collector:\n"
+    "\n"
+    '    if sys.platform == "win32":\n'
+    "\n"
+    "        def record_ready_queue_depth(self, payload):\n"
+    "            return payload.windows_depth()\n"
+    "\n"
+    "    else:\n"
+    "\n"
+    "        def record_ready_queue_depth(self, payload):\n"
+    "            return len(payload.entries)\n"
+)
+
+_DUPLICATE_METHOD_CALLER_TEXT = (
+    "from pkg_b.observability.execution_platform_metrics import Collector\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    Collector.record_ready_queue_depth(payload)\n"
+)
+
+# A body-only change inside the dead first method's span (old line 3).
+_DEAD_METHOD_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -3 +3 @@\n"
+    "-        return None\n"
+    "+        return 0\n"
+)
+
+# The same change inside the effective method's span (old line 6).
+_EFFECTIVE_METHOD_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -6 +6 @@\n"
+    "-        return len(payload.entries)\n"
+    "+        return payload.ready_depth()\n"
+)
+
+
+def _duplicate_method_probe(*, diff: str) -> _Probe:
+    return _Probe(
+        texts={
+            (_LEFT, _CALLER): _DUPLICATE_METHOD_CALLER_TEXT,
+            (_LEFT, _CALLEE_MODULE): _DUPLICATE_METHOD_CALLEE_TEXT,
+        },
+        changed_paths=(_CALLEE_MODULE,),
+        diffs={_CALLEE_MODULE: diff},
+    )
+
+
+@pytest.mark.unit
+def test_only_the_effective_class_member_definition_is_importable() -> None:
+    """A class that defines one method twice binds the later ``def``.
+
+    The class body executes its heads in textual order just as a module body
+    does, so an earlier same-named method is dead code the attribute never
+    holds and a correction confined to it changes nothing the receiver calls
+    (PRRT_kwDOSJAM6s6q_M0o). Holds whether or not the receiver's import pins
+    the enclosing class.
+    """
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_METHOD_CALLEE_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(5, 6)]
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_METHOD_CALLEE_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+        enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+    ) == [(5, 6)]
+
+
+@pytest.mark.unit
+def test_conditionally_duplicated_class_members_fail_closed() -> None:
+    """Branch-guarded members leave no provable effective method.
+
+    A head indented deeper than its class body runs only when its enclosing
+    block does, so the textually last of two guarded ``def``s is not provably
+    the attribute the receiver reaches; every span of that name in that class
+    is withheld (PRRT_kwDOSJAM6s6q_M0o).
+    """
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            _CONDITIONAL_METHOD_CALLEE_TEXT,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_dead_duplicate_class_member_is_not_evidence() -> None:
+    """End to end: editing the shadowed method leaves the called one untouched."""
+    assert not await _probe(_duplicate_method_probe(diff=_DEAD_METHOD_DIFF), item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_change_to_the_effective_duplicate_class_member_is_evidence() -> None:
+    """The paired accept: the surviving last method is the real callee."""
+    assert await _probe(_duplicate_method_probe(diff=_EFFECTIVE_METHOD_DIFF), item_line=5)
+
+
+@pytest.mark.unit
+def test_bindings_owned_only_by_a_nested_scope_do_not_shadow() -> None:
+    """A child scope's own parameters and locals are not the parent's locals.
+
+    A nested helper assigning ``validate``, a lambda taking it as a parameter
+    and a comprehension using it as a target all bind the name in *their* own
+    scope, so the anchored line's ``validate`` still holds the module's import
+    and a correction to that imported definition does change the callee it
+    reaches (PRRT_kwDOSJAM6s6q_M0s). What those children bind in the parent —
+    the nested definition's name, the assignment the comprehension is stored
+    to — is still reported.
+    """
+    text = (
+        "def refresh(pool):\n"
+        "    def helper(validate):\n"
+        "        shadowed = validate\n"
+        "        return shadowed\n"
+        "\n"
+        "    picked = [validate for validate in pool.items]\n"
+        "    mapper = lambda validate: validate\n"
+        "    return validate(helper, picked, mapper)\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 8, path=_CALLER) == frozenset(
+        {"pool", "helper", "picked", "mapper"}
+    )
+
+
+@pytest.mark.unit
+def test_a_comprehension_target_shadows_inside_the_comprehension() -> None:
+    """The paired fail-closed: a call *inside* the comprehension reaches its target."""
+    text = (
+        "def refresh(pool):\n"
+        "    return [\n"
+        "        validate(item)\n"
+        "        for validate, item in pool.pairs\n"
+        "    ]\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset(
+        {"pool", "validate", "item"}
+    )
+
+
+@pytest.mark.unit
+def test_a_walrus_inside_a_comprehension_still_binds_the_holding_scope() -> None:
+    """``:=`` assigns in the scope holding the comprehension, so it shadows there.
+
+    A walrus a child *definition* evaluates reaches the enclosing scope too
+    (through a decorator or a parameter default), so every ``:=`` target in a
+    child keeps failing closed rather than paying to tell its position apart.
+    """
+    text = (
+        "def refresh(pool):\n"
+        "    totals = [(validate := item.check)(item) for item in pool.items]\n"
+        "    hooks = [lambda item=item: (inner := item) for item in pool.items]\n"
+        "    return validate, totals, hooks\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 4, path=_CALLER) == frozenset(
+        {"pool", "totals", "hooks", "validate", "inner"}
+    )
+
+
+# The candidate module defines the imported name and then rebinds it to
+# something that carries no definition head of its own, so importing the name
+# reaches the replacement and the ``def`` above it is dead code.
+_REASSIGNED_DEFINITION_CALLEE_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "record_ready_queue_depth = _build_recorder()\n"
+)
+
+# A body-only change inside the shadowed definition's span (old line 2).
+_REASSIGNED_DEAD_DEFINITION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -2 +2 @@\n"
+    "-    return None\n"
+    "+    return 0\n"
+)
+
+
+@pytest.mark.unit
+def test_a_definition_a_plain_assignment_rebinds_is_not_importable() -> None:
+    """``def f(...)`` followed by ``f = replacement`` leaves the ``def`` dead.
+
+    The module body runs the assignment last, so the imported name holds the
+    replacement and a correction confined to the earlier ``def`` changes
+    nothing the call site reaches. Only recognized definition heads are
+    collected, so that assignment is invisible to the last-head fold and the
+    name has to fail closed here instead (PRRT_kwDOSJAM6s6q_ywa). An
+    assignment whose right-hand side *is* a definition head keeps folding
+    normally, and an assignment of some other name shadows nothing.
+    """
+    for names, bare_names in (
+        (frozenset({"record_ready_queue_depth"}), frozenset()),
+        (frozenset(), frozenset({"record_ready_queue_depth"})),
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                _REASSIGNED_DEFINITION_CALLEE_TEXT,
+                names,
+                path=_CALLEE_MODULE,
+                bare_names=bare_names,
+            )
+            == []
+        )
+
+    rebound_to_lambda = _REASSIGNED_DEFINITION_CALLEE_TEXT.replace(
+        "_build_recorder()", "lambda payload: payload.ready_depth()"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        rebound_to_lambda,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(5, 5)]
+
+    other_name = _REASSIGNED_DEFINITION_CALLEE_TEXT.replace(
+        "record_ready_queue_depth = _build_recorder()", "RECORDER = _build_recorder()"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        other_name,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_class_member_a_plain_assignment_rebinds_is_not_importable() -> None:
+    """A class body rebinding the attribute leaves the earlier ``def`` dead too.
+
+    ``record = staticmethod(record)`` is the attribute the receiver reaches, so
+    the method above it is not the callee a correction has to touch
+    (PRRT_kwDOSJAM6s6q_ywa).
+    """
+    text = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    record_ready_queue_depth = staticmethod(_recorder)\n"
+    )
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_bindings_outside_the_definition_scope_do_not_shadow_it() -> None:
+    """Only the binding scope's own statements rebind its names.
+
+    A keyword argument and a continuation-line parameter default read as
+    ``name=value`` but are not statements, and a function-local assignment
+    binds in that function, so none of them makes the module-level definition
+    unreachable (PRRT_kwDOSJAM6s6q_ywa).
+    """
+    text = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+        "\n"
+        "\n"
+        "GAUGE = _build_gauge(\n"
+        "    record_ready_queue_depth=None,\n"
+        ")\n"
+        "\n"
+        "\n"
+        "def refresh(\n"
+        "    record_ready_queue_depth=None,\n"
+        "):\n"
+        "    record_ready_queue_depth = GAUGE.recorder\n"
+        "    return record_ready_queue_depth\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        text,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(1, 4)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_definition_a_later_assignment_rebinds_is_not_evidence() -> None:
+    """End to end: the shadowed ``def`` withholds evidence instead of resolving."""
+    probe = _cross_package_probe(
+        callee_text=_REASSIGNED_DEFINITION_CALLEE_TEXT,
+        diff=_REASSIGNED_DEAD_DEFINITION_DIFF,
+    )
+
+    assert not await _probe(probe)
+
+
+@pytest.mark.unit
+def test_a_class_body_binding_shadows_for_a_call_in_the_class_body() -> None:
+    """A line executing directly in a class body resolves through the class namespace.
+
+    ``class C: validate = local_validate; result = validate()`` calls the class
+    attribute, not the module's import, so the class body's own bindings shadow
+    at that anchor (PRRT_kwDOSJAM6s6q_ywe) — while the method body below keeps
+    the import, which is the paired tolerance
+    ``test_a_class_body_binding_is_not_a_local_shadow`` covers.
+    """
+    text = (
+        "class Collector:\n"
+        "    validate = local_validate\n"
+        "    result = validate()\n"
+        "\n"
+        "    def refresh(self):\n"
+        "        return validate()\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset(
+        {"validate", "result", "refresh"}
+    )
+    assert cross_file._locally_rebound_names_at_line(text, 6, path=_CALLER) == frozenset({"self"})
+
+
+@pytest.mark.unit
+def test_the_innermost_class_body_is_the_one_read_at_its_own_anchor() -> None:
+    """Only the innermost class body binds, and an enclosing function still does.
+
+    A class body does not see the class body around it, while it *does* see the
+    locals of a function that holds it, so a nested class's anchor reads its own
+    attributes plus the enclosing function's locals and nothing from the outer
+    class (PRRT_kwDOSJAM6s6q_ywe).
+    """
+    text = (
+        "class Outer:\n"
+        "    outer_attr = 1\n"
+        "\n"
+        "    def build(self, pool):\n"
+        "        class Inner:\n"
+        "            validate = pool.check\n"
+        "            result = validate()\n"
+        "\n"
+        "        return Inner\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 7, path=_CALLER) == frozenset(
+        {"self", "pool", "Inner", "validate", "result"}
+    )
+
+
+# The candidate module defines the imported name and then imports the same name
+# from somewhere else, so a caller importing it reaches the fallback object and
+# the ``def`` above is dead code.
+_IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "from pkg_b.fallback import record_ready_queue_depth\n"
+)
+
+
+@pytest.mark.unit
+def test_a_definition_a_later_import_rebinds_is_not_importable() -> None:
+    """``def f(...)`` plus ``from fallback import f`` leaves the ``def`` dead.
+
+    The import binds the name to the fallback object, so a correction confined
+    to the earlier head changes nothing the importing call site reaches. Import
+    statements carry no definition head, so they are invisible to the last-head
+    fold and the name has to fail closed here (PRRT_kwDOSJAM6s6rAAWY). An
+    aliased import, a plain ``import`` of the name and a parenthesized import
+    list all bind it the same way; an import of some other name, and an import
+    inside a function body, shadow nothing.
+    """
+    for names, bare_names in (
+        (frozenset({"record_ready_queue_depth"}), frozenset()),
+        (frozenset(), frozenset({"record_ready_queue_depth"})),
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT,
+                names,
+                path=_CALLEE_MODULE,
+                bare_names=bare_names,
+            )
+            == []
+        )
+
+    for rebinding_import in (
+        "from pkg_b.fallback import build_recorder as record_ready_queue_depth",
+        "import record_ready_queue_depth",
+        "from pkg_b.fallback import (\n    record_ready_queue_depth,\n)",
+    ):
+        text = _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT.replace(
+            "from pkg_b.fallback import record_ready_queue_depth", rebinding_import
+        )
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                text,
+                frozenset(),
+                path=_CALLEE_MODULE,
+                bare_names=frozenset({"record_ready_queue_depth"}),
+            )
+            == []
+        )
+
+    for inert_import in (
+        "from pkg_b.fallback import build_recorder",
+        "def refresh():\n    from pkg_b.fallback import record_ready_queue_depth\n",
+    ):
+        text = _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT.replace(
+            "from pkg_b.fallback import record_ready_queue_depth", inert_import
+        )
+        assert cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset(),
+            path=_CALLEE_MODULE,
+            bare_names=frozenset({"record_ready_queue_depth"}),
+        ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_star_import_withholds_every_definition_it_could_rebind() -> None:
+    """``from pkg import *`` binds names this reader cannot enumerate.
+
+    It may well bind ``record_ready_queue_depth``, and nothing in the file says
+    otherwise, so the definition fails closed rather than being offered as the
+    importable callee (PRRT_kwDOSJAM6s6rAAWY).
+    """
+    text = _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT.replace(
+        "import record_ready_queue_depth", "import *"
+    )
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset(),
+            path=_CALLEE_MODULE,
+            bare_names=frozenset({"record_ready_queue_depth"}),
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_a_class_member_an_import_rebinds_is_not_importable() -> None:
+    """A class body importing the attribute leaves the earlier method dead too.
+
+    The class attribute the receiver reaches is the imported object, not the
+    method above it (PRRT_kwDOSJAM6s6rAAWY).
+    """
+    text = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    from pkg_b.fallback import record_ready_queue_depth\n"
+    )
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_a_non_python_candidate_keeps_its_definition_spans() -> None:
+    """Text this reader cannot parse as Python leaves the lexical spans alone.
+
+    A JS/TS module cannot both declare and import the same name — that is a
+    redeclaration error — so the parse failure must not fail its definition
+    spans closed (PRRT_kwDOSJAM6s6rAAWY).
+    """
+    text = (
+        'import { recordReadyQueueDepth } from "./fallback";\n'
+        "\n"
+        "export function recordReadyQueueDepth(payload) {\n"
+        "  return null;\n"
+        "}\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        text,
+        frozenset(),
+        path="src/pkg_b/observability/metrics.ts",
+        bare_names=frozenset({"recordReadyQueueDepth"}),
+    ) == [(3, 5)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_definition_a_later_import_rebinds_is_not_evidence() -> None:
+    """End to end: the import-shadowed ``def`` withholds evidence instead of resolving."""
+    probe = _cross_package_probe(
+        callee_text=_IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT,
+        diff=_REASSIGNED_DEAD_DEFINITION_DIFF,
+    )
+
+    assert not await _probe(probe)
