@@ -1192,3 +1192,54 @@ def test_a_one_line_suite_on_a_wrapped_header_is_not_a_module_rebinding() -> Non
         )
         == []
     )
+
+
+@pytest.mark.unit
+def test_a_match_capture_rebinding_is_not_importable() -> None:
+    """A ``match`` pattern binds its capture as plainly as ``=`` does.
+
+    ``case record:`` replaces the module-level ``def record`` above it once the
+    pattern matches, and a ``*rest`` or ``**rest`` capture does the same, so a
+    reader watching only assignment statements still offers the dead head as
+    the callee a correction must touch while importers receive the captured
+    value. The capture's own scope still decides: one inside a function binds a
+    local and shadows nothing at module scope.
+    """
+    for pattern in (
+        "case record_ready_queue_depth:",
+        "case [*record_ready_queue_depth]:",
+        "case {**record_ready_queue_depth}:",
+    ):
+        module_capture = (
+            "def record_ready_queue_depth(payload):\n"
+            "    return None\n"
+            "\n"
+            "\n"
+            "match _handler():\n"
+            f"    {pattern}\n"
+            "        pass\n"
+        )
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                module_capture,
+                frozenset({"record_ready_queue_depth"}),
+                path=_CALLEE_MODULE,
+            )
+            == []
+        )
+
+    function_local = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+        "\n"
+        "\n"
+        "def refresh(handler):\n"
+        "    match handler:\n"
+        "        case record_ready_queue_depth:\n"
+        "            return record_ready_queue_depth\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        function_local,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]

@@ -130,8 +130,17 @@ def _assignment_rebound_scope_names(
     would resolve the thread while importers still reach the loop's last
     handler or the context manager's value (PRRT_kwDOSJAM6s6rBjC4).
 
+    A ``match`` pattern's capture binds its name the same way and is read the
+    same way: ``case record:`` replaces the ``def record`` above it once the
+    pattern matches, as do a sequence pattern's ``*rest`` and a mapping
+    pattern's ``**rest``, whose names live on the pattern node instead of on an
+    ``ast.Name`` store, so a reader watching only assignment statements still
+    offered the dead head while importers receive the captured value
+    (PRRT_kwDOSJAM6s6rBsj0).
+
     Only bindings that bind a name are read: an annotation without a value
-    binds nothing, a ``with`` item without ``as`` binds nothing, and an
+    binds nothing, a ``with`` item without ``as`` binds nothing, a wildcard
+    ``case _:`` and a class or value pattern capture nothing, and an
     attribute or subscript target rebinds no name of the scope. Comprehension
     targets are not read at all — they bind in the comprehension's own scope,
     not the one holding it. The head of a line already read as a definition is
@@ -156,6 +165,7 @@ def _assignment_rebound_scope_names(
     header_line_suites = _header_line_suite_heads(raw_lines, tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
+        captured: set[str] = set()
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
@@ -166,9 +176,17 @@ def _assignment_rebound_scope_names(
             isinstance(node, ast.AnnAssign) and node.value is not None
         ):
             targets = [node.target]
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            targets = []
+            captured = {node.name}
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            targets = []
+            captured = {node.rest}
         else:
             continue
-        bound = {name for target in targets for name in _assignment_target_names(target)} & names
+        bound = (
+            {name for target in targets for name in _assignment_target_names(target)} | captured
+        ) & names
         if not bound:
             continue
         indent = _leading_indent(raw_lines[node.lineno - 1])
