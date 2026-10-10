@@ -194,6 +194,14 @@ def _assignment_rebound_scope_names(
     correction has to touch credited an edit to dead code while ``from module
     import record`` stayed broken (PRRT_kwDOSJAM6s6rB_UI).
 
+    An augmented assignment and a PEP 695 ``type record = Callable[...]``
+    statement are read the same way, for the reason every form here is: both
+    store into the name while carrying no definition head of their own, so an
+    overload-capable ``record += replacement`` and an alias statement each left
+    the ``def``/``class record`` above them classified as importable while
+    callers reach the operator's result or the alias object
+    (PRRT_kwDOSJAM6s6rCGKj).
+
     Only bindings that bind a name are read: an annotation without a value
     binds nothing, a ``with`` item without ``as`` binds nothing, a bare
     ``except Exception:`` binds nothing, a wildcard
@@ -232,10 +240,12 @@ def _assignment_rebound_scope_names(
             targets = [node.target]
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             targets = [item.optional_vars for item in node.items if item.optional_vars is not None]
-        elif isinstance(node, ast.NamedExpr) or (
+        elif isinstance(node, (ast.AugAssign, ast.NamedExpr)) or (
             isinstance(node, ast.AnnAssign) and node.value is not None
         ):
             targets = [node.target]
+        elif isinstance(node, ast.TypeAlias):
+            targets = [node.name]
         elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.ExceptHandler)) and node.name:
             targets = []
             captured = {node.name}
