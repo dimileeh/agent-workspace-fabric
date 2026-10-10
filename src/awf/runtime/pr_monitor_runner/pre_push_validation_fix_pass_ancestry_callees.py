@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import functools
 import re
+from collections.abc import Iterator
+from typing import Final
 
 # JS/TS identifiers may include ``$`` (e.g. ``$helper``). Python ``\b`` treats
 # ``$`` as non-word, so ``$helper()`` would otherwise match as bare ``helper``
@@ -1343,3 +1346,72 @@ def _enclosing_definition_name(file_text: str, line: int, *, path: str | None = 
     """Return the nearest def/function/class name at or above ``line``."""
     identity = _enclosing_definition_identity(file_text, line, path=path)
     return None if identity is None else identity[0]
+
+
+# A comprehension is its own scope: its generator targets bind only inside it,
+# while a ``:=`` in its body assigns in the scope that holds it.
+_COMPREHENSION_SCOPES: Final = (ast.DictComp, ast.GeneratorExp, ast.ListComp, ast.SetComp)
+# Scopes an anchored line can sit in. A class body is absent on purpose: its
+# bindings are attributes, invisible to the calls inside its methods.
+_FUNCTION_SCOPES: Final = (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)
+_ANCHORED_SCOPES: Final = _FUNCTION_SCOPES + _COMPREHENSION_SCOPES
+
+
+def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
+    """Names the scope ``scope`` binds inside its own body.
+
+    Python locals are function-wide — a name assigned anywhere in a function is
+    local throughout it — so the whole body is read rather than only the lines
+    above the anchor. Parameters, assignment / loop / ``with`` targets, caught
+    exceptions, function-local imports and nested definitions all count, and so
+    do ``match`` / ``case`` capture, star and mapping-rest targets: those carry
+    their name on the pattern node rather than storing an ``ast.Name``, so a
+    reader that watched only ``Store`` names would leave a ``case record:``
+    still holding its import (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds
+    nothing and is skipped.
+
+    Child scopes are *not* descended into. A nested function's or lambda's
+    parameters and locals, a class body's attributes and a comprehension's
+    targets are bound in those scopes, not here, so counting them as locals
+    would mark an import shadowed that the anchored line still holds and reject
+    a correction that does change the callee it reaches (PRRT_kwDOSJAM6s6q_M0s).
+    What a child binds in *this* scope is still reported: a nested ``def`` /
+    ``class`` name, and every ``:=`` target in a child, because a comprehension
+    assigns its walruses in the scope holding it and a definition's decorators
+    and parameter defaults are evaluated where the definition appears. A walrus
+    buried in a child's *body* binds only there, but telling the two apart costs
+    more than the name is worth, so it keeps failing closed. ``scope``'s own
+    name is not reported — a
+    definition's name is bound in the scope that *holds* it, so a method named
+    like an imported helper does not shadow that import for the calls in its own
+    body. Neither is a ``nonlocal`` rebinding: it is legal only where an
+    enclosing function already binds the name, which that scope's own pass
+    reports. Callers anchor every scope enclosing the line, so an enclosing
+    function's locals still reach a call nested inside it.
+    """
+    pending: list[ast.AST] = list(ast.iter_child_nodes(scope))
+    if isinstance(scope, _COMPREHENSION_SCOPES):
+        pending.extend(generator.target for generator in scope.generators)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                yield node.name
+            pending.extend(
+                found.target for found in ast.walk(node) if isinstance(found, ast.NamedExpr)
+            )
+            continue
+        if isinstance(node, ast.comprehension):
+            pending.extend((node.iter, *node.ifs))
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node.id
+        elif isinstance(node, ast.arg):
+            yield node.arg
+        elif isinstance(node, ast.alias):
+            yield node.asname or node.name.partition(".")[0]
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            yield node.name
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            yield node.rest
+        pending.extend(ast.iter_child_nodes(node))

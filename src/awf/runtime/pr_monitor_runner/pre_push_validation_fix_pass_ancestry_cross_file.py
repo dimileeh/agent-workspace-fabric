@@ -28,6 +28,7 @@ from typing import Any, cast
 
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
+    _ANCHORED_SCOPES,
     _DECORATOR_BASENAME_RE,
     _ENCLOSING_DEFINITION_RE,
     _definition_binding_scope,
@@ -36,6 +37,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _definition_is_nested_in_other,
     _definition_span_is_class,
     _iter_definition_spans,
+    _names_bound_in_scope,
     _path_allows_js_private_fields,
 )
 
@@ -471,39 +473,6 @@ def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]
     )
 
 
-def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
-    """Names the function scope ``scope`` binds inside its own body.
-
-    Python locals are function-wide — a name assigned anywhere in a function is
-    local throughout it — so the whole subtree is read rather than only the
-    lines above the anchor. Parameters, assignment / loop / ``with`` targets,
-    caught exceptions, function-local imports and nested definitions all count,
-    and so do ``match`` / ``case`` capture, star and mapping-rest targets: those
-    carry their name on the pattern node rather than storing an ``ast.Name``, so
-    a reader that watched only ``Store`` names would leave a ``case record:``
-    still holding its import (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds
-    nothing and is skipped.
-    Names a *nested* scope binds come out with them, which can only make a name
-    fail closed. ``scope``'s own name does not: a definition's name is bound in
-    the scope that *holds* it, so a method named like an imported helper does
-    not shadow that import for the calls in its own body.
-    """
-    for node in ast.walk(scope):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            yield node.id
-        elif isinstance(node, ast.arg):
-            yield node.arg
-        elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
-            if node is not scope:
-                yield node.name
-        elif isinstance(node, ast.alias):
-            yield node.asname or node.name.partition(".")[0]
-        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
-            yield node.name
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            yield node.rest
-
-
 def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> frozenset[str]:
     """Names a function scope enclosing ``line`` binds itself.
 
@@ -517,10 +486,13 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     name.
 
     Only function scopes shadow: a class body's binding is an attribute of the
-    class and is invisible to the calls inside its methods. A name *no* import
-    binds is not reported on by this reader at all — it keeps the name-only rule
-    the #1019 fixes and the parameter-receiver tolerance depend on, because an
-    unknown local is exactly the unreadable binding that rule exists for. Text
+    class and is invisible to the calls inside its methods. A comprehension is
+    anchored as well, because its generator targets bind inside it — they shadow
+    the import for the calls it contains and for nothing else
+    (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
+    reader at all — it keeps the name-only rule the #1019 fixes and the
+    parameter-receiver tolerance depend on, because an unknown local is exactly
+    the unreadable binding that rule exists for. Text
     this reader cannot parse yields nothing, which leaves the lexical readers'
     bindings as they were rather than failing every import-bound callee closed
     on a parse error this probe cannot act on.
@@ -533,7 +505,7 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
         return frozenset()
     bound: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)):
+        if not isinstance(node, _ANCHORED_SCOPES):
             continue
         if node.lineno <= line <= (node.end_lineno or node.lineno):
             bound.update(_names_bound_in_scope(node))

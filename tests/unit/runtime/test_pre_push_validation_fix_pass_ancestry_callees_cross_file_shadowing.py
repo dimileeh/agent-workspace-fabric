@@ -736,3 +736,67 @@ async def test_a_change_to_a_dead_duplicate_class_member_is_not_evidence() -> No
 async def test_a_change_to_the_effective_duplicate_class_member_is_evidence() -> None:
     """The paired accept: the surviving last method is the real callee."""
     assert await _probe(_duplicate_method_probe(diff=_EFFECTIVE_METHOD_DIFF), item_line=5)
+
+
+@pytest.mark.unit
+def test_bindings_owned_only_by_a_nested_scope_do_not_shadow() -> None:
+    """A child scope's own parameters and locals are not the parent's locals.
+
+    A nested helper assigning ``validate``, a lambda taking it as a parameter
+    and a comprehension using it as a target all bind the name in *their* own
+    scope, so the anchored line's ``validate`` still holds the module's import
+    and a correction to that imported definition does change the callee it
+    reaches (PRRT_kwDOSJAM6s6q_M0s). What those children bind in the parent —
+    the nested definition's name, the assignment the comprehension is stored
+    to — is still reported.
+    """
+    text = (
+        "def refresh(pool):\n"
+        "    def helper(validate):\n"
+        "        shadowed = validate\n"
+        "        return shadowed\n"
+        "\n"
+        "    picked = [validate for validate in pool.items]\n"
+        "    mapper = lambda validate: validate\n"
+        "    return validate(helper, picked, mapper)\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 8, path=_CALLER) == frozenset(
+        {"pool", "helper", "picked", "mapper"}
+    )
+
+
+@pytest.mark.unit
+def test_a_comprehension_target_shadows_inside_the_comprehension() -> None:
+    """The paired fail-closed: a call *inside* the comprehension reaches its target."""
+    text = (
+        "def refresh(pool):\n"
+        "    return [\n"
+        "        validate(item)\n"
+        "        for validate, item in pool.pairs\n"
+        "    ]\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset(
+        {"pool", "validate", "item"}
+    )
+
+
+@pytest.mark.unit
+def test_a_walrus_inside_a_comprehension_still_binds_the_holding_scope() -> None:
+    """``:=`` assigns in the scope holding the comprehension, so it shadows there.
+
+    A walrus a child *definition* evaluates reaches the enclosing scope too
+    (through a decorator or a parameter default), so every ``:=`` target in a
+    child keeps failing closed rather than paying to tell its position apart.
+    """
+    text = (
+        "def refresh(pool):\n"
+        "    totals = [(validate := item.check)(item) for item in pool.items]\n"
+        "    hooks = [lambda item=item: (inner := item) for item in pool.items]\n"
+        "    return validate, totals, hooks\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 4, path=_CALLER) == frozenset(
+        {"pool", "totals", "hooks", "validate", "inner"}
+    )
