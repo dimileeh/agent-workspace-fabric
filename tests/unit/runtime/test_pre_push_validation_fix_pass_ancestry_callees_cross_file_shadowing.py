@@ -1560,3 +1560,58 @@ def test_a_rebinding_inside_a_one_line_compound_suite_is_not_importable() -> Non
             frozenset({"record_ready_queue_depth"}),
             path=_CALLEE_MODULE,
         ) == [(1, 4)], untouched
+
+
+@pytest.mark.unit
+def test_a_walrus_rebinding_in_a_compound_header_is_not_importable() -> None:
+    """``:=`` binds the name inside the header, where no statement starts.
+
+    A compound suite at least spells its assignment as a statement; a walrus
+    binding lives in the header's own expression, so a reader that looks for
+    statement starts has nothing to match either way. The importer still
+    reaches the replacement, so the dead ``def`` above it is not the callee a
+    correction must touch (PRRT_kwDOSJAM6s6rBbdn). The suite's own scope still
+    decides: a function-local walrus binds a local, and one binding some other
+    name shadows nothing.
+    """
+    guarded_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "if (record_ready_queue_depth := _build_recorder()) is not None:\n"
+        "    _register(record_ready_queue_depth)\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            guarded_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    function_local = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+        "\n"
+        "\n"
+        "def refresh(gauge):\n"
+        "    if (record_ready_queue_depth := gauge.recorder) is not None:\n"
+        "        return record_ready_queue_depth\n"
+        "    return None\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        function_local,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    other_name = guarded_rebind.replace(
+        "record_ready_queue_depth := _build_recorder()", "recorder := _build_recorder()"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        other_name,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]

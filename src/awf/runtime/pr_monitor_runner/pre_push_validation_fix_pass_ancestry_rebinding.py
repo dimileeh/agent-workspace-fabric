@@ -60,7 +60,9 @@ def _assignment_rebound_scope_names(
     header nor the statement, so the name keeps looking bound to the dead
     ``def`` above it while the importer reaches ``replacement``
     (PRRT_kwDOSJAM6s6rBbdn). An ``ast`` walk sees that statement, a
-    semicolon-separated one and a wrapped one alike.
+    semicolon-separated one and a wrapped one alike, and it is also the only
+    reading a ``:=`` binding has: ``if (record := replacement):`` rebinds the
+    name inside the header itself, where no statement starts at all.
 
     Only assignments that bind a name are read: an annotation without a value
     binds nothing, and an attribute or subscript target rebinds no name of the
@@ -85,7 +87,9 @@ def _assignment_rebound_scope_names(
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        elif isinstance(node, ast.NamedExpr) or (
+            isinstance(node, ast.AnnAssign) and node.value is not None
+        ):
             targets = [node.target]
         else:
             continue
