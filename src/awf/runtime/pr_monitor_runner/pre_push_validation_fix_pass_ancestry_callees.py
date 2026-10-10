@@ -1139,7 +1139,10 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
     capture, star and mapping-rest targets: those carry their name on the
     pattern node rather than storing an ``ast.Name``, so a reader that watched
     only ``Store`` names would leave a ``case record:`` still holding its import
-    (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds nothing and is skipped, and
+    (PRRT_kwDOSJAM6s6q-N1B). A ``del record`` target counts too: ``del`` makes
+    the name local for the whole body exactly as an assignment does, and then
+    leaves it bound to nothing, so a call in that body reaches no import at all
+    (PRRT_kwDOSJAM6s6rB_UI). A wildcard ``_`` binds nothing and is skipped, and
     neither is an ``import`` statement in the body — it is a binding the import
     readers hold themselves, see ``_locally_rebound_names_at_line``
     (PRRT_kwDOSJAM6s6rAhm2).
@@ -1177,7 +1180,7 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
         if isinstance(node, ast.comprehension):
             pending.extend((node.iter, *node.ifs))
             continue
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             yield node.id
         elif isinstance(node, ast.arg):
             yield node.arg

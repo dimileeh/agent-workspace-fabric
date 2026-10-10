@@ -687,3 +687,41 @@ def test_unreadable_call_sites_report_no_module_scope_bindings() -> None:
         frozenset()
     )
     assert cross_file._module_scope_rebound_names("record = (\n", path=_CALLER) == frozenset()
+
+
+@pytest.mark.unit
+def test_module_scope_delete_targets_are_read() -> None:
+    """``del record`` leaves the import bound to nothing, so it proves no callee.
+
+    Every other rebinding form at least leaves the name reaching *something*;
+    a module-level ``del`` leaves it reaching nothing, which makes trusting the
+    import as proof of the callee strictly worse than for an assignment —
+    a correction to the imported module's definition cannot be what the
+    anchored call reaches (PRRT_kwDOSJAM6s6rB_UI). An attribute target unbinds
+    no name of the module and is not collected.
+    """
+    text = "from pkg import record\n\n\ndel record\n"
+
+    assert cross_file._module_scope_rebound_names(text, path=_CALLER) == frozenset({"record"})
+
+    attribute_target = text.replace("del record\n", "del _registry.record\n")
+
+    assert cross_file._module_scope_rebound_names(attribute_target, path=_CALLER) == frozenset()
+
+
+@pytest.mark.unit
+def test_delete_targets_of_the_anchored_scope_are_read() -> None:
+    """``del record`` in the anchored body makes the name local and then unbound.
+
+    ``del`` binds a name locally for the whole function exactly as an
+    assignment does, so the call below it reaches no import — it raises — and
+    the imported module's definition is not the callee a correction has to
+    touch (PRRT_kwDOSJAM6s6rB_UI).
+    """
+    text = (
+        "from pkg import record\n\n\ndef refresh(pool):\n    del record\n    return record(pool)\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 6, path=_CALLER) == frozenset(
+        {"pool", "record"}
+    )

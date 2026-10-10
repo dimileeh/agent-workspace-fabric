@@ -557,7 +557,12 @@ def _module_scope_rebound_names(file_text: str, *, path: str) -> frozenset[str]:
     ``def`` / ``class`` of the name does shadow the import and is collected, as
     do a module-level ``match`` statement's capture, star and mapping-rest
     targets, whose names live on the pattern nodes instead of on an ``ast.Name``
-    store (PRRT_kwDOSJAM6s6q-N1B).
+    store (PRRT_kwDOSJAM6s6q-N1B). A module-level ``del record`` is collected as
+    well: it is the one form that leaves the name bound to nothing at all, so
+    treating the import as still proof of the callee credited a correction the
+    caller can no longer reach (PRRT_kwDOSJAM6s6rB_UI); an attribute or
+    subscript target such as ``del _registry.record`` unbinds no name of the
+    module and is not collected.
     Text this reader cannot parse yields nothing, matching the companion reader
     rather than failing every import-bound callee closed on a parse error.
     """
@@ -577,7 +582,7 @@ def _module_scope_rebound_names(file_text: str, *, path: str) -> frozenset[str]:
             continue
         if isinstance(node, ast.Lambda):
             continue
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bound.add(node.id)
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             bound.add(node.name)
