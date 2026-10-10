@@ -1420,3 +1420,55 @@ async def test_a_change_to_a_definition_a_later_import_rebinds_is_not_evidence()
     )
 
     assert not await _probe(probe)
+
+
+@pytest.mark.unit
+def test_a_rebinding_after_a_semicolon_on_the_same_line_is_not_importable() -> None:
+    """A rebinding that follows another statement on its line still fails closed.
+
+    A logical line can spell several simple statements, so
+    ``_initialize(); record = replacement`` rebinds the name just as a line of
+    its own would. Matched only from the start of the physical line, the
+    assignment is invisible and the dead ``def`` above it is offered as the
+    callee a correction must touch (PRRT_kwDOSJAM6s6rBTTP). A head line carries
+    the same shape: the head itself is still not read as its own rebinding,
+    while a statement after it is. A trailing statement binding some *other*
+    name shadows nothing, as one on a line of its own does not.
+    """
+    trailing_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "_initialize(); record_ready_queue_depth = _build_recorder()\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            trailing_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    after_a_head = (
+        "record_ready_queue_depth = lambda payload: payload.ready_depth()"
+        "; record_ready_queue_depth = _build_recorder()\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            after_a_head,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    other_name = trailing_rebind.replace(
+        "record_ready_queue_depth = _build_recorder()", "RECORDER = _build_recorder()"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        other_name,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]

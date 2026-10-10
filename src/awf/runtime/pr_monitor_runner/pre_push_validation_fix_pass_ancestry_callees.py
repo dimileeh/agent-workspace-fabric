@@ -270,6 +270,30 @@ def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> l
     return scan_lines
 
 
+def _simple_statement_segments(scan: str) -> Iterator[str]:
+    """The simple statements a masked statement line spells.
+
+    A logical line can hold several simple statements separated by ``;``, and
+    only the first of them starts at the line's own left edge, so a reader
+    anchored there misses every later one. Semicolons inside brackets are
+    skipped: a ``;`` cannot appear in an expression, so a bracketed one belongs
+    to a JS/TS ``for (let i = 0; i < n; i++)`` header rather than to a
+    statement boundary. Scanning for a bare ``;`` is otherwise exact, because
+    the callers run over comment/string-masked lines.
+    """
+    depth = 0
+    start = 0
+    for position, char in enumerate(scan):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(depth - 1, 0)
+        elif char == ";" and depth == 0:
+            yield scan[start:position]
+            start = position + 1
+    yield scan[start:]
+
+
 def _plain_assignment_rebound_scope_names(
     file_text: str,
     all_spans: list[tuple[str, int, int, int]],
@@ -290,12 +314,20 @@ def _plain_assignment_rebound_scope_names(
     the binding that runs last (PRRT_kwDOSJAM6s6q_ywa).
 
     ``definition_head_starts`` are the lines already read as definitions of
-    their own, which the last-head fold orders without help. Only statement
-    positions count — bracket depth is tracked across the file so a keyword
-    argument or a continuation-line parameter default (``validate=None,``) is
-    not read as a binding — and each target is attributed to the scope whose
-    body executes it, so a function-local assignment never shadows a
-    module-level definition.
+    their own, which the last-head fold orders without help. Only the *head*
+    of such a line is skipped: definition discovery matches heads at the line's
+    left edge too, so a statement after a ``;`` on it carries no head of its
+    own and rebinds the name exactly as a line of its own would. Every simple
+    statement a line spells is read for the same reason — ``initialize();
+    validate = replacement`` is the binding an importer reaches, and left
+    unread it leaves the dead head standing as the callee a correction must
+    touch (PRRT_kwDOSJAM6s6rBTTP).
+
+    Only statement positions count — bracket depth is tracked across the file
+    so a keyword argument or a continuation-line parameter default
+    (``validate=None,``) is not read as a binding — and each target is
+    attributed to the scope whose body executes it, so a function-local
+    assignment never shadows a module-level definition.
     """
     raw_lines = file_text.splitlines()
     scan_lines = _definition_head_scan_lines(file_text, path=path)
@@ -307,12 +339,17 @@ def _plain_assignment_rebound_scope_names(
         closed = scan.count(")") + scan.count("]") + scan.count("}")
         depth = max(0, depth + opened - closed)
         line = idx + 1
-        if not at_statement_start or line in definition_head_starts:
+        if not at_statement_start:
             continue
-        match = _PLAIN_ASSIGNMENT_TARGETS_RE.match(scan)
-        if match is None:
-            continue
-        targets = {target.strip() for target in match.group(1).split(",")} & names
+        head_is_a_definition = line in definition_head_starts
+        targets: set[str] = set()
+        for position, segment in enumerate(_simple_statement_segments(scan)):
+            if position == 0 and head_is_a_definition:
+                continue
+            match = _PLAIN_ASSIGNMENT_TARGETS_RE.match(segment)
+            if match is not None:
+                targets.update(target.strip() for target in match.group(1).split(","))
+        targets &= names
         if not targets:
             continue
         scope_start, _body_indent = _definition_binding_scope(
