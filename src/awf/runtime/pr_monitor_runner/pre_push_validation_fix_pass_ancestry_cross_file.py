@@ -784,6 +784,7 @@ def _caller_binding_resolver(
     rebound: frozenset[str],
     refs: frozenset[tuple[str, str]],
     bare_refs: frozenset[tuple[str, str]],
+    chained_receivers: frozenset[str] = frozenset(),
     require_binding: bool = False,
 ) -> Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]]:
     """Bind ``refs`` to one caller text's imports, as a path-keyed callable.
@@ -791,8 +792,13 @@ def _caller_binding_resolver(
     A receiver a plain ``import`` binds is a module, so its callee is held to
     module scope like a bare one; every other receiver may be an instance and
     keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
-    ``require_binding`` drops the name-only fallback, for the re-read that has
-    to *prove* a rename target reachable rather than merely not refute it.
+    ``chained_receivers`` are the keys a chained receiver resolved to, which
+    never take the name-only fallback: an attribute chain is not a name an
+    import can bind, so a root this reader cannot tie to the candidate fails
+    closed instead of accepting any reachable same-named definition
+    (PRRT_kwDOSJAM6s6q-6LK). ``require_binding`` drops that fallback for every
+    key, for the re-read that has to *prove* a rename target reachable rather
+    than merely not refute it.
     """
     bare_bindings = _import_targets_without_locally_rebound(
         _bare_name_import_module_targets(caller_text, path=call_site), rebound
@@ -807,6 +813,8 @@ def _caller_binding_resolver(
         receiver_bindings = _bindings_fail_closed_when_unbound(
             receiver_bindings, frozenset(key for key, _ in refs)
         )
+    elif chained_receivers:
+        receiver_bindings = _bindings_fail_closed_when_unbound(receiver_bindings, chained_receivers)
     module_receivers = _module_bound_receiver_names(caller_text, path=call_site)
     return partial(
         _callee_names_bound_to_path,
@@ -1125,34 +1133,63 @@ async def _path_diff_text_in_commit_range(
 
 def _cross_file_callee_names(
     file_text: str, line: int, *, path: str
-) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
+) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]], frozenset[str]]:
     """Callee refs at ``line`` that may resolve in another file.
 
-    Returns ``(attribute_qualified, bare)`` separately because the two call
-    shapes reach different definitions across a module boundary — see
-    ``_importable_definition_spans_for_names``. Each ref is a
-    ``(binding_key, name)`` pair, the key being the name whose import binding
-    narrows the candidate path: a qualified callee binds through its receiver, a
-    bare callee through itself. The two differ for an aliased bare callee, whose
-    key is the local binding while the definition to look for carries the
-    imported symbol's name (PRRT_kwDOSJAM6s6q9WnP); a qualified callee's name is
-    an attribute of its receiver, which no import renames.
+    Returns ``(attribute_qualified, bare, chained_receivers)``. The first two
+    are separate because the two call shapes reach different definitions across
+    a module boundary — see ``_importable_definition_spans_for_names``. Each ref
+    is a ``(binding_key, name)`` pair, the key being the name whose import
+    binding narrows the candidate path: a qualified callee binds through its
+    receiver, a bare callee through itself. The two differ for an aliased bare
+    callee, whose key is the local binding while the definition to look for
+    carries the imported symbol's name (PRRT_kwDOSJAM6s6q9WnP); a qualified
+    callee's name is an attribute of its receiver, which no import renames.
+
+    A callee reached through a *chain* of receivers (``api.metrics.record()``)
+    does not bind through its immediate qualifier ``metrics``, which is an
+    attribute no import can bind — keying such a ref on the qualifier would
+    leave it on the name-only rule and let a correction to any reachable
+    ``record`` resolve the thread while ``api.metrics.record`` stayed untouched.
+    A chain that itself spells a plain-imported module
+    (``pkg.obs.metrics.record()``) is that module's receiver and keeps the
+    qualifier its import already binds; any other chain is keyed on its root —
+    the one link an import can bind — and reported as chained, so the resolver
+    holds it closed instead of falling back to the name-only rule when the root
+    reaches nothing the candidate can satisfy (PRRT_kwDOSJAM6s6q-6LK).
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
         _callee_refs_from_file_line,
+        _receiver_chain_segments_from_file_line,
     )
 
     refs = _callee_refs_from_file_line(file_text, line, path=path)
-    qualified = frozenset(
-        (qualifier, name)
-        for qualifier, name in refs
-        if qualifier is not None and qualifier not in _IN_FILE_CALLEE_QUALIFIERS
-    )
+    chains = _receiver_chain_segments_from_file_line(file_text, line, path=path)
+    plain_imports = _plain_import_module_paths(file_text, path=path)
+    qualified: set[tuple[str, str]] = set()
+    chained_receivers: set[str] = set()
+    for qualifier, name in refs:
+        if qualifier is None or qualifier in _IN_FILE_CALLEE_QUALIFIERS:
+            continue
+        if qualifier not in chains:
+            qualified.add((qualifier, name))
+            continue
+        chain = chains[qualifier]
+        if chain is not None and "/".join(chain) in plain_imports.get(qualifier, frozenset()):
+            # ``import pkg.obs.metrics`` binds the receiver this chain spells,
+            # under its last segment — the qualifier already carries it.
+            qualified.add((qualifier, name))
+            continue
+        # An unreadable chain keeps the qualifier as the key; either way the key
+        # is reported as chained, which is what holds it closed.
+        key = chain[0] if chain is not None else qualifier
+        chained_receivers.add(key)
+        qualified.add((key, name))
     imported = _bare_name_imported_definition_names(file_text, path=path)
     bare = frozenset(
         (name, imported.get(name, name)) for qualifier, name in refs if qualifier is None
     )
-    return qualified, bare
+    return frozenset(qualified), bare, frozenset(chained_receivers)
 
 
 async def _commit_range_changes_callee_definition(
@@ -1173,7 +1210,11 @@ async def _commit_range_changes_callee_definition(
     diff overlaps. Each callee is additionally held to the module its own import
     binds — a bare callee through its ``from`` import, a qualified callee
     through its receiver — so a same-named definition in a module the call site
-    never imported is not evidence (PRRT_kwDOSJAM6s6q7bSI). A callee whose
+    never imported is not evidence (PRRT_kwDOSJAM6s6q7bSI). A callee reached through a chain of
+    receivers binds through the chain's root instead of the attribute in front
+    of it, and never takes the name-only fallback, so an edit to a same-named
+    definition in a module that root cannot reach is not evidence
+    (PRRT_kwDOSJAM6s6q-6LK). A callee whose
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
     gate exists for; a receiver imported by name resolves to that name's own
     module or to the importing module's file, not to any sibling under its
@@ -1224,7 +1265,9 @@ async def _commit_range_changes_callee_definition(
     )
     if not item_text:
         return False
-    names, bare_names = _cross_file_callee_names(item_text, item_line, path=normalized_item)
+    names, bare_names, chained_receivers = _cross_file_callee_names(
+        item_text, item_line, path=normalized_item
+    )
     if not (names or bare_names):
         return False
     candidates = [
@@ -1251,6 +1294,7 @@ async def _commit_range_changes_callee_definition(
         rebound=rebound,
         refs=names,
         bare_refs=bare_names,
+        chained_receivers=chained_receivers,
     )
     bound_to_after: (
         Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]] | None

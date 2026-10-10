@@ -110,6 +110,13 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
+# The dotted prefix before a chained callee's receiver: in
+# ``root.mid.receiver.name()`` group 1 is ``root.mid``, the part of the receiver
+# the callee's immediate qualifier hides. Only simple-identifier links are read,
+# so ``factory().receiver.name()`` leaves the chain unreadable.
+_RECEIVER_CHAIN_PREFIX_RE = re.compile(
+    rf"({_IDENT_BOUNDARY}{_JS_IDENT}(?:\s*\??\.\s*{_JS_IDENT})*)\s*\??\.\s*$"
+)
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 # JS/TS class instance receiver (gated by ``_path_allows_js_private_fields``).
 _JS_ATTR_CALLEE_QUALIFIERS = frozenset({"this"})
@@ -1075,12 +1082,16 @@ def _bare_callee_follows_attribute_dot(scan_text: str, match_start: int) -> bool
     return _BARE_CALLEE_AFTER_ATTR_DOT_RE.search(scan_text[:match_start]) is not None
 
 
-def _callee_refs_from_anchor_line(
+def _callee_ref_matches_from_anchor_line(
     anchor_line: str, *, path: str | None = None
-) -> frozenset[tuple[str | None, str]]:
-    """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line."""
+) -> tuple[str, list[re.Match[str]]]:
+    """``(masked_scan_text, matches)`` for the call refs on a review-anchor line.
+
+    Shared by the ref reader and the receiver-chain reader so both see exactly
+    the same calls, and the same masked text their positions index into.
+    """
     if not anchor_line:
-        return frozenset()
+        return "", []
     scan_from = 0
     # A leading def/class/function signature's name is not a callee. Scan from
     # the signature's opening ``(`` so default-expression calls before the
@@ -1090,11 +1101,11 @@ def _callee_refs_from_anchor_line(
     if _ENCLOSING_DEFINITION_RE.match(anchor_line) is not None:
         colon = anchor_line.find(":")
         if colon < 0:
-            return frozenset()
+            return "", []
         open_paren = anchor_line.find("(")
         scan_from = open_paren if 0 <= open_paren < colon else colon + 1
     scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line, path=path)
-    refs: set[tuple[str | None, str]] = set()
+    matches: list[re.Match[str]] = []
     for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
@@ -1104,18 +1115,83 @@ def _callee_refs_from_anchor_line(
         # emit as bare ``helper`` and link an unrelated module ``def helper``.
         if qualifier is None and _bare_callee_follows_attribute_dot(scan_text, match.start()):
             continue
-        # Keep keyword-like receivers (e.g. ``match.helper()``). Erasing them to
-        # a bare name would let an unrelated module-level ``helper`` satisfy
-        # FIXED evidence; non-self/cls/this qualifiers already fail closed at
-        # resolve (``this`` only resolves on JS/TS paths).
-        refs.add((qualifier, name))
-    return frozenset(refs)
+        matches.append(match)
+    return scan_text, matches
+
+
+def _callee_refs_from_anchor_line(
+    anchor_line: str, *, path: str | None = None
+) -> frozenset[tuple[str | None, str]]:
+    """Extract ``(qualifier|None, name)`` call refs from a review-anchor source line.
+
+    Keyword-like receivers are kept (e.g. ``match.helper()``). Erasing them to
+    a bare name would let an unrelated module-level ``helper`` satisfy FIXED
+    evidence; non-self/cls/this qualifiers already fail closed at resolve
+    (``this`` only resolves on JS/TS paths).
+    """
+    _scan_text, matches = _callee_ref_matches_from_anchor_line(anchor_line, path=path)
+    return frozenset((match.group(1), match.group(2)) for match in matches)
+
+
+def _receiver_chain_segments(prefix_text: str) -> tuple[str, ...] | None:
+    """The dotted receiver chain ``prefix_text`` ends with, or None.
+
+    ``?`` cannot appear in an identifier, so dropping it leaves the optional
+    chaining operator as a plain ``.`` separator.
+    """
+    match = _RECEIVER_CHAIN_PREFIX_RE.search(prefix_text)
+    if match is None:
+        return None
+    return tuple(segment.strip() for segment in match.group(1).replace("?", "").split("."))
+
+
+def _receiver_chain_segments_from_anchor_line(
+    anchor_line: str, *, path: str | None = None
+) -> dict[str, tuple[str, ...] | None]:
+    """Receiver chains of the *chained* callees on a review-anchor source line.
+
+    ``_callee_refs_from_anchor_line`` keeps only a callee's immediate
+    qualifier, so ``api.metrics.record()`` reports the receiver as ``metrics``
+    — a name no import binds, which would leave the callee on the name-only
+    rule and let any reachable ``record`` stand in as evidence
+    (PRRT_kwDOSJAM6s6q-6LK). Each chained receiver is mapped to the full dotted
+    chain it is reached through, ``("api", "metrics")`` here, whose first
+    segment is the name an import can bind and whose whole run may itself spell
+    an imported module. The chain is ``None`` when it is not a run of plain
+    identifiers (``factory().metrics.record()``), when the line gives one
+    receiver two different chains, or when the same receiver also appears
+    unchained — readings the caller holds closed instead of guessing.
+    """
+    scan_text, matches = _callee_ref_matches_from_anchor_line(anchor_line, path=path)
+    chained: dict[str, tuple[str, ...] | None] = {}
+    unchained: set[str] = set()
+    for match in matches:
+        qualifier = match.group(1)
+        if qualifier is None:
+            continue
+        if not _bare_callee_follows_attribute_dot(scan_text, match.start(1)):
+            unchained.add(qualifier)
+            continue
+        prefix = _receiver_chain_segments(scan_text[: match.start(1)])
+        chain = None if prefix is None else (*prefix, qualifier)
+        if chained.get(qualifier, chain) != chain:
+            chain = None
+        chained[qualifier] = chain
+    return {
+        qualifier: (None if qualifier in unchained else chain)
+        for qualifier, chain in chained.items()
+    }
 
 
 # Leading ``.`` or ``?.`` after a receiver split onto the prior line.
 _LEADING_DOT_RE = re.compile(r"^([ \t]*)\??\.")
 # Trailing receiver may end with ``.`` or ``?.`` when the call continues below.
-_TRAILING_RECEIVER_RE = re.compile(rf"({_IDENT_BOUNDARY}{_JS_IDENT})\s*(\??\.)?\s*$")
+# The whole dotted chain is captured, not just its last link, so a receiver
+# chain a formatter split across lines still reaches the reader that resolves
+# it to the name an import binds (PRRT_kwDOSJAM6s6q-6LK).
+_TRAILING_RECEIVER_RE = re.compile(
+    rf"({_IDENT_BOUNDARY}{_JS_IDENT}(?:\s*\??\.\s*{_JS_IDENT})*)\s*(\??\.)?\s*$"
+)
 _LEADING_BARE_CALL_RE = re.compile(rf"^([ \t]*)({_JS_IDENT})\s*(?:\?\.)?\s*\(")
 
 
@@ -1161,10 +1237,8 @@ def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -
     return line
 
 
-def _callee_refs_from_file_line(
-    file_text: str, line: int, *, path: str | None = None
-) -> frozenset[tuple[str | None, str]]:
-    """Extract callee refs from ``line`` using preceding file lexical context.
+def _masked_anchor_line(file_text: str, line: int, *, path: str | None = None) -> str | None:
+    """``line``'s masked text with a split receiver reattached, or None.
 
     Masking only the isolated review line loses open multiline string/docstring
     state from earlier lines, so call-shaped decoy text can become FIXED
@@ -1173,18 +1247,42 @@ def _callee_refs_from_file_line(
     attribute calls are not misread as bare names.
     """
     if line < 1 or not file_text:
-        return frozenset()
+        return None
     lines = file_text.splitlines()
     if line > len(lines):
-        return frozenset()
+        return None
     prefix = "\n".join(lines[:line])
     masked_prefix = _mask_comments_and_string_literals_for_callee_scan(prefix, path=path)
     masked_lines = masked_prefix.splitlines()
     # Masking preserves newlines, so line counts stay aligned with ``lines``.
     if line > len(masked_lines):  # pragma: no cover
+        return None
+    return _anchor_line_with_split_receiver(masked_lines, line - 1)
+
+
+def _callee_refs_from_file_line(
+    file_text: str, line: int, *, path: str | None = None
+) -> frozenset[tuple[str | None, str]]:
+    """Extract callee refs from ``line`` using preceding file lexical context."""
+    anchor = _masked_anchor_line(file_text, line, path=path)
+    if anchor is None:
         return frozenset()
-    anchor = _anchor_line_with_split_receiver(masked_lines, line - 1)
     return _callee_refs_from_anchor_line(anchor, path=path)
+
+
+def _receiver_chain_segments_from_file_line(
+    file_text: str, line: int, *, path: str | None = None
+) -> dict[str, tuple[str, ...] | None]:
+    """Receiver chains of ``line``'s chained callees, read with file context.
+
+    The companion of :func:`_callee_refs_from_file_line`: same anchor text, but
+    reporting which of its qualified callees reach their receiver through a
+    dotted chain, and what that chain spells (PRRT_kwDOSJAM6s6q-6LK).
+    """
+    anchor = _masked_anchor_line(file_text, line, path=path)
+    if anchor is None:
+        return {}
+    return _receiver_chain_segments_from_anchor_line(anchor, path=path)
 
 
 def _callee_names_from_anchor_line(anchor_line: str, *, path: str | None = None) -> frozenset[str]:

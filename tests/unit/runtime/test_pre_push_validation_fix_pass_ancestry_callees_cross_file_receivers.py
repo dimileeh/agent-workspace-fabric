@@ -16,7 +16,9 @@ from awf.runtime.pr_monitor_runner import (
 )
 from tests.unit.runtime._pre_push_ancestry_cross_file_helpers import (
     _CALLEE_MODULE,
+    _CALLEE_TEXT,
     _CALLER,
+    _IN_SPAN_DIFF,
     _LEFT,
     _Probe,
     _probe,
@@ -391,3 +393,85 @@ def test_an_exact_receiver_target_carries_the_imported_symbol() -> None:
     ) == {
         "Collector": frozenset({("pkg/obs/Collector", False, None), ("pkg/obs", True, "Collector")})
     }
+
+
+# A caller reaching its callee through a *chain* of receivers: the import binds
+# ``obs``, and ``execution_platform_metrics`` is an attribute of that module —
+# a name no import of this file binds.
+_CHAINED_RECEIVER_CALLER_TEXT = (
+    "import pkg_b.observability as obs\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    obs.execution_platform_metrics.record_ready_queue_depth(payload)\n"
+)
+_UNREACHABLE_SAME_NAME_MODULE = "src/pkg_c/unrelated.py"
+
+
+def _chained_receiver_probe(*, caller_text: str, changed: str = _CALLEE_MODULE) -> _Probe:
+    return _Probe(
+        texts={(_LEFT, _CALLER): caller_text, (_LEFT, changed): _CALLEE_TEXT},
+        changed_paths=(changed,),
+        diffs={changed: _IN_SPAN_DIFF.replace(_CALLEE_MODULE, changed)},
+    )
+
+
+@pytest.mark.unit
+async def test_a_chained_receiver_resolves_under_its_imported_root() -> None:
+    """``obs.metrics.record()`` reaches the module its chain root's import names."""
+    probe = _chained_receiver_probe(caller_text=_CHAINED_RECEIVER_CALLER_TEXT)
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_chained_receiver_rejects_a_module_its_root_cannot_reach() -> None:
+    """The callee's immediate qualifier is an attribute, so the root is the binding.
+
+    Keying the ref on ``execution_platform_metrics`` — the only qualifier the
+    anchored line's scan reports — leaves it bound to nothing, which would hand
+    the callee the name-only rule and let a correction to any reachable
+    ``record_ready_queue_depth`` resolve the thread while
+    ``obs.execution_platform_metrics.record_ready_queue_depth`` stayed
+    untouched (PRRT_kwDOSJAM6s6q-6LK).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=_CHAINED_RECEIVER_CALLER_TEXT, changed=_UNREACHABLE_SAME_NAME_MODULE
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_chained_receiver_whose_root_no_import_binds_fails_closed() -> None:
+    """An attribute chain is not a name an import binds, so it never falls back.
+
+    The name-only tolerance a single unreadable receiver keeps cannot apply
+    here: the receiver is an attribute of ``ctx``, which no import associates
+    with the changed module, so the gate holds the callee closed instead of
+    accepting a same-named definition (PRRT_kwDOSJAM6s6q-6LK).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "def refresh(ctx, payload):\n"
+            "    ctx.execution_platform_metrics.record_ready_queue_depth(payload)\n"
+        )
+    )
+
+    assert not await _probe(probe, item_line=2)
+
+
+@pytest.mark.unit
+async def test_a_receiver_chain_this_reader_cannot_resolve_fails_closed() -> None:
+    """A chain rooted in a call expression leaves no name to bind, so it closes."""
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "import pkg_b.observability as obs\n"
+            "\n"
+            "\n"
+            "def refresh(payload):\n"
+            "    factory().execution_platform_metrics.record_ready_queue_depth(payload)\n"
+        )
+    )
+
+    assert not await _probe(probe, item_line=5)
