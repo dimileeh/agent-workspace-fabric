@@ -557,7 +557,7 @@ def test_plain_import_bindings_skip_pieces_that_are_not_module_names() -> None:
     """Only dotted module names bind; the trailing-comma/garbage pieces do not."""
     assert cross_file._plain_import_module_paths(
         "import a.b  # note\nimport a.b as c\nimport (\n", path="m.py"
-    ) == {"b": frozenset({"a/b"}), "c": frozenset({"a/b"})}
+    ) == {"b": frozenset({"a/b"}), "c": frozenset({"a/b"}), "a": frozenset({"a"})}
     # Non-Python call sites keep the name-only rule for receivers too.
     assert cross_file._plain_import_module_paths("import a.b\n", path="m.ts") == {}
 
@@ -1145,8 +1145,11 @@ def test_import_readers_skip_heads_inside_string_literals() -> None:
     assert cross_file._bare_name_import_module_paths(text, path="src/pkg/caller.py") == {
         "alpha": frozenset({"pkg/mod"})
     }
+    # ``pkg`` is the real statement's own package root; the decoy's module path
+    # reaches neither binding.
     assert cross_file._plain_import_module_paths(text, path="src/pkg/caller.py") == {
-        "real": frozenset({"pkg/real"})
+        "real": frozenset({"pkg/real"}),
+        "pkg": frozenset({"pkg"}),
     }
 
 
@@ -1172,7 +1175,8 @@ def test_import_readers_skip_heads_inside_retained_interpolations() -> None:
         "alpha": frozenset({"pkg/mod"})
     }
     assert cross_file._plain_import_module_paths(text, path="src/pkg/caller.py") == {
-        "real": frozenset({"pkg/real"})
+        "real": frozenset({"pkg/real"}),
+        "pkg": frozenset({"pkg"}),
     }
 
 
@@ -1262,6 +1266,7 @@ def test_an_import_repeated_for_the_same_module_still_binds_it() -> None:
         "metrics": frozenset({("pkg/obs/metrics", False, None), ("pkg/obs", True, "metrics")}),
         "record": frozenset({("pkg/obs/record", False, None), ("pkg/obs", True, "record")}),
         "obs": frozenset({("pkg/obs", False, None)}),
+        "pkg": frozenset({("pkg", False, None)}),
     }
 
 
@@ -1280,7 +1285,8 @@ def test_a_dotted_plain_import_does_not_rebind_a_same_named_bare_callee() -> Non
     """
     text = "from pkg.obs import metrics\nimport vendor.metrics\n"
     assert cross_file._plain_import_module_paths(text, path=_CALLER) == {
-        "metrics": frozenset({"vendor/metrics"})
+        "metrics": frozenset({"vendor/metrics"}),
+        "vendor": frozenset({"vendor"}),
     }
     assert cross_file._bare_name_import_module_targets(text, path=_CALLER) == {
         "metrics": frozenset({("pkg/obs", False, None)})

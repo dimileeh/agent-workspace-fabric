@@ -119,7 +119,12 @@ async def test_an_unreadable_receiver_keeps_the_class_member_tolerance() -> None
 
 @pytest.mark.unit
 def test_only_plain_imports_prove_a_receiver_is_a_module() -> None:
-    """``import M [as m]`` binds a module; a ``from`` import may bind an object."""
+    """``import M [as m]`` binds a module; a ``from`` import may bind an object.
+
+    The package root an unaliased ``import pkg.obs`` binds is a module object
+    too, so it is proven alongside the import's own last segment
+    (PRRT_kwDOSJAM6s6rAAWV).
+    """
     text = (
         "import pkg.obs\n"
         "import pkg.other as alt\n"
@@ -127,7 +132,7 @@ def test_only_plain_imports_prove_a_receiver_is_a_module() -> None:
         "from pkg.obs import metrics as m\n"
     )
     assert cross_file._module_bound_receiver_names(text, path="src/pkg_a/caller.py") == frozenset(
-        {"obs", "alt"}
+        {"obs", "alt", "pkg"}
     )
     # A name both forms bind is rebound, so it is not claimed as a module here
     # and fails closed on the ambiguous target instead.
@@ -619,3 +624,63 @@ async def test_a_chain_whose_root_the_anchored_scope_rebinds_fails_closed() -> N
     )
 
     assert not await _probe(probe, item_line=5)
+
+
+# An *unaliased* dotted plain import: Python binds the package root, so
+# ``pkg_c`` — not the import's last segment — is the receiver this line writes.
+_ROOT_PACKAGE_CALLER_TEXT = (
+    "import pkg_c.collectors\n"
+    "\n"
+    "\n"
+    "def refresh(payload):\n"
+    "    pkg_c.record_ready_queue_depth(payload)\n"
+)
+
+
+@pytest.mark.unit
+async def test_an_unaliased_dotted_import_rejects_a_root_it_cannot_reach() -> None:
+    """``import pkg.mod`` binds ``pkg``, so ``pkg.record()`` is bound through it.
+
+    Recording only the last segment leaves the root with no readable binding,
+    which hands the callee the name-only rule and lets a correction to any
+    reachable ``record_ready_queue_depth`` resolve the thread while
+    ``pkg_c.record_ready_queue_depth`` stays untouched.
+    """
+    probe = _chained_receiver_probe(caller_text=_ROOT_PACKAGE_CALLER_TEXT)
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_unaliased_dotted_import_resolves_under_its_package_root() -> None:
+    """The paired accept: the root's own package still reaches the definition.
+
+    ``pkg_b.record_ready_queue_depth`` is an attribute of the package the
+    import binds, which ``pkg_b/__init__.py`` may re-export from the changed
+    submodule, so the root keeps the descendant tolerance a package import
+    needs.
+    """
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "import pkg_b.observability\n"
+            "\n"
+            "\n"
+            "def refresh(payload):\n"
+            "    pkg_b.record_ready_queue_depth(payload)\n"
+        )
+    )
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+def test_an_alias_binds_no_package_root() -> None:
+    """``import pkg.mod as alias`` binds only ``alias``; the root stays unbound."""
+    assert cross_file._plain_import_module_paths(
+        "import pkg.mod\nimport other.mod as alias\nimport plain\n", path=_CALLER
+    ) == {
+        "mod": frozenset({"pkg/mod"}),
+        "pkg": frozenset({"pkg"}),
+        "alias": frozenset({"other/mod"}),
+        "plain": frozenset({"plain"}),
+    }

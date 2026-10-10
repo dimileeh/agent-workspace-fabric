@@ -308,7 +308,11 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     ``import pkg.mod`` is called through as ``pkg.mod.record(...)``, so the
     receiver captured at the anchored line is the import's last segment;
     ``import pkg.mod as alias`` renames that receiver. Either way the imported
-    module's own path is what a qualified callee reaches through it. Pieces that
+    module's own path is what a qualified callee reaches through it. The unaliased form
+    also binds the package root Python puts in the namespace, because ``pkg.record()``
+    reaches an attribute of ``pkg`` itself: left unbound that root keeps its callee on
+    the name-only rule, so a correction to a same-named definition in another package
+    resolves the thread (PRRT_kwDOSJAM6s6rAAWV). An alias binds no root. Pieces that
     are not a dotted module name are skipped, and a name no plain import binds
     keeps the name-only rule. The comma split runs over the statement without
     its trailing comment, so a comma inside a ``# note`` cannot bind the word
@@ -334,8 +338,11 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
             if not parts or _DOTTED_MODULE_RE.fullmatch(parts[0]) is None:
                 continue
             segments = parts[0].split(".")
-            alias = parts[2] if len(parts) >= 3 and parts[1] == "as" else segments[-1]
+            aliased = len(parts) >= 3 and parts[1] == "as"
+            alias = parts[2] if aliased else segments[-1]
             bindings.setdefault(alias, set()).add("/".join(segments))
+            if not aliased:
+                bindings.setdefault(segments[0], set()).add(segments[0])
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
 
