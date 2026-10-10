@@ -43,6 +43,59 @@ def _assignment_target_names(target: ast.expr) -> Iterator[str]:
             yield from _assignment_target_names(element)
 
 
+def _same_line_suite_columns(tree: ast.AST) -> dict[int, int]:
+    """``head_line -> column`` for each definition whose suite is on its own header line.
+
+    ``def other(): record = replacement`` runs its body on the header's own
+    physical line, so the statement shares that line's leading indent — the
+    *header's* — and starts on the head's own line, which is exactly where
+    ``_definition_binding_scope`` stops reading: it only takes spans that start
+    strictly above the line it is given. Recording the column such a one-line
+    suite starts at lets the readers tell that binding apart from one the
+    enclosing scope's body really executes (PRRT_kwDOSJAM6s6rBkXd).
+    """
+    columns: dict[int, int] = {}
+    for scope in ast.walk(tree):
+        if (
+            isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and scope.body[0].lineno == scope.lineno
+        ):
+            columns[scope.lineno] = scope.body[0].col_offset
+    return columns
+
+
+def _binding_scope_start(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    same_line_suites: dict[int, int],
+    line: int,
+    column: int,
+    indent: int,
+) -> int:
+    """The ``scope_start`` key of the scope whose body executes this binding.
+
+    Normally the indent of the line the binding starts on, read through
+    ``_definition_binding_scope`` so the key matches the definition heads' own.
+    A binding inside a suite written on its header's line is the exception: it
+    carries the header's indent on the header's line, which that reader
+    resolves to the scope *enclosing* the header — so ``def other(): record =
+    ...`` looked like a module-scope rebinding and withheld the live module
+    ``def record``, parking a correct callee-span fix as ``needs_human``
+    (PRRT_kwDOSJAM6s6rBkXd). Such a binding is attributed to the head holding
+    it instead; a one-line suite can hold no definition head of its own, so the
+    pair it keys shadows nothing — which is the point, since a local or class
+    attribute is no rebinding of the module name.
+    """
+    suite_column = same_line_suites.get(line)
+    if suite_column is not None and column >= suite_column:
+        return line
+    scope_start, _body_indent = _definition_binding_scope(
+        file_text, all_spans, start=line, indent=indent
+    )
+    return scope_start
+
+
 def _assignment_rebound_scope_names(
     file_text: str,
     all_spans: list[tuple[str, int, int, int]],
@@ -79,9 +132,10 @@ def _assignment_rebound_scope_names(
     skipped exactly as the lexical reader skips it — ``record = lambda ...``
     *is* the head the last-head fold orders — while any other statement on
     that line is read.
-    Each binding is attributed through ``_definition_binding_scope``, from the
+    Each binding is attributed through ``_binding_scope_start``, from the
     indent of the line it starts on, so the keys match the heads' own and a
-    function-local assignment shadows nothing at module scope. Text this
+    function-local assignment shadows nothing at module scope — including one
+    written in its header's own line (PRRT_kwDOSJAM6s6rBkXd). Text this
     reader cannot parse yields nothing, leaving the lexical reader's verdict
     as it stands: that is the JS/TS case, which this Python-shaped walk has no
     reading of.
@@ -93,6 +147,7 @@ def _assignment_rebound_scope_names(
     except (SyntaxError, ValueError):
         return set()
     raw_lines = file_text.splitlines()
+    same_line_suites = _same_line_suite_columns(tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -113,8 +168,13 @@ def _assignment_rebound_scope_names(
         indent = _leading_indent(raw_lines[node.lineno - 1])
         if node.lineno in definition_head_starts and node.col_offset == indent:
             continue
-        scope_start, _body_indent = _definition_binding_scope(
-            file_text, all_spans, start=node.lineno, indent=indent
+        scope_start = _binding_scope_start(
+            file_text,
+            all_spans,
+            same_line_suites=same_line_suites,
+            line=node.lineno,
+            column=node.col_offset,
+            indent=indent,
         )
         rebound.update((scope_start, name) for name in bound)
     return rebound
@@ -140,12 +200,12 @@ def _import_rebound_scope_names(
 
     ``from pkg import *`` binds names this reader cannot enumerate, so every
     candidate name of the scope holding it fails closed. Each binding is
-    attributed — through ``_definition_binding_scope``, so the keys match the
-    heads' own — to the scope whose body executes the statement, leaving a
-    function-local import shadowing nothing at module scope. Text this reader
-    cannot parse yields nothing: it is the JS/TS case, where a definition head
-    and an import of that same name are a redeclaration error rather than a
-    dead definition.
+    attributed — through ``_binding_scope_start``, so the keys match the heads'
+    own — to the scope whose body executes the statement, leaving a
+    function-local import shadowing nothing at module scope, ``def other():
+    import record`` included. Text this reader cannot parse yields nothing: it
+    is the JS/TS case, where a definition head and an import of that same name
+    are a redeclaration error rather than a dead definition.
     """
     if not names:
         return set()
@@ -154,6 +214,7 @@ def _import_rebound_scope_names(
     except (SyntaxError, ValueError):
         return set()
     raw_lines = file_text.splitlines()
+    same_line_suites = _same_line_suite_columns(tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -162,10 +223,12 @@ def _import_rebound_scope_names(
         targets = names if "*" in bound else bound & names
         if not targets:
             continue
-        scope_start, _body_indent = _definition_binding_scope(
+        scope_start = _binding_scope_start(
             file_text,
             all_spans,
-            start=node.lineno,
+            same_line_suites=same_line_suites,
+            line=node.lineno,
+            column=node.col_offset,
             indent=_leading_indent(raw_lines[node.lineno - 1]),
         )
         rebound.update((scope_start, target) for target in targets)

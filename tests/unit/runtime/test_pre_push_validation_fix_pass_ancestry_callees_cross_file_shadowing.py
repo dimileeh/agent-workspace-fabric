@@ -1745,3 +1745,67 @@ def test_a_loop_or_with_target_rebinding_is_not_importable() -> None:
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_binding_in_a_one_line_definition_suite_is_not_a_module_rebinding() -> None:
+    """A suite on its header's own line binds in *that* header's scope.
+
+    ``def refresh(gauge): record = gauge.recorder`` spells a local, but the
+    statement carries the ``def``'s own indent on the ``def``'s own line, which
+    the span reader resolves to the scope *enclosing* the header — so the local
+    looked like a module-scope rebinding, the live module ``def`` was withheld
+    and a correct callee-span fix parked as ``needs_human``
+    (PRRT_kwDOSJAM6s6rBkXd). A one-line ``class`` body and a one-line
+    function-local ``import`` bind no module name either, while a one-line
+    suite that is no definition head at all — ``if enabled:`` — still rebinds
+    the module name and still fails closed.
+    """
+    for one_liner in (
+        "def refresh(gauge): record_ready_queue_depth = gauge.recorder",
+        "async def refresh(gauge): record_ready_queue_depth = gauge.recorder",
+        "def refresh(gauge): record_ready_queue_depth: Recorder = gauge.recorder",
+        "def refresh(gauge): return (record_ready_queue_depth := gauge.recorder)",
+        "def refresh(gauge): from pkg_b.fallback import record_ready_queue_depth",
+        "class Collector: record_ready_queue_depth = staticmethod(_recorder)",
+    ):
+        assert cross_file._importable_definition_spans_for_names(
+            "def record_ready_queue_depth(payload):\n"
+            "    return len(payload.entries)\n"
+            "\n"
+            "\n"
+            f"{one_liner}\n",
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        ) == [(1, 4)], one_liner
+
+    in_a_class_body = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    def refresh(self, gauge): record_ready_queue_depth = gauge.recorder\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        in_a_class_body,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+        enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+    ) == [(2, 4)]
+
+    for module_rebind in (
+        "if _enabled(): record_ready_queue_depth = _build_recorder()",
+        "if _enabled(): from pkg_b.fallback import record_ready_queue_depth",
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                "def record_ready_queue_depth(payload):\n"
+                "    return len(payload.entries)\n"
+                "\n"
+                "\n"
+                f"{module_rebind}\n",
+                frozenset({"record_ready_queue_depth"}),
+                path=_CALLEE_MODULE,
+            )
+            == []
+        ), module_rebind
