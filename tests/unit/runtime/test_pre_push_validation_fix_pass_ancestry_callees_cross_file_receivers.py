@@ -348,6 +348,46 @@ async def test_an_imported_object_receiver_resolves_its_own_method() -> None:
     assert await _probe(probe, item_line=5)
 
 
+# ``Collector`` declared under a module-level ``if``: textually indented, yet
+# still bound in the module globals the import reads.
+_GUARDED_CLASS_TEXT = (
+    "import sys\n"
+    "\n"
+    "if sys.version_info >= (3, 12):\n"
+    "\n"
+    "    class Collector:\n"
+    "        def record_ready_queue_depth(self, payload):\n"
+    "            return payload\n"
+)
+
+# A body-only change inside the guarded ``Collector`` method (old line 7).
+_GUARDED_METHOD_DIFF = (
+    f"--- a/{_IMPORTED_OBJECT_MODULE}\n"
+    f"+++ b/{_IMPORTED_OBJECT_MODULE}\n"
+    "@@ -7 +7 @@\n"
+    "-            return payload\n"
+    "+            return payload.ready_depth()\n"
+)
+
+
+@pytest.mark.unit
+async def test_an_imported_object_receiver_resolves_an_if_guarded_class_s_method() -> None:
+    """A class under a module-level ``if`` still binds in the module globals.
+
+    ``from M import Collector`` reaches the class the executed branch bound, so
+    holding the pinned scope to a *textual* indent of 0 would drop a real
+    ``Collector.record_ready_queue_depth`` correction and park the item as
+    needs_human (PRRT_kwDOSJAM6s6q-8T_). Nothing else encloses the class, which
+    is what makes it module-scoped.
+    """
+    probe = _imported_object_receiver_probe(
+        diff=_GUARDED_METHOD_DIFF, caller_text=_IMPORTED_CLASS_CALLER_TEXT
+    )
+    probe.texts[(_LEFT, _IMPORTED_OBJECT_MODULE)] = _GUARDED_CLASS_TEXT
+
+    assert await _probe(probe, item_line=5)
+
+
 @pytest.mark.unit
 async def test_an_imported_object_receiver_rejects_a_module_level_definition() -> None:
     """A module-level ``def`` is no attribute of the object the import bound.

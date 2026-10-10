@@ -861,13 +861,17 @@ def _definition_is_member_of_named_module_scope_definition(
     member of a *different* class in that file, a module-level definition, and a
     member of a same-named class nested inside another one are all something the
     call site cannot reach (PRRT_kwDOSJAM6s6q-L4H).
+    "Module-level" is *one* enclosing definition, not a textual indent of 0: a
+    class declared under a module-level ``if``/``try`` is indented yet still
+    binds in the module globals the import reads, so requiring indent 0 would
+    drop a real correction to its member (PRRT_kwDOSJAM6s6q-8T_).
     """
     enclosing = [
-        (span_indent, name)
+        name
         for name, span_start, span_end, span_indent in all_spans
         if span_start < start <= span_end and span_indent < indent
     ]
-    return len(enclosing) == 1 and enclosing[0][0] == 0 and enclosing[0][1] in names
+    return len(enclosing) == 1 and enclosing[0] in names
 
 
 def _definition_span_start_with_decorators(file_text: str, start: int) -> int:
