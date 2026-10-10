@@ -298,7 +298,10 @@ def _plain_import_module_paths(
     keeps the name-only rule. The comma split runs over the *logical* statement:
     backslash-continued physical lines are joined first, so a receiver listed
     after the marker binds the module it names instead of nothing
-    (PRRT_kwDOSJAM6s6rA-rt), and the statement is read without its trailing
+    (PRRT_kwDOSJAM6s6rA-rt), semicolon-separated statements are matched one by
+    one, and a wrapped ``from`` target list that precedes a plain import on its
+    closing line is consumed so that import is still read as a head of its own
+    (PRRT_kwDOSJAM6s6rBTTM). The statement is read without its trailing
     comment, so a comma inside a ``# note`` cannot bind the word after it to a
     module the call site never imported — that receiver would then fail closed
     against every changed file (PRRT_kwDOSJAM6s6q8BmK). Lines come
@@ -319,8 +322,19 @@ def _plain_import_module_paths(
             index += 1
             continue
         head_line = index + 1
-        statements, index = _import_logical_statements(scan_lines, index)
-        for statement in statements:
+        pending, index = _import_logical_statements(scan_lines, index)
+        while pending:
+            statement = pending.pop(0)
+            # A ``from`` head's wrapped target list is consumed here too, so the
+            # plain import that follows it on the closing line is matched as a
+            # head of its own instead of staying hidden behind the bracket-depth
+            # gate (PRRT_kwDOSJAM6s6rBTTM).
+            while statement.count("(") > statement.count(")") and index < len(scan_lines):
+                joined = _import_line_without_comment(scan_lines[index])
+                statement += " " + _import_line_without_continuation(joined).strip()
+                index += 1
+            statement, trailing = _import_statement_and_trailing(statement)
+            pending.extend(trailing)
             head = _PLAIN_IMPORT_RE.match(statement)
             if head is None or head_line in hidden:
                 continue

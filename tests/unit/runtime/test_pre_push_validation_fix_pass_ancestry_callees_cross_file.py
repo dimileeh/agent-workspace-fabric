@@ -615,6 +615,36 @@ def test_statements_after_a_wrapped_target_list_are_split_off_too() -> None:
 
 
 @pytest.mark.unit
+def test_plain_import_after_a_wrapped_target_list_is_read_as_its_own_head() -> None:
+    """The receiver reader has to split that trailing head off as well.
+
+    ``from pkg.x import (`` + ``y,`` + ``); import pkg.decoy as metrics`` leaves
+    the plain import on the closing line of the wrapped list, where the bracket
+    depth gate hides it. Unread, ``metrics`` keeps the *shadowed* ``pkg/real``
+    binding while the call site reaches ``pkg.decoy``, so a correction to
+    ``pkg.real``'s definition would satisfy the gate (PRRT_kwDOSJAM6s6rBTTM).
+    Split off, the rebinding is seen and the receiver fails closed.
+    """
+    decoy = (
+        "import pkg.real as metrics\nfrom pkg.x import (\n    y,\n); import pkg.decoy as metrics\n"
+    )
+    assert cross_file._plain_import_module_paths(decoy, path="src/pkg/caller.py") == {
+        "metrics": frozenset({"pkg/real", "pkg/decoy"})
+    }
+    assert (
+        cross_file._receiver_import_module_targets(decoy, path="src/pkg/caller.py")["metrics"]
+        == cross_file._AMBIGUOUS_IMPORT_TARGET
+    )
+    # A non-import suffix still binds no receiver of its own.
+    assert (
+        cross_file._plain_import_module_paths(
+            "from pkg.x import (\n    y,\n); cache = {}\n", path="src/pkg/caller.py"
+        )
+        == {}
+    )
+
+
+@pytest.mark.unit
 def test_plain_import_bindings_skip_pieces_that_are_not_module_names() -> None:
     """Only dotted module names bind; the trailing-comma/garbage pieces do not."""
     assert cross_file._plain_import_module_paths(
