@@ -20,6 +20,7 @@ from tests.unit.runtime._pre_push_ancestry_cross_file_helpers import (
     _CALLER,
     _IN_SPAN_DIFF,
     _LEFT,
+    _RIGHT,
     _Probe,
     _probe,
 )
@@ -777,3 +778,43 @@ def test_distinct_classes_keep_their_own_same_named_members() -> None:
         frozenset({"record_ready_queue_depth"}),
         path=_IMPORTED_OBJECT_MODULE,
     ) == [(2, 5), (7, 8)]
+
+
+# The correction edits the effective ``Collector``'s member, but the right side
+# declares a third ``Collector`` below it, so the member it edited is dead code
+# by the time the correction lands.
+_RESHADOWED_CLASS_TEXT = (
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return payload\n"
+    "\n"
+    "\n"
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return payload.ready_depth()\n"
+    "\n"
+    "\n"
+    "class Collector:\n"
+    "    def flush(self):\n"
+    "        return None\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_member_the_correction_shadows_does_not_survive() -> None:
+    """The survival read is held to the enclosing binding too.
+
+    The overlap is genuine — the correction edits the member of the class the
+    *left* side binds — but it also appends another ``class Collector`` that
+    carries no such member, so the binding the caller's unchanged import now
+    reaches has lost the callee. Reading survival by name alone would find the
+    edited-but-now-dead member and resolve the thread against a call site that
+    breaks (PRRT_kwDOSJAM6s6rAhm1).
+    """
+    probe = _imported_object_receiver_probe(
+        diff=_EFFECTIVE_CLASS_METHOD_DIFF, caller_text=_IMPORTED_CLASS_CALLER_TEXT
+    )
+    probe.texts[(_LEFT, _IMPORTED_OBJECT_MODULE)] = _DUPLICATE_CLASS_TEXT
+    probe.texts[(_RIGHT, _IMPORTED_OBJECT_MODULE)] = _RESHADOWED_CLASS_TEXT
+
+    assert not await _probe(probe, item_line=5)
