@@ -275,9 +275,14 @@ def _import_rebound_scope_names(
     attributed — through ``_binding_scope_start``, so the keys match the heads'
     own — to the scope whose body executes the statement, leaving a
     function-local import shadowing nothing at module scope, ``def other():
-    import record`` included. Text this reader cannot parse yields nothing: it
-    is the JS/TS case, where a definition head and an import of that same name
-    are a redeclaration error rather than a dead definition.
+    import record`` included, except where a ``global`` declaration says
+    otherwise: an import is the one other statement form that binds a name
+    while carrying no definition head, so ``global record`` beside ``from
+    fallback import record`` replaces the module binding exactly as a declared
+    assignment does, and attributing it to the helper's own scope left the dead
+    head importable (PRRT_kwDOSJAM6s6rB2mf). Text this reader cannot parse
+    yields nothing: it is the JS/TS case, where a definition head and an import
+    of that same name are a redeclaration error rather than a dead definition.
     """
     if not names:
         return set()
@@ -287,6 +292,7 @@ def _import_rebound_scope_names(
         return set()
     raw_lines = file_text.splitlines()
     header_line_suites = _header_line_suite_heads(raw_lines, tree)
+    global_scopes = _global_declared_scope_ranges(tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -303,7 +309,10 @@ def _import_rebound_scope_names(
             column=node.col_offset,
             indent=_leading_indent(raw_lines[node.lineno - 1]),
         )
-        rebound.update((scope_start, target) for target in targets)
+        rebound.update(
+            (0 if _declared_global_at(global_scopes, node.lineno, target) else scope_start, target)
+            for target in targets
+        )
     return rebound
 
 

@@ -1293,3 +1293,55 @@ def test_a_global_declared_rebinding_is_attributed_to_module_scope() -> None:
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_global_declared_import_is_attributed_to_module_scope() -> None:
+    """``global record`` makes a function-body *import* a module rebinding too.
+
+    The same reading the declaration forces on an assignment, on the one other
+    statement form that binds a name without carrying a definition head of its
+    own: ``global record`` beside ``from fallback import record`` replaces the
+    module binding for every importer once the helper runs, so attributing the
+    import to the helper's syntactic scope left the dead ``def`` importable and
+    let a correction confined to it satisfy the cross-file evidence gate while
+    callers reach the fallback object (PRRT_kwDOSJAM6s6rB2mf). Without the
+    declaration the import binds a local and shadows nothing, and a declaration
+    naming some *other* name leaves it local as well.
+    """
+    global_import = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "def _install():\n"
+        "    global record_ready_queue_depth\n"
+        "    from fallback import record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "_install()\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            global_import,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    local_only = global_import.replace("    global record_ready_queue_depth\n", "")
+    assert cross_file._importable_definition_spans_for_names(
+        local_only,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    other_name = global_import.replace(
+        "    global record_ready_queue_depth\n", "    global _recorder\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        other_name,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
