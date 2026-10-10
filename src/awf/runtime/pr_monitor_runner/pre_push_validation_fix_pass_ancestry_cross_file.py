@@ -45,7 +45,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
     _import_head_bracket_depths,
     _import_line_without_comment,
     _import_line_without_continuation,
-    _joined_import_logical_line,
+    _import_logical_statements,
+    _imported_binding_names,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _effective_scope_head_starts,
@@ -167,23 +168,6 @@ def _module_path_segments(path: str) -> list[str]:
     return [segment for segment in normalized.split("/") if segment]
 
 
-def _imported_binding_names(targets: str) -> list[tuple[str, str]]:
-    """``(bound, imported)`` pairs an import target list binds.
-
-    The two differ under ``orig as alias``: the call site refers to ``alias``,
-    while ``orig`` is the name inside the target module — which is the identity
-    a receiver resolves through, so both are kept.
-    """
-    names: list[tuple[str, str]] = []
-    for piece in targets.replace("(", " ").replace(")", " ").split(","):
-        parts = piece.split()
-        if not parts or parts[0] == "*":
-            continue
-        aliased = len(parts) >= 3 and parts[1] == "as"
-        names.append((parts[2] if aliased else parts[0], parts[0]))
-    return names
-
-
 def _relative_import_module_path(path: str, dots: str, module: str | None) -> str | None:
     """A relative import's target as a ``/``-joined path prefix, or None.
 
@@ -245,27 +229,30 @@ def _iter_from_import_bindings(
             index += 1
             continue
         head_line = index + 1
-        statement, index = _joined_import_logical_line(lines, index)
-        absolute = _ABSOLUTE_FROM_IMPORT_RE.match(statement)
-        relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(statement)
-        if absolute is not None:
-            module_path = absolute.group(1).replace(".", "/")
-            targets = absolute.group(2)
-        elif relative is not None:
-            module_path = _relative_import_module_path(path, relative.group(1), relative.group(2))
-            targets = relative.group(3)
-        else:
-            continue
-        # Consume the wrapped target list even when the head did not resolve,
-        # so its names are not re-read as import heads on the next pass.
-        while targets.count("(") > targets.count(")") and index < len(lines):
-            joined = _import_line_without_comment(lines[index])
-            targets += " " + _import_line_without_continuation(joined).strip()
-            index += 1
-        if head_line in hidden:
-            continue
-        for bound, imported in _imported_binding_names(targets):
-            yield module_path, bound, imported
+        statements, index = _import_logical_statements(lines, index)
+        for statement in statements:
+            absolute = _ABSOLUTE_FROM_IMPORT_RE.match(statement)
+            relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(statement)
+            if absolute is not None:
+                module_path = absolute.group(1).replace(".", "/")
+                targets = absolute.group(2)
+            elif relative is not None:
+                module_path = _relative_import_module_path(
+                    path, relative.group(1), relative.group(2)
+                )
+                targets = relative.group(3)
+            else:
+                continue
+            # Consume the wrapped target list even when the head did not
+            # resolve, so its names are not re-read as import heads later.
+            while targets.count("(") > targets.count(")") and index < len(lines):
+                joined = _import_line_without_comment(lines[index])
+                targets += " " + _import_line_without_continuation(joined).strip()
+                index += 1
+            if head_line in hidden:
+                continue
+            for bound, imported in _imported_binding_names(targets):
+                yield module_path, bound, imported
 
 
 def _bare_name_import_module_paths(
@@ -322,20 +309,21 @@ def _plain_import_module_paths(
             index += 1
             continue
         head_line = index + 1
-        statement, index = _joined_import_logical_line(scan_lines, index)
-        head = _PLAIN_IMPORT_RE.match(statement)
-        if head is None or head_line in hidden:
-            continue
-        for piece in head.group(1).split(","):
-            parts = piece.split()
-            if not parts or _DOTTED_MODULE_RE.fullmatch(parts[0]) is None:
+        statements, index = _import_logical_statements(scan_lines, index)
+        for statement in statements:
+            head = _PLAIN_IMPORT_RE.match(statement)
+            if head is None or head_line in hidden:
                 continue
-            segments = parts[0].split(".")
-            aliased = len(parts) >= 3 and parts[1] == "as"
-            alias = parts[2] if aliased else segments[-1]
-            bindings.setdefault(alias, set()).add("/".join(segments))
-            if not aliased:
-                bindings.setdefault(segments[0], set()).add(segments[0])
+            for piece in head.group(1).split(","):
+                parts = piece.split()
+                if not parts or _DOTTED_MODULE_RE.fullmatch(parts[0]) is None:
+                    continue
+                segments = parts[0].split(".")
+                aliased = len(parts) >= 3 and parts[1] == "as"
+                alias = parts[2] if aliased else segments[-1]
+                bindings.setdefault(alias, set()).add("/".join(segments))
+                if not aliased:
+                    bindings.setdefault(segments[0], set()).add(segments[0])
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
 

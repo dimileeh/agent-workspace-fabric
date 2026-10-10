@@ -11,6 +11,28 @@ budget, and because physical→logical line reading is one unit.
 from __future__ import annotations
 
 
+def _import_statement_separator_positions(statement: str) -> list[int]:
+    """Offsets of the top-level ``;`` in ``statement``.
+
+    Semicolons inside brackets are skipped: a parenthesized target list is the
+    only bracket an import head can open, and a ``;`` can never appear inside
+    it, so a bracketed one belongs to an interpolation the masked scan retained
+    rather than to this statement. Scanning for a bare ``;`` is otherwise exact,
+    because the readers run over comment/string-masked lines and a semicolon
+    cannot appear in a Python expression.
+    """
+    positions: list[int] = []
+    depth = 0
+    for position, char in enumerate(statement):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(depth - 1, 0)
+        elif char == ";" and depth == 0:
+            positions.append(position)
+    return positions
+
+
 def _import_line_without_comment(line: str) -> str:
     """``line`` up to its first ``#``.
 
@@ -88,3 +110,44 @@ def _joined_import_logical_line(lines: list[str], index: int) -> tuple[str, int]
         )
         index += 1
     return _import_line_without_continuation(line), index
+
+
+def _import_logical_statements(lines: list[str], index: int) -> tuple[list[str], int]:
+    """The simple statements the logical line at ``lines[index]`` spells, and the next index.
+
+    A logical line can hold several simple statements separated by ``;``, and an
+    ``import`` is one of them, so each separated statement has to be matched as
+    a head of its own. Read whole instead, ``from pkg.mod import record; cache =
+    {}`` hands the import scanners the target list ``record; cache = {}``, which
+    binds ``record;`` and leaves ``record`` bound to no module — back on the
+    name-only rule that accepts an unrelated same-named definition in another
+    package (PRRT_kwDOSJAM6s6rBKOW). Plain imports carry the same shape, and an
+    import that *follows* a separator binds nothing at all when the suffix is
+    not split off. Only the last statement can hold an unbalanced bracket,
+    because an open bracket continues the logical line past any later ``;``.
+    """
+    statement, index = _joined_import_logical_line(lines, index)
+    start = 0
+    statements: list[str] = []
+    for position in _import_statement_separator_positions(statement):
+        statements.append(statement[start:position])
+        start = position + 1
+    statements.append(statement[start:])
+    return statements, index
+
+
+def _imported_binding_names(targets: str) -> list[tuple[str, str]]:
+    """``(bound, imported)`` pairs an import target list binds.
+
+    The two differ under ``orig as alias``: the call site refers to ``alias``,
+    while ``orig`` is the name inside the target module — which is the identity
+    a receiver resolves through, so both are kept.
+    """
+    names: list[tuple[str, str]] = []
+    for piece in targets.replace("(", " ").replace(")", " ").split(","):
+        parts = piece.split()
+        if not parts or parts[0] == "*":
+            continue
+        aliased = len(parts) >= 3 and parts[1] == "as"
+        names.append((parts[2] if aliased else parts[0], parts[0]))
+    return names

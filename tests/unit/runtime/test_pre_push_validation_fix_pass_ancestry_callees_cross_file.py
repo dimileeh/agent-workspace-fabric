@@ -553,6 +553,37 @@ def test_plain_import_comments_are_stripped_before_the_pieces_are_read() -> None
 
 
 @pytest.mark.unit
+def test_semicolon_separated_statements_are_split_before_the_names_are_read() -> None:
+    """Each simple statement on a logical line is matched as its own head.
+
+    ``from pkg.mod import record; cache = {}`` is one logical line holding two
+    simple statements. Read whole, the target list is ``record; cache = {}``,
+    which binds ``record;`` and leaves ``record`` on the name-only rule that
+    accepts an unrelated same-named definition in another package
+    (PRRT_kwDOSJAM6s6rBKOW). A plain import has the same shape, and an import
+    that *follows* the separator is a head of its own.
+    """
+    assert cross_file._bare_name_import_module_paths(
+        "from pkg.mod import record; cache = {}\ncache_other = {}; from pkg.other import replay\n",
+        path="src/pkg/caller.py",
+    ) == {
+        "record": frozenset({"pkg/mod"}),
+        "replay": frozenset({"pkg/other"}),
+    }
+    assert cross_file._plain_import_module_paths(
+        "import pkg.mod; cache = {}\nimport a.b; import c.d\n",
+        path="src/pkg/caller.py",
+    ) == {
+        "mod": frozenset({"pkg/mod"}),
+        "pkg": frozenset({"pkg"}),
+        "b": frozenset({"a/b"}),
+        "a": frozenset({"a"}),
+        "d": frozenset({"c/d"}),
+        "c": frozenset({"c"}),
+    }
+
+
+@pytest.mark.unit
 def test_plain_import_bindings_skip_pieces_that_are_not_module_names() -> None:
     """Only dotted module names bind; the trailing-comma/garbage pieces do not."""
     assert cross_file._plain_import_module_paths(
