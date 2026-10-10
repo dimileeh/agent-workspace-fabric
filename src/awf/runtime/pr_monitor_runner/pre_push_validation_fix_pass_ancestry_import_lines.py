@@ -61,3 +61,30 @@ def _import_head_bracket_depths(lines: list[str]) -> list[int]:
             elif char in ")]}":
                 depth = max(depth - 1, 0)
     return depths
+
+
+def _joined_import_logical_line(lines: list[str], index: int) -> tuple[str, int]:
+    """The logical line starting at ``lines[index]``, and the index just past it.
+
+    Backslash continuations are joined before any import head is matched: the
+    marker can split a statement either side of ``import``, so the head is only
+    matchable once whole, and consuming the joined physical lines keeps the
+    names they carry from being re-read as heads of their own. Both import
+    readers need this — a ``from`` head (PRRT_kwDOSJAM6s6rAf0X) and a plain
+    ``import pkg.other, \\`` + ``pkg.real as metrics``, whose receiver would
+    otherwise bind to nothing and keep the name-only rule that accepts an
+    unrelated same-named definition (PRRT_kwDOSJAM6s6rA-rt). Each physical line
+    is read without its trailing comment. A continuation with no line after it
+    has no target list; dropping the dangling marker leaves the head
+    unmatchable, so it binds nothing.
+    """
+    line = _import_line_without_comment(lines[index])
+    index += 1
+    while line.rstrip().endswith("\\") and index < len(lines):
+        line = (
+            _import_line_without_continuation(line)
+            + " "
+            + _import_line_without_comment(lines[index]).strip()
+        )
+        index += 1
+    return _import_line_without_continuation(line), index

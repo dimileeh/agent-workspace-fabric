@@ -45,6 +45,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
     _import_head_bracket_depths,
     _import_line_without_comment,
     _import_line_without_continuation,
+    _joined_import_logical_line,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _effective_scope_head_starts,
@@ -240,20 +241,7 @@ def _iter_from_import_bindings(
         if depths[index]:
             index += 1
             continue
-        line = _import_line_without_comment(lines[index])
-        index += 1
-        # Join backslash continuations first: the marker can split the statement
-        # either side of ``import``, so the head is only matchable once whole.
-        while line.rstrip().endswith("\\") and index < len(lines):
-            line = (
-                _import_line_without_continuation(line)
-                + " "
-                + _import_line_without_comment(lines[index]).strip()
-            )
-            index += 1
-        # A continuation with no line after it has no target list; dropping the
-        # dangling marker leaves the head unmatchable, so it binds nothing.
-        line = _import_line_without_continuation(line)
+        line, index = _joined_import_logical_line(lines, index)
         absolute = _ABSOLUTE_FROM_IMPORT_RE.match(line)
         relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(line)
         if absolute is not None:
@@ -300,10 +288,13 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     the name-only rule, so a correction to a same-named definition in another package
     resolves the thread (PRRT_kwDOSJAM6s6rAAWV). An alias binds no root. Pieces that
     are not a dotted module name are skipped, and a name no plain import binds
-    keeps the name-only rule. The comma split runs over the statement without
-    its trailing comment, so a comma inside a ``# note`` cannot bind the word
-    after it to a module the call site never imported — that receiver would then
-    fail closed against every changed file (PRRT_kwDOSJAM6s6q8BmK). Lines come
+    keeps the name-only rule. The comma split runs over the *logical* statement:
+    backslash-continued physical lines are joined first, so a receiver listed
+    after the marker binds the module it names instead of nothing
+    (PRRT_kwDOSJAM6s6rA-rt), and the statement is read without its trailing
+    comment, so a comma inside a ``# note`` cannot bind the word after it to a
+    module the call site never imported — that receiver would then fail closed
+    against every changed file (PRRT_kwDOSJAM6s6q8BmK). Lines come
     from the comment/string-masked scan, so a quoted ``import`` inside a
     docstring binds no receiver either (PRRT_kwDOSJAM6s6q8MXB), and a head read
     back from inside a retained interpolation is skipped with it.
@@ -313,10 +304,13 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     bindings: dict[str, set[str]] = {}
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     depths = _import_head_bracket_depths(scan_lines)
-    for depth, scan_line in zip(depths, scan_lines, strict=True):
-        if depth:
+    index = 0
+    while index < len(scan_lines):
+        if depths[index]:
+            index += 1
             continue
-        head = _PLAIN_IMPORT_RE.match(_import_line_without_comment(scan_line))
+        line, index = _joined_import_logical_line(scan_lines, index)
+        head = _PLAIN_IMPORT_RE.match(line)
         if head is None:
             continue
         for piece in head.group(1).split(","):

@@ -867,3 +867,44 @@ async def test_a_member_the_correction_shadows_does_not_survive() -> None:
     probe.texts[(_RIGHT, _IMPORTED_OBJECT_MODULE)] = _RESHADOWED_CLASS_TEXT
 
     assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_backslash_continued_plain_import_binds_its_receiver() -> None:
+    """``import a, \\`` + ``b as metrics`` is one statement, so ``metrics`` binds ``b``.
+
+    Read as separate physical lines the head's last piece is the backslash and
+    the continuation matches no head at all, so ``metrics`` keeps the name-only
+    rule and a correction to an unrelated same-named
+    ``record_ready_queue_depth`` in ``pkg_c`` resolves the thread
+    (PRRT_kwDOSJAM6s6rA-rt).
+    """
+    caller = (
+        "import pkg_b.other, \\\n"
+        "    pkg_b.observability.execution_platform_metrics as metrics\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    metrics.record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(
+        _chained_receiver_probe(caller_text=caller, changed=_UNREACHABLE_SAME_NAME_MODULE),
+        item_line=6,
+    )
+    # The paired accept: the module the joined statement names still resolves.
+    assert await _probe(_chained_receiver_probe(caller_text=caller), item_line=6)
+
+
+@pytest.mark.unit
+def test_plain_import_continuations_are_joined_before_the_pieces_are_read() -> None:
+    """The marker is consumed mid-list and before ``import``; a dangling one binds nothing."""
+    assert cross_file._plain_import_module_paths(
+        "import pkg.other, \\\n    pkg.real as metrics\nimport \\\n    pkg.third\nimport \\\n",
+        path=_CALLER,
+    ) == {
+        "other": frozenset({"pkg/other"}),
+        "pkg": frozenset({"pkg"}),
+        "metrics": frozenset({"pkg/real"}),
+        "third": frozenset({"pkg/third"}),
+    }
