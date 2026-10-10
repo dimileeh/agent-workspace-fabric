@@ -940,3 +940,54 @@ async def test_a_change_to_a_definition_a_later_assignment_rebinds_is_not_eviden
     )
 
     assert not await _probe(probe)
+
+
+@pytest.mark.unit
+def test_a_class_body_binding_shadows_for_a_call_in_the_class_body() -> None:
+    """A line executing directly in a class body resolves through the class namespace.
+
+    ``class C: validate = local_validate; result = validate()`` calls the class
+    attribute, not the module's import, so the class body's own bindings shadow
+    at that anchor (PRRT_kwDOSJAM6s6q_ywe) — while the method body below keeps
+    the import, which is the paired tolerance
+    ``test_a_class_body_binding_is_not_a_local_shadow`` covers.
+    """
+    text = (
+        "class Collector:\n"
+        "    validate = local_validate\n"
+        "    result = validate()\n"
+        "\n"
+        "    def refresh(self):\n"
+        "        return validate()\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset(
+        {"validate", "result", "refresh"}
+    )
+    assert cross_file._locally_rebound_names_at_line(text, 6, path=_CALLER) == frozenset({"self"})
+
+
+@pytest.mark.unit
+def test_the_innermost_class_body_is_the_one_read_at_its_own_anchor() -> None:
+    """Only the innermost class body binds, and an enclosing function still does.
+
+    A class body does not see the class body around it, while it *does* see the
+    locals of a function that holds it, so a nested class's anchor reads its own
+    attributes plus the enclosing function's locals and nothing from the outer
+    class (PRRT_kwDOSJAM6s6q_ywe).
+    """
+    text = (
+        "class Outer:\n"
+        "    outer_attr = 1\n"
+        "\n"
+        "    def build(self, pool):\n"
+        "        class Inner:\n"
+        "            validate = pool.check\n"
+        "            result = validate()\n"
+        "\n"
+        "        return Inner\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 7, path=_CALLER) == frozenset(
+        {"self", "pool", "Inner", "validate", "result"}
+    )

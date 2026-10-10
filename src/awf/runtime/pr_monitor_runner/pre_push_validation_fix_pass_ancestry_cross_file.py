@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _ANCHORED_SCOPES,
     _DECORATOR_BASENAME_RE,
     _ENCLOSING_DEFINITION_RE,
+    _anchored_class_scope,
     _definition_binding_scope,
     _definition_head_is_assignment,
     _definition_head_scan_lines,
@@ -475,7 +476,7 @@ def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]
 
 
 def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> frozenset[str]:
-    """Names a function scope enclosing ``line`` binds itself.
+    """Names a scope enclosing ``line`` binds itself.
 
     An import binding is proof about a call only while the name still *holds*
     that import where the call is made. ``from pkg.mod import validate``
@@ -486,8 +487,11 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     ``with`` target, a function-local import and a nested definition of the
     name.
 
-    Only function scopes shadow: a class body's binding is an attribute of the
-    class and is invisible to the calls inside its methods. A comprehension is
+    A class body's binding is an attribute of the class and is invisible to the
+    calls inside its methods, but a line executing *directly* in the class body
+    resolves through the class namespace — ``class C: validate = local;
+    result = validate()`` calls the attribute — so the class body the anchor
+    sits in directly is read as well (PRRT_kwDOSJAM6s6q_ywe). A comprehension is
     anchored as well, because its generator targets bind inside it — they shadow
     the import for the calls it contains and for nothing else
     (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
@@ -510,6 +514,9 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
             continue
         if node.lineno <= line <= (node.end_lineno or node.lineno):
             bound.update(_names_bound_in_scope(node))
+    anchored_class = _anchored_class_scope(tree, line)
+    if anchored_class is not None:
+        bound.update(_names_bound_in_scope(anchored_class))
     return frozenset(bound)
 
 

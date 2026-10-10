@@ -1477,3 +1477,24 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
         elif isinstance(node, ast.MatchMapping) and node.rest:
             yield node.rest
         pending.extend(ast.iter_child_nodes(node))
+
+
+def _anchored_class_scope(tree: ast.AST, line: int) -> ast.ClassDef | None:
+    """The class body ``line`` executes directly in, if any.
+
+    Such a line resolves through the class namespace, so the class body's own
+    bindings shadow an import for it (PRRT_kwDOSJAM6s6q_ywe). The innermost
+    scope wins, which is what keeps class attributes out of a method-body
+    lookup: a method, lambda or comprehension holds the lines inside *it*, a
+    class body never sees the one around it, and a tie resolves to the class.
+    """
+    holding = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (*_ANCHORED_SCOPES, ast.ClassDef))
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    innermost = max(
+        holding, key=lambda node: (node.lineno, -(node.end_lineno or node.lineno)), default=None
+    )
+    return innermost if isinstance(innermost, ast.ClassDef) else None
