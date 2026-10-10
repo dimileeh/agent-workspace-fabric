@@ -476,8 +476,18 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     parameter, so a correction to ``pkg/mod.py``'s ``validate`` changes nothing
     the anchored line calls and must not satisfy this gate
     (PRRT_kwDOSJAM6s6q9WnX); the same goes for a local assignment, a loop or
-    ``with`` target, a function-local import and a nested definition of the
-    name.
+    ``with`` target and a nested definition of the name.
+
+    A function-local ``import`` of the name is *not* such a binding: it is the
+    binding the import readers above read — they match indented statements too
+    — so reporting it here would invalidate the very evidence it supplies and
+    park a correction confined to the module it names as ``needs_human``
+    (PRRT_kwDOSJAM6s6rAhm2). A second import binding the name to a different
+    definition is still caught, by those readers' own rebinding guard (see
+    ``_AMBIGUOUS_IMPORT_TARGET``), and a scope that binds the name some *other*
+    way as well still reports it through that binding. This matches
+    ``_module_scope_rebound_names``, which leaves import aliases uncollected
+    for the same reason.
 
     A class body's binding is an attribute of the class and is invisible to the
     calls inside its methods, but a line executing *directly* in the class body

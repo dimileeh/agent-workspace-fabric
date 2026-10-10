@@ -1425,12 +1425,14 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
     Python locals are function-wide — a name assigned anywhere in a function is
     local throughout it — so the whole body is read rather than only the lines
     above the anchor. Parameters, assignment / loop / ``with`` targets, caught
-    exceptions, function-local imports and nested definitions all count, and so
-    do ``match`` / ``case`` capture, star and mapping-rest targets: those carry
-    their name on the pattern node rather than storing an ``ast.Name``, so a
-    reader that watched only ``Store`` names would leave a ``case record:``
-    still holding its import (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds
-    nothing and is skipped.
+    exceptions and nested definitions all count, and so do ``match`` / ``case``
+    capture, star and mapping-rest targets: those carry their name on the
+    pattern node rather than storing an ``ast.Name``, so a reader that watched
+    only ``Store`` names would leave a ``case record:`` still holding its import
+    (PRRT_kwDOSJAM6s6q-N1B). A wildcard ``_`` binds nothing and is skipped, and
+    neither is an ``import`` statement in the body — it is a binding the import
+    readers hold themselves, see ``_locally_rebound_names_at_line``
+    (PRRT_kwDOSJAM6s6rAhm2).
 
     Child scopes are *not* descended into. A nested function's or lambda's
     parameters and locals, a class body's attributes and a comprehension's
@@ -1443,13 +1445,12 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
     and parameter defaults are evaluated where the definition appears. A walrus
     buried in a child's *body* binds only there, but telling the two apart costs
     more than the name is worth, so it keeps failing closed. ``scope``'s own
-    name is not reported — a
-    definition's name is bound in the scope that *holds* it, so a method named
-    like an imported helper does not shadow that import for the calls in its own
-    body. Neither is a ``nonlocal`` rebinding: it is legal only where an
-    enclosing function already binds the name, which that scope's own pass
-    reports. Callers anchor every scope enclosing the line, so an enclosing
-    function's locals still reach a call nested inside it.
+    name is not reported — a definition's name is bound in the scope that
+    *holds* it, so a method named like an imported helper does not shadow that
+    import for the calls in its own body. Neither is a ``nonlocal`` rebinding:
+    it is legal only where an enclosing function already binds the name, which
+    that scope's own pass reports. Callers anchor every scope enclosing the
+    line, so an enclosing function's locals still reach a call nested inside it.
     """
     pending: list[ast.AST] = list(ast.iter_child_nodes(scope))
     if isinstance(scope, _COMPREHENSION_SCOPES):
@@ -1470,8 +1471,6 @@ def _names_bound_in_scope(scope: ast.AST) -> Iterator[str]:
             yield node.id
         elif isinstance(node, ast.arg):
             yield node.arg
-        elif isinstance(node, ast.alias):
-            yield node.asname or node.name.partition(".")[0]
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             yield node.name
         elif isinstance(node, ast.MatchMapping) and node.rest:

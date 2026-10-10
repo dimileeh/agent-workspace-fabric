@@ -105,6 +105,59 @@ async def test_a_local_assignment_shadowing_the_import_fails_closed() -> None:
     assert not await _probe(probe, item_line=6)
 
 
+# The callee's only binding is a *function-local* import — the lazy-import
+# shape — so the call on line 5 reaches the imported definition and a
+# correction confined to it is evidence about this call site.
+_LOCAL_IMPORT_TEXT = (
+    "def refresh(pool):\n"
+    f"    {_IMPORT_LINE}"
+    "\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+)
+
+# A local import of the *same name* from another module rebinds it, so the
+# readers cannot tell which statement runs last and the name fails closed.
+_LOCAL_IMPORT_REBIND_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "def refresh(pool):\n"
+    "    from pkg_c.legacy.metrics import record_ready_queue_depth\n"
+    "\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_function_local_import_still_supplies_its_own_evidence() -> None:
+    """A lazy import is the call's binding, not a shadow of it.
+
+    ``def run(): from pkg_b.mod import validate; validate()`` reaches the
+    imported definition, so a correction confined to it in another package is
+    the #1019 evidence this gate exists to accept — reading the import as a
+    local rebinding parked such a fix as ``needs_human``
+    (PRRT_kwDOSJAM6s6rAhm2).
+    """
+    probe = _cross_package_probe(caller_text=_LOCAL_IMPORT_TEXT)
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_function_local_import_rebinding_the_module_import_fails_closed() -> None:
+    """Two imports of one name stay unmatchable, local or not.
+
+    The lexical readers cannot order a function-local import against the
+    module-level one, so the name is held to ``_AMBIGUOUS_IMPORT_TARGET``
+    rather than crediting a correction to the shadowed definition.
+    """
+    probe = _cross_package_probe(caller_text=_LOCAL_IMPORT_REBIND_TEXT)
+
+    assert not await _probe(probe, item_line=8)
+
+
 @pytest.mark.unit
 async def test_an_unshadowed_bare_callee_still_resolves() -> None:
     """The paired accept: the #1019 shape keeps resolving across the two files."""
@@ -145,8 +198,13 @@ def test_parameters_and_locals_of_the_anchored_scope_are_read() -> None:
 
 
 @pytest.mark.unit
-def test_loop_context_and_import_targets_of_the_anchored_scope_are_read() -> None:
-    """Loop, ``with``, ``except`` and function-local import targets all bind the name."""
+def test_loop_and_context_targets_of_the_anchored_scope_are_read_but_imports_are_not() -> None:
+    """Loop, ``with`` and ``except`` targets bind the name; a local import does not.
+
+    A function-local import is the binding the import readers themselves read,
+    so reporting it here would invalidate its own evidence and park a
+    correction confined to the module it names (PRRT_kwDOSJAM6s6rAhm2).
+    """
     text = (
         "def refresh(paths):\n"
         "    for looped in paths:\n"
@@ -160,7 +218,28 @@ def test_loop_context_and_import_targets_of_the_anchored_scope_are_read() -> Non
     )
 
     assert cross_file._locally_rebound_names_at_line(text, 8, path=_CALLER) == frozenset(
-        {"paths", "looped", "opened", "late", "imported", "caught"}
+        {"paths", "looped", "opened", "caught"}
+    )
+
+
+@pytest.mark.unit
+def test_a_name_both_locally_imported_and_assigned_is_still_read() -> None:
+    """The import exemption is per *binding*, not per name.
+
+    A scope that also assigns the name — or takes it as a parameter — reaches
+    that binding rather than its own import, which the lexical import readers
+    cannot see, so it keeps failing closed (PRRT_kwDOSJAM6s6q9WnX).
+    """
+    text = (
+        "def refresh(flag):\n"
+        "    from pkg import validate\n"
+        "    if flag:\n"
+        "        validate = flag.validator\n"
+        "    return validate()\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(text, 5, path=_CALLER) == frozenset(
+        {"flag", "validate"}
     )
 
 
