@@ -46,6 +46,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
     _import_line_without_comment,
     _import_line_without_continuation,
     _import_logical_statements,
+    _import_statement_and_trailing,
     _imported_binding_names,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
@@ -194,7 +195,10 @@ def _iter_from_import_bindings(
     Both ``from M import ...`` and the relative ``from .M import ...`` form are
     read, including the parenthesized multi-line variant and the backslash-
     continued one, whose physical lines are joined into the logical statement
-    before the heads are matched (PRRT_kwDOSJAM6s6rAf0X); ``module_path`` is the
+    before the heads are matched (PRRT_kwDOSJAM6s6rAf0X); a statement that
+    follows the wrapped list on its closing line is split back off the joined
+    targets and matched as a head of its own (PRRT_kwDOSJAM6s6rBTTM).
+    ``module_path`` is the
     target module as a ``/``-joined path prefix, resolved against ``path``'s own
     directory for the relative form. Star imports and plain ``import M`` carry
     no name→path link, so the names they bind are not yielded and keep the
@@ -229,8 +233,9 @@ def _iter_from_import_bindings(
             index += 1
             continue
         head_line = index + 1
-        statements, index = _import_logical_statements(lines, index)
-        for statement in statements:
+        pending, index = _import_logical_statements(lines, index)
+        while pending:
+            statement = pending.pop(0)
             absolute = _ABSOLUTE_FROM_IMPORT_RE.match(statement)
             relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(statement)
             if absolute is not None:
@@ -249,6 +254,11 @@ def _iter_from_import_bindings(
                 joined = _import_line_without_comment(lines[index])
                 targets += " " + _import_line_without_continuation(joined).strip()
                 index += 1
+            # The statements that follow the now-complete one are still embedded
+            # in its target list, so they are split off and matched as heads of
+            # their own (see ``_import_statement_and_trailing``).
+            targets, trailing = _import_statement_and_trailing(targets)
+            pending.extend(trailing)
             if head_line in hidden:
                 continue
             for bound, imported in _imported_binding_names(targets):

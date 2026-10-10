@@ -136,6 +136,29 @@ def _import_logical_statements(lines: list[str], index: int) -> tuple[list[str],
     return statements, index
 
 
+def _import_statement_and_trailing(statement: str) -> tuple[str, list[str]]:
+    """``statement`` up to its first top-level ``;``, and the statements after it.
+
+    ``_import_logical_statements`` splits a logical line before its bracketed
+    continuation is joined on, so the statements that follow a *wrapped* target
+    list are still embedded in that list once it is complete: ``from pkg.real
+    import (`` + ``record`` + ``); from pkg.decoy import record`` hands the
+    ``from`` reader the targets ``( record ); from pkg.decoy import record``.
+    Read whole, the trailing head is never matched as a head of its own, so the
+    rebinding it performs — which is the binding the call site actually reaches
+    — stays invisible and the name keeps the *shadowed* module instead of
+    failing closed on it (PRRT_kwDOSJAM6s6rBTTM). Splitting off the completed
+    statement restores both halves.
+    """
+    positions = _import_statement_separator_positions(statement)
+    if not positions:
+        return statement, []
+    ends = [*positions[1:], len(statement)]
+    return statement[: positions[0]], [
+        statement[start + 1 : end] for start, end in zip(positions, ends, strict=True)
+    ]
+
+
 def _imported_binding_names(targets: str) -> list[tuple[str, str]]:
     """``(bound, imported)`` pairs an import target list binds.
 

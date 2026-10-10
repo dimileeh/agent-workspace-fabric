@@ -584,6 +584,37 @@ def test_semicolon_separated_statements_are_split_before_the_names_are_read() ->
 
 
 @pytest.mark.unit
+def test_statements_after_a_wrapped_target_list_are_split_off_too() -> None:
+    """A head that follows a parenthesized target list is a head of its own.
+
+    The statement splitter runs before the bracketed continuation is joined, so
+    ``from pkg.real import (`` + ``record`` + ``); from pkg.decoy import record``
+    leaves the second import embedded in the first one's targets. Read whole, the
+    rebinding stays invisible: the name keeps ``pkg/real`` while the call site
+    actually reaches ``pkg.decoy``, so a correction to the shadowed definition
+    would resolve the thread (PRRT_kwDOSJAM6s6rBTTM). Split off, both bindings
+    are seen and the rebound name fails closed. A trailing statement that is not
+    an import still binds nothing of its own.
+    """
+    decoy = "from pkg.real import (\n    record\n); from pkg.decoy import record\n"
+    assert cross_file._bare_name_import_module_paths(decoy, path="src/pkg/caller.py") == {
+        "record": frozenset({"pkg/real", "pkg/decoy"})
+    }
+    assert cross_file._bare_name_import_module_targets(decoy, path="src/pkg/caller.py") == {
+        "record": cross_file._AMBIGUOUS_IMPORT_TARGET
+    }
+    # The trailing head may wrap its own target list; it is balanced by the join.
+    wrapped = "from pkg.real import (\n    record,\n); from pkg.decoy import (\n    record\n)\n"
+    assert cross_file._bare_name_import_module_targets(wrapped, path="src/pkg/caller.py") == {
+        "record": cross_file._AMBIGUOUS_IMPORT_TARGET
+    }
+    plain_suffix = "from pkg.real import (\n    record,\n); cache = {}\n"
+    assert cross_file._bare_name_import_module_paths(plain_suffix, path="src/pkg/caller.py") == {
+        "record": frozenset({"pkg/real"})
+    }
+
+
+@pytest.mark.unit
 def test_plain_import_bindings_skip_pieces_that_are_not_module_names() -> None:
     """Only dotted module names bind; the trailing-comma/garbage pieces do not."""
     assert cross_file._plain_import_module_paths(
