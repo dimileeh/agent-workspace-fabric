@@ -515,3 +515,107 @@ async def test_a_receiver_chain_this_reader_cannot_resolve_fails_closed() -> Non
     )
 
     assert not await _probe(probe, item_line=5)
+
+
+# A sibling of the chain's own module, under the same imported root.
+_SIBLING_SAME_NAME_MODULE = "src/pkg_b/observability/unrelated.py"
+
+
+@pytest.mark.unit
+async def test_a_chained_receiver_rejects_a_sibling_under_its_root() -> None:
+    """The chain's own segment is part of the binding, not just its root.
+
+    ``import pkg_b.observability as obs`` plus
+    ``obs.execution_platform_metrics.record_ready_queue_depth()`` reaches the
+    ``execution_platform_metrics`` submodule, so binding the call to the whole
+    ``pkg_b/observability`` subtree would let a correction to a same-named
+    module-level helper in a *sibling* module satisfy the gate while the callee
+    stayed untouched (PRRT_kwDOSJAM6s6q_M0j).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=_CHAINED_RECEIVER_CALLER_TEXT, changed=_SIBLING_SAME_NAME_MODULE
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_an_unreadable_chain_fails_closed_even_when_its_qualifier_binds() -> None:
+    """A chain this reader cannot read resolves to no module, so it closes.
+
+    ``factory().execution_platform_metrics`` is an attribute of an unknown
+    object, not the imported submodule of the same name, so the import's own
+    target is no proof about this call (PRRT_kwDOSJAM6s6q_M0j).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "from pkg_b.observability import execution_platform_metrics\n"
+            "\n"
+            "\n"
+            "def refresh(payload):\n"
+            "    factory().execution_platform_metrics.record_ready_queue_depth(payload)\n"
+        )
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_two_chains_sharing_one_root_fail_closed() -> None:
+    """One root reached through two different chains resolves to neither module.
+
+    The root is the only binding key the resolver has, so a line spelling both
+    ``obs.execution_platform_metrics.record_ready_queue_depth`` and
+    ``obs.other.helper`` cannot hold the two callees to their own modules —
+    keeping one of the chains would bind a callee to a module it never reaches
+    (PRRT_kwDOSJAM6s6q_M0j).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "import pkg_b.observability as obs\n"
+            "\n"
+            "\n"
+            "def refresh(payload):\n"
+            "    obs.execution_platform_metrics.record_ready_queue_depth(obs.other.helper())\n"
+        )
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_chain_under_an_imported_package_resolves_its_own_submodule() -> None:
+    """A ``from`` import's submodule reading carries the chain's segment too.
+
+    ``from pkg_b import observability`` reads the root two ways; only the
+    submodule one names a module, and the chain extends *that* path to
+    ``pkg_b/observability/execution_platform_metrics``, which is the module the
+    call actually reaches (PRRT_kwDOSJAM6s6q_M0j).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "from pkg_b import observability\n"
+            "\n"
+            "\n"
+            "def refresh(payload):\n"
+            "    observability.execution_platform_metrics.record_ready_queue_depth(payload)\n"
+        )
+    )
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_chain_whose_root_the_anchored_scope_rebinds_fails_closed() -> None:
+    """A rebound root names no module, so its chain extends nothing."""
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "import pkg_b.observability as obs\n"
+            "\n"
+            "\n"
+            "def refresh(obs, payload):\n"
+            "    obs.execution_platform_metrics.record_ready_queue_depth(payload)\n"
+        )
+    )
+
+    assert not await _probe(probe, item_line=5)

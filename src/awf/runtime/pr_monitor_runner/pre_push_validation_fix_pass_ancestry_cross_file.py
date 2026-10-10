@@ -777,6 +777,35 @@ def _bindings_fail_closed_when_unbound(
     return unbound | {key: targets for key, targets in bindings.items() if targets}
 
 
+def _receiver_bindings_through_chains(
+    bindings: dict[str, frozenset[_ModuleTarget]],
+    chains: dict[str, tuple[str, ...] | None],
+) -> dict[str, frozenset[_ModuleTarget]]:
+    """``bindings`` with each chained key re-pointed at the module its chain spells.
+
+    ``import pkg_b as api`` plus ``api.metrics.record()`` reaches
+    ``pkg_b/metrics``, not every module under ``pkg_b``: keeping the chain
+    root's own target discards the ``metrics`` segment and lets a correction to
+    a same-named definition in a sibling such as ``pkg_b/unrelated.py`` satisfy
+    the gate while ``api.metrics.record`` stays untouched
+    (PRRT_kwDOSJAM6s6q_M0j). A chain whose segments are unresolvable (None),
+    and the reading where the root is an *object* an imported module defines —
+    whose attribute is no module path — name no module at all, so they resolve
+    to nothing and the key is held to the unmatchable target every chained key
+    already fails closed on.
+    """
+    extended = dict(bindings)
+    for key, segments in chains.items():
+        targets = bindings.get(key, frozenset()) if segments is not None else frozenset()
+        tail = segments or ()
+        extended[key] = frozenset(
+            ("/".join([module_path, *tail]), False, None)
+            for module_path, _exact, enclosed_by in targets
+            if module_path and enclosed_by is None
+        )
+    return _bindings_fail_closed_when_unbound(extended, frozenset(chains))
+
+
 def _caller_binding_resolver(
     caller_text: str,
     *,
@@ -784,7 +813,7 @@ def _caller_binding_resolver(
     rebound: frozenset[str],
     refs: frozenset[tuple[str, str]],
     bare_refs: frozenset[tuple[str, str]],
-    chained_receivers: frozenset[str] = frozenset(),
+    chained_receivers: dict[str, tuple[str, ...] | None] | None = None,
     require_binding: bool = False,
 ) -> Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]]:
     """Bind ``refs`` to one caller text's imports, as a path-keyed callable.
@@ -792,10 +821,13 @@ def _caller_binding_resolver(
     A receiver a plain ``import`` binds is a module, so its callee is held to
     module scope like a bare one; every other receiver may be an instance and
     keeps the class-member tolerance (PRRT_kwDOSJAM6s6q8-M1).
-    ``chained_receivers`` are the keys a chained receiver resolved to, which
-    never take the name-only fallback: an attribute chain is not a name an
-    import can bind, so a root this reader cannot tie to the candidate fails
-    closed instead of accepting any reachable same-named definition
+    ``chained_receivers`` maps the keys a chained receiver resolved to onto the
+    chain segments following the key, appended to the key's module path so the
+    callee is held to the module the whole chain spells
+    (PRRT_kwDOSJAM6s6q_M0j). Such a key never takes the name-only fallback
+    either: an attribute chain is not a name an import can bind, so a root this
+    reader cannot tie to the candidate fails closed instead of accepting any
+    reachable same-named definition
     (PRRT_kwDOSJAM6s6q-6LK). ``require_binding`` drops that fallback for every
     key, for the re-read that has to *prove* a rename target reachable rather
     than merely not refute it.
@@ -814,7 +846,7 @@ def _caller_binding_resolver(
             receiver_bindings, frozenset(key for key, _ in refs)
         )
     elif chained_receivers:
-        receiver_bindings = _bindings_fail_closed_when_unbound(receiver_bindings, chained_receivers)
+        receiver_bindings = _receiver_bindings_through_chains(receiver_bindings, chained_receivers)
     module_receivers = _module_bound_receiver_names(caller_text, path=call_site)
     return partial(
         _callee_names_bound_to_path,
@@ -1174,7 +1206,9 @@ async def _path_diff_text_in_commit_range(
 
 def _cross_file_callee_names(
     file_text: str, line: int, *, path: str
-) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]], frozenset[str]]:
+) -> tuple[
+    frozenset[tuple[str, str]], frozenset[tuple[str, str]], dict[str, tuple[str, ...] | None]
+]:
     """Callee refs at ``line`` that may resolve in another file.
 
     Returns ``(attribute_qualified, bare, chained_receivers)``. The first two
@@ -1197,7 +1231,12 @@ def _cross_file_callee_names(
     qualifier its import already binds; any other chain is keyed on its root —
     the one link an import can bind — and reported as chained, so the resolver
     holds it closed instead of falling back to the name-only rule when the root
-    reaches nothing the candidate can satisfy (PRRT_kwDOSJAM6s6q-6LK).
+    reaches nothing the candidate can satisfy (PRRT_kwDOSJAM6s6q-6LK). The
+    segments *between* the root and the callee ride along with that key, so the
+    resolver holds the callee to the module the whole chain spells rather than
+    to the root's subtree; they are None for an unreadable chain and for a root
+    two chains share, which the one-key-per-name resolver cannot hold apart
+    (PRRT_kwDOSJAM6s6q_M0j).
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
         _callee_refs_from_file_line,
@@ -1208,7 +1247,7 @@ def _cross_file_callee_names(
     chains = _receiver_chain_segments_from_file_line(file_text, line, path=path)
     plain_imports = _plain_import_module_paths(file_text, path=path)
     qualified: set[tuple[str, str]] = set()
-    chained_receivers: set[str] = set()
+    chained_receivers: dict[str, tuple[str, ...] | None] = {}
     for qualifier, name in refs:
         if qualifier is None or qualifier in _IN_FILE_CALLEE_QUALIFIERS:
             continue
@@ -1224,13 +1263,16 @@ def _cross_file_callee_names(
         # An unreadable chain keeps the qualifier as the key; either way the key
         # is reported as chained, which is what holds it closed.
         key = chain[0] if chain is not None else qualifier
-        chained_receivers.add(key)
+        segments = chain[1:] if chain is not None else None
+        if key in chained_receivers and chained_receivers[key] != segments:
+            segments = None
+        chained_receivers[key] = segments
         qualified.add((key, name))
     imported = _bare_name_imported_definition_names(file_text, path=path)
     bare = frozenset(
         (name, imported.get(name, name)) for qualifier, name in refs if qualifier is None
     )
-    return frozenset(qualified), bare, frozenset(chained_receivers)
+    return frozenset(qualified), bare, chained_receivers
 
 
 async def _commit_range_changes_callee_definition(
@@ -1255,7 +1297,10 @@ async def _commit_range_changes_callee_definition(
     receivers binds through the chain's root instead of the attribute in front
     of it, and never takes the name-only fallback, so an edit to a same-named
     definition in a module that root cannot reach is not evidence
-    (PRRT_kwDOSJAM6s6q-6LK). A callee whose
+    (PRRT_kwDOSJAM6s6q-6LK); the chain's remaining segments extend that root's
+    module path, so a sibling module under it is not evidence either, and a
+    chain this reader cannot resolve to one module fails closed
+    (PRRT_kwDOSJAM6s6q_M0j). A callee whose
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
     gate exists for; a receiver imported by name resolves to that name's own
     module or to the importing module's file, not to any sibling under its
