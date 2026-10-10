@@ -98,6 +98,16 @@ _ASSIGNMENT_DEFINITION_HEAD = (
     rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
+# A plain assignment binding simple targets: ``validate = replacement``,
+# ``const validate = replacement``, ``validate: Recorder = replacement``. Its
+# right-hand side carries no definition head of its own — those heads are
+# ``_ASSIGNMENT_DEFINITION_HEAD``'s subject and are read as definitions — so
+# this is the rebinding form definition discovery cannot see.
+_PLAIN_ASSIGNMENT_TARGETS_RE = re.compile(
+    rf"^[ \t]*(?:(?:const|let|var)[ \t]+)?"
+    rf"({_JS_IDENT}(?:[ \t]*,[ \t]*{_JS_IDENT})*)"
+    rf"(?:[ \t]*:[^=\n]*)?[ \t]*=(?!=)"
+)
 _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
     rf"(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
@@ -355,6 +365,58 @@ def _definition_head_scan_lines(file_text: str, *, path: str | None = None) -> l
     elif len(scan_lines) > raw_count:  # pragma: no cover - defensive
         scan_lines = scan_lines[:raw_count]
     return scan_lines
+
+
+def _plain_assignment_rebound_scope_names(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    path: str | None,
+    names: frozenset[str],
+    definition_head_starts: frozenset[int],
+) -> set[tuple[int, str]]:
+    """``(scope_start, name)`` pairs a plain assignment rebinds in that scope.
+
+    Definition discovery recognizes only definition *heads*, so a scope that
+    binds a name with ``validate = replacement`` after ``def validate`` leaves
+    the head looking like the name's single effective binding while importing
+    the name actually reaches ``replacement``. Every name a scope rebinds this
+    way is reported so the caller can fail it closed: this lexical reader
+    cannot order the assignment against the head any more than
+    ``_module_scope_rebound_names`` can, and a guarded assignment need not be
+    the binding that runs last (PRRT_kwDOSJAM6s6q_ywa).
+
+    ``definition_head_starts`` are the lines already read as definitions of
+    their own, which the last-head fold orders without help. Only statement
+    positions count — bracket depth is tracked across the file so a keyword
+    argument or a continuation-line parameter default (``validate=None,``) is
+    not read as a binding — and each target is attributed to the scope whose
+    body executes it, so a function-local assignment never shadows a
+    module-level definition.
+    """
+    raw_lines = file_text.splitlines()
+    scan_lines = _definition_head_scan_lines(file_text, path=path)
+    rebound: set[tuple[int, str]] = set()
+    depth = 0
+    for idx, scan in enumerate(scan_lines):
+        at_statement_start = depth == 0
+        opened = scan.count("(") + scan.count("[") + scan.count("{")
+        closed = scan.count(")") + scan.count("]") + scan.count("}")
+        depth = max(0, depth + opened - closed)
+        line = idx + 1
+        if not at_statement_start or line in definition_head_starts:
+            continue
+        match = _PLAIN_ASSIGNMENT_TARGETS_RE.match(scan)
+        if match is None:
+            continue
+        targets = {target.strip() for target in match.group(1).split(",")} & names
+        if not targets:
+            continue
+        scope_start, _body_indent = _definition_binding_scope(
+            file_text, all_spans, start=line, indent=_leading_indent(raw_lines[idx])
+        )
+        rebound.update((scope_start, target) for target in targets)
+    return rebound
 
 
 def _enclosing_definition_identity(

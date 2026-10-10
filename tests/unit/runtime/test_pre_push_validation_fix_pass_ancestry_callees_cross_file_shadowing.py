@@ -800,3 +800,143 @@ def test_a_walrus_inside_a_comprehension_still_binds_the_holding_scope() -> None
     assert cross_file._locally_rebound_names_at_line(text, 4, path=_CALLER) == frozenset(
         {"pool", "totals", "hooks", "validate", "inner"}
     )
+
+
+# The candidate module defines the imported name and then rebinds it to
+# something that carries no definition head of its own, so importing the name
+# reaches the replacement and the ``def`` above it is dead code.
+_REASSIGNED_DEFINITION_CALLEE_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "record_ready_queue_depth = _build_recorder()\n"
+)
+
+# A body-only change inside the shadowed definition's span (old line 2).
+_REASSIGNED_DEAD_DEFINITION_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -2 +2 @@\n"
+    "-    return None\n"
+    "+    return 0\n"
+)
+
+
+@pytest.mark.unit
+def test_a_definition_a_plain_assignment_rebinds_is_not_importable() -> None:
+    """``def f(...)`` followed by ``f = replacement`` leaves the ``def`` dead.
+
+    The module body runs the assignment last, so the imported name holds the
+    replacement and a correction confined to the earlier ``def`` changes
+    nothing the call site reaches. Only recognized definition heads are
+    collected, so that assignment is invisible to the last-head fold and the
+    name has to fail closed here instead (PRRT_kwDOSJAM6s6q_ywa). An
+    assignment whose right-hand side *is* a definition head keeps folding
+    normally, and an assignment of some other name shadows nothing.
+    """
+    for names, bare_names in (
+        (frozenset({"record_ready_queue_depth"}), frozenset()),
+        (frozenset(), frozenset({"record_ready_queue_depth"})),
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                _REASSIGNED_DEFINITION_CALLEE_TEXT,
+                names,
+                path=_CALLEE_MODULE,
+                bare_names=bare_names,
+            )
+            == []
+        )
+
+    rebound_to_lambda = _REASSIGNED_DEFINITION_CALLEE_TEXT.replace(
+        "_build_recorder()", "lambda payload: payload.ready_depth()"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        rebound_to_lambda,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(5, 5)]
+
+    other_name = _REASSIGNED_DEFINITION_CALLEE_TEXT.replace(
+        "record_ready_queue_depth = _build_recorder()", "RECORDER = _build_recorder()"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        other_name,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_class_member_a_plain_assignment_rebinds_is_not_importable() -> None:
+    """A class body rebinding the attribute leaves the earlier ``def`` dead too.
+
+    ``record = staticmethod(record)`` is the attribute the receiver reaches, so
+    the method above it is not the callee a correction has to touch
+    (PRRT_kwDOSJAM6s6q_ywa).
+    """
+    text = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    record_ready_queue_depth = staticmethod(_recorder)\n"
+    )
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_bindings_outside_the_definition_scope_do_not_shadow_it() -> None:
+    """Only the binding scope's own statements rebind its names.
+
+    A keyword argument and a continuation-line parameter default read as
+    ``name=value`` but are not statements, and a function-local assignment
+    binds in that function, so none of them makes the module-level definition
+    unreachable (PRRT_kwDOSJAM6s6q_ywa).
+    """
+    text = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+        "\n"
+        "\n"
+        "GAUGE = _build_gauge(\n"
+        "    record_ready_queue_depth=None,\n"
+        ")\n"
+        "\n"
+        "\n"
+        "def refresh(\n"
+        "    record_ready_queue_depth=None,\n"
+        "):\n"
+        "    record_ready_queue_depth = GAUGE.recorder\n"
+        "    return record_ready_queue_depth\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        text,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(1, 4)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_definition_a_later_assignment_rebinds_is_not_evidence() -> None:
+    """End to end: the shadowed ``def`` withholds evidence instead of resolving."""
+    probe = _cross_package_probe(
+        callee_text=_REASSIGNED_DEFINITION_CALLEE_TEXT,
+        diff=_REASSIGNED_DEAD_DEFINITION_DIFF,
+    )
+
+    assert not await _probe(probe)
