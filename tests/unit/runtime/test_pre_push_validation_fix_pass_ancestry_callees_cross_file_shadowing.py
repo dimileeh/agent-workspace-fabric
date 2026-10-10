@@ -1615,3 +1615,133 @@ def test_a_walrus_rebinding_in_a_compound_header_is_not_importable() -> None:
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_loop_or_with_target_rebinding_is_not_importable() -> None:
+    """A ``for`` or ``with`` target rebinds the name as plainly as ``=`` does.
+
+    ``for record in handlers:`` leaves the module-level ``def record`` above it
+    dead once the loop has run, and ``with _recorder() as record:`` rebinds the
+    name for its whole suite, so a reader watching only assignments still
+    offers that dead head as the callee a correction must touch
+    (PRRT_kwDOSJAM6s6rBjC4). The binding's own scope still decides: a
+    function-local loop binds a local, an unpacking target binds its names all
+    the same, and a target that is no name of the scope — a comprehension's
+    own target, an attribute, a subscript, some other name, or a ``with`` item
+    with no ``as`` at all — shadows nothing.
+    """
+    loop_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "for record_ready_queue_depth in _recorders():\n"
+        "    _register(record_ready_queue_depth)\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            loop_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    with_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "with _recorder() as record_ready_queue_depth:\n"
+        "    _register(record_ready_queue_depth)\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            with_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    in_a_class_body = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    for record_ready_queue_depth in _recorders():\n"
+        "        pass\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            in_a_class_body,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+    function_local = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+        "\n"
+        "\n"
+        "def refresh(gauges):\n"
+        "    for record_ready_queue_depth in gauges:\n"
+        "        _register(record_ready_queue_depth)\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        function_local,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    for binding in (
+        "for record_ready_queue_depth, _tail in _recorders():",
+        "for [record_ready_queue_depth, *_rest] in _recorders():",
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                loop_rebind.replace("for record_ready_queue_depth in _recorders():", binding),
+                frozenset({"record_ready_queue_depth"}),
+                path=_CALLEE_MODULE,
+            )
+            == []
+        ), binding
+
+    for untouched in (
+        "for recorder in _recorders():",
+        "for _gauge.record_ready_queue_depth in _recorders():",
+        "for _gauge[record_ready_queue_depth] in _recorders():",
+    ):
+        assert cross_file._importable_definition_spans_for_names(
+            loop_rebind.replace("for record_ready_queue_depth in _recorders():", untouched).replace(
+                "_register(record_ready_queue_depth)", "pass"
+            ),
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        ) == [(1, 4)], untouched
+
+    comprehension_target = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "_RECORDERS = [record_ready_queue_depth for record_ready_queue_depth in _recorders()]\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        comprehension_target,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    no_as_clause = with_rebind.replace(
+        "with _recorder() as record_ready_queue_depth:", "with _recorder():"
+    ).replace("_register(record_ready_queue_depth)", "pass")
+    assert cross_file._importable_definition_spans_for_names(
+        no_as_clause,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]

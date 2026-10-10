@@ -28,7 +28,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
 
 
 def _assignment_target_names(target: ast.expr) -> Iterator[str]:
-    """The plain names one assignment target binds.
+    """The plain names one assignment or loop/``with`` target binds.
 
     Unpacking targets nest (``first, (second, *rest) = ...``), while an
     attribute or subscript target binds nothing in the scope's own namespace,
@@ -50,7 +50,7 @@ def _assignment_rebound_scope_names(
     names: frozenset[str],
     definition_head_starts: frozenset[int],
 ) -> set[tuple[int, str]]:
-    """``(scope_start, name)`` pairs an assignment rebinds, read from the AST.
+    """``(scope_start, name)`` pairs a binding statement rebinds, read from the AST.
 
     The same rebinding form ``_plain_assignment_rebound_scope_names`` reads
     lexically (PRRT_kwDOSJAM6s6q_ywa), found wherever Python actually spells
@@ -64,11 +64,21 @@ def _assignment_rebound_scope_names(
     reading a ``:=`` binding has: ``if (record := replacement):`` rebinds the
     name inside the header itself, where no statement starts at all.
 
-    Only assignments that bind a name are read: an annotation without a value
-    binds nothing, and an attribute or subscript target rebinds no name of the
-    scope. The head of a line already read as a definition is skipped exactly
-    as the lexical reader skips it — ``record = lambda ...`` *is* the head the
-    last-head fold orders — while any other statement on that line is read.
+    A ``for`` or ``with`` target binds its name the same way and is read the
+    same way: ``for record in handlers:`` leaves the ``def record`` above it
+    dead once the loop has run, and ``with open(path) as record:`` rebinds the
+    name for its whole suite, so crediting a correction confined to that head
+    would resolve the thread while importers still reach the loop's last
+    handler or the context manager's value (PRRT_kwDOSJAM6s6rBjC4).
+
+    Only bindings that bind a name are read: an annotation without a value
+    binds nothing, a ``with`` item without ``as`` binds nothing, and an
+    attribute or subscript target rebinds no name of the scope. Comprehension
+    targets are not read at all — they bind in the comprehension's own scope,
+    not the one holding it. The head of a line already read as a definition is
+    skipped exactly as the lexical reader skips it — ``record = lambda ...``
+    *is* the head the last-head fold orders — while any other statement on
+    that line is read.
     Each binding is attributed through ``_definition_binding_scope``, from the
     indent of the line it starts on, so the keys match the heads' own and a
     function-local assignment shadows nothing at module scope. Text this
@@ -87,6 +97,10 @@ def _assignment_rebound_scope_names(
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [item.optional_vars for item in node.items if item.optional_vars is not None]
         elif isinstance(node, ast.NamedExpr) or (
             isinstance(node, ast.AnnAssign) and node.value is not None
         ):
@@ -167,15 +181,17 @@ def _rebound_scope_names(
 ) -> set[tuple[int, str]]:
     """``(scope_start, name)`` pairs no ``collected`` definition head can own.
 
-    The union of both rebinding forms these readers know: a plain assignment
-    (PRRT_kwDOSJAM6s6q_ywa) and an ``import`` of the same name
+    The union of every rebinding form these readers know: a plain assignment
+    (PRRT_kwDOSJAM6s6q_ywa), a ``for`` or ``with`` target
+    (PRRT_kwDOSJAM6s6rBjC4) and an ``import`` of the same name
     (PRRT_kwDOSJAM6s6rAAWY). ``collected`` carries the candidate heads in
     ``_importable_definition_spans_for_names``'s own shape — the names to look
     for, and the lines already read as definitions of their own.
 
     Assignments are read twice over: lexically, which is the only reading
     JS/TS text has, and from the Python AST, which finds the ones a physical
-    line does not start with (PRRT_kwDOSJAM6s6rBbdn).
+    line does not start with (PRRT_kwDOSJAM6s6rBbdn) and the loop and ``with``
+    targets the lexical reader has no shape for at all.
     """
     names = frozenset(name for name, *_rest in collected)
     head_starts = frozenset(start for _name, start, *_rest in collected)
