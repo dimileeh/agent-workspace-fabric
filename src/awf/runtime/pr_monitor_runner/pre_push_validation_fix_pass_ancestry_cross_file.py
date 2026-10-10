@@ -830,7 +830,9 @@ def _caller_binding_resolver(
     reachable same-named definition
     (PRRT_kwDOSJAM6s6q-6LK). ``require_binding`` drops that fallback for every
     key, for the re-read that has to *prove* a rename target reachable rather
-    than merely not refute it.
+    than merely not refute it; it composes with the chain extension instead of
+    replacing it, so that re-read cannot re-widen a chained callee back to the
+    chain root's subtree (PRRT_kwDOSJAM6s6q_M0j).
     """
     bare_bindings = _import_targets_without_locally_rebound(
         _bare_name_import_module_targets(caller_text, path=call_site), rebound
@@ -838,6 +840,8 @@ def _caller_binding_resolver(
     receiver_bindings = _import_targets_without_locally_rebound(
         _receiver_import_module_targets(caller_text, path=call_site), rebound
     )
+    if chained_receivers:
+        receiver_bindings = _receiver_bindings_through_chains(receiver_bindings, chained_receivers)
     if require_binding:
         bare_bindings = _bindings_fail_closed_when_unbound(
             bare_bindings, frozenset(key for key, _ in bare_refs)
@@ -845,8 +849,6 @@ def _caller_binding_resolver(
         receiver_bindings = _bindings_fail_closed_when_unbound(
             receiver_bindings, frozenset(key for key, _ in refs)
         )
-    elif chained_receivers:
-        receiver_bindings = _receiver_bindings_through_chains(receiver_bindings, chained_receivers)
     module_receivers = _module_bound_receiver_names(caller_text, path=call_site)
     return partial(
         _callee_names_bound_to_path,
@@ -1090,6 +1092,7 @@ async def _caller_binding_after_correction(
     rebound: frozenset[str],
     refs: frozenset[tuple[str, str]],
     bare_refs: frozenset[tuple[str, str]],
+    chained_receivers: dict[str, tuple[str, ...] | None] | None = None,
 ) -> Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]] | None:
     """The caller's own import binding *after* the correction, or None if unreadable.
 
@@ -1100,6 +1103,10 @@ async def _caller_binding_after_correction(
     stay unmatchable here too, and a caller whose right-side text is unreadable
     — or which no longer imports the callee at all — fails closed rather than
     falling back to the name-only rule (PRRT_kwDOSJAM6s6q-L4B).
+
+    A chained receiver carries its chain here too: re-reading the root's
+    binding alone would hand the move the root's whole subtree and accept a
+    same-named definition the chain never reaches (PRRT_kwDOSJAM6s6q_M0j).
     """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _path_text_at_ref,
@@ -1116,6 +1123,7 @@ async def _caller_binding_after_correction(
         rebound=rebound,
         refs=refs,
         bare_refs=bare_refs,
+        chained_receivers=chained_receivers,
         require_binding=True,
     )
 
@@ -1416,6 +1424,7 @@ async def _commit_range_changes_callee_definition(
                         rebound=rebound,
                         refs=names,
                         bare_refs=bare_names,
+                        chained_receivers=chained_receivers,
                     )
                 if bound_to_after is not None:
                     after_names, after_bare, after_enclosed_by = bound_to_after(rename_target)

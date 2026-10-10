@@ -392,3 +392,52 @@ async def test_rename_target_the_receiver_reaches_unpinned_is_evidence() -> None
     )
 
     assert await _probe(probe)
+
+
+# A callee reached through a chain of receivers: ``import pkg_b.observability
+# as obs`` plus ``obs.execution_platform_metrics.record_ready_queue_depth()``
+# spells one module under the imported root, not every module under it
+# (PRRT_kwDOSJAM6s6q_M0j).
+_CHAINED_CALLER_TEXT = (
+    "import pkg_b.observability as obs\n"
+    "\n"
+    "\n"
+    "def refresh_ready_queue_metrics(pool):\n"
+    "    payload = pool.snapshot()\n"
+    "    obs.execution_platform_metrics.record_ready_queue_depth(payload)\n"
+    "    return payload\n"
+)
+
+# A sibling of the module the chain spells, under the same imported root.
+_CHAIN_SIBLING_MODULE = "src/pkg_b/observability/unrelated.py"
+
+
+@pytest.mark.unit
+async def test_rename_into_a_chains_sibling_is_not_evidence_for_the_corrected_caller() -> None:
+    """The corrected caller's re-read keeps the chain's segments too.
+
+    The move carries ``record_ready_queue_depth`` out of the module the chain
+    spells and into a *sibling* under the chain root, so
+    ``obs.execution_platform_metrics.record_ready_queue_depth`` is left broken.
+    The left-side binding rejects that target, and the right-side re-read of the
+    unchanged caller must not re-widen the chained key to the root's whole
+    subtree and accept the move after all (PRRT_kwDOSJAM6s6q_M0j).
+    """
+    probe = _RenameProbe(
+        name_status_z=_name_status_z_rename(_CHAIN_SIBLING_MODULE),
+        diffs={
+            (
+                _CALLEE_MODULE,
+                _CHAIN_SIBLING_MODULE,
+            ): _rename_with_body_change_diff(_CHAIN_SIBLING_MODULE),
+        },
+        rename_target=_CHAIN_SIBLING_MODULE,
+        extra_texts={
+            (_LEFT, _CALLER): _CHAINED_CALLER_TEXT,
+            # The correction left this caller alone, so its right side still
+            # spells the same chain.
+            (_RIGHT, _CALLER): _CHAINED_CALLER_TEXT,
+        },
+    )
+
+    assert not await _probe(probe)
