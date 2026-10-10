@@ -1472,3 +1472,91 @@ def test_a_rebinding_after_a_semicolon_on_the_same_line_is_not_importable() -> N
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_rebinding_inside_a_one_line_compound_suite_is_not_importable() -> None:
+    """A suite written on its header's own line rebinds the name just as well.
+
+    ``if enabled: record = replacement`` spells its assignment past the ``if``
+    header, where neither the header nor the statement sits at the line's left
+    edge, so a reader anchored there matches nothing and leaves the dead ``def``
+    above it standing as the callee a correction must touch
+    (PRRT_kwDOSJAM6s6rBbdn). The suite's own scope still decides: a
+    function-local one binds a local, an annotated or unpacking target binds
+    its names all the same, and a statement binding some *other* name — or an
+    attribute or subscript of it, which is no name of the scope — shadows
+    nothing.
+    """
+    guarded_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "if _enabled(): record_ready_queue_depth = _build_recorder()\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            guarded_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    in_a_class_body = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    if _enabled(): record_ready_queue_depth = staticmethod(_recorder)\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            in_a_class_body,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+    function_local = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+        "\n"
+        "\n"
+        "def refresh(gauge):\n"
+        "    if gauge: record_ready_queue_depth = gauge.recorder\n"
+        "    return record_ready_queue_depth\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        function_local,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    for binding in (
+        "record_ready_queue_depth: Recorder = _build_recorder()",
+        "record_ready_queue_depth, _tail = _build_recorders()",
+        "[record_ready_queue_depth, *_rest] = _build_recorders()",
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                guarded_rebind.replace("record_ready_queue_depth = _build_recorder()", binding),
+                frozenset({"record_ready_queue_depth"}),
+                path=_CALLEE_MODULE,
+            )
+            == []
+        ), binding
+
+    for untouched in (
+        "RECORDER = _build_recorder()",
+        "_gauge.record_ready_queue_depth = _build_recorder()",
+        "_gauge[record_ready_queue_depth] = _build_recorder()",
+    ):
+        assert cross_file._importable_definition_spans_for_names(
+            guarded_rebind.replace("record_ready_queue_depth = _build_recorder()", untouched),
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        ) == [(1, 4)], untouched

@@ -16,6 +16,7 @@ all three stay under the first-party file line limit.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
     _ANCHORED_SCOPES,
@@ -24,6 +25,81 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _leading_indent,
     _plain_assignment_rebound_scope_names,
 )
+
+
+def _assignment_target_names(target: ast.expr) -> Iterator[str]:
+    """The plain names one assignment target binds.
+
+    Unpacking targets nest (``first, (second, *rest) = ...``), while an
+    attribute or subscript target binds nothing in the scope's own namespace,
+    so only ``ast.Name`` stores are yielded.
+    """
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, ast.Starred):
+        yield from _assignment_target_names(target.value)
+    elif isinstance(target, (ast.List, ast.Tuple)):
+        for element in target.elts:
+            yield from _assignment_target_names(element)
+
+
+def _assignment_rebound_scope_names(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    names: frozenset[str],
+    definition_head_starts: frozenset[int],
+) -> set[tuple[int, str]]:
+    """``(scope_start, name)`` pairs an assignment rebinds, read from the AST.
+
+    The same rebinding form ``_plain_assignment_rebound_scope_names`` reads
+    lexically (PRRT_kwDOSJAM6s6q_ywa), found wherever Python actually spells
+    it rather than only at a physical line's left edge. A suite written on its
+    header's own line — ``if enabled: record = replacement`` — puts the
+    assignment past the ``if``, where the anchored reader matches neither the
+    header nor the statement, so the name keeps looking bound to the dead
+    ``def`` above it while the importer reaches ``replacement``
+    (PRRT_kwDOSJAM6s6rBbdn). An ``ast`` walk sees that statement, a
+    semicolon-separated one and a wrapped one alike.
+
+    Only assignments that bind a name are read: an annotation without a value
+    binds nothing, and an attribute or subscript target rebinds no name of the
+    scope. The head of a line already read as a definition is skipped exactly
+    as the lexical reader skips it — ``record = lambda ...`` *is* the head the
+    last-head fold orders — while any other statement on that line is read.
+    Each binding is attributed through ``_definition_binding_scope``, from the
+    indent of the line it starts on, so the keys match the heads' own and a
+    function-local assignment shadows nothing at module scope. Text this
+    reader cannot parse yields nothing, leaving the lexical reader's verdict
+    as it stands: that is the JS/TS case, which this Python-shaped walk has no
+    reading of.
+    """
+    if not names:
+        return set()
+    try:
+        tree = ast.parse(file_text)
+    except (SyntaxError, ValueError):
+        return set()
+    raw_lines = file_text.splitlines()
+    rebound: set[tuple[int, str]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        bound = {name for target in targets for name in _assignment_target_names(target)} & names
+        if not bound:
+            continue
+        indent = _leading_indent(raw_lines[node.lineno - 1])
+        if node.lineno in definition_head_starts and node.col_offset == indent:
+            continue
+        scope_start, _body_indent = _definition_binding_scope(
+            file_text, all_spans, start=node.lineno, indent=indent
+        )
+        rebound.update((scope_start, name) for name in bound)
+    return rebound
 
 
 def _import_rebound_scope_names(
@@ -92,15 +168,26 @@ def _rebound_scope_names(
     (PRRT_kwDOSJAM6s6rAAWY). ``collected`` carries the candidate heads in
     ``_importable_definition_spans_for_names``'s own shape — the names to look
     for, and the lines already read as definitions of their own.
+
+    Assignments are read twice over: lexically, which is the only reading
+    JS/TS text has, and from the Python AST, which finds the ones a physical
+    line does not start with (PRRT_kwDOSJAM6s6rBbdn).
     """
     names = frozenset(name for name, *_rest in collected)
-    return _plain_assignment_rebound_scope_names(
-        file_text,
-        all_spans,
-        path=path,
-        names=names,
-        definition_head_starts=frozenset(start for _name, start, *_rest in collected),
-    ) | _import_rebound_scope_names(file_text, all_spans, names=names)
+    head_starts = frozenset(start for _name, start, *_rest in collected)
+    return (
+        _plain_assignment_rebound_scope_names(
+            file_text,
+            all_spans,
+            path=path,
+            names=names,
+            definition_head_starts=head_starts,
+        )
+        | _assignment_rebound_scope_names(
+            file_text, all_spans, names=names, definition_head_starts=head_starts
+        )
+        | _import_rebound_scope_names(file_text, all_spans, names=names)
+    )
 
 
 def _effective_scope_head_starts(
