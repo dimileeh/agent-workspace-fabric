@@ -123,13 +123,13 @@ _ENCLOSING_DEFINITION_RE = re.compile(
     rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
-# The dotted prefix before a chained callee's receiver: in
-# ``root.mid.receiver.name()`` group 1 is ``root.mid``, the part of the receiver
-# the callee's immediate qualifier hides. Only simple-identifier links are read,
-# so ``factory().receiver.name()`` leaves the chain unreadable.
-_RECEIVER_CHAIN_PREFIX_RE = re.compile(
-    rf"({_IDENT_BOUNDARY}{_JS_IDENT}(?:\s*\??\.\s*{_JS_IDENT})*)\s*\??\.\s*$"
-)
+# Single-character probes for the right-anchored receiver-chain scan in
+# ``_trailing_receiver_chain``, using the same classes as the dotted-chain
+# patterns it replaces: ``[\w$]`` continues an identifier, ``\s`` separates
+# chain links, and ``_JS_IDENT_RE`` validates one link.
+_IDENT_CHAR_RE = re.compile(r"[\w$]")
+_SPACE_CHAR_RE = re.compile(r"\s")
+_JS_IDENT_RE = re.compile(_JS_IDENT)
 _ATTR_CALLEE_QUALIFIERS = frozenset({"self", "cls"})
 # JS/TS class instance receiver (gated by ``_path_allows_js_private_fields``).
 _JS_ATTR_CALLEE_QUALIFIERS = frozenset({"this"})
@@ -1231,16 +1231,70 @@ def _callee_refs_from_anchor_line(
     return frozenset((match.group(1), match.group(2)) for match in matches)
 
 
+def _scan_back_while(probe: re.Pattern[str], text: str, end: int) -> int:
+    """Leftmost index ``i <= end`` where every character of ``text[i:end]`` matches."""
+    while end > 0 and probe.match(text, end - 1):
+        end -= 1
+    return end
+
+
+def _trailing_receiver_chain(text: str) -> tuple[str, bool] | None:
+    """The dotted receiver chain ``text`` ends with, and whether a ``.`` follows it.
+
+    In ``root.mid.receiver.`` the chain is ``root.mid.receiver`` and the flag is
+    True; in ``root.mid.receiver`` the flag is False. Only runs of plain
+    identifiers are read, so ``factory().receiver.`` yields just ``receiver``
+    and ``factory().`` yields None.
+
+    The scan is end-anchored and walks backwards, so it costs one pass over the
+    chain. An equivalent forward ``re.search`` re-scans the whole chain from
+    every identifier in it whenever the tail cannot match (``a.a.…a()``), which
+    is quadratic in a source line whose length is not bounded here
+    (PRRT_kwDOSJAM6s6rAhm4).
+    """
+    end = _scan_back_while(_SPACE_CHAR_RE, text, len(text))
+    ends_with_dot = end > 0 and text[end - 1] == "."
+    if ends_with_dot:
+        end -= 1
+        if end > 0 and text[end - 1] == "?":
+            end -= 1
+        end = _scan_back_while(_SPACE_CHAR_RE, text, end)
+    chain_end = end
+    chain_start: int | None = None
+    while True:
+        link_start = _scan_back_while(_IDENT_CHAR_RE, text, end)
+        if _JS_IDENT_RE.fullmatch(text, link_start, end) is None:
+            # Not an identifier (empty, or digit-led like ``1x``): the chain
+            # starts to its right, exactly where a leftmost search would start.
+            break
+        chain_start = link_start
+        # ``\s*\??\.\s*`` joining this link to the one before it.
+        cursor = _scan_back_while(_SPACE_CHAR_RE, text, link_start)
+        if cursor == 0 or text[cursor - 1] != ".":
+            break
+        cursor -= 1
+        if cursor > 0 and text[cursor - 1] == "?":
+            cursor -= 1
+        end = _scan_back_while(_SPACE_CHAR_RE, text, cursor)
+    if chain_start is None:
+        return None
+    return text[chain_start:chain_end], ends_with_dot
+
+
 def _receiver_chain_segments(prefix_text: str) -> tuple[str, ...] | None:
     """The dotted receiver chain ``prefix_text`` ends with, or None.
 
-    ``?`` cannot appear in an identifier, so dropping it leaves the optional
-    chaining operator as a plain ``.`` separator.
+    ``prefix_text`` is the text before a chained callee's receiver, so in
+    ``root.mid.receiver.name()`` the segments are ``("root", "mid")`` — the part
+    of the receiver the callee's immediate qualifier hides. A chain is only read
+    when the prefix ends on a ``.``/``?.`` link, so ``factory().receiver.name()``
+    leaves it unreadable. ``?`` cannot appear in an identifier, so dropping it
+    leaves the optional chaining operator as a plain ``.`` separator.
     """
-    match = _RECEIVER_CHAIN_PREFIX_RE.search(prefix_text)
-    if match is None:
+    chain = _trailing_receiver_chain(prefix_text)
+    if chain is None or not chain[1]:
         return None
-    return tuple(segment.strip() for segment in match.group(1).replace("?", "").split("."))
+    return tuple(segment.strip() for segment in chain[0].replace("?", "").split("."))
 
 
 def _receiver_chain_segments_from_anchor_line(
@@ -1283,13 +1337,6 @@ def _receiver_chain_segments_from_anchor_line(
 
 # Leading ``.`` or ``?.`` after a receiver split onto the prior line.
 _LEADING_DOT_RE = re.compile(r"^([ \t]*)\??\.")
-# Trailing receiver may end with ``.`` or ``?.`` when the call continues below.
-# The whole dotted chain is captured, not just its last link, so a receiver
-# chain a formatter split across lines still reaches the reader that resolves
-# it to the name an import binds (PRRT_kwDOSJAM6s6q-6LK).
-_TRAILING_RECEIVER_RE = re.compile(
-    rf"({_IDENT_BOUNDARY}{_JS_IDENT}(?:\s*\??\.\s*{_JS_IDENT})*)\s*(\??\.)?\s*$"
-)
 _LEADING_BARE_CALL_RE = re.compile(rf"^([ \t]*)({_JS_IDENT})\s*(?:\?\.)?\s*\(")
 
 
@@ -1315,23 +1362,28 @@ def _anchor_line_with_split_receiver(masked_lines: list[str], line_index: int) -
     if line_index < 0 or line_index >= len(masked_lines):  # pragma: no cover
         return ""
     line = masked_lines[line_index]
+    # Whether the anchor line continues a receiver is the cheap, anchored read;
+    # take it before scanning the prior line for a chain to reattach.
+    leading_dot = _LEADING_DOT_RE.match(line)
+    bare = None if leading_dot is not None else _LEADING_BARE_CALL_RE.match(line)
+    if leading_dot is None and bare is None:
+        return line
     prior = _prior_nonblank_masked_line(masked_lines, line_index)
     if prior is None:
         return line
-    trailing = _TRAILING_RECEIVER_RE.search(prior)
+    # The whole dotted chain is reattached, not just its last link, so a
+    # receiver chain a formatter split across lines still reaches the reader
+    # that resolves it to the name an import binds (PRRT_kwDOSJAM6s6q-6LK).
+    trailing = _trailing_receiver_chain(prior)
     if trailing is None:
         return line
-    receiver = trailing.group(1)
-    prior_has_dot = trailing.group(2) is not None
-    leading_dot = _LEADING_DOT_RE.match(line)
+    receiver, prior_has_dot = trailing
     if leading_dot is not None:
         # ``self`` / ``self.`` / ``client`` above, ``.helper()`` / ``?.helper()`` below.
         return f"{leading_dot.group(1)}{receiver}.{line[leading_dot.end() :]}"
-    if prior_has_dot:
-        bare = _LEADING_BARE_CALL_RE.match(line)
-        if bare is not None:
-            # ``self.`` / ``client?.`` above, ``helper()`` on the anchor line.
-            return f"{bare.group(1)}{receiver}.{line[bare.start(2) :]}"
+    if prior_has_dot and bare is not None:
+        # ``self.`` / ``client?.`` above, ``helper()`` on the anchor line.
+        return f"{bare.group(1)}{receiver}.{line[bare.start(2) :]}"
     return line
 
 

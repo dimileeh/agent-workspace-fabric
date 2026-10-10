@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -347,3 +348,34 @@ def test_split_receiver_with_trailing_dot_ignores_non_call_continuation() -> Non
         "        )\n"
     )
     assert callees._callee_refs_from_file_line(text, 5) == frozenset()
+
+
+@pytest.mark.unit
+def test_receiver_scan_stays_linear_on_a_long_dotted_line() -> None:
+    """A long dotted chain whose tail cannot match must not be re-scanned per link.
+
+    The receiver readers are end-anchored and walk backwards, so
+    ``a.a.…a()`` costs one pass instead of one forward scan from every
+    identifier in the chain, and an anchor line that cannot continue a
+    receiver never reads the prior line at all (PRRT_kwDOSJAM6s6rAhm4).
+    """
+    chain_line = "        " + "a." * 6000 + "a()"
+    started = time.perf_counter()
+    assert callees._anchor_line_with_split_receiver([chain_line, "        .helper()"], 1) == (
+        "        .helper()"
+    )
+    assert callees._anchor_line_with_split_receiver([chain_line, "        x = 1"], 1) == (
+        "        x = 1"
+    )
+    assert callees._receiver_chain_segments("a." * 6000 + "x[0](") is None
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.unit
+def test_split_receiver_needs_a_prior_line_and_reads_optional_chain_links() -> None:
+    """A continuation with nothing above it reattaches nothing; ``?.`` links still read."""
+    assert callees._anchor_line_with_split_receiver(["    .helper()"], 0) == "    .helper()"
+    assert callees._anchor_line_with_split_receiver(["", "    helper()"], 1) == "    helper()"
+    assert callees._receiver_chain_segments_from_anchor_line(
+        "    root?.mid?.metrics?.record(payload)"
+    ) == {"metrics": ("root", "mid", "metrics")}
