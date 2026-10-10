@@ -47,7 +47,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
     _import_line_without_continuation,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
+    _effective_scope_head_starts,
     _rebound_scope_names,
+    _without_shadowed_enclosing_definitions,
 )
 
 # Receivers attempt 0 resolves in the reviewed file or its own class. Linking
@@ -937,43 +939,6 @@ def _diff_adds_decorators_above_span(diff_text: str, start: int) -> bool:
     return False
 
 
-def _effective_scope_head_starts(
-    collected: list[tuple[str, int, int, tuple[int, int], tuple[int, int]]],
-) -> dict[tuple[int, str], int]:
-    """The head each collected name is provably bound to, within its own scope.
-
-    "Last head wins" holds because a module or class body executes its heads in
-    textual order — but a head indented deeper than that body runs only when
-    its enclosing block does, so a name defined in mutually exclusive branches
-    (``if sys.platform == "win32": def validate(...)`` / ``else:``) is bound by
-    the branch taken, not by textual order. Crediting a correction confined to
-    the textually later head would mark the feedback fixed while the callable
-    actually imported stays untouched — and the survival check would find that
-    same inactive head — so a name with more than one head whose last head is
-    conditional is omitted here and fails closed in both checks
-    (PRRT_kwDOSJAM6s6q-6LP). A lone head stays effective (conditional or not,
-    it is the only binding the call site could reach), as does a last head at
-    its scope's body indent, which rebinds the name after any guarded head.
-
-    Heads group by the scope that binds them, so a class member folds against
-    that same class's other definitions of the name — the later ``def`` is the
-    only attribute a receiver reaches — and never against a same-named method
-    of a *different* class, a distinct attribute (PRRT_kwDOSJAM6s6q_M0o).
-    """
-    heads: dict[tuple[int, str], list[tuple[int, int]]] = {}
-    body_indents: dict[int, int] = {}
-    for name, start, indent, (scope_start, body_indent), _span in collected:
-        heads.setdefault((scope_start, name), []).append((start, indent))
-        body_indents[scope_start] = body_indent
-    effective: dict[tuple[int, str], int] = {}
-    for key, name_heads in heads.items():
-        last_start, last_indent = max(name_heads)
-        if len(name_heads) > 1 and last_indent > body_indents[key[0]]:
-            continue
-        effective[key] = last_start
-    return effective
-
-
 def _importable_definition_spans_for_names(
     file_text: str,
     names: frozenset[str],
@@ -1022,6 +987,12 @@ def _importable_definition_spans_for_names(
     entirely, and the fold is per binding scope so same-named members of
     distinct classes stay distinct — see ``_effective_scope_head_starts``.
 
+    The same rule holds the candidate's *enclosing* heads: a member is reached
+    only through the object its enclosing definition binds, so a method of the
+    first of two ``class Collector`` declarations is dead code even though the
+    pinned name sits on its enclosing class
+    (PRRT_kwDOSJAM6s6rAhm1) — see ``_without_shadowed_enclosing_definitions``.
+
     That order only covers the heads this scan recognizes, so a scope that
     rebinds the name with a statement carrying no head of its own — a plain
     ``validate = replacement`` (PRRT_kwDOSJAM6s6q_ywa) or an ``import`` of that
@@ -1055,6 +1026,9 @@ def _importable_definition_spans_for_names(
         span = (_definition_span_start_with_decorators(file_text, start), end)
         scope = _definition_binding_scope(file_text, all_spans, start=start, indent=indent)
         collected.append((name, start, indent, scope, span))
+    collected = _without_shadowed_enclosing_definitions(
+        file_text, all_spans, path=path, collected=collected
+    )
     effective = _effective_scope_head_starts(collected)
     rebound = _rebound_scope_names(file_text, all_spans, path=path, collected=collected)
     return [

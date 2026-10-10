@@ -684,3 +684,96 @@ def test_an_alias_binds_no_package_root() -> None:
         "alias": frozenset({"other/mod"}),
         "plain": frozenset({"plain"}),
     }
+
+
+# The imported module declares ``Collector`` twice at module scope: the first
+# class is dead, because ``from pkg_b.observability import Collector`` reaches
+# the binding the module body executes last.
+_DUPLICATE_CLASS_TEXT = (
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return payload\n"
+    "\n"
+    "\n"
+    "class Collector:\n"
+    "    def record_ready_queue_depth(self, payload):\n"
+    "        return payload\n"
+)
+
+# A body-only change inside the dead first ``Collector``'s method (old line 3).
+_DEAD_CLASS_METHOD_DIFF = _COLLECTOR_METHOD_DIFF
+
+# The same change inside the effective second ``Collector``'s method (line 8).
+_EFFECTIVE_CLASS_METHOD_DIFF = _OTHER_METHOD_DIFF
+
+
+@pytest.mark.unit
+async def test_a_shadowed_class_s_method_is_not_evidence() -> None:
+    """A method of a class the module later rebinds is dead code.
+
+    ``_definition_is_member_of_named_module_scope_definition`` reads the
+    enclosing class's *name*, which both declarations of ``class Collector``
+    carry, so a correction confined to the first one's method would otherwise
+    pass the overlap check while the imported class — the last binding the
+    module body executes — stays untouched (PRRT_kwDOSJAM6s6rAhm1). The
+    enclosing class has to own the module's ``Collector`` binding before its
+    members count.
+    """
+    probe = _imported_object_receiver_probe(
+        diff=_DEAD_CLASS_METHOD_DIFF, caller_text=_IMPORTED_CLASS_CALLER_TEXT
+    )
+    probe.texts[(_LEFT, _IMPORTED_OBJECT_MODULE)] = _DUPLICATE_CLASS_TEXT
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_the_effective_class_s_method_is_still_evidence() -> None:
+    """The paired accept: the surviving last ``Collector``'s member counts."""
+    probe = _imported_object_receiver_probe(
+        diff=_EFFECTIVE_CLASS_METHOD_DIFF, caller_text=_IMPORTED_CLASS_CALLER_TEXT
+    )
+    probe.texts[(_LEFT, _IMPORTED_OBJECT_MODULE)] = _DUPLICATE_CLASS_TEXT
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+def test_only_the_effective_class_s_members_are_importable() -> None:
+    """The span reader drops members of a shadowed or rebound enclosing class.
+
+    Both readings of the qualified call shape are held to it: the receiver
+    pinned to the imported symbol, and the unpinned attribute reading, where an
+    instance of a class the module no longer binds is equally unreachable
+    (PRRT_kwDOSJAM6s6rAhm1). A class whose name a later plain assignment or
+    import rebinds loses its members the same way, since neither statement
+    carries a head the last-head fold can see.
+    """
+    names = frozenset({"record_ready_queue_depth"})
+    pinned = {"record_ready_queue_depth": frozenset({"Collector"})}
+
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_CLASS_TEXT, names, path=_IMPORTED_OBJECT_MODULE, enclosed_by=pinned
+    ) == [(7, 8)]
+    assert cross_file._importable_definition_spans_for_names(
+        _DUPLICATE_CLASS_TEXT, names, path=_IMPORTED_OBJECT_MODULE
+    ) == [(7, 8)]
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            f"{_TWO_CLASS_TEXT}\n\nCollector = Other\n",
+            names,
+            path=_IMPORTED_OBJECT_MODULE,
+            enclosed_by=pinned,
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_distinct_classes_keep_their_own_same_named_members() -> None:
+    """The guard is per name: two differently named classes both stay reachable."""
+    assert cross_file._importable_definition_spans_for_names(
+        _TWO_CLASS_TEXT,
+        frozenset({"record_ready_queue_depth"}),
+        path=_IMPORTED_OBJECT_MODULE,
+    ) == [(2, 5), (7, 8)]

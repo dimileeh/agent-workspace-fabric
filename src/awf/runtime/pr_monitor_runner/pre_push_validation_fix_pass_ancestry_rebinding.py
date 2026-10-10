@@ -1,11 +1,13 @@
-"""Rebinding readers for importable-definition selection (pre-push FIXED evidence).
+"""Effective-binding readers for importable-definition selection (pre-push FIXED evidence).
 
 Definition discovery recognizes only definition *heads*, so a scope that binds
 one of those names again with a statement carrying no head of its own leaves
 the dead head looking like the name's effective binding. These readers report
 the ``(scope_start, name)`` pairs that happens for, so
 ``_importable_definition_spans_for_names`` can withhold those spans instead of
-offering dead code as the callee a correction has to touch.
+offering dead code as the callee a correction has to touch — together with the
+last-head-wins fold itself, which the same module applies to a candidate's
+*enclosing* heads as well (PRRT_kwDOSJAM6s6rAhm1).
 
 Kept beside ``..._ancestry_callees.py`` and ``..._ancestry_cross_file.py`` so
 all three stay under the first-party file line limit.
@@ -97,3 +99,94 @@ def _rebound_scope_names(
         names=names,
         definition_head_starts=frozenset(start for _name, start, *_rest in collected),
     ) | _import_rebound_scope_names(file_text, all_spans, names=names)
+
+
+def _effective_scope_head_starts(
+    collected: list[tuple[str, int, int, tuple[int, int], tuple[int, int]]],
+) -> dict[tuple[int, str], int]:
+    """The head each collected name is provably bound to, within its own scope.
+
+    "Last head wins" holds because a module or class body executes its heads in
+    textual order — but a head indented deeper than that body runs only when
+    its enclosing block does, so a name defined in mutually exclusive branches
+    (``if sys.platform == "win32": def validate(...)`` / ``else:``) is bound by
+    the branch taken, not by textual order. Crediting a correction confined to
+    the textually later head would mark the feedback fixed while the callable
+    actually imported stays untouched — and the survival check would find that
+    same inactive head — so a name with more than one head whose last head is
+    conditional is omitted here and fails closed in both checks
+    (PRRT_kwDOSJAM6s6q-6LP). A lone head stays effective (conditional or not,
+    it is the only binding the call site could reach), as does a last head at
+    its scope's body indent, which rebinds the name after any guarded head.
+
+    Heads group by the scope that binds them, so a class member folds against
+    that same class's other definitions of the name — the later ``def`` is the
+    only attribute a receiver reaches — and never against a same-named method
+    of a *different* class, a distinct attribute (PRRT_kwDOSJAM6s6q_M0o).
+    """
+    heads: dict[tuple[int, str], list[tuple[int, int]]] = {}
+    body_indents: dict[int, int] = {}
+    for name, start, indent, (scope_start, body_indent), _span in collected:
+        heads.setdefault((scope_start, name), []).append((start, indent))
+        body_indents[scope_start] = body_indent
+    effective: dict[tuple[int, str], int] = {}
+    for key, name_heads in heads.items():
+        last_start, last_indent = max(name_heads)
+        if len(name_heads) > 1 and last_indent > body_indents[key[0]]:
+            continue
+        effective[key] = last_start
+    return effective
+
+
+def _without_shadowed_enclosing_definitions(
+    file_text: str,
+    all_spans: list[tuple[str, int, int, int]],
+    *,
+    path: str | None,
+    collected: list[tuple[str, int, int, tuple[int, int], tuple[int, int]]],
+) -> list[tuple[str, int, int, tuple[int, int], tuple[int, int]]]:
+    """``collected`` without the heads whose *enclosing* head is itself dead.
+
+    A member is only reachable through the object its enclosing definition
+    binds, so the effective-binding rule has to be applied to that enclosing
+    head too: a module declaring ``class Collector`` twice carries the name on
+    both, and a member of the first one is dead code no importer reaches, even
+    though ``_definition_is_member_of_named_module_scope_definition`` finds the
+    pinned name on its enclosing class (PRRT_kwDOSJAM6s6rAhm1). Each enclosing
+    head is therefore folded against every head of *its* own name — the same
+    last-head-wins rule, through :func:`_effective_scope_head_starts`, plus the
+    rebinding readers above — and a member whose chain holds one head that
+    cannot be proved effective fails closed.
+
+    The fold runs over every head in the file, not just the candidate names,
+    because an enclosing class is rarely the callee's own name; the whole pass
+    is skipped when no candidate has an enclosing head at all.
+    """
+    enclosing = {
+        start: frozenset(
+            span_start
+            for _span_name, span_start, span_end, span_indent in all_spans
+            if span_start < start <= span_end and span_indent < indent
+        )
+        for _name, start, indent, _scope, _span in collected
+    }
+    if not any(enclosing.values()):
+        return collected
+    heads = [
+        (
+            name,
+            start,
+            indent,
+            _definition_binding_scope(file_text, all_spans, start=start, indent=indent),
+            (start, end),
+        )
+        for name, start, end, indent in all_spans
+    ]
+    effective = _effective_scope_head_starts(heads)
+    rebound = _rebound_scope_names(file_text, all_spans, path=path, collected=heads)
+    shadowed = {
+        start
+        for name, start, _indent, (scope_start, _body_indent), _span in heads
+        if effective.get((scope_start, name)) != start or (scope_start, name) in rebound
+    }
+    return [entry for entry in collected if not enclosing[entry[1]] & shadowed]
