@@ -1414,3 +1414,79 @@ def test_a_function_local_exception_target_shadows_no_module_definition() -> Non
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_deleted_definitions_are_not_importable() -> None:
+    """``del record`` leaves the ``def record`` above it importable from nowhere.
+
+    A ``del`` statement unbinds the name outright, so a module body that runs
+    it replaces nothing and leaves ``from module import record`` failing: the
+    ``def`` above it is dead code no importer can reach. Reading only the
+    binding forms that *rebind* a name still offered that head as the callee a
+    correction has to touch, so an edit confined to it satisfied the cross-file
+    evidence gate and resolved the thread while the import stayed broken
+    (PRRT_kwDOSJAM6s6rB_UI). An attribute target such as ``del obj.record``
+    unbinds no name of the scope and shadows nothing.
+    """
+    deleted = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "del record_ready_queue_depth\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            deleted,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    attribute_target = deleted.replace(
+        "del record_ready_queue_depth\n", "del _registry.record_ready_queue_depth\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        attribute_target,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_function_local_delete_shadows_no_module_definition() -> None:
+    """``del`` inside a helper unbinds that helper's local, not the module name.
+
+    The same scope attribution every other binding form gets, with the one
+    exception every other form has too: a ``global record`` declaration makes
+    the helper's ``del`` unbind the *module* name, so the dead head above it
+    stays withheld.
+    """
+    local_delete = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "def other():\n"
+        "    record_ready_queue_depth = _load()\n"
+        "    del record_ready_queue_depth\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        local_delete,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    global_delete = local_delete.replace(
+        "    record_ready_queue_depth = _load()\n", "    global record_ready_queue_depth\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            global_delete,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )

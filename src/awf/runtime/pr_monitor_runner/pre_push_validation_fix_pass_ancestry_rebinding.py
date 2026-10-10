@@ -188,11 +188,17 @@ def _assignment_rebound_scope_names(
     which makes offering that dead head worse than for any other rebinding
     (PRRT_kwDOSJAM6s6rB2mh).
 
+    A ``del record`` statement is read the same way, and is the one form that
+    *only* unbinds: a module body running it leaves the ``def record`` above it
+    importable from nowhere at all, so offering that head as the callee a
+    correction has to touch credited an edit to dead code while ``from module
+    import record`` stayed broken (PRRT_kwDOSJAM6s6rB_UI).
+
     Only bindings that bind a name are read: an annotation without a value
     binds nothing, a ``with`` item without ``as`` binds nothing, a bare
     ``except Exception:`` binds nothing, a wildcard
     ``case _:`` and a class or value pattern capture nothing, and an
-    attribute or subscript target rebinds no name of the scope. Comprehension
+    attribute or subscript target rebinds or unbinds no name of the scope. Comprehension
     targets are not read at all — they bind in the comprehension's own scope,
     not the one holding it. The head of a line already read as a definition is
     skipped exactly as the lexical reader skips it — ``record = lambda ...``
@@ -220,7 +226,7 @@ def _assignment_rebound_scope_names(
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         captured: set[str] = set()
-        if isinstance(node, ast.Assign):
+        if isinstance(node, (ast.Assign, ast.Delete)):
             targets: list[ast.expr] = list(node.targets)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             targets = [node.target]
