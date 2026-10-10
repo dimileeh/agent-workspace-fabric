@@ -1337,7 +1337,11 @@ async def _commit_range_changes_callee_definition(
         return False
     # A module-scope rebinding cannot reach a name the anchored function
     # imports itself: that import binds the name for the whole body, so the
-    # global is unreachable there (PRRT_kwDOSJAM6s6rAhm2).
+    # global is unreachable there (PRRT_kwDOSJAM6s6rAhm2). Read *before* the
+    # callee names, which consume it to decide whether a chain spelling a
+    # plain-imported module still reaches that module: deferring this read
+    # until after that call reopens the rebound-root shortcut
+    # (PRRT_kwDOSJAM6s6rAh8I).
     rebound = _locally_rebound_names_at_line(item_text, item_line, path=normalized_item) | (
         _module_scope_rebound_names(item_text, path=normalized_item)
         - _function_local_import_names_at_line(item_text, item_line)
