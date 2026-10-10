@@ -928,6 +928,39 @@ def _diff_adds_decorators_above_span(diff_text: str, start: int) -> bool:
     return False
 
 
+def _effective_module_scope_head_starts(
+    collected: list[tuple[str, int, int, bool, tuple[int, int]]],
+) -> dict[str, int]:
+    """The module-scope head each collected name is provably bound to.
+
+    "Last head wins" holds because the module body executes its heads in
+    textual order — but an *indented* head runs only when its enclosing block
+    does, so a name defined in mutually exclusive branches
+    (``if sys.platform == "win32": def validate(...)`` / ``else: def
+    validate(...)``) is bound by the branch taken, not by textual order.
+    Crediting a correction confined to the textually later head would mark the
+    feedback fixed while the callable actually imported on the running platform
+    stays untouched — and the survival check would find that same inactive
+    head — so a name with more than one head whose last head is conditional is
+    omitted here and fails closed in both checks (PRRT_kwDOSJAM6s6q-6LP).
+    A lone head stays effective: conditional or not, it is the only binding the
+    call site could reach. A last head at module indent also stays effective:
+    it rebinds the name after any guarded head above it.
+    """
+    heads: dict[str, list[tuple[int, int]]] = {}
+    for name, start, indent, nested, _span in collected:
+        if nested:
+            continue
+        heads.setdefault(name, []).append((start, indent))
+    effective: dict[str, int] = {}
+    for name, name_heads in heads.items():
+        last_start, last_indent = max(name_heads)
+        if len(name_heads) > 1 and last_indent > 0:
+            continue
+        effective[name] = last_start
+    return effective
+
+
 def _importable_definition_spans_for_names(
     file_text: str,
     names: frozenset[str],
@@ -972,6 +1005,8 @@ def _importable_definition_spans_for_names(
     code the importing call site cannot reach, and a correction confined to it
     changes nothing that call does (PRRT_kwDOSJAM6s6q9Wnf). This is the rule
     attempt 0's ``_resolve_callee_definition_span`` already applies in-file.
+    Duplicates whose effective head that order cannot prove are withheld
+    entirely — see ``_effective_module_scope_head_starts``.
     Members of module-level classes are *not* folded this way — a same-named
     method of a different class is a distinct attribute, which an instance
     receiver may well be calling, not a shadowing pair.
@@ -980,7 +1015,7 @@ def _importable_definition_spans_for_names(
         return []
     all_spans = _iter_definition_spans(file_text, path=path)
     js_ts = _path_allows_js_private_fields(path)
-    collected: list[tuple[str, int, bool, tuple[int, int]]] = []
+    collected: list[tuple[str, int, int, bool, tuple[int, int]]] = []
     for name, start, end, indent in all_spans:
         qualified = name in names
         if not qualified and name not in bare_names:
@@ -1001,11 +1036,13 @@ def _importable_definition_spans_for_names(
         elif nested:
             continue
         span = (_definition_span_start_with_decorators(file_text, start), end)
-        collected.append((name, start, nested, span))
-    effective = {
-        name: start for name, start, nested, _span in collected if not nested
-    }  # last head wins
-    return [span for name, start, nested, span in collected if nested or effective[name] == start]
+        collected.append((name, start, indent, nested, span))
+    effective = _effective_module_scope_head_starts(collected)
+    return [
+        span
+        for name, start, _indent, nested, span in collected
+        if nested or effective.get(name) == start
+    ]
 
 
 async def _caller_binding_after_correction(

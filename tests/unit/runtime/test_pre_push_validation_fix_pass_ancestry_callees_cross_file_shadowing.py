@@ -502,3 +502,113 @@ async def test_a_change_to_the_effective_duplicate_definition_is_evidence() -> N
     )
 
     assert await _probe(probe)
+
+
+# The callee module defines the imported name twice, in mutually exclusive
+# branches: which definition the import reaches depends on the branch taken,
+# not on textual order.
+_CONDITIONAL_DUPLICATE_CALLEE_TEXT = (
+    "import sys\n"
+    "\n"
+    "\n"
+    'if sys.platform == "win32":\n'
+    "\n"
+    "    def record_ready_queue_depth(payload):\n"
+    "        return payload.windows_depth()\n"
+    "\n"
+    "else:\n"
+    "\n"
+    "    def record_ready_queue_depth(payload):\n"
+    "        return len(payload.entries)\n"
+)
+
+# A body-only change inside the textually last branch's definition (old line 12).
+_LAST_BRANCH_DIFF = (
+    f"--- a/{_CALLEE_MODULE}\n"
+    f"+++ b/{_CALLEE_MODULE}\n"
+    "@@ -12 +12 @@\n"
+    "-        return len(payload.entries)\n"
+    "+        return payload.ready_depth()\n"
+)
+
+
+@pytest.mark.unit
+def test_conditionally_duplicated_definitions_fail_closed() -> None:
+    """Branch-guarded duplicates leave no provable effective definition.
+
+    ``if sys.platform == "win32": def validate(...)`` / ``else: def
+    validate(...)`` binds the name from the branch the module runs, so the
+    textually last head is not provably the one an importing call site reaches.
+    Crediting a correction confined to it would mark the item fixed while the
+    callable actually imported stays untouched, so every module-scope span of
+    such a name is withheld (PRRT_kwDOSJAM6s6q-6LP).
+    """
+    for names, bare_names in (
+        (frozenset(), frozenset({"record_ready_queue_depth"})),
+        (frozenset({"record_ready_queue_depth"}), frozenset()),
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                _CONDITIONAL_DUPLICATE_CALLEE_TEXT,
+                names,
+                path=_CALLEE_MODULE,
+                bare_names=bare_names,
+            )
+            == []
+        )
+
+
+@pytest.mark.unit
+def test_a_single_conditional_definition_stays_importable() -> None:
+    """One branch-guarded head is the only binding the call site can reach."""
+    single = (
+        "import sys\n"
+        "\n"
+        "\n"
+        "if sys.platform:\n"
+        "\n"
+        "    def record_ready_queue_depth(payload):\n"
+        "        return len(payload.entries)\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        single,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(6, 7)]
+
+
+@pytest.mark.unit
+def test_a_module_indent_last_head_still_shadows_a_conditional_one() -> None:
+    """An unconditional head after a guarded one always rebinds the name."""
+    rebound = (
+        "import sys\n"
+        "\n"
+        "\n"
+        "if sys.platform:\n"
+        "\n"
+        "    def record_ready_queue_depth(payload):\n"
+        "        return payload.guarded\n"
+        "\n"
+        "\n"
+        "def record_ready_queue_depth(payload):\n"
+        "    return len(payload.entries)\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        rebound,
+        frozenset(),
+        path=_CALLEE_MODULE,
+        bare_names=frozenset({"record_ready_queue_depth"}),
+    ) == [(10, 11)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_one_branch_of_a_duplicate_definition_is_not_evidence() -> None:
+    """End to end: the guarded pair withholds evidence instead of resolving."""
+    probe = _cross_package_probe(
+        callee_text=_CONDITIONAL_DUPLICATE_CALLEE_TEXT, diff=_LAST_BRANCH_DIFF
+    )
+
+    assert not await _probe(probe)
