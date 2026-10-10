@@ -908,3 +908,18 @@ def test_plain_import_continuations_are_joined_before_the_pieces_are_read() -> N
         "metrics": frozenset({"pkg/real"}),
         "third": frozenset({"pkg/third"}),
     }
+
+
+@pytest.mark.unit
+def test_a_continuation_split_around_as_still_binds_the_alias() -> None:
+    """The marker can land either side of ``as``, and twice over, in one statement.
+
+    The join reduces the whole statement before the pieces are split, so where
+    the marker falls inside ``pkg.real as metrics`` cannot change what
+    ``metrics`` binds — otherwise a split before the alias leaves the receiver
+    unbound on the name-only rule (PRRT_kwDOSJAM6s6rA-rt).
+    """
+    assert cross_file._plain_import_module_paths(
+        "import pkg.real as \\\n    metrics\nimport pkg.second \\\n    as \\\n    counters\n",
+        path=_CALLER,
+    ) == {"metrics": frozenset({"pkg/real"}), "counters": frozenset({"pkg/second"})}
