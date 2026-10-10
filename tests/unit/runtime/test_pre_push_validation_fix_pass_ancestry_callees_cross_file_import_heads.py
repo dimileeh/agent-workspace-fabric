@@ -89,3 +89,49 @@ async def test_callee_imported_without_post_keyword_whitespace_fails_closed() ->
     )
 
     assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=5)
+
+
+@pytest.mark.unit
+def test_from_import_heads_bind_with_whitespace_around_dots() -> None:
+    """``from pkg . mod import record`` is one module, however its dots are spaced.
+
+    Python allows whitespace around a dotted name's separators and between a
+    relative head's leading dots. Held to adjacency, such a head matches
+    nothing, the name binds to no module and keeps the name-only rule, so a
+    correction to an unrelated same-named definition in another package
+    resolves the thread (PRRT_kwDOSJAM6s6rCLc7).
+    """
+    assert cross_file._bare_name_import_module_paths(
+        "from pkg . mod import record\nfrom pkg\t.\tother import alpha as beta\n",
+        path="src/pkg/caller.py",
+    ) == {"record": frozenset({"pkg/mod"}), "beta": frozenset({"pkg/other"})}
+    assert cross_file._bare_name_import_module_paths(
+        "from . mod import delta\nfrom . . up import epsilon\nfrom . import zeta\n",
+        path="src/pkg/sub/caller.py",
+    ) == {
+        "delta": frozenset({"src/pkg/sub/mod"}),
+        "epsilon": frozenset({"src/pkg/up"}),
+        "zeta": frozenset({"src/pkg/sub"}),
+    }
+    # Spacing the dots still does not make a missing keyword boundary a head.
+    assert (
+        cross_file._bare_name_import_module_paths(
+            "from pkg . mod importrecord\n", path="src/pkg/caller.py"
+        )
+        == {}
+    )
+
+
+@pytest.mark.unit
+async def test_callee_imported_with_whitespace_around_dots_fails_closed() -> None:
+    """The spaced head binds its own module, so another package is not evidence."""
+    caller = (
+        "from pkg_b . observability . execution_platform_metrics import"
+        " record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=5)

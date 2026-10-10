@@ -47,16 +47,21 @@ _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 # so both admit that boundary: held to whitespace, the real head ``from pkg
 # import(record)`` matches nothing, ``record`` binds to no module and keeps the
 # name-only rule that accepts an unrelated same-named definition in another
-# package (PRRT_kwDOSJAM6s6rBbdr).
+# package (PRRT_kwDOSJAM6s6rBbdr). Both also admit the whitespace Python allows
+# around a dotted name's separators and between a relative head's leading dots,
+# which ``_dotted_name_without_whitespace`` closes back up: ``from pkg . mod
+# import record`` is a real head too, and held to adjacency it matches nothing
+# and keeps that same name-only rule (PRRT_kwDOSJAM6s6rCLc7).
 _ABSOLUTE_FROM_IMPORT_RE = re.compile(
-    r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import(?:[ \t]+|(?=\())(.+)$"
+    r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:[ \t]*\.[ \t]*\w+)*)[ \t]+import(?:[ \t]+|(?=\())(.+)$"
 )
 
 # ``from .mod import x`` / ``from ..pkg.mod import x`` / ``from . import x`` —
 # the leading dots and the optional module tail, resolved against the call
 # site's own directory by ``_relative_import_module_path``.
 _RELATIVE_FROM_IMPORT_RE = re.compile(
-    r"^[ \t]*from[ \t]+(\.+)(\w+(?:\.\w+)*)?[ \t]+import(?:[ \t]+|(?=\())(.+)$"
+    r"^[ \t]*from[ \t]+((?:\.[ \t]*)+)(\w+(?:[ \t]*\.[ \t]*\w+)*)?[ \t]+import"
+    r"(?:[ \t]+|(?=\())(.+)$"
 )
 
 # ``import pkg.mod`` / ``import pkg.mod as alias`` — the statement binds a
@@ -98,6 +103,19 @@ _AMBIGUOUS_IMPORT_TARGET: frozenset[_ModuleTarget] = frozenset({("", False, None
 # unresolvable import bound (PRRT_kwDOSJAM6s6q8-M1). It is not a path any
 # candidate can match, so it only ever makes a name fail closed.
 _UNRESOLVED_IMPORT_MODULE = "?"
+
+
+def _dotted_name_without_whitespace(name: str) -> str:
+    """``name`` with the whitespace Python allows around its dots removed.
+
+    ``from pkg . mod import record`` and ``from . . up import record`` are valid
+    heads, so the readers below match that spacing and normalize it away before
+    resolving a path: the spaced and the adjacent spelling name one module, and
+    a head left unmatched would bind nothing and keep the name-only rule that
+    accepts an unrelated same-named definition in another package
+    (PRRT_kwDOSJAM6s6rCLc7).
+    """
+    return name.replace(" ", "").replace("\t", "")
 
 
 def _import_binding_identity(module_path: str | None, imported: str) -> str:
@@ -169,7 +187,10 @@ def _iter_from_import_bindings(
     continued one, whose physical lines are joined into the logical statement
     before the heads are matched (PRRT_kwDOSJAM6s6rAf0X); a statement that
     follows the wrapped list on its closing line is split back off the joined
-    targets and matched as a head of its own (PRRT_kwDOSJAM6s6rBTTM).
+    targets and matched as a head of its own (PRRT_kwDOSJAM6s6rBTTM). The
+    whitespace Python allows around a dotted name's dots is read as part of the
+    head and normalized away, so ``from pkg . mod import record`` binds the same
+    module the adjacent spelling does (PRRT_kwDOSJAM6s6rCLc7).
     ``module_path`` is the
     target module as a ``/``-joined path prefix, resolved against ``path``'s own
     directory for the relative form. Star imports and plain ``import M`` carry
@@ -211,11 +232,14 @@ def _iter_from_import_bindings(
             absolute = _ABSOLUTE_FROM_IMPORT_RE.match(statement)
             relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(statement)
             if absolute is not None:
-                module_path = absolute.group(1).replace(".", "/")
+                module_path = _dotted_name_without_whitespace(absolute.group(1)).replace(".", "/")
                 targets = absolute.group(2)
             elif relative is not None:
+                tail = relative.group(2)
                 module_path = _relative_import_module_path(
-                    path, relative.group(1), relative.group(2)
+                    path,
+                    _dotted_name_without_whitespace(relative.group(1)),
+                    None if tail is None else _dotted_name_without_whitespace(tail),
                 )
                 targets = relative.group(3)
             else:
