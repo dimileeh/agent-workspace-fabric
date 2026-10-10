@@ -40,7 +40,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _iter_definition_spans,
     _names_bound_in_scope,
     _path_allows_js_private_fields,
-    _plain_assignment_rebound_scope_names,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
+    _rebound_scope_names,
 )
 
 # Receivers attempt 0 resolves in the reviewed file or its own class. Linking
@@ -1040,9 +1042,11 @@ def _importable_definition_spans_for_names(
     distinct classes stay distinct — see ``_effective_scope_head_starts``.
 
     That order only covers the heads this scan recognizes, so a scope that
-    rebinds the name with a plain ``validate = replacement`` — invisible to
-    definition discovery, and the binding an import then reaches — withholds
-    every span of that name as well (PRRT_kwDOSJAM6s6q_ywa).
+    rebinds the name with a statement carrying no head of its own — a plain
+    ``validate = replacement`` (PRRT_kwDOSJAM6s6q_ywa) or an ``import`` of that
+    same name (PRRT_kwDOSJAM6s6rAAWY), both invisible to definition discovery
+    and the binding an import of this module then reaches — withholds every
+    span of that name as well.
     """
     if not (names or bare_names) or not file_text:
         return []
@@ -1071,13 +1075,7 @@ def _importable_definition_spans_for_names(
         scope = _definition_binding_scope(file_text, all_spans, start=start, indent=indent)
         collected.append((name, start, indent, scope, span))
     effective = _effective_scope_head_starts(collected)
-    rebound = _plain_assignment_rebound_scope_names(
-        file_text,
-        all_spans,
-        path=path,
-        names=frozenset(name for name, *_rest in collected),
-        definition_head_starts=frozenset(start for _name, start, *_rest in collected),
-    )
+    rebound = _rebound_scope_names(file_text, all_spans, path=path, collected=collected)
     return [
         span
         for name, start, _indent, (scope_start, _body_indent), span in collected

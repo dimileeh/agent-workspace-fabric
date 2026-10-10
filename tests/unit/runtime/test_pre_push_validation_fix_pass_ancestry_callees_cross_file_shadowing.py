@@ -991,3 +991,158 @@ def test_the_innermost_class_body_is_the_one_read_at_its_own_anchor() -> None:
     assert cross_file._locally_rebound_names_at_line(text, 7, path=_CALLER) == frozenset(
         {"self", "pool", "Inner", "validate", "result"}
     )
+
+
+# The candidate module defines the imported name and then imports the same name
+# from somewhere else, so a caller importing it reaches the fallback object and
+# the ``def`` above is dead code.
+_IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT = (
+    "def record_ready_queue_depth(payload):\n"
+    "    return None\n"
+    "\n"
+    "\n"
+    "from pkg_b.fallback import record_ready_queue_depth\n"
+)
+
+
+@pytest.mark.unit
+def test_a_definition_a_later_import_rebinds_is_not_importable() -> None:
+    """``def f(...)`` plus ``from fallback import f`` leaves the ``def`` dead.
+
+    The import binds the name to the fallback object, so a correction confined
+    to the earlier head changes nothing the importing call site reaches. Import
+    statements carry no definition head, so they are invisible to the last-head
+    fold and the name has to fail closed here (PRRT_kwDOSJAM6s6rAAWY). An
+    aliased import, a plain ``import`` of the name and a parenthesized import
+    list all bind it the same way; an import of some other name, and an import
+    inside a function body, shadow nothing.
+    """
+    for names, bare_names in (
+        (frozenset({"record_ready_queue_depth"}), frozenset()),
+        (frozenset(), frozenset({"record_ready_queue_depth"})),
+    ):
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT,
+                names,
+                path=_CALLEE_MODULE,
+                bare_names=bare_names,
+            )
+            == []
+        )
+
+    for rebinding_import in (
+        "from pkg_b.fallback import build_recorder as record_ready_queue_depth",
+        "import record_ready_queue_depth",
+        "from pkg_b.fallback import (\n    record_ready_queue_depth,\n)",
+    ):
+        text = _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT.replace(
+            "from pkg_b.fallback import record_ready_queue_depth", rebinding_import
+        )
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                text,
+                frozenset(),
+                path=_CALLEE_MODULE,
+                bare_names=frozenset({"record_ready_queue_depth"}),
+            )
+            == []
+        )
+
+    for inert_import in (
+        "from pkg_b.fallback import build_recorder",
+        "def refresh():\n    from pkg_b.fallback import record_ready_queue_depth\n",
+    ):
+        text = _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT.replace(
+            "from pkg_b.fallback import record_ready_queue_depth", inert_import
+        )
+        assert cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset(),
+            path=_CALLEE_MODULE,
+            bare_names=frozenset({"record_ready_queue_depth"}),
+        ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_star_import_withholds_every_definition_it_could_rebind() -> None:
+    """``from pkg import *`` binds names this reader cannot enumerate.
+
+    It may well bind ``record_ready_queue_depth``, and nothing in the file says
+    otherwise, so the definition fails closed rather than being offered as the
+    importable callee (PRRT_kwDOSJAM6s6rAAWY).
+    """
+    text = _IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT.replace(
+        "import record_ready_queue_depth", "import *"
+    )
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset(),
+            path=_CALLEE_MODULE,
+            bare_names=frozenset({"record_ready_queue_depth"}),
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_a_class_member_an_import_rebinds_is_not_importable() -> None:
+    """A class body importing the attribute leaves the earlier method dead too.
+
+    The class attribute the receiver reaches is the imported object, not the
+    method above it (PRRT_kwDOSJAM6s6rAAWY).
+    """
+    text = (
+        "class Collector:\n"
+        "    def record_ready_queue_depth(self, payload):\n"
+        "        return len(payload.entries)\n"
+        "\n"
+        "    from pkg_b.fallback import record_ready_queue_depth\n"
+    )
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            text,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+            enclosed_by={"record_ready_queue_depth": frozenset({"Collector"})},
+        )
+        == []
+    )
+
+
+@pytest.mark.unit
+def test_a_non_python_candidate_keeps_its_definition_spans() -> None:
+    """Text this reader cannot parse as Python leaves the lexical spans alone.
+
+    A JS/TS module cannot both declare and import the same name — that is a
+    redeclaration error — so the parse failure must not fail its definition
+    spans closed (PRRT_kwDOSJAM6s6rAAWY).
+    """
+    text = (
+        'import { recordReadyQueueDepth } from "./fallback";\n'
+        "\n"
+        "export function recordReadyQueueDepth(payload) {\n"
+        "  return null;\n"
+        "}\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        text,
+        frozenset(),
+        path="src/pkg_b/observability/metrics.ts",
+        bare_names=frozenset({"recordReadyQueueDepth"}),
+    ) == [(3, 5)]
+
+
+@pytest.mark.unit
+async def test_a_change_to_a_definition_a_later_import_rebinds_is_not_evidence() -> None:
+    """End to end: the import-shadowed ``def`` withholds evidence instead of resolving."""
+    probe = _cross_package_probe(
+        callee_text=_IMPORT_SHADOWED_DEFINITION_CALLEE_TEXT,
+        diff=_REASSIGNED_DEAD_DEFINITION_DIFF,
+    )
+
+    assert not await _probe(probe)
