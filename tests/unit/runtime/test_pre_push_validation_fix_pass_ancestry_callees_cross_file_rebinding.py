@@ -118,3 +118,63 @@ def test_a_function_local_augmented_assignment_shadows_no_module_definition() ->
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_an_augmented_rebinding_is_read_off_a_header_line_too() -> None:
+    """``if enabled: record += extra`` rebinds the name past its line's left edge.
+
+    The two placements no anchored reader sees — a suite written on its
+    header's own line and a semicolon-separated statement — are read for an
+    augmented assignment the same way they are for a plain one, because the
+    ``ast`` walk sees the statement wherever Python spells it
+    (PRRT_kwDOSJAM6s6rCGKj).
+    """
+    for rebind in (
+        "if enabled: record_ready_queue_depth += _extra_handler\n",
+        "flag = True; record_ready_queue_depth += _extra_handler\n",
+    ):
+        text = "def record_ready_queue_depth(payload):\n    return None\n\n\n" + rebind
+        assert (
+            cross_file._importable_definition_spans_for_names(
+                text,
+                frozenset({"record_ready_queue_depth"}),
+                path=_CALLEE_MODULE,
+            )
+            == []
+        )
+
+
+@pytest.mark.unit
+def test_a_parameterized_type_alias_rebinds_only_its_own_scope() -> None:
+    """``type record[T] = list[T]`` rebinds; a class body's alias does not.
+
+    A PEP 695 statement carrying type parameters binds its name exactly as the
+    bare form does, so the ``def record`` above it is dead
+    (PRRT_kwDOSJAM6s6rCGKj). The same scope attribution keeps a class body's
+    alias — which binds in the class namespace, not the module's — from
+    withholding a module-level head importers really reach.
+    """
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            "def record_ready_queue_depth(payload):\n"
+            "    return None\n"
+            "\n"
+            "\n"
+            "type record_ready_queue_depth[T] = list[T]\n",
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "class Holder:\n"
+        "    type record_ready_queue_depth = int\n",
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
