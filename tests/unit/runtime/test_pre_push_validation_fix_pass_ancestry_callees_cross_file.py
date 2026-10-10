@@ -690,6 +690,59 @@ def test_import_comments_are_stripped_per_line_before_the_names_are_read() -> No
 
 
 @pytest.mark.unit
+async def test_a_backslash_continued_import_still_binds_its_targets() -> None:
+    """``from M import \\`` + ``name`` is one statement, so the name binds to ``M``.
+
+    Left unjoined the head binds the backslash instead, ``record_ready_queue_depth``
+    keeps the name-only rule, and editing an unrelated same-named def in ``pkg_c``
+    would resolve the thread (PRRT_kwDOSJAM6s6rAf0X).
+    """
+    caller = (
+        "from pkg_b.observability.execution_platform_metrics import \\\n"
+        "    record_ready_queue_depth\n"
+        "\n"
+        "\n"
+        "def refresh(payload):\n"
+        "    record_ready_queue_depth(payload)\n"
+    )
+
+    assert not await _probe(_unrelated_same_name_probe(caller_text=caller), item_line=6)
+
+
+@pytest.mark.unit
+def test_backslash_continuations_are_joined_before_the_names_are_read() -> None:
+    """The marker is consumed on the head, before ``import``, and inside a block."""
+    assert cross_file._bare_name_import_module_paths(
+        "from pkg.mod import \\\n"
+        "    alpha, beta as gamma\n"
+        "from pkg.other \\\n"
+        "    import delta\n"
+        "from pkg.third import (\n"
+        "    epsilon, \\\n"
+        "    zeta,\n"
+        ")\n",
+        path="src/pkg/caller.py",
+    ) == {
+        "alpha": frozenset({"pkg/mod"}),
+        "gamma": frozenset({"pkg/mod"}),
+        "delta": frozenset({"pkg/other"}),
+        "epsilon": frozenset({"pkg/third"}),
+        "zeta": frozenset({"pkg/third"}),
+    }
+
+
+@pytest.mark.unit
+def test_a_continuation_with_no_following_line_binds_nothing() -> None:
+    """An unterminated continuation has no target list, so it fails closed."""
+    assert (
+        cross_file._bare_name_import_module_paths(
+            "from pkg.mod import \\\n", path="src/pkg/caller.py"
+        )
+        == {}
+    )
+
+
+@pytest.mark.unit
 def test_a_module_path_deeper_than_the_candidate_cannot_match() -> None:
     """An import of a deep submodule is not satisfied by a shallower file."""
     assert not cross_file._candidate_is_under_module_path(

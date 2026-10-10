@@ -41,6 +41,11 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees
     _names_bound_in_scope,
     _path_allows_js_private_fields,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_lines import (
+    _import_head_bracket_depths,
+    _import_line_without_comment,
+    _import_line_without_continuation,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _rebound_scope_names,
 )
@@ -157,21 +162,6 @@ def _module_path_segments(path: str) -> list[str]:
     return [segment for segment in normalized.split("/") if segment]
 
 
-def _import_line_without_comment(line: str) -> str:
-    """``line`` up to its first ``#``.
-
-    A comment ends at its own physical line, but a parenthesized target list is
-    joined line by line, so it has to be dropped *before* the join — otherwise
-    one ``# note`` swallows every name listed below it, those names never bind,
-    and the gate silently falls back to the name-only rule that accepts an
-    unrelated same-named definition (PRRT_kwDOSJAM6s6q8BmK). Both import readers
-    split on commas, so both strip the comment first. An import statement cannot
-    hold a string literal, so scanning for a bare ``#`` is exact.
-    """
-    head, _hash, _comment = line.partition("#")
-    return head
-
-
 def _imported_binding_names(targets: str) -> list[tuple[str, str]]:
     """``(bound, imported)`` pairs an import target list binds.
 
@@ -207,37 +197,15 @@ def _relative_import_module_path(path: str, dots: str, module: str | None) -> st
     return "/".join([*base, *tail]) or None
 
 
-def _import_head_bracket_depths(lines: list[str]) -> list[int]:
-    """Open-bracket depth each masked line begins at.
-
-    An ``import`` head starts a logical line, so it can never sit inside an open
-    bracket. The masked scan deliberately keeps f-string / template ``{...}``
-    bodies scannable so interpolated calls stay visible to callee discovery,
-    which leaves an import head quoted inside a *multi-line* interpolation
-    readable as code. It is still inside the interpolation's brace, so holding
-    heads to depth 0 drops that last decoy binding (PRRT_kwDOSJAM6s6q8MXB); a
-    real import's parenthesized target list is unaffected because its head is
-    itself at depth 0.
-    """
-    depths: list[int] = []
-    depth = 0
-    for line in lines:
-        depths.append(depth)
-        for char in line:
-            if char in "([{":
-                depth += 1
-            elif char in ")]}":
-                depth = max(depth - 1, 0)
-    return depths
-
-
 def _iter_from_import_bindings(
     file_text: str, *, path: str
 ) -> Iterator[tuple[str | None, str, str]]:
     """``(module_path, bound, imported)`` for each ``from`` import in ``file_text``.
 
     Both ``from M import ...`` and the relative ``from .M import ...`` form are
-    read, including the parenthesized multi-line variant; ``module_path`` is the
+    read, including the parenthesized multi-line variant and the backslash-
+    continued one, whose physical lines are joined into the logical statement
+    before the heads are matched (PRRT_kwDOSJAM6s6rAf0X); ``module_path`` is the
     target module as a ``/``-joined path prefix, resolved against ``path``'s own
     directory for the relative form. Star imports and plain ``import M`` carry
     no name→path link, so the names they bind are not yielded and keep the
@@ -270,9 +238,21 @@ def _iter_from_import_bindings(
             index += 1
             continue
         line = _import_line_without_comment(lines[index])
+        index += 1
+        # Join backslash continuations first: the marker can split the statement
+        # either side of ``import``, so the head is only matchable once whole.
+        while line.rstrip().endswith("\\") and index < len(lines):
+            line = (
+                _import_line_without_continuation(line)
+                + " "
+                + _import_line_without_comment(lines[index]).strip()
+            )
+            index += 1
+        # A continuation with no line after it has no target list; dropping the
+        # dangling marker leaves the head unmatchable, so it binds nothing.
+        line = _import_line_without_continuation(line)
         absolute = _ABSOLUTE_FROM_IMPORT_RE.match(line)
         relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(line)
-        index += 1
         if absolute is not None:
             module_path = absolute.group(1).replace(".", "/")
             targets = absolute.group(2)
@@ -284,7 +264,8 @@ def _iter_from_import_bindings(
         # Consume the wrapped target list even when the head did not resolve,
         # so its names are not re-read as import heads on the next pass.
         while targets.count("(") > targets.count(")") and index < len(lines):
-            targets += " " + _import_line_without_comment(lines[index]).strip()
+            joined = _import_line_without_comment(lines[index])
+            targets += " " + _import_line_without_continuation(joined).strip()
             index += 1
         for bound, imported in _imported_binding_names(targets):
             yield module_path, bound, imported
