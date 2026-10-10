@@ -221,6 +221,42 @@ def _scope_own_import_names(scope: ast.AST) -> frozenset[str]:
     return frozenset(imported - declared)
 
 
+def _import_lines_hidden_from(file_text: str, line: int | None) -> frozenset[int]:
+    """1-based lines whose own bindings cannot reach ``line``.
+
+    A function-local ``import`` binds a *local*: ``def a(): from pkg.real
+    import record`` is invisible to every line outside ``a``'s body, so a
+    sibling ``def b(): from pkg.decoy import record`` is not a second binding
+    of the name the call inside ``a`` reaches. Reading the whole file's import
+    heads as one identity set made such a name ambiguous at *both* call sites
+    and parked a legitimate cross-file correction as ``needs_human``
+    (PRRT_kwDOSJAM6s6rA-ru), so the cross-file import readers skip heads
+    sitting in a function scope the anchored line is not in.
+
+    Only function scopes are withheld, and only when ``line`` names one: a
+    module-level import is in scope everywhere, a class body's import binds an
+    attribute the readers already weigh file-wide, and ``line`` is None for the
+    re-read whose own text the anchored line does not index (see
+    ``_caller_binding_after_correction``) — all three keep the file-wide
+    reading, which is the conservative one. Text this reader cannot parse
+    hides nothing, for the same reason.
+    """
+    if line is None:
+        return frozenset()
+    try:
+        tree = ast.parse(file_text)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    hidden: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, _FUNCTION_SCOPES):
+            continue
+        end = node.end_lineno or node.lineno
+        if not node.lineno <= line <= end:
+            hidden.update(range(node.lineno, end + 1))
+    return frozenset(hidden)
+
+
 def _function_local_import_names_at_line(file_text: str, line: int) -> frozenset[str]:
     """Names a function scope enclosing ``line`` binds with its own ``import``.
 

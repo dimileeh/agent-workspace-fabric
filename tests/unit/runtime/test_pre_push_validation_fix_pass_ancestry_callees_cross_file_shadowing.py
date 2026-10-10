@@ -119,6 +119,38 @@ _LOCAL_IMPORT_TEXT = (
     "    record_ready_queue_depth(payload)\n"
 )
 
+# Two *sibling* functions lazily importing the same local name from different
+# modules. Neither import is visible in the other's body, so the call on line 5
+# reaches ``pkg_b``'s definition and the one on line 11 reaches ``pkg_c``'s.
+_SIBLING_LOCAL_IMPORT_TEXT = (
+    "def refresh(pool):\n"
+    f"    {_IMPORT_LINE}"
+    "\n"
+    "    payload = pool.snapshot()\n"
+    "    record_ready_queue_depth(payload)\n"
+    "\n"
+    "\n"
+    "def legacy(pool):\n"
+    "    from pkg_c.legacy.metrics import record_ready_queue_depth\n"
+    "\n"
+    "    record_ready_queue_depth(pool)\n"
+)
+
+# The receiver form of the same shape: two sibling functions each importing a
+# different module under the same local receiver name.
+_SIBLING_LOCAL_PLAIN_IMPORT_TEXT = (
+    "def refresh(payload):\n"
+    "    import pkg_b.observability.execution_platform_metrics as metrics\n"
+    "\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+    "\n"
+    "\n"
+    "def legacy(payload):\n"
+    "    import pkg_c.legacy.metrics as metrics\n"
+    "\n"
+    "    metrics.record_ready_queue_depth(payload)\n"
+)
+
 # A local import of the *same name* from another module rebinds it, so the
 # readers cannot tell which statement runs last and the name fails closed.
 _LOCAL_IMPORT_REBIND_TEXT = (
@@ -159,6 +191,65 @@ async def test_a_function_local_import_rebinding_the_module_import_fails_closed(
     probe = _cross_package_probe(caller_text=_LOCAL_IMPORT_REBIND_TEXT)
 
     assert not await _probe(probe, item_line=8)
+
+
+@pytest.mark.unit
+async def test_a_sibling_functions_lazy_import_leaves_the_name_unambiguous() -> None:
+    """A lazy import in another function is invisible at the anchored line.
+
+    ``def a(): from pkg.real import record`` and ``def b(): from pkg.decoy
+    import record`` bind two *locals*, not one name twice, so reading the file's
+    import heads as a single identity set marked ``record`` ambiguous at both
+    call sites and parked a legitimate cross-file correction as ``needs_human``
+    (PRRT_kwDOSJAM6s6rA-ru).
+    """
+    probe = _cross_package_probe(caller_text=_SIBLING_LOCAL_IMPORT_TEXT)
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+def test_import_targets_are_read_only_from_the_scopes_holding_the_line() -> None:
+    """Each sibling's lazy import binds the name at its own call site only."""
+    targets = cross_file._bare_name_import_module_targets(
+        _SIBLING_LOCAL_IMPORT_TEXT, path=_CALLER, line=5
+    )
+
+    assert targets == {
+        "record_ready_queue_depth": frozenset(
+            {("pkg_b/observability/execution_platform_metrics", False, None)}
+        )
+    }
+    assert cross_file._bare_name_import_module_targets(
+        _SIBLING_LOCAL_IMPORT_TEXT, path=_CALLER, line=11
+    ) == {"record_ready_queue_depth": frozenset({("pkg_c/legacy/metrics", False, None)})}
+    # With no anchored line the readers keep the file-wide — conservative —
+    # reading, which is the rebinding both imports look like together.
+    assert cross_file._bare_name_import_module_targets(
+        _SIBLING_LOCAL_IMPORT_TEXT, path=_CALLER
+    ) == {"record_ready_queue_depth": cross_file._AMBIGUOUS_IMPORT_TARGET}
+
+
+@pytest.mark.unit
+def test_plain_import_receivers_are_read_only_from_the_scopes_holding_the_line() -> None:
+    """The receiver form is scoped the same way, including its proven-module read."""
+    assert cross_file._plain_import_module_paths(
+        _SIBLING_LOCAL_PLAIN_IMPORT_TEXT, path=_CALLER, line=4
+    ) == {"metrics": frozenset({"pkg_b/observability/execution_platform_metrics"})}
+    assert cross_file._receiver_import_module_targets(
+        _SIBLING_LOCAL_PLAIN_IMPORT_TEXT, path=_CALLER, line=10
+    ) == {"metrics": frozenset({("pkg_c/legacy/metrics", False, None)})}
+    assert cross_file._module_bound_receiver_names(
+        _SIBLING_LOCAL_PLAIN_IMPORT_TEXT, path=_CALLER, line=4
+    ) == frozenset({"metrics"})
+
+
+@pytest.mark.unit
+async def test_a_sibling_functions_lazy_receiver_import_still_resolves() -> None:
+    """The receiver shape of the sibling-scoping accept, end to end."""
+    probe = _receiver_probe(caller_text=_SIBLING_LOCAL_PLAIN_IMPORT_TEXT)
+
+    assert await _probe(probe, item_line=4)
 
 
 @pytest.mark.unit
@@ -444,6 +535,15 @@ async def test_a_class_body_import_does_not_outrank_a_module_level_definition() 
     probe = _cross_package_probe(caller_text=_CLASS_BODY_IMPORT_OVER_MODULE_DEF_TEXT)
 
     assert not await _probe(probe, item_line=8)
+
+
+@pytest.mark.unit
+def test_hidden_import_lines_fail_open_to_the_file_wide_reading() -> None:
+    """Unparseable text hides nothing, which keeps the conservative reading."""
+    assert rebinding._import_lines_hidden_from("def refresh(\n", 1) == frozenset()
+    # A class body carries no function-wide local rule, so its import lines
+    # stay visible to every anchor.
+    assert rebinding._import_lines_hidden_from(f"class C:\n    {_IMPORT_LINE}", 1) == frozenset()
 
 
 @pytest.mark.unit

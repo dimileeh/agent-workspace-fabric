@@ -50,6 +50,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _effective_scope_head_starts,
     _function_local_import_names_at_line,
+    _import_lines_hidden_from,
     _rebound_scope_names,
     _without_shadowed_enclosing_definitions,
 )
@@ -202,7 +203,7 @@ def _relative_import_module_path(path: str, dots: str, module: str | None) -> st
 
 
 def _iter_from_import_bindings(
-    file_text: str, *, path: str
+    file_text: str, *, path: str, line: int | None = None
 ) -> Iterator[tuple[str | None, str, str]]:
     """``(module_path, bound, imported)`` for each ``from`` import in ``file_text``.
 
@@ -229,11 +230,13 @@ def _iter_from_import_bindings(
     path (a relative import climbing past the repo root). The names it binds are
     still yielded, because the statement rebinds them whether or not this reader
     can follow it: callers that need a path skip those bindings, while the ones
-    that judge *rebinding* count them (PRRT_kwDOSJAM6s6q8-M1).
+    that judge *rebinding* count them (PRRT_kwDOSJAM6s6q8-M1). ``line`` scopes
+    the scan to the heads visible there (see ``_import_lines_hidden_from``).
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return
     module_path: str | None
+    hidden = _import_lines_hidden_from(file_text, line)
     lines = _definition_head_scan_lines(file_text, path=path)
     depths = _import_head_bracket_depths(lines)
     index = 0
@@ -241,9 +244,10 @@ def _iter_from_import_bindings(
         if depths[index]:
             index += 1
             continue
-        line, index = _joined_import_logical_line(lines, index)
-        absolute = _ABSOLUTE_FROM_IMPORT_RE.match(line)
-        relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(line)
+        head_line = index + 1
+        statement, index = _joined_import_logical_line(lines, index)
+        absolute = _ABSOLUTE_FROM_IMPORT_RE.match(statement)
+        relative = None if absolute else _RELATIVE_FROM_IMPORT_RE.match(statement)
         if absolute is not None:
             module_path = absolute.group(1).replace(".", "/")
             targets = absolute.group(2)
@@ -258,25 +262,31 @@ def _iter_from_import_bindings(
             joined = _import_line_without_comment(lines[index])
             targets += " " + _import_line_without_continuation(joined).strip()
             index += 1
+        if head_line in hidden:
+            continue
         for bound, imported in _imported_binding_names(targets):
             yield module_path, bound, imported
 
 
-def _bare_name_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+def _bare_name_import_module_paths(
+    file_text: str, *, path: str, line: int | None = None
+) -> dict[str, frozenset[str]]:
     """Module paths each name in ``file_text`` is bound to by a ``from`` import.
 
     A *bare* callee is reached through the module it was imported from, so that
     module is the whole binding; the imported name adds nothing to it.
     """
     bindings: dict[str, set[str]] = {}
-    for module_path, bound, _imported in _iter_from_import_bindings(file_text, path=path):
+    for module_path, bound, _name in _iter_from_import_bindings(file_text, path=path, line=line):
         if module_path is None:
             continue
         bindings.setdefault(bound, set()).add(module_path)
     return {name: frozenset(paths) for name, paths in bindings.items()}
 
 
-def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozenset[str]]:
+def _plain_import_module_paths(
+    file_text: str, *, path: str, line: int | None = None
+) -> dict[str, frozenset[str]]:
     """Module paths each name a plain ``import`` statement binds as a receiver.
 
     ``import pkg.mod`` is called through as ``pkg.mod.record(...)``, so the
@@ -297,11 +307,13 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
     against every changed file (PRRT_kwDOSJAM6s6q8BmK). Lines come
     from the comment/string-masked scan, so a quoted ``import`` inside a
     docstring binds no receiver either (PRRT_kwDOSJAM6s6q8MXB), and a head read
-    back from inside a retained interpolation is skipped with it.
+    back from inside a retained interpolation is skipped with it. ``line``
+    scopes the scan to the heads visible there (``_import_lines_hidden_from``).
     """
     if f".{path.rsplit('.', 1)[-1].lower()}" not in _PYTHON_CALL_SITE_SUFFIXES:
         return {}
     bindings: dict[str, set[str]] = {}
+    hidden = _import_lines_hidden_from(file_text, line)
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     depths = _import_head_bracket_depths(scan_lines)
     index = 0
@@ -309,9 +321,10 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
         if depths[index]:
             index += 1
             continue
-        line, index = _joined_import_logical_line(scan_lines, index)
-        head = _PLAIN_IMPORT_RE.match(line)
-        if head is None:
+        head_line = index + 1
+        statement, index = _joined_import_logical_line(scan_lines, index)
+        head = _PLAIN_IMPORT_RE.match(statement)
+        if head is None or head_line in hidden:
             continue
         for piece in head.group(1).split(","):
             parts = piece.split()
@@ -327,7 +340,7 @@ def _plain_import_module_paths(file_text: str, *, path: str) -> dict[str, frozen
 
 
 def _bare_name_import_module_targets(
-    file_text: str, *, path: str
+    file_text: str, *, path: str, line: int | None = None
 ) -> dict[str, frozenset[_ModuleTarget]]:
     """Bare-callee ``from`` import bindings as descendant-tolerant targets.
 
@@ -344,9 +357,11 @@ def _bare_name_import_module_targets(
     the call reaching ``pkg``'s ``helper``, so a correction to a *same-named*
     ``record`` under ``pkg`` is no more evidence about the effective binding
     than a shadowed definition in another package is (PRRT_kwDOSJAM6s6q8-Mw).
+    Both readings see only the imports ``line`` can, so two sibling functions
+    lazily importing one local name are two bindings (PRRT_kwDOSJAM6s6rA-ru).
     """
     identities: dict[str, set[str]] = {}
-    for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+    for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path, line=line):
         identities.setdefault(bound, set()).add(_import_binding_identity(module_path, imported))
     return {
         name: (
@@ -354,11 +369,13 @@ def _bare_name_import_module_targets(
             if len(identities[name]) > 1
             else frozenset((module_path, False, None) for module_path in paths)
         )
-        for name, paths in _bare_name_import_module_paths(file_text, path=path).items()
+        for name, paths in _bare_name_import_module_paths(file_text, path=path, line=line).items()
     }
 
 
-def _bare_name_imported_definition_names(file_text: str, *, path: str) -> dict[str, str]:
+def _bare_name_imported_definition_names(
+    file_text: str, *, path: str, line: int | None = None
+) -> dict[str, str]:
     """Imported symbol each bare-callee binding in ``file_text`` actually names.
 
     ``from pkg.mod import actual as alias`` makes ``alias()`` a call to
@@ -374,7 +391,7 @@ def _bare_name_imported_definition_names(file_text: str, *, path: str) -> dict[s
     keeps its local name here rather than this reader picking one of them.
     """
     imported_names: dict[str, set[str]] = {}
-    for _module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+    for _path, bound, imported in _iter_from_import_bindings(file_text, path=path, line=line):
         imported_names.setdefault(bound, set()).add(imported)
     return {
         bound: next(iter(imported))
@@ -384,7 +401,7 @@ def _bare_name_imported_definition_names(file_text: str, *, path: str) -> dict[s
 
 
 def _receiver_import_module_targets(
-    file_text: str, *, path: str
+    file_text: str, *, path: str, line: int | None = None
 ) -> dict[str, frozenset[_ModuleTarget]]:
     """Module targets each *receiver* name at a call site is bound to.
 
@@ -411,18 +428,19 @@ def _receiver_import_module_targets(
     the one module they came from. The two *forms* are counted apart even when
     their module paths coincide, because ``import pkg.mod as m`` and ``from pkg
     import mod as m`` bind different objects (see
-    ``_plain_import_binding_identity``).
+    ``_plain_import_binding_identity``). Both forms are read only where
+    ``line`` can see them (PRRT_kwDOSJAM6s6rA-ru).
     """
     targets: dict[str, set[_ModuleTarget]] = {}
     bound_modules: dict[str, set[str]] = {}
-    for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path):
+    for module_path, bound, imported in _iter_from_import_bindings(file_text, path=path, line=line):
         bound_modules.setdefault(bound, set()).add(_import_binding_identity(module_path, imported))
         if module_path is None:
             continue
         targets.setdefault(bound, set()).update(
             ((f"{module_path}/{imported}", False, None), (module_path, True, imported))
         )
-    for name, paths in _plain_import_module_paths(file_text, path=path).items():
+    for name, paths in _plain_import_module_paths(file_text, path=path, line=line).items():
         bound_modules.setdefault(name, set()).update(
             _plain_import_binding_identity(module_path) for module_path in paths
         )
@@ -433,7 +451,9 @@ def _receiver_import_module_targets(
     }
 
 
-def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]:
+def _module_bound_receiver_names(
+    file_text: str, *, path: str, line: int | None = None
+) -> frozenset[str]:
     """Receiver names a plain ``import`` proves to be modules.
 
     ``import pkg.metrics as metrics`` binds a module object, so
@@ -454,12 +474,10 @@ def _module_bound_receiver_names(file_text: str, *, path: str) -> frozenset[str]
     the name all the same and so disproves the plain import's module identity
     just as a resolvable one does.
     """
-    from_bound = {
-        bound for _module_path, bound, _imported in _iter_from_import_bindings(file_text, path=path)
-    }
-    return frozenset(
-        name for name in _plain_import_module_paths(file_text, path=path) if name not in from_bound
-    )
+    bindings = _iter_from_import_bindings(file_text, path=path, line=line)
+    from_bound = {bound for _module_path, bound, _imported in bindings}
+    plain = _plain_import_module_paths(file_text, path=path, line=line)
+    return frozenset(name for name in plain if name not in from_bound)
 
 
 def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> frozenset[str]:
@@ -796,6 +814,7 @@ def _caller_binding_resolver(
     bare_refs: frozenset[tuple[str, str]],
     chained_receivers: dict[str, tuple[str, ...] | None] | None = None,
     require_binding: bool = False,
+    line: int | None = None,
 ) -> Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]]:
     """Bind ``refs`` to one caller text's imports, as a path-keyed callable.
 
@@ -813,13 +832,15 @@ def _caller_binding_resolver(
     key, for the re-read that has to *prove* a rename target reachable rather
     than merely not refute it; it composes with the chain extension instead of
     replacing it, so that re-read cannot re-widen a chained callee back to the
-    chain root's subtree (PRRT_kwDOSJAM6s6q_M0j).
+    chain root's subtree (PRRT_kwDOSJAM6s6q_M0j). ``line`` scopes the import
+    readers to the bindings visible there, and is None for a ``caller_text``
+    the anchored line does not index (PRRT_kwDOSJAM6s6rA-ru).
     """
     bare_bindings = _import_targets_without_locally_rebound(
-        _bare_name_import_module_targets(caller_text, path=call_site), rebound
+        _bare_name_import_module_targets(caller_text, path=call_site, line=line), rebound
     )
     receiver_bindings = _import_targets_without_locally_rebound(
-        _receiver_import_module_targets(caller_text, path=call_site), rebound
+        _receiver_import_module_targets(caller_text, path=call_site, line=line), rebound
     )
     if chained_receivers:
         receiver_bindings = _receiver_bindings_through_chains(receiver_bindings, chained_receivers)
@@ -830,7 +851,7 @@ def _caller_binding_resolver(
         receiver_bindings = _bindings_fail_closed_when_unbound(
             receiver_bindings, frozenset(key for key, _ in refs)
         )
-    module_receivers = _module_bound_receiver_names(caller_text, path=call_site)
+    module_receivers = _module_bound_receiver_names(caller_text, path=call_site, line=line)
     return partial(
         _callee_names_bound_to_path,
         refs=refs,
@@ -1219,7 +1240,7 @@ def _cross_file_callee_names(
 
     refs = _callee_refs_from_file_line(file_text, line, path=path)
     chains = _receiver_chain_segments_from_file_line(file_text, line, path=path)
-    plain_imports = _plain_import_module_paths(file_text, path=path)
+    plain_imports = _plain_import_module_paths(file_text, path=path, line=line)
     qualified: set[tuple[str, str]] = set()
     chained_receivers: dict[str, tuple[str, ...] | None] = {}
     for qualifier, name in refs:
@@ -1246,7 +1267,7 @@ def _cross_file_callee_names(
             segments = None
         chained_receivers[key] = segments
         qualified.add((key, name))
-    imported = _bare_name_imported_definition_names(file_text, path=path)
+    imported = _bare_name_imported_definition_names(file_text, path=path, line=line)
     bare = frozenset(
         (name, imported.get(name, name)) for qualifier, name in refs if qualifier is None
     )
@@ -1367,6 +1388,7 @@ async def _commit_range_changes_callee_definition(
         refs=names,
         bare_refs=bare_names,
         chained_receivers=chained_receivers,
+        line=item_line,
     )
     bound_to_after: (
         Callable[[str], tuple[frozenset[str], frozenset[str], dict[str, frozenset[str]]]] | None
