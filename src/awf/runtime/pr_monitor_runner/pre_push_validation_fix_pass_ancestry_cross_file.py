@@ -1182,7 +1182,7 @@ async def _path_diff_text_in_commit_range(
 
 
 def _cross_file_callee_names(
-    file_text: str, line: int, *, path: str
+    file_text: str, line: int, *, path: str, rebound: frozenset[str]
 ) -> tuple[
     frozenset[tuple[str, str]], frozenset[tuple[str, str]], dict[str, tuple[str, ...] | None]
 ]:
@@ -1205,7 +1205,10 @@ def _cross_file_callee_names(
     ``record`` resolve the thread while ``api.metrics.record`` stayed untouched.
     A chain that itself spells a plain-imported module
     (``pkg.obs.metrics.record()``) is that module's receiver and keeps the
-    qualifier its import already binds; any other chain is keyed on its root —
+    qualifier its import already binds — unless ``rebound`` holds the chain's
+    root, in which case the call reaches an attribute of that binding rather
+    than the module the chain spells, so it takes the root-keyed path below and
+    fails closed there (PRRT_kwDOSJAM6s6rAh8I); any other chain is keyed on its root —
     the one link an import can bind — and reported as chained, so the resolver
     holds it closed instead of falling back to the name-only rule when the root
     reaches nothing the candidate can satisfy (PRRT_kwDOSJAM6s6q-6LK). The
@@ -1232,7 +1235,11 @@ def _cross_file_callee_names(
             qualified.add((qualifier, name))
             continue
         chain = chains[qualifier]
-        if chain is not None and "/".join(chain) in plain_imports.get(qualifier, frozenset()):
+        if (
+            chain is not None
+            and chain[0] not in rebound
+            and "/".join(chain) in plain_imports.get(qualifier, frozenset())
+        ):
             # ``import pkg.obs.metrics`` binds the receiver this chain spells,
             # under its last segment — the qualifier already carries it.
             qualified.add((qualifier, name))
@@ -1328,8 +1335,15 @@ async def _commit_range_changes_callee_definition(
     )
     if not item_text:
         return False
+    # A module-scope rebinding cannot reach a name the anchored function
+    # imports itself: that import binds the name for the whole body, so the
+    # global is unreachable there (PRRT_kwDOSJAM6s6rAhm2).
+    rebound = _locally_rebound_names_at_line(item_text, item_line, path=normalized_item) | (
+        _module_scope_rebound_names(item_text, path=normalized_item)
+        - _function_local_import_names_at_line(item_text, item_line)
+    )
     names, bare_names, chained_receivers = _cross_file_callee_names(
-        item_text, item_line, path=normalized_item
+        item_text, item_line, path=normalized_item, rebound=rebound
     )
     if not (names or bare_names):
         return False
@@ -1347,13 +1361,6 @@ async def _commit_range_changes_callee_definition(
         return False
     rename_map, _name_status_z = await _rename_map_in_commit_range(
         self, worktree_path=worktree_path, left=left, right=right
-    )
-    # A module-scope rebinding cannot reach a name the anchored function
-    # imports itself: that import binds the name for the whole body, so the
-    # global is unreachable there (PRRT_kwDOSJAM6s6rAhm2).
-    rebound = _locally_rebound_names_at_line(item_text, item_line, path=normalized_item) | (
-        _module_scope_rebound_names(item_text, path=normalized_item)
-        - _function_local_import_names_at_line(item_text, item_line)
     )
     bound_to = _caller_binding_resolver(
         item_text,

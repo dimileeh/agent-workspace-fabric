@@ -627,6 +627,55 @@ async def test_a_chain_whose_root_the_anchored_scope_rebinds_fails_closed() -> N
     assert not await _probe(probe, item_line=5)
 
 
+# The chain spells the plain-imported module exactly, so the shortcut that
+# keys such a ref on its *last* segment would skip the root's rebinding.
+_SPELLED_MODULE_CHAIN_CALL = (
+    "    pkg_b.observability.execution_platform_metrics.record_ready_queue_depth(payload)\n"
+)
+
+
+@pytest.mark.unit
+async def test_a_spelled_module_chain_whose_root_a_parameter_rebinds_fails_closed() -> None:
+    """A rebound root disproves the module the chain spells.
+
+    ``import pkg_b.observability.execution_platform_metrics`` binds the chain's
+    own module under its last segment, but the call is written through
+    ``pkg_b`` — here a *parameter* — so at runtime it reaches an attribute of
+    the argument, not the imported module. Taking the spelled-module shortcut
+    would key the ref on ``execution_platform_metrics``, a name the rebinding
+    guard never sees, and accept an edit to that module's
+    ``record_ready_queue_depth`` as evidence about a call that cannot reach it
+    (PRRT_kwDOSJAM6s6rAh8I).
+    """
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "import pkg_b.observability.execution_platform_metrics\n"
+            "\n"
+            "\n"
+            "def refresh(pkg_b, payload):\n" + _SPELLED_MODULE_CHAIN_CALL
+        )
+    )
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_spelled_module_chain_whose_root_the_module_body_rebinds_fails_closed() -> None:
+    """A module-scope rebinding of the root closes the shortcut the same way."""
+    probe = _chained_receiver_probe(
+        caller_text=(
+            "import pkg_b.observability.execution_platform_metrics\n"
+            "\n"
+            "pkg_b = make_context()\n"
+            "\n"
+            "\n"
+            "def refresh(payload):\n" + _SPELLED_MODULE_CHAIN_CALL
+        )
+    )
+
+    assert not await _probe(probe, item_line=7)
+
+
 # An *unaliased* dotted plain import: Python binds the package root, so
 # ``pkg_c`` — not the import's last segment — is the receiver this line writes.
 _ROOT_PACKAGE_CALLER_TEXT = (
