@@ -68,6 +68,48 @@ def _header_line_suite_heads(raw_lines: list[str], tree: ast.AST) -> dict[int, t
     return suites
 
 
+def _global_declared_scope_ranges(tree: ast.AST) -> list[tuple[int, int, frozenset[str]]]:
+    """``(start, end, names)`` for each function scope declaring names ``global``.
+
+    ``global record`` exists only so an assignment in that body reaches the
+    *module* binding, so such a statement rebinds the module name even though
+    it sits inside a function whose other assignments bind locals: left
+    attributed to the function's own scope, a ``def record`` replaced by
+    ``global record; record = replacement`` stayed importable and a correction
+    confined to that dead head could satisfy the cross-file evidence gate while
+    importers still reach the replacement (PRRT_kwDOSJAM6s6rBsj5).
+
+    Each scope reports only the declarations its *own* body makes — a nested
+    function's ``global`` governs that nested body — but the ranges nest, so a
+    binding inside a declaring scope's nested local is attributed to module
+    scope as well. That only ever withholds a span, which is the direction this
+    reader fails in.
+    """
+    ranges: list[tuple[int, int, frozenset[str]]] = []
+    for scope in ast.walk(tree):
+        if not isinstance(scope, _FUNCTION_SCOPES):
+            continue
+        declared: set[str] = set()
+        pending: list[ast.AST] = list(ast.iter_child_nodes(scope))
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (*_FUNCTION_SCOPES, ast.ClassDef)):
+                continue
+            if isinstance(node, ast.Global):
+                declared.update(node.names)
+            pending.extend(ast.iter_child_nodes(node))
+        if declared:
+            ranges.append((scope.lineno, scope.end_lineno or scope.lineno, frozenset(declared)))
+    return ranges
+
+
+def _declared_global_at(
+    global_scopes: list[tuple[int, int, frozenset[str]]], line: int, name: str
+) -> bool:
+    """True when a function scope holding ``line`` declares ``name`` ``global``."""
+    return any(start <= line <= end and name in declared for start, end, declared in global_scopes)
+
+
 def _binding_scope_start(
     file_text: str,
     all_spans: list[tuple[str, int, int, int]],
@@ -150,7 +192,9 @@ def _assignment_rebound_scope_names(
     Each binding is attributed through ``_binding_scope_start``, from the
     indent of the line it starts on, so the keys match the heads' own and a
     function-local assignment shadows nothing at module scope — including one
-    written in its header's own line (PRRT_kwDOSJAM6s6rBkXd). Text this
+    written in its header's own line (PRRT_kwDOSJAM6s6rBkXd) — except where a
+    ``global`` declaration says otherwise, which is the one binding a function
+    body makes at module scope (see ``_global_declared_scope_ranges``). Text this
     reader cannot parse yields nothing, leaving the lexical reader's verdict
     as it stands: that is the JS/TS case, which this Python-shaped walk has no
     reading of.
@@ -163,6 +207,7 @@ def _assignment_rebound_scope_names(
         return set()
     raw_lines = file_text.splitlines()
     header_line_suites = _header_line_suite_heads(raw_lines, tree)
+    global_scopes = _global_declared_scope_ranges(tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         captured: set[str] = set()
@@ -200,7 +245,10 @@ def _assignment_rebound_scope_names(
             column=node.col_offset,
             indent=indent,
         )
-        rebound.update((scope_start, name) for name in bound)
+        rebound.update(
+            (0 if _declared_global_at(global_scopes, node.lineno, name) else scope_start, name)
+            for name in bound
+        )
     return rebound
 
 

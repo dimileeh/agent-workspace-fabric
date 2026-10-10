@@ -1243,3 +1243,53 @@ def test_a_match_capture_rebinding_is_not_importable() -> None:
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_global_declared_rebinding_is_attributed_to_module_scope() -> None:
+    """``global record`` makes a function-body assignment a module rebinding.
+
+    ``global`` exists only so the assignment reaches the module binding, so a
+    helper carrying one replaces the ``def`` above it for every importer once
+    it runs — attributing that assignment to the helper's own syntactic scope
+    leaves the dead head importable and lets a correction confined to it
+    resolve the thread. Without the declaration the same statement binds a
+    local and shadows nothing, and a declaration naming some *other* name
+    leaves the binding local too.
+    """
+    global_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "def _install():\n"
+        "    global record_ready_queue_depth\n"
+        "    record_ready_queue_depth = _build_recorder()\n"
+        "\n"
+        "\n"
+        "_install()\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            global_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    local_only = global_rebind.replace("    global record_ready_queue_depth\n", "")
+    assert cross_file._importable_definition_spans_for_names(
+        local_only,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+    other_name = global_rebind.replace(
+        "    global record_ready_queue_depth\n", "    global _recorder\n"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        other_name,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
