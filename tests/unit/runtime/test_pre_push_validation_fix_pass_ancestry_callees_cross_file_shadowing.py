@@ -1809,3 +1809,49 @@ def test_a_binding_in_a_one_line_definition_suite_is_not_a_module_rebinding() ->
             )
             == []
         ), module_rebind
+
+
+@pytest.mark.unit
+def test_a_one_line_suite_on_a_wrapped_header_is_not_a_module_rebinding() -> None:
+    """A one-line suite binds in its header's scope however the header is written.
+
+    The header's own physical line is not the only place a one-line suite can
+    sit: a wrapped signature puts it on the closing ``): `` line, which carries
+    the *header's* indent just the same and still starts on no line the
+    header's lexical span contains. Reading only the head's own line left that
+    local looking like a module-scope rebinding, so the live module ``def`` was
+    withheld and a correct callee-span fix parked as ``needs_human``
+    (PRRT_kwDOSJAM6s6rBkXd). A wrapped header that is no definition at all —
+    ``if _enabled(...)`` — still rebinds the module name and still fails
+    closed.
+    """
+    for one_liner in (
+        "): record_ready_queue_depth = gauge.recorder",
+        "): from pkg_b.fallback import record_ready_queue_depth",
+    ):
+        assert cross_file._importable_definition_spans_for_names(
+            "def record_ready_queue_depth(payload):\n"
+            "    return len(payload.entries)\n"
+            "\n"
+            "\n"
+            "def refresh(\n"
+            "    gauge,\n"
+            f"{one_liner}\n",
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        ) == [(1, 4)], one_liner
+
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            "def record_ready_queue_depth(payload):\n"
+            "    return len(payload.entries)\n"
+            "\n"
+            "\n"
+            "if _enabled(\n"
+            "    flag,\n"
+            "): record_ready_queue_depth = _build_recorder()\n",
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )

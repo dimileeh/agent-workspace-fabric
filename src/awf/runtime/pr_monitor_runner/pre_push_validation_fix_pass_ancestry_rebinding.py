@@ -43,32 +43,36 @@ def _assignment_target_names(target: ast.expr) -> Iterator[str]:
             yield from _assignment_target_names(element)
 
 
-def _same_line_suite_columns(tree: ast.AST) -> dict[int, int]:
-    """``head_line -> column`` for each definition whose suite is on its own header line.
+def _header_line_suite_heads(raw_lines: list[str], tree: ast.AST) -> dict[int, tuple[int, int]]:
+    """``suite_line -> (column, head_line)`` for each definition suite on a header line.
 
     ``def other(): record = replacement`` runs its body on the header's own
     physical line, so the statement shares that line's leading indent — the
-    *header's* — and starts on the head's own line, which is exactly where
+    *header's* — and starts on no line below the head, which is exactly where
     ``_definition_binding_scope`` stops reading: it only takes spans that start
-    strictly above the line it is given. Recording the column such a one-line
-    suite starts at lets the readers tell that binding apart from one the
-    enclosing scope's body really executes (PRRT_kwDOSJAM6s6rBkXd).
+    strictly above the line it is given. A wrapped signature does the same on
+    the closing ``): record = replacement`` line of its header, which sits
+    outside the head's lexical span entirely. Both are read the
+    same way, by the one symptom they share — a first body statement no deeper
+    than its own header — so the readers can tell such a binding apart from one
+    the enclosing scope's body really executes, and attribute it to the head
+    holding it (PRRT_kwDOSJAM6s6rBkXd).
     """
-    columns: dict[int, int] = {}
+    suites: dict[int, tuple[int, int]] = {}
     for scope in ast.walk(tree):
-        if (
-            isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and scope.body[0].lineno == scope.lineno
-        ):
-            columns[scope.lineno] = scope.body[0].col_offset
-    return columns
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        first = scope.body[0]
+        if _leading_indent(raw_lines[first.lineno - 1]) <= scope.col_offset:
+            suites[first.lineno] = (first.col_offset, scope.lineno)
+    return suites
 
 
 def _binding_scope_start(
     file_text: str,
     all_spans: list[tuple[str, int, int, int]],
     *,
-    same_line_suites: dict[int, int],
+    header_line_suites: dict[int, tuple[int, int]],
     line: int,
     column: int,
     indent: int,
@@ -77,19 +81,21 @@ def _binding_scope_start(
 
     Normally the indent of the line the binding starts on, read through
     ``_definition_binding_scope`` so the key matches the definition heads' own.
-    A binding inside a suite written on its header's line is the exception: it
-    carries the header's indent on the header's line, which that reader
-    resolves to the scope *enclosing* the header — so ``def other(): record =
-    ...`` looked like a module-scope rebinding and withheld the live module
-    ``def record``, parking a correct callee-span fix as ``needs_human``
-    (PRRT_kwDOSJAM6s6rBkXd). Such a binding is attributed to the head holding
-    it instead; a one-line suite can hold no definition head of its own, so the
-    pair it keys shadows nothing — which is the point, since a local or class
+    A binding inside a suite written on a header line is the exception: it
+    carries the header's indent on a line the header's own span does not
+    contain, which that reader resolves to the scope *enclosing* the header —
+    so ``def other(): record = ...``, and the same suite on a wrapped
+    signature's closing line, looked like a module-scope rebinding and withheld
+    the live module ``def record``, parking a correct callee-span fix as
+    ``needs_human`` (PRRT_kwDOSJAM6s6rBkXd). Such a binding is attributed to
+    the head holding it instead, which is the key that head's own body already
+    uses; a one-line suite can hold no definition head of its own, so the pair
+    it keys shadows nothing — which is the point, since a local or class
     attribute is no rebinding of the module name.
     """
-    suite_column = same_line_suites.get(line)
-    if suite_column is not None and column >= suite_column:
-        return line
+    suite = header_line_suites.get(line)
+    if suite is not None and column >= suite[0]:
+        return suite[1]
     scope_start, _body_indent = _definition_binding_scope(
         file_text, all_spans, start=line, indent=indent
     )
@@ -147,7 +153,7 @@ def _assignment_rebound_scope_names(
     except (SyntaxError, ValueError):
         return set()
     raw_lines = file_text.splitlines()
-    same_line_suites = _same_line_suite_columns(tree)
+    header_line_suites = _header_line_suite_heads(raw_lines, tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -171,7 +177,7 @@ def _assignment_rebound_scope_names(
         scope_start = _binding_scope_start(
             file_text,
             all_spans,
-            same_line_suites=same_line_suites,
+            header_line_suites=header_line_suites,
             line=node.lineno,
             column=node.col_offset,
             indent=indent,
@@ -214,7 +220,7 @@ def _import_rebound_scope_names(
     except (SyntaxError, ValueError):
         return set()
     raw_lines = file_text.splitlines()
-    same_line_suites = _same_line_suite_columns(tree)
+    header_line_suites = _header_line_suite_heads(raw_lines, tree)
     rebound: set[tuple[int, str]] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -226,7 +232,7 @@ def _import_rebound_scope_names(
         scope_start = _binding_scope_start(
             file_text,
             all_spans,
-            same_line_suites=same_line_suites,
+            header_line_suites=header_line_suites,
             line=node.lineno,
             column=node.col_offset,
             indent=_leading_indent(raw_lines[node.lineno - 1]),
