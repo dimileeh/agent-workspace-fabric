@@ -180,8 +180,17 @@ def _assignment_rebound_scope_names(
     offered the dead head while importers receive the captured value
     (PRRT_kwDOSJAM6s6rBsj0).
 
+    An ``except Exception as record`` target is read the same way, and carries
+    its name on the handler node for the same reason. It is the one binding
+    form that *unbinds* the name again — Python deletes the target when the
+    handler exits — so a module body whose handler runs replaces the ``def
+    record`` above it and then leaves the name importable from nowhere at all,
+    which makes offering that dead head worse than for any other rebinding
+    (PRRT_kwDOSJAM6s6rB2mh).
+
     Only bindings that bind a name are read: an annotation without a value
-    binds nothing, a ``with`` item without ``as`` binds nothing, a wildcard
+    binds nothing, a ``with`` item without ``as`` binds nothing, a bare
+    ``except Exception:`` binds nothing, a wildcard
     ``case _:`` and a class or value pattern capture nothing, and an
     attribute or subscript target rebinds no name of the scope. Comprehension
     targets are not read at all — they bind in the comprehension's own scope,
@@ -221,7 +230,7 @@ def _assignment_rebound_scope_names(
             isinstance(node, ast.AnnAssign) and node.value is not None
         ):
             targets = [node.target]
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.ExceptHandler)) and node.name:
             targets = []
             captured = {node.name}
         elif isinstance(node, ast.MatchMapping) and node.rest:

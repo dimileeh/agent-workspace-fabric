@@ -1345,3 +1345,72 @@ def test_a_global_declared_import_is_attributed_to_module_scope() -> None:
         frozenset({"record_ready_queue_depth"}),
         path=_CALLEE_MODULE,
     ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_exception_handler_targets_rebind_the_name() -> None:
+    """``except Exception as record`` leaves no module binding of that name.
+
+    A handler target binds its name for the handler's body and then Python
+    *deletes* it on the way out, so a module body whose handler runs replaces
+    the ``def record`` above it and then unbinds the name entirely: importing
+    ``record`` fails. Reading only assignment and loop targets still offered
+    that dead head as the callee a correction has to touch, so an edit confined
+    to it resolved the thread even though no importer can reach it at all
+    (PRRT_kwDOSJAM6s6rB2mh).
+    """
+    handler_rebind = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "try:\n"
+        "    _load()\n"
+        "except Exception as record_ready_queue_depth:\n"
+        "    pass\n"
+    )
+    assert (
+        cross_file._importable_definition_spans_for_names(
+            handler_rebind,
+            frozenset({"record_ready_queue_depth"}),
+            path=_CALLEE_MODULE,
+        )
+        == []
+    )
+
+    bare_target = handler_rebind.replace(
+        "except Exception as record_ready_queue_depth:", "except Exception:"
+    )
+    assert cross_file._importable_definition_spans_for_names(
+        bare_target,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
+
+
+@pytest.mark.unit
+def test_a_function_local_exception_target_shadows_no_module_definition() -> None:
+    """A handler target inside a helper binds that helper's local, not the module name.
+
+    The same scope attribution every other binding form gets: ``def other():
+    try: ... except Exception as record`` cannot reach what an importer of the
+    module-level ``def record`` sees, so withholding that span would park a
+    correct cross-file correction as ``needs_human``.
+    """
+    text = (
+        "def record_ready_queue_depth(payload):\n"
+        "    return None\n"
+        "\n"
+        "\n"
+        "def other():\n"
+        "    try:\n"
+        "        _load()\n"
+        "    except Exception as record_ready_queue_depth:\n"
+        "        return record_ready_queue_depth\n"
+    )
+
+    assert cross_file._importable_definition_spans_for_names(
+        text,
+        frozenset({"record_ready_queue_depth"}),
+        path=_CALLEE_MODULE,
+    ) == [(1, 4)]
