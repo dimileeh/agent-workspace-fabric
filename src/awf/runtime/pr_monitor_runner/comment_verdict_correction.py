@@ -3,7 +3,7 @@
 Kept separate so ``comment_verdict`` stays under the first-party line budget;
 re-exported from ``comment_verdict`` for callers and tests.
 
-Four policies live here, all scoped to the correction retry — the attempt that
+Five policies live here, all scoped to the correction retry — the attempt that
 runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
 
 * **Path-level evidence on the correction** — attempt 0 keeps the strict
@@ -32,6 +32,18 @@ runs only after AWF told the agent, explicitly, why attempt 0 was rejected.
   keep escalating with the commit preserved, and the unmappable-anchor sentinel
   stays fail-closed. A request to remove this acceptance (PR #929 /
   issue:5558086911) is answered DEFER — it is an explicit operator decision.
+* **Cross-file call-site→definition evidence on the correction** (#1019) —
+  after the line-anchored, path-level and package-level checks have all failed,
+  the same item-own range is accepted when it changes the *definition span* of a
+  callee referenced at the anchored line in another file. Attempt 0 already
+  trusts that relationship, but only inside the reviewed file, so a review
+  anchored where a behaviour is observed and fixed where it is implemented had
+  no acceptable evidence once the two lived in different packages — aira-agent
+  PRs #1478 and #1491 both parked a correct fix as ``needs_human``. Touching the
+  callee's file is not enough, the definition must be reachable from module
+  scope, and ``self`` / ``cls`` / ``this`` receivers fail closed. Attempt 0
+  stays strict, commits with no callee relationship keep escalating with the
+  commit preserved, and the unmappable-anchor sentinel stays fail-closed.
 * **No rollback on a self-citing non-fix** — the correction prompt puts the
   item's own attempt-0 commit at HEAD, so an agent can answer ``FALSE POSITIVE:
   already addressed by commit <its own sha>``. Accepting that as a non-fix and
@@ -343,6 +355,107 @@ async def package_level_item_fix_evidence(
     return False
 
 
+async def callee_definition_item_fix_evidence(
+    runner: PullRequestMonitorRunner,
+    *,
+    worktree_path: Path,
+    item_start_head: str | None,
+    item_path: str | None,
+    item_line: int | None,
+    state: MonitorState | None,
+    dirty_changes_committed: bool,
+) -> bool:
+    """Accept a cross-file callee fix as correction-attempt FIXED evidence (#1019).
+
+    The fourth and last of the correction-attempt evidence checks: same
+    ``item_start_head``..HEAD range and the same contentful-descendant
+    requirement as the line-anchored, path-level and package-level gates, with
+    the scope predicate widened along the one relationship attempt 0 already
+    trusts — the call site. The callee(s) referenced at the anchored line are
+    resolved in the reviewed file as of ``item_start_head``, and the range is
+    accepted when it changes the *definition span* of one of them in another
+    file (``_commit_range_changes_callee_definition``). Touching the
+    callee's file is not enough, and ``self`` / ``cls`` / ``this`` receivers —
+    which attempt 0 resolves in-file or in-class — fail closed.
+
+    Why this is safe, and why it is needed (issue #1019): reviewers anchor where
+    a behaviour is *observed* and the fix belongs where it is *implemented*, so
+    once those are in different packages every correct fix is out of scope by
+    construction — aira-agent PR #1478 (anchor ``services/job_pools.py:340``,
+    fix in ``observability/execution_platform_metrics.py``) and PR #1491 (anchor
+    ``app.py:748``, fix in ``api/routes/tasks.py``) both parked as
+    ``needs_human`` with a correct fix in hand. This gate runs only after the
+    three earlier checks have failed, only on the correction attempt — which
+    exists only because AWF told the agent its FIXED had no evidence and the
+    agent re-affirmed it — and only over the item's *own* range, so the commit
+    cannot be stale or foreign. The accepted change must hit the definition of a
+    function literally called at the reviewed line, and that definition must be
+    reachable from module scope. Attempt 0 stays strict, so a no-op or misplaced
+    FIXED still earns its correction round; a commit with no callee relationship
+    keeps escalating to ``needs_human`` with the commit preserved (#928); and
+    the unmappable-anchor sentinel stays fail-closed. Cross-file linking is
+    name-based (no import or type resolution), so this widens the *radius* of the
+    existing "an unrelated edit could satisfy the gate" risk, not its kind.
+
+    ``item_line`` is required: with no anchored line (or the ``item_line <= 0``
+    unmappable-anchor sentinel) there is no call site to resolve, so the check
+    fails closed rather than degrading to a path-shaped comparison the earlier
+    gates already made.
+
+    ``dirty_changes_committed`` is accepted for signature parity with the other
+    evidence helpers and deliberately never consulted: the earlier checks
+    already produced the degraded dirty-sink fallback, so the widest gate must
+    never be the one that invents evidence for a lightweight or mocked runner.
+    """
+    del dirty_changes_committed
+
+    if item_start_head is None or item_path is None or item_line is None or item_line < 1:
+        return False
+    if not worktree_path.exists():
+        return False
+
+    descends = getattr(runner, "_head_descends_from", None)
+    trees_differ = getattr(runner, "_commit_trees_differ", None)
+    changes_callee = getattr(runner, "_commit_range_changes_callee_definition", None)
+    if not (callable(descends) and callable(trees_differ) and callable(changes_callee)):
+        return False
+
+    candidate_heads: list[str] = []
+    end_head = await runner._rev_parse_head(worktree_path)
+    if end_head:
+        candidate_heads.append(end_head)
+    if state is not None and state.hosted_terminal_head_advanced:
+        hosted_head = (state.last_push_sha or "").strip()
+        if hosted_head and hosted_head not in candidate_heads:
+            candidate_heads.append(hosted_head)
+
+    for candidate in candidate_heads:
+        if candidate.lower() == item_start_head.lower():
+            continue
+        if not await descends(
+            worktree_path=worktree_path,
+            ancestor=item_start_head,
+            descendant=candidate,
+        ):
+            continue
+        if not await trees_differ(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+        ):
+            continue
+        if not await changes_callee(
+            worktree_path=worktree_path,
+            left=item_start_head,
+            right=candidate,
+            item_path=item_path,
+            item_line=item_line,
+        ):
+            continue
+        return True
+    return False
+
+
 def correction_self_citation_outcome(
     *,
     workspace_id: str,
@@ -357,7 +470,9 @@ def correction_self_citation_outcome(
     line-anchored check, **or** — because this only ever runs on the correction
     attempt — the path-level re-check of the item's own commit range
     (``path_level_item_fix_evidence``), **or** the package-level re-check of
-    that same range (``package_level_item_fix_evidence``, #952). The guard reads
+    that same range (``package_level_item_fix_evidence``, #952), **or** the
+    cross-file call-site→definition re-check of it
+    (``callee_definition_item_fix_evidence``, #1019). The guard reads
     whatever the correction accepted as evidence, so a sibling-module fix the
     agent then points at as "already addressed" resolves the thread instead of
     escalating. An explicit corrected ``needs_human``
@@ -462,10 +577,13 @@ def correction_unscoped_fix_outcome(
     touches none of the reviewed paths, so AWF cannot accept FIXED. The
     same-file off-anchor case no longer reaches here: on the correction attempt
     ``path_level_item_fix_evidence`` accepts a commit that changes the reviewed
-    file, and ``package_level_item_fix_evidence`` accepts one that changes a
-    file in the reviewed file's package (#952). What is left is a commit in
-    another package entirely (or, with an unmappable anchor, one AWF cannot
-    place at all — that stays fail-closed). The protocol
+    file, ``package_level_item_fix_evidence`` accepts one that changes a file in
+    the reviewed file's package (#952), and
+    ``callee_definition_item_fix_evidence`` accepts one that changes the
+    definition of a callee referenced at the anchored line in another file
+    (#1019). What is left is a commit in another package with no call-site
+    relationship to the reviewed line (or, with an unmappable anchor, one AWF
+    cannot place at all — that stays fail-closed). The protocol
     used to roll that commit back and terminate with ``AGENT_FIXED_WITHOUT_EVIDENCE``,
     which failed the whole monitor — the shape that killed ws_46bc0f45 on PR
     #922 after a protocol-violation correction, where attempt 1's off-anchor

@@ -38,6 +38,9 @@ def _agent_verdict_protocol_failure_result(
         stderr=str(exc),
         reason_code=exc.reason_code,
         failure_reason=FailureReason.agent_failure,
+        # Nothing was pushed on this path, so the evidence must not claim a push
+        # was attempted (#1020).
+        operation="agent verdict protocol",
     )
 
 
@@ -62,6 +65,7 @@ def _git_push_result_with_terminal_head_provenance_unavailable(
         recovered_by_resync=push_result.recovered_by_resync,
         reason_code=push_result.reason_code,
         failure_reason=push_result.failure_reason,
+        operation=push_result.operation,
         details=details,
         paused_into_blocked=push_result.paused_into_blocked,
         parked_needs_human=push_result.parked_needs_human,
@@ -92,6 +96,7 @@ def _git_push_result_with_local_terminal_head(
         recovered_by_resync=push_result.recovered_by_resync,
         reason_code=push_result.reason_code,
         failure_reason=push_result.failure_reason,
+        operation=push_result.operation,
         details=details,
         paused_into_blocked=push_result.paused_into_blocked,
         parked_needs_human=push_result.parked_needs_human,

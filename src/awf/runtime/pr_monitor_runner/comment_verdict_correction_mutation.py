@@ -7,8 +7,16 @@ Both helpers here serve the same rule: a *correction* attempt may only be
 credited with a non-FIXED verdict when AWF can prove that attempt did not
 mutate the worktree. That needs an end-of-attempt HEAD (``read_correction_end_head``);
 when the measurement says the attempt did mutate, the verdict is refused after a
-safe rollback (``raise_correction_non_fixed_mutation``). Both fail closed: an
+safe rollback (``resolve_correction_non_fixed_mutation``). Both fail closed: an
 unreadable HEAD is a refusal, never an assumed-clean acceptance.
+
+Refusing the verdict is not the same as failing the workspace. Once the rollback
+has succeeded, the offending *item* is parked as ``needs_human`` with its reason
+code preserved — the #925/#928 escalation shape — and the comment-repair batch
+carries on to its end-of-batch push, so the items already accepted before it are
+published instead of stranded in the worktree (#1020). Only a rollback that
+itself fails still terminates: the worktree state is then unknown, and failing
+closed is the only safe answer.
 
 The rollback helpers and the trusted HEAD probe are resolved through
 ``comment_verdict`` at call time so monkeypatches on that module (and the
@@ -18,13 +26,14 @@ The rollback helpers and the trusted HEAD probe are resolved through
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 
 from awf.common.logging import get_logger
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
+    from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
 
 _log = get_logger(__name__)
 
@@ -128,7 +137,7 @@ async def read_correction_end_head(
     )
 
 
-async def raise_correction_non_fixed_mutation(
+async def resolve_correction_non_fixed_mutation(
     runner: PullRequestMonitorRunner,
     *,
     workspace_id: str,
@@ -140,19 +149,33 @@ async def raise_correction_non_fixed_mutation(
     attempt_start_head: str | None,
     post_attempt_head: str | None,
     verdict: str,
+    agent_reason: str | None,
     dirty_changes_committed: bool,
     stranded_dirty_residue: bool,
     pre_sink_head_unreadable: bool,
     pre_sink_probe_exc: Exception | None,
-) -> NoReturn:
-    """Roll back a mutating correction attempt, then refuse its non-FIXED verdict.
+) -> VerdictResult:
+    """Roll back a mutating correction attempt, then park its non-FIXED verdict.
 
     ``pre_sink_head_unreadable`` distinguishes "the attempt demonstrably mutated"
     (``AGENT_NON_FIXED_WITH_MUTATION``) from "mutation could not be measured, so
-    fail closed" (``AGENT_VERDICT_PROTOCOL_VIOLATION``); the originating probe
-    failure is chained as the cause so it is not lost. Never returns.
+    fail closed" (``AGENT_VERDICT_PROTOCOL_VIOLATION``).
+
+    On a successful rollback the refused verdict becomes a ``needs_human`` park
+    for this item alone (#1020): the reason code, the agent's own verdict and its
+    reason travel in the returned reason, which ``_sync_needs_human_reason``
+    persists on the thread, so the merge gate keeps blocking and ``decide()``
+    answers ``NotifyHuman`` — while the batch's already-accepted item commits
+    reach the remote through the ordinary end-of-batch push. Raising here instead
+    killed the monitor mid-batch and stranded those commits three times in three
+    days (``ws_8cd0de10``, ``ws_6a5514fb``, ``ws_6e4081d1``).
+
+    A rollback that fails still raises: the worktree holds unaccepted edits AWF
+    could not remove, so there is nothing safe to continue with. The originating
+    probe failure is chained as the cause so it is not lost.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+    from awf.runtime.pr_monitor_runner.comment_verdict_correction import _bounded
 
     if pre_sink_head_unreadable:
         mutation_reason_code = _comment_verdict.AGENT_VERDICT_PROTOCOL_VIOLATION
@@ -204,10 +227,21 @@ async def raise_correction_non_fixed_mutation(
         if pre_sink_probe_exc is not None:
             raise rollback_error from pre_sink_probe_exc
         raise rollback_error
-    mutation_error = _comment_verdict.AgentVerdictProtocolError(
+    _log.warning(
+        "monitor.agent_verdict_correction_mutation_item_parked",
+        workspace_id=workspace_id,
         reason_code=mutation_reason_code,
-        message=mutation_message,
+        protocol_attempt=protocol_attempt,
+        rollback_floor_head=rollback_floor_head,
+        verdict=verdict,
     )
-    if pre_sink_probe_exc is not None:
-        raise mutation_error from pre_sink_probe_exc
-    raise mutation_error
+    short_floor = (rollback_floor_head or "")[:12]
+    return _comment_verdict.VerdictResult(
+        verdict="needs_human",
+        reason=_bounded(
+            f"{mutation_reason_code}: {mutation_message} The correction "
+            f"attempt's edits were rolled back to {short_floor or '<unknown>'}; "
+            f"the item is parked for human review. Agent verdict: {verdict}. "
+            f"Agent reason: {agent_reason}"
+        ),
+    )

@@ -33,6 +33,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     AGENT_NON_FIX_CITES_OWN_COMMIT as AGENT_NON_FIX_CITES_OWN_COMMIT,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
+    callee_definition_item_fix_evidence as callee_definition_item_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_reason_cites_own_item_commit as correction_reason_cites_own_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
@@ -54,10 +57,10 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     verdict_reason_cites_own_commit as verdict_reason_cites_own_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction_mutation import (
-    raise_correction_non_fixed_mutation as raise_correction_non_fixed_mutation,
+    read_correction_end_head as read_correction_end_head,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_correction_mutation import (
-    read_correction_end_head as read_correction_end_head,
+    resolve_correction_non_fixed_mutation as resolve_correction_non_fixed_mutation,
 )
 
 # Re-exported (``X as X``) because ``comments`` and the tests resolve the item
@@ -286,8 +289,10 @@ async def _run_item_verdict_protocol(
     attempt-0 residue left by a False first sink is not attributed to a clean
     correction: sinking or re-detecting that same residue still rolls back to
     item-start and accepts the verdict (PRRT_kwDOSJAM6s6eKNQT). Mutation plus
-    non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION`` after safe rollback. First-attempt
-    non-FIXED still rolls back unaccepted edits and returns the verdict. Any
+    non-FIXED is ``AGENT_NON_FIXED_WITH_MUTATION``: after a safe rollback the item
+    is parked as ``needs_human`` so the batch survives (#1020), and only a failed
+    rollback still terminates the protocol. First-attempt non-FIXED still rolls
+    back unaccepted edits and returns the verdict. Any
     provider execution failure before an accepted verdict also rolls unaccepted
     edits back first. Rollback never rewinds past this attempt's own start: on a
     re-attempt after a preserved timeout the evidence anchor is restored to the
@@ -931,6 +936,36 @@ async def _run_item_verdict_protocol(
                         state=state,
                         dirty_changes_committed=dirty_changes_committed,
                     )
+                if (
+                    not logical_fix_evidence
+                    and protocol_attempt == 1
+                    and item_path is not None
+                    and item_line is not None
+                    and item_line > 0
+                ):
+                    # Call-site→definition evidence across files (#1019). All
+                    # three checks above have failed, so the item's own commit
+                    # range changes neither the anchored line, nor the reviewed
+                    # file, nor its package. Accept it when it changes the
+                    # *definition* of a callee referenced at the anchored line
+                    # in another file — the one relationship attempt 0 already
+                    # trusts, widened past the same-file restriction that parked
+                    # aira-agent PRs #1478 and #1491. Rationale, limits and the
+                    # fail-closed cases live in the helper's docstring. Same
+                    # guards as above plus a usable anchor line: with none there
+                    # is no call site, so ``item_line is None`` and the
+                    # ``item_line <= 0`` sentinel both stay fail-closed. Inside
+                    # the commit-sink ``try`` so it shares the rollback /
+                    # reason-code handlers.
+                    logical_fix_evidence = await callee_definition_item_fix_evidence(
+                        runner,
+                        worktree_path=worktree_path,
+                        item_start_head=item_start_head,
+                        item_path=item_path,
+                        item_line=item_line,
+                        state=state,
+                        dirty_changes_committed=dirty_changes_committed,
+                    )
             except (
                 ProviderRecoveryRetryError,
                 ProviderRecoveryFallbackError,
@@ -1211,7 +1246,12 @@ async def _run_item_verdict_protocol(
                                 # Rolls back to the floor, then refuses the
                                 # verdict as mutation or — when the pre-sink
                                 # probe failed — as an unmeasurable attempt.
-                                await raise_correction_non_fixed_mutation(
+                                # The refusal parks THIS item as ``needs_human``
+                                # instead of failing the workspace, so the
+                                # batch's already-accepted item commits still
+                                # reach the remote (#1020); a failed rollback
+                                # inside the helper still raises.
+                                return await resolve_correction_non_fixed_mutation(
                                     runner,
                                     workspace_id=workspace_id,
                                     worktree_path=worktree_path,
@@ -1222,6 +1262,7 @@ async def _run_item_verdict_protocol(
                                     attempt_start_head=attempt_start_head,
                                     post_attempt_head=post_attempt_head,
                                     verdict=parsed.verdict,
+                                    agent_reason=parsed.reason,
                                     dirty_changes_committed=dirty_changes_committed,
                                     stranded_dirty_residue=stranded_dirty_residue,
                                     pre_sink_head_unreadable=pre_sink_head_unreadable,

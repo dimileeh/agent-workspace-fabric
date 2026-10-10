@@ -13,13 +13,13 @@ def _agent_runtime_dockerfile() -> str:
 def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG GH_VERSION=2.92.0" in dockerfile
+    assert "ARG GH_VERSION=2.102.0" in dockerfile
     assert (
-        "ARG GH_AMD64_SHA256=8f8212b1a9cec261a8839e0893168f50d3fc70f095da257feef4229234cefdf8"
+        "ARG GH_AMD64_SHA256=7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"
         in dockerfile
     )
     assert (
-        "ARG GH_ARM64_SHA256=34d620b7c884774ed86236541535170889fda0b99aafbdab8b69c7d458b5ca6b"
+        "ARG GH_ARM64_SHA256=5006962696f01e1624b3fcf1f9d8e1a11547f24bf067dd2a0371b7b421945237"
         in dockerfile
     )
     assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
@@ -87,13 +87,13 @@ def test_agent_runtime_installs_pinned_docker_buildx_plugin() -> None:
 def test_agent_runtime_verifies_pinned_cursor_release_before_extracting() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CURSOR_VERSION=2026.09.02-c22c1a3" in dockerfile
+    assert "ARG CURSOR_VERSION=2026.10.01-e373342" in dockerfile
     assert (
-        "ARG CURSOR_X64_SHA256=b73b59854762535c0fc20d7ccc51c3b5a356a851491088d60a362be48750f53c"
+        "ARG CURSOR_X64_SHA256=a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8"
         in dockerfile
     )
     assert (
-        "ARG CURSOR_ARM64_SHA256=fb7bc635be6172ebcf68f907fd9217e3614da51916455c6d7fdb66690997884c"
+        "ARG CURSOR_ARM64_SHA256=785c5f6bf2a60eb1121e27ed8c14f5ee07ed1b5b6692324f2d9a997238245eb5"
         in dockerfile
     )
     assert "https://cursor.com/install" not in dockerfile
@@ -124,18 +124,18 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     """Verify agent runtime installs all supported coding clis."""
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "ARG CODEX_VERSION=0.153.4" in dockerfile
-    assert "ARG CLAUDE_CODE_VERSION=2.1.263" in dockerfile
-    assert "ARG OPENCODE_VERSION=1.18.29" in dockerfile
-    assert "ARG CURSOR_VERSION=2026.09.02-c22c1a3" in dockerfile
-    assert "ARG GROK_VERSION=1.0.13" in dockerfile
-    assert "ARG ANTIGRAVITY_VERSION=1.1.27" in dockerfile
+    assert "ARG CODEX_VERSION=0.162.0" in dockerfile
+    assert "ARG CLAUDE_CODE_VERSION=2.1.295" in dockerfile
+    assert "ARG OPENCODE_VERSION=1.18.35" in dockerfile
+    assert "ARG CURSOR_VERSION=2026.10.01-e373342" in dockerfile
+    assert "ARG GROK_VERSION=1.0.50" in dockerfile
+    assert "ARG ANTIGRAVITY_VERSION=1.3.2" in dockerfile
     assert (
-        "ARG ANTIGRAVITY_AMD64_SHA256=f874d4f6b8a73c2df660f580f25fb656fcb6e64adbfd746e6692e837fd9a20be"
+        "ARG ANTIGRAVITY_AMD64_SHA256=bf8504c72097c97de77d271b160bdb10b956031cf79cf95d96cb948df161c25f"
         in dockerfile
     )
     assert (
-        "ARG ANTIGRAVITY_ARM64_SHA256=97fc9fe5a6067406cd02cbe4ae6e362c9623a24d33bec486911246c17ceb6a94"
+        "ARG ANTIGRAVITY_ARM64_SHA256=f904ce9ca50ee7d2010bd8063a864ce37c31585c710af451bab66be6e4b59a74"
         in dockerfile
     )
     assert "github.com/google-antigravity/antigravity-cli/releases/download/" in dockerfile
@@ -165,7 +165,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
     assert "cursor-agent --version || true" in dockerfile
     assert dockerfile.index(
         'ln -sf "$(readlink -f "$(command -v node)")" /usr/local/bin/node'
-    ) < dockerfile.index("ARG CURSOR_VERSION=2026.09.02-c22c1a3")
+    ) < dockerfile.index("ARG CURSOR_VERSION=2026.10.01-e373342")
     assert "npm install -g cursor-agent" not in dockerfile
     assert "@xai-official/grok@${GROK_VERSION}" in dockerfile
     assert "https://x.ai/cli/install.sh" not in dockerfile
@@ -193,6 +193,17 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_installs_pinned_ccusage_usage_collector() -> None:
+    """ccusage backs AWF's usage sampler, so its npm pin must stay explicit."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "ARG CCUSAGE_VERSION=20.0.26" in dockerfile
+    assert "ARG CCUSAGE_VERSION=latest" not in dockerfile
+    assert "ccusage@${CCUSAGE_VERSION}" in dockerfile
+    assert "ccusage --version" in dockerfile
+
+
+@pytest.mark.unit
 def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     """Verify pinned CLIs still parse the arguments used by AWF adapters."""
     dockerfile = _agent_runtime_dockerfile()
@@ -200,7 +211,7 @@ def test_agent_runtime_checks_pinned_cli_adapter_contracts() -> None:
     assert "codex --version || true" not in dockerfile
     assert (
         "codex exec --dangerously-bypass-approvals-and-sandbox "
-        "--model gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
+        "--model gpt-6.1-sol -c 'model_reasoning_effort=\"xhigh\"' --help >/dev/null"
     ) in dockerfile
 
     assert "gemini --version || true" not in dockerfile
@@ -232,7 +243,14 @@ def test_agent_runtime_checks_grok_acp_stdio_contract() -> None:
     assert '.result.authMethods[]?.id] | index("grok.com") != null' in dockerfile
     assert '"method":"authenticate","params":{"methodId":"grok.com"' in dockerfile
     assert "unsupported auth method" not in dockerfile
-    assert '.error.message == "Authentication required"' in dockerfile
+    # grok 1.0.50 stopped answering the unauthenticated ``session/new`` with an
+    # error and instead emits ``_x.ai/session/setup`` auth notifications, so the
+    # probe asserts the notification rather than a JSON-RPC error reply.
+    assert (
+        'any(.[]; .method == "_x.ai/session/setup" and .params.method == "session/new"'
+        ' and .params.phase == "auth")'
+    ) in dockerfile
+    assert "Authentication required" not in dockerfile
     assert '.error.data == "unknown session id"' in dockerfile
     assert dockerfile.index("@xai-official/grok@${GROK_VERSION}") < dockerfile.index(
         '"method":"initialize"'

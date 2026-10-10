@@ -142,7 +142,82 @@ worktree directory contains `HEAD`, `commondir`, `gitdir`, and a per-worktree
   from either side (control plane or agent), without forcing a recursive
   chown over every per-worktree subtree.
 - The bare mirror's `refs/` and `logs/` (when present) are chowned
-  recursively so commit-side ref updates and ref-log appends succeed.
+  recursively so commit-side ref updates and ref-log appends succeed. That
+  chown is a point-in-time fix and is **not sufficient on its own** — see
+  "Shared Mirror Ref Namespaces" below.
+
+### Shared Mirror Ref Namespaces
+
+The bare mirror is shared: the control plane writes refs into it as root while
+an agent (UID `1000`) holds a linked worktree on the same mirror. A
+point-in-time chown of `refs/`/`logs/` loses that race by construction
+(issue #1033):
+
+1. root-side `git gc --auto` (fired by a control-plane fetch or commit) runs
+   `pack-refs`, which moves loose refs into `packed-refs` (`root:root`) and
+   prunes the emptied loose-ref directories;
+2. the next root ref write in that namespace — a base-sync merge commit, a
+   host-side item commit, `git worktree add -b <ns>/…` for a *sibling*
+   workspace — recreates the directory `755 root:root`, after the attempt's
+   ownership repair already ran;
+3. the agent then fails its own `git commit` with `EACCES` creating
+   `refs/heads/<ns>/<ws>.lock`, which reads as an AWF infrastructure failure.
+
+The invariant is therefore three layers, all additive to the chown baseline.
+Layers 2 and 3 are root-only — they `chown`/`setfacl` directories the control
+plane created as root, which only root can do, so both are gated on
+`os.geteuid() == 0`. Layer 1 is uid-independent (see below).
+
+1. **`gc.packRefs=false`** in every AWF-managed mirror's local config, applied
+   by `ensure_mirror` both when the mirror is cloned and when an existing
+   (pre-#1033) mirror is re-ensured. `git gc` then skips `pack-refs`, so step 1
+   above never happens, while object repacking, loose-object pruning and reflog
+   expiry keep running on these long-lived, constantly-fetched mirrors.
+   `gc.auto=0` is deliberately *not* set: it would stop mirror housekeeping
+   altogether and trade this race for unbounded loose-object growth.
+   This layer is deliberately **not** gated on `geteuid()`: unlike layers 2
+   and 3 it needs no privilege (a local config write into a mirror the process
+   already owns) and nothing about it is uid-specific. Gating it would leave
+   exactly the non-root control plane whose uid differs from the agent's — a
+   worker run on the host against containerized agents — with packed refs and
+   the #1033 race, which is the opposite of the intent. A write that does fail
+   is advisory and reason-coded (`MIRROR_REF_PACKING_CONFIG_FAILED`) rather
+   than fatal, so no host needs a pre-check.
+2. **A default POSIX ACL** (`setfacl -d -m u:1000:rwx`) on every directory in
+   the mirror's `refs/` and `logs/` trees, applied by
+   `repair_agent_writable_worktree` right after the chown. Directories git
+   creates later — including a namespace root recreates in step 2 — inherit
+   `u:1000:rwx`. The ACL sits on the parent (`refs/heads/`), which is what makes
+   the inheritance work for a recreated `refs/heads/<ns>/`; the recreated
+   directory then carries a default ACL of its own. The effective mask is the
+   directory's creation mode intersected with the ACL entry, and git creates ref
+   directories with `0777 & ~umask`, so the agent keeps `rwx`.
+   The walk opens every component below the mirror with `O_NOFOLLOW` relative
+   to its already pinned parent and hands `setfacl` the resulting
+   `/proc/self/fd/<fd>` links (via `pass_fds`) instead of pathnames: these
+   trees are agent-writable, and `setfacl` follows symlinks given on its
+   command line, so a pathname could be swapped for a symlink after the check
+   and grant uid 1000 inheritable access outside the mirror.
+   The object database is never given an ACL (same reason as the chown
+   exclusion: `aa866959`).
+3. **Re-running the cheap refs/logs ownership repair after control-plane ref
+   writes** (`repair_agent_runtime_ownership`): host-side item commits and
+   `worktree add` already did this, and the clean base-sync merge commit now
+   does too (reason `sync_base_post_merge_ref_write`; a failed repair is
+   reason-coded `AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED` and blocks the push
+   rather than pushing over an unrepaired mirror).
+
+Layer 2 needs `setfacl` (the `acl` Debian package, installed in
+`docker/control-plane.Dockerfile`) and a filesystem with ACL support. When
+`setfacl` is missing, `apply_mirror_ref_default_acls` returns `False` and
+`mirror.ref_default_acl_unsupported` is warned once per process (the repair
+runs several times per attempt and the answer cannot change under a running
+control plane). When the filesystem rejects the ACL — a `noacl` mount, Docker
+Desktop's macOS file-sharing layer — each failing call warns
+`mirror.ref_default_acl_failed` with the `setfacl` exit code and stderr. Either
+way the chown baseline plus layers 1 and 3 still apply, and a missing ACL layer
+never fails a provision. The helpers live in
+`src/awf/node/git_manager_mirror.py`.
 
 ### Linux vs macOS Behavior
 
@@ -291,6 +366,19 @@ The decision is locked by the following tests:
   - `TestAgentWorktreeWritable::test_prepared_worktree_supports_agent_git_status_add_commit`
     — proves the prepared worktree accepts `git status`, `git add`, and
     `git commit` when the controlling user is the agent UID.
+- `tests/unit/node/test_git_manager_mirror_ref_hardening_part_001.py`
+  — locks the shared-mirror ref-namespace invariant: `gc.packRefs=false` on
+  cloned *and* re-ensured mirrors, the default-ACL directory set (`refs/` and
+  `logs/` trees only, never `objects/`), the graceful fallback when `setfacl`
+  or filesystem ACL support is missing, the descriptor pinning (a ref directory
+  swapped for an outside symlink after the walk is still ACLed by inode, and
+  the walk leaks no descriptors), and the #1033 race itself — a
+  namespace recreated root-owned after the repair is chowned back and
+  re-ACLed by the repair that follows the next control-plane ref write.
+- `tests/unit/runtime/test_sync_base_post_merge_ownership_repair_part_001.py`
+  — locks the third layer at the base-sync merge commit: the repair runs
+  before the push, and a failed repair blocks the push with
+  `AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED`.
 - `tests/integration/test_workspace_agent_git_in_workspace.py`
   - `test_agent_container_can_git_status_add_commit_in_workspace` — full
     Docker integration: the rendered workspace stack lets the
@@ -312,6 +400,8 @@ The decision is locked by the following tests:
 - `src/awf/node/git_manager.py` — `AGENT_RUNTIME_UID`/`AGENT_RUNTIME_GID`
   constants, `_prepare_agent_writable_worktree`, `_agent_writable_git_targets`,
   `_chown_targets`, `_chown_tree`.
+- `src/awf/node/git_manager_mirror.py` — `ensure_mirror_ref_packing_disabled`,
+  `apply_mirror_ref_default_acls` (the shared-mirror ref-namespace invariant).
 - `src/awf/node/auth_mounts.py` — `_chown_workspace_auth_sources`.
 - `src/awf/service/worker.py` — imports `AGENT_RUNTIME_UID`/`AGENT_RUNTIME_GID`
   and wires them into `GitManager` and `ServiceAuthMountResolver`.

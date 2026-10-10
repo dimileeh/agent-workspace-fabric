@@ -96,6 +96,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import 
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
     _rename_diff_preserves_line_numbers as _rename_diff_preserves_line_numbers,
 )
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
+    _commit_range_changes_callee_definition as _commit_range_changes_callee_definition,
+)
 from awf.runtime.pr_monitor_runner.remote_repair import (
     _mirror_commit_object_exists,
     _open_merge_candidate_head_sha,
