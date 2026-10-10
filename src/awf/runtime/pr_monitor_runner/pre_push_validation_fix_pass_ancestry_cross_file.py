@@ -76,15 +76,20 @@ _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 # pkg.mod`` binds ``pkg`` rather than the callee, so it narrows no *bare*
 # candidate path and is not matched here; relative targets are read below, and
 # the plain form is read for receivers by ``_receiver_import_module_targets``.
+# Either head's keyword also ends at the ``(`` of a parenthesized target list,
+# so both admit that boundary: held to whitespace, the real head ``from pkg
+# import(record)`` matches nothing, ``record`` binds to no module and keeps the
+# name-only rule that accepts an unrelated same-named definition in another
+# package (PRRT_kwDOSJAM6s6rBbdr).
 _ABSOLUTE_FROM_IMPORT_RE = re.compile(
-    r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import[ \t]+(.+)$"
+    r"^[ \t]*from[ \t]+([A-Za-z_]\w*(?:\.\w+)*)[ \t]+import(?:[ \t]+|(?=\())(.+)$"
 )
 
 # ``from .mod import x`` / ``from ..pkg.mod import x`` / ``from . import x`` —
 # the leading dots and the optional module tail, resolved against the call
 # site's own directory by ``_relative_import_module_path``.
 _RELATIVE_FROM_IMPORT_RE = re.compile(
-    r"^[ \t]*from[ \t]+(\.+)(\w+(?:\.\w+)*)?[ \t]+import[ \t]+(.+)$"
+    r"^[ \t]*from[ \t]+(\.+)(\w+(?:\.\w+)*)?[ \t]+import(?:[ \t]+|(?=\())(.+)$"
 )
 
 # ``import pkg.mod`` / ``import pkg.mod as alias`` — the statement binds a
