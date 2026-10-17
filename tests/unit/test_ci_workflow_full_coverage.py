@@ -19,7 +19,7 @@ DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 GITHUB_HOSTED_RUNNER = "ubuntu-latest"
-POSTGRES_CI_IMAGE = "public.ecr.aws/docker/library/postgres:16"
+POSTGRES_CI_IMAGE = "mirror.gcr.io/library/postgres:16"
 SETUP_UV_VERSION = "0.5.31"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -442,7 +442,7 @@ def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
     ("action", "ref"),
     [
         ("actions/checkout", "v7"),
-        ("astral-sh/setup-uv", "v10.2.0"),
+        ("astral-sh/setup-uv", "v10.3.0"),
         ("actions/upload-artifact", "v7"),
         ("actions/download-artifact", "v8"),
         ("actions/setup-node", "v6"),
