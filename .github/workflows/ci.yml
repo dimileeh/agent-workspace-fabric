@@ -88,9 +88,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
-        # Use the Docker Official Images mirror to avoid Docker Hub pull timeouts
-        # before the shard job can run any retryable steps.
-        image: public.ecr.aws/docker/library/postgres:16
+        # Use Google's Docker Hub mirror: ECR Public rejected hosted-runner pulls
+        # with `toomanyrequests: Data limit exceeded` before tests could start.
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_USER: awf
           POSTGRES_PASSWORD: awf_ci

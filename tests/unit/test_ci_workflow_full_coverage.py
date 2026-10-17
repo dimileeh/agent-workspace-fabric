@@ -19,7 +19,7 @@ DB_URL = "postgresql+asyncpg://awf:awf_ci@localhost:5432/awf"
 DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 GITHUB_HOSTED_RUNNER = "ubuntu-latest"
-POSTGRES_CI_IMAGE = "public.ecr.aws/docker/library/postgres:16"
+POSTGRES_CI_IMAGE = "mirror.gcr.io/library/postgres:16"
 SETUP_UV_VERSION = "0.5.31"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
