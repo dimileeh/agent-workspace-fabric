@@ -16,6 +16,8 @@ from typing import Literal
 AGENT_VERDICT_PROTOCOL_VIOLATION = "AGENT_VERDICT_PROTOCOL_VIOLATION"
 AGENT_FIXED_WITHOUT_EVIDENCE = "AGENT_FIXED_WITHOUT_EVIDENCE"
 AGENT_NON_FIXED_WITH_MUTATION = "AGENT_NON_FIXED_WITH_MUTATION"
+# #1076: an untyped error ended the item after its rollback succeeded; parked.
+AGENT_VERDICT_ITEM_UNEXPECTED_ERROR = "AGENT_VERDICT_ITEM_UNEXPECTED_ERROR"
 
 AgentVerdict = Literal["fix_committed", "false_positive", "defer", "needs_human"]
 MonitorVerdict = Literal[
