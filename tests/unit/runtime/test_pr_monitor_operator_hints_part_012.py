@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.control.quality_gates import GrantSpec
 from awf.db.enums import FailureReason
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import MonitorState, OperatorHint
@@ -40,7 +41,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
-from tests.unit.runtime._verdict_trailing_output_fixtures import F1
+from tests.unit.runtime._verdict_trailing_output_fixtures import F1, F3
 from tests.unit.runtime.test_comment_repair_item_provenance_parts.test_comment_repair_item_provenance_part_007 import (
     _HeadTrackingCommandRunner,
 )
@@ -270,3 +271,151 @@ async def test_commitless_hint_fixed_with_chatter_parks_instead_of_failing(
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
     assert AGENT_VERDICT_PROTOCOL_VIOLATION in (state.pending_operator_hint.status_reason or "")
+
+
+def _record_less_hint_runner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workspace_id: str,
+    pushes: list[str],
+) -> object:
+    """F3 on both attempts after a contentful commit, so the protocol keeps and parks."""
+    return _real_protocol_runner(
+        factory,
+        tmp_path,
+        monkeypatch,
+        workspace_id=workspace_id,
+        stdout=F3,
+        commits=True,
+        head=[_START_HEAD],
+        pushes=pushes,
+    )
+
+
+@pytest.mark.unit
+async def test_record_less_hint_keeps_its_commit_pushes_it_and_stays_parked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3 on both attempts after a contentful commit: the kept commit is pushed.
+
+    The hint still parks for a human, as an item does, but the preserved commit
+    goes through the same guarded push a comment batch uses. Otherwise
+    ``decide()`` answers ``NotifyHuman`` while the commit stays local.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    pushes: list[str] = []
+    runner = _record_less_hint_runner(
+        factory, tmp_path, monkeypatch, workspace_id=workspace_id, pushes=pushes
+    )
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    result = await _run_cycle(
+        runner, workspace_id=workspace_id, hint=hint, state=state, tmp_path=tmp_path
+    )
+
+    assert result.failed is False
+    assert result.pushed is True
+    assert pushes == [_HINT_FIX_HEAD]
+    assert state.last_push_sha == _HINT_FIX_HEAD
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    status_reason = state.pending_operator_hint.status_reason or ""
+    assert AGENT_VERDICT_PROTOCOL_VIOLATION in status_reason
+    assert _HINT_FIX_HEAD[:12] in status_reason
+    assert "preserved for human review" in status_reason
+
+
+@pytest.mark.unit
+async def test_kept_hint_commit_with_a_no_op_push_stays_parked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An up-to-date push does not finalize the parked hint as processed."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _record_less_hint_runner(
+        factory, tmp_path, monkeypatch, workspace_id=workspace_id, pushes=[]
+    )
+
+    async def _up_to_date(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_validated_git_push_result", _up_to_date)
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    result = await _run_cycle(
+        runner, workspace_id=workspace_id, hint=hint, state=state, tmp_path=tmp_path
+    )
+
+    assert result.failed is False
+    assert result.pushed is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+
+
+@pytest.mark.unit
+async def test_kept_hint_commit_already_on_the_remote_stays_parked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idempotent no-op records the remote head but leaves the hint parked."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    pushes: list[str] = []
+    runner = _record_less_hint_runner(
+        factory, tmp_path, monkeypatch, workspace_id=workspace_id, pushes=pushes
+    )
+
+    async def _on_remote(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _on_remote)
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    result = await _run_cycle(
+        runner, workspace_id=workspace_id, hint=hint, state=state, tmp_path=tmp_path
+    )
+
+    assert result.failed is False
+    assert pushes == []
+    assert state.last_push_sha == _HINT_FIX_HEAD
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+
+
+@pytest.mark.unit
+async def test_kept_hint_commit_under_an_active_grant_is_not_pushed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a finalized resume consumes a grant, so a grant-bearing park does not push."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    pushes: list[str] = []
+    runner = _record_less_hint_runner(
+        factory, tmp_path, monkeypatch, workspace_id=workspace_id, pushes=pushes
+    )
+
+    async def _active_grant(_workspace_id: str) -> list[GrantSpec]:
+        return [GrantSpec(path="pyproject.toml")]
+
+    monkeypatch.setattr(runner, "_active_operator_grant_specs", _active_grant)
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    result = await _run_cycle(
+        runner, workspace_id=workspace_id, hint=hint, state=state, tmp_path=tmp_path
+    )
+
+    assert result.failed is False
+    assert result.pushed is False
+    assert pushes == []
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"

@@ -254,6 +254,8 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     acted_feedback_text = hint.directive
+    # Set when a parked verdict kept a commit that must still be pushed (#1074).
+    hint_parked = False
     if hint.directive or not active_grant_specs:
         if not hint.directive:
             acted_feedback_text = hint.reason
@@ -441,7 +443,19 @@ async def _run_operator_hint_cycle(
                 preserved_head_sha=preserved_head_sha,
             )
             mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(pushed=False, failed=False, returncode=0)
+            if not (
+                isinstance(verdict, VerdictResult)
+                and verdict.kept_commit
+                and not active_grant_specs
+            ):
+                return _GitPushResult(pushed=False, failed=False, returncode=0)
+            # The protocol parked this hint but kept its contentful commit (#1074).
+            # Returning here would leave that commit local while ``decide()``
+            # answers ``NotifyHuman``. Push it through the guarded push below, as a
+            # comment batch would, and skip every finalize step so the hint stays
+            # parked. An approve-and-keep grant is consumed only by a finalized
+            # resume, so a grant-bearing hint keeps the plain park above.
+            hint_parked = True
 
     # The operator-hint resume may have outlived its PR: ``decide()`` only
     # short-circuits merged/closed at the START of a poll cycle, so re-read PR
@@ -661,13 +675,14 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            hint=hint,
-            acted_feedback_text=acted_feedback_text,
-        )
+        if not hint_parked:
+            await _finalize_operator_hint_resume(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                hint=hint,
+                acted_feedback_text=acted_feedback_text,
+            )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
         await self._repair_protected_scope_commits_before_push(
@@ -848,13 +863,14 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
-        await _finalize_operator_hint_resume(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            hint=hint,
-            acted_feedback_text=acted_feedback_text,
-        )
+        if not hint_parked:
+            await _finalize_operator_hint_resume(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                hint=hint,
+                acted_feedback_text=acted_feedback_text,
+            )
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)
@@ -862,13 +878,15 @@ async def _run_operator_hint_cycle(
         state.last_push_sha = pushed_head_sha
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
-    await _finalize_operator_hint_resume(
-        self,
-        workspace_id=workspace_id,
-        state=state,
-        hint=hint,
-        acted_feedback_text=acted_feedback_text,
-    )
+    # A parked hint pushed only its kept commit and stays ``needs_human``.
+    if not hint_parked:
+        await _finalize_operator_hint_resume(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=acted_feedback_text,
+        )
     return cast(_GitPushResult, push_result)
 
 

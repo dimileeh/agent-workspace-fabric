@@ -122,6 +122,7 @@ async def test_record_less_item_with_a_contentful_commit_keeps_it_and_parks(
     assert result.reason.startswith(f"{AGENT_VERDICT_PROTOCOL_VIOLATION}:")
     assert _FIX_HEAD[:12] in result.reason
     assert "preserved for human review" in result.reason
+    assert result.kept_commit is True
     assert len(runner.prompts) == 2
     assert runner.reset_targets == []
     assert runner.current_head == _FIX_HEAD
@@ -161,6 +162,7 @@ async def test_a_commit_with_no_content_is_rolled_back_before_parking(tmp_path: 
     assert result.verdict == "needs_human"
     assert result.reason is not None
     assert AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
+    assert result.kept_commit is False
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
 

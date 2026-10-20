@@ -356,7 +356,9 @@ any form), and the correction's usual evidence gates judge it. A correction
 that still ends without an accepted verdict parks the item as `needs_human`
 with its reason code. A contentful commit the item made is kept and cited;
 otherwise its edits are rolled back first. The batch then continues to its
-normal push and the monitor stays in `monitoring_pr`. Only a rollback that
+normal push and the monitor stays in `monitoring_pr`. An operator hint parked
+this way pushes its kept commit through the same guarded push and stays
+`needs_human`, unless an approve-and-keep grant is active. Only a rollback that
 fails, or an item with no known start HEAD or local worktree to roll back,
 still terminates the monitor as an agent failure. Provider execution failures
 do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve

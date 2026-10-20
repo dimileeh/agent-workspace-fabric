@@ -34,8 +34,10 @@ AWF never accepts a verdict it has no evidence to check.
   contentful commit is kept, as in ``correction_unscoped_fix_outcome``.
   Otherwise the residue is rolled back first, as in
   ``resolve_correction_non_fixed_mutation`` (#1020). The batch then reaches its
-  end-of-batch push. A rollback that itself fails still raises, and so does an
-  item with no known floor or no local worktree, where no rollback could run.
+  end-of-batch push; an operator hint pushes a kept commit through its own
+  guarded push and stays parked. A rollback that itself fails still raises, and
+  so does an item with no known floor or no local worktree, where no rollback
+  could run.
 
 Sibling modules (``helpers_verdict``, ``helpers``, ``comment_verdict``) are
 resolved at call time. ``comment_verdict`` imports this module at load time, and
@@ -203,6 +205,8 @@ async def park_unaccepted_correction(
     ``_sync_needs_human_reason`` persists the reason on the thread, the merge
     gate keeps blocking, ``decide()`` answers ``NotifyHuman``, and the batch's
     accepted commits reach the remote through the ordinary end-of-batch push. A
+    kept commit is flagged ``kept_commit``, so an operator hint, which returns
+    before its push for other parked verdicts, pushes it too and stays parked. A
     rollback that fails still raises, unchanged: the worktree state is then
     unknown. With no known floor or no local worktree nothing can be measured or
     rolled back, so ``protocol_error`` is raised exactly as before.
@@ -252,6 +256,7 @@ async def park_unaccepted_correction(
                 f"{(preserved_tip or '')[:12] or '<unknown>'}) is preserved for "
                 f"human review."
             ),
+            kept_commit=True,
         )
     rollback_ok = await _comment_verdict._rollback_or_classify_failure(
         runner,
