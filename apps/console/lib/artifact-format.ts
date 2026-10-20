@@ -1,4 +1,4 @@
-import type { WorkspaceArtifact } from "@/lib/types";
+import type { ArtifactPresenceItem, ArtifactPresencePage } from "@/lib/types";
 import { awfPath } from "./console-urls.ts";
 
 // Stable names the executor deposits into the served artifact dir. The console
@@ -14,17 +14,17 @@ export const CONFORMANCE_ARTIFACT_NAME = "conformance.json";
 // deposited plan/conformance artifacts live at the root, where
 // ``relative_path`` equals the stable filename.
 export function findArtifactByRelativePath(
-  items: WorkspaceArtifact[],
+  items: readonly ArtifactPresenceItem[],
   relativePath: string,
-): WorkspaceArtifact | undefined {
+): ArtifactPresenceItem | undefined {
   return items.find((item) => item.relative_path === relativePath);
 }
 
-export function hasPlanArtifact(items: WorkspaceArtifact[]): boolean {
+export function hasPlanArtifact(items: readonly ArtifactPresenceItem[]): boolean {
   return findArtifactByRelativePath(items, PLAN_ARTIFACT_NAME) !== undefined;
 }
 
-export function hasConformanceArtifact(items: WorkspaceArtifact[]): boolean {
+export function hasConformanceArtifact(items: readonly ArtifactPresenceItem[]): boolean {
   return findArtifactByRelativePath(items, CONFORMANCE_ARTIFACT_NAME) !== undefined;
 }
 
@@ -51,23 +51,64 @@ export function artifactListPath(workspaceId: string, cursor: string | null): st
   });
 }
 
-export interface ArtifactListPage {
-  items: WorkspaceArtifact[];
-  next_cursor: string | null;
-  has_more: boolean;
+function isArtifactPresenceItem(value: unknown): value is ArtifactPresenceItem {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const relativePath = (value as { relative_path?: unknown }).relative_path;
+  return typeof relativePath === "string" && relativePath.length > 0;
+}
+
+// Accept a page only when every item has a usable relative_path and the
+// pagination envelope is well typed. Extra fields are left in place. One bad
+// item rejects the whole page so presence is never decided from a partial list.
+export function parseArtifactPresencePage(value: unknown): ArtifactPresencePage | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const page = value as {
+    items?: unknown;
+    next_cursor?: unknown;
+    has_more?: unknown;
+  };
+  if (!Array.isArray(page.items) || !page.items.every(isArtifactPresenceItem)) {
+    return null;
+  }
+  if (typeof page.has_more !== "boolean") {
+    return null;
+  }
+  const nextCursor = page.next_cursor;
+  if (nextCursor !== null && (typeof nextCursor !== "string" || nextCursor.length === 0)) {
+    return null;
+  }
+  return {
+    items: page.items,
+    next_cursor: nextCursor,
+    has_more: page.has_more,
+  };
 }
 
 // Accumulate artifacts across pages until both named artifacts are present (the
 // only thing the presence check needs) or the list is exhausted. ``fetchPage``
 // returns ``null`` to signal a failed request, which short-circuits to ``null``
-// so the caller can surface the error instead of a truncated list.
+// so the caller can surface the error instead of a truncated list. A thrown
+// fetch or a page that is not an ArtifactPresencePage does the same.
 export async function collectArtifactsForPresence(
-  fetchPage: (cursor: string | null) => Promise<ArtifactListPage | null>,
-): Promise<WorkspaceArtifact[] | null> {
-  const collected: WorkspaceArtifact[] = [];
+  fetchPage: (cursor: string | null) => Promise<unknown>,
+): Promise<ArtifactPresenceItem[] | null> {
+  const collected: ArtifactPresenceItem[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < ARTIFACT_LIST_MAX_PAGES; page += 1) {
-    const data = await fetchPage(cursor);
+    let raw: unknown;
+    try {
+      raw = await fetchPage(cursor);
+    } catch {
+      return null;
+    }
+    if (raw === null) {
+      return null;
+    }
+    const data = parseArtifactPresencePage(raw);
     if (data === null) {
       return null;
     }

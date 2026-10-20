@@ -153,3 +153,119 @@ test("collectArtifactsForPresence stops at the page ceiling for an endless curso
   assert.equal(calls, ARTIFACT_LIST_MAX_PAGES);
   assert.equal(collected.length, ARTIFACT_LIST_MAX_PAGES);
 });
+
+test("collectArtifactsForPresence resolves null when items is missing", async () => {
+  const missingItems = await collectArtifactsForPresence(async () => ({
+    next_cursor: null,
+    has_more: false,
+  }));
+  assert.equal(missingItems, null);
+
+  // Reproduced hosted envelope. Core must reject it, not unwrap it.
+  const envelope = await collectArtifactsForPresence(async () => ({
+    request_id: "req_1",
+    tenant: { id: "ten_1" },
+    artifacts: { workspace_id: "ws_1", artifact_ids: ["native_pr_evidence"] },
+  }));
+  assert.equal(envelope, null);
+});
+
+test("collectArtifactsForPresence resolves null when items is not an array", async () => {
+  const fromString = await collectArtifactsForPresence(async () => ({
+    items: "plan.md",
+    next_cursor: null,
+    has_more: false,
+  }));
+  assert.equal(fromString, null);
+
+  const fromObject = await collectArtifactsForPresence(async () => ({
+    items: { artifact_ids: ["native_pr_evidence"] },
+    next_cursor: null,
+    has_more: false,
+  }));
+  assert.equal(fromObject, null);
+});
+
+test("collectArtifactsForPresence resolves null when an item identity is invalid", async () => {
+  const pages = [
+    [{ name: "plan.md" }],
+    [null],
+    [{ relative_path: "" }],
+    [{ relative_path: 1 }],
+    [{ relative_path: PLAN_ARTIFACT_NAME }, { name: "plan.md" }],
+  ];
+  for (const items of pages) {
+    const collected = await collectArtifactsForPresence(async () => ({
+      items,
+      next_cursor: null,
+      has_more: false,
+    }));
+    assert.equal(collected, null);
+  }
+});
+
+test("collectArtifactsForPresence resolves null for malformed pagination", async () => {
+  const pages = [
+    { items: [], next_cursor: null },
+    { items: [], next_cursor: null, has_more: "false" },
+    { items: [], next_cursor: 1, has_more: false },
+    { items: [], next_cursor: "", has_more: false },
+  ];
+  for (const page of pages) {
+    const collected = await collectArtifactsForPresence(async () => page);
+    assert.equal(collected, null);
+  }
+});
+
+test("collectArtifactsForPresence resolves null when fetchPage throws", async () => {
+  const collected = await collectArtifactsForPresence(async () => {
+    throw new Error("network down");
+  });
+  assert.equal(collected, null);
+});
+
+test("collectArtifactsForPresence accepts a minimal relative_path entry", async () => {
+  const collected = await collectArtifactsForPresence(async () => ({
+    items: [{ relative_path: PLAN_ARTIFACT_NAME }],
+    next_cursor: null,
+    has_more: false,
+  }));
+  assert.ok(collected);
+  assert.equal(collected.length, 1);
+  assert.equal(collected[0].relative_path, PLAN_ARTIFACT_NAME);
+  assert.equal(hasPlanArtifact(collected), true);
+  assert.equal("path" in collected[0], false);
+  assert.equal("size_bytes" in collected[0], false);
+  assert.equal("modified_at" in collected[0], false);
+});
+
+test("collectArtifactsForPresence keeps full local artifact metadata", async () => {
+  const plan = artifact(PLAN_ARTIFACT_NAME);
+  const collected = await collectArtifactsForPresence(async () => ({
+    items: [plan],
+    next_cursor: null,
+    has_more: false,
+  }));
+  assert.deepEqual(collected, [plan]);
+  assert.equal(hasPlanArtifact(collected), true);
+});
+
+test("collectArtifactsForPresence returns an empty array for a valid empty page", async () => {
+  const collected = await collectArtifactsForPresence(async () => ({
+    items: [],
+    next_cursor: null,
+    has_more: false,
+  }));
+  assert.deepEqual(collected, []);
+});
+
+test("collectArtifactsForPresence stops when has_more is true but next_cursor is null", async () => {
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    calls += 1;
+    return { items: [artifact("only.txt")], next_cursor: null, has_more: true };
+  });
+  assert.equal(calls, 1);
+  assert.equal(collected.length, 1);
+  assert.equal(collected[0].relative_path, "only.txt");
+});

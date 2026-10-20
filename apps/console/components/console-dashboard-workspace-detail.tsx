@@ -40,6 +40,7 @@ CONFORMANCE_ARTIFACT_NAME,
 formatConformanceJson,
 hasConformanceArtifact,
 hasPlanArtifact,
+parseArtifactPresencePage,
 PLAN_ARTIFACT_NAME
 } from "@/lib/artifact-format";
 import {
@@ -74,13 +75,12 @@ import {
 resolveRetryCapabilityGate,
 } from "@/lib/console-capabilities";
 import type {
+ArtifactPresenceItem,
 ConsoleCapabilities,
 MergeQueueItem,
 PricingMetadata,
 ProviderReadinessPreflight,
 Workspace,
-WorkspaceArtifact,
-WorkspaceArtifactList,
 WorkspaceOperatorAction,
 WorkspaceOverview,
 WorkspaceStatus
@@ -340,7 +340,7 @@ export function TaskArtifactsSection({
   workspaceId: string;
   refreshKey?: string;
 }) {
-  const [items, setItems] = useState<WorkspaceArtifact[]>([]);
+  const [items, setItems] = useState<ArtifactPresenceItem[]>([]);
   const [view, setView] = useState<TaskArtifactView | null>(null);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
@@ -359,32 +359,10 @@ export function TaskArtifactsSection({
     let cancelled = false;
     void (async () => {
       let failure: string | null = null;
-      // The list endpoint is cursor-paginated (default 50) and sorted by
-      // relative_path, so plan.md / conformance.json can sit on a later page for
-      // an artifact-heavy workspace. Follow next_cursor before deciding presence
-      // so the Plan/Validation controls are not hidden when the files do exist.
-      const collected = await collectArtifactsForPresence(async (cursor) => {
-        // Stop paginating the moment the effect is cancelled (unmount or
-        // refreshKey change): the post-loop guard already discards the result,
-        // but bailing here also avoids firing the remaining page requests whose
-        // responses would just be thrown away.
-        if (cancelled) {
-          return null;
-        }
-        const result = await apiGet<WorkspaceArtifactList>(
-          artifactListPath(workspaceId, cursor),
-        );
-        if (!result.ok) {
-          failure = result.message;
-          return null;
-        }
-        return result.data;
-      });
-      if (cancelled) {
-        return;
-      }
-      if (collected === null) {
-        setListError(failure);
+      const listFailureMessage = (message: string | null): string =>
+        message !== null && message.length > 0 ? message : "Artifact list response was malformed.";
+      const settleListFailure = (message: string) => {
+        setListError(message);
         // A failed list fetch is not authoritative about presence, so drop any
         // artifacts a prior successful fetch surfaced. Retaining them would keep
         // the Plan/Validation buttons visible off stale data while the list API
@@ -396,13 +374,52 @@ export function TaskArtifactsSection({
         // gates on view && !downloadError). With presence now invalidated and no
         // button left to dismiss it, collapse the view so stale plan/validation
         // text cannot linger below the list-error banner. The download error is an
-        // independent failure source and is left untouched.
+        // independent failure source and is left untouched. Loading is cleared so
+        // a download spinner cannot remain after presence is invalidated.
         setView(null);
         setContent("");
-        return;
+        setLoading(false);
+      };
+      try {
+        // The list endpoint is cursor-paginated (default 50) and sorted by
+        // relative_path, so plan.md / conformance.json can sit on a later page for
+        // an artifact-heavy workspace. Follow next_cursor before deciding presence
+        // so the Plan/Validation controls are not hidden when the files do exist.
+        const collected = await collectArtifactsForPresence(async (cursor) => {
+          // Stop paginating the moment the effect is cancelled (unmount or
+          // refreshKey change): the post-loop guard already discards the result,
+          // but bailing here also avoids firing the remaining page requests whose
+          // responses would just be thrown away.
+          if (cancelled) {
+            return null;
+          }
+          const result = await apiGet<unknown>(artifactListPath(workspaceId, cursor));
+          if (!result.ok) {
+            failure = result.message;
+            return null;
+          }
+          const page = parseArtifactPresencePage(result.data);
+          if (page === null) {
+            failure = "Artifact list response was malformed.";
+            return null;
+          }
+          return page;
+        });
+        if (cancelled) {
+          return;
+        }
+        if (collected === null) {
+          settleListFailure(listFailureMessage(failure));
+          return;
+        }
+        setListError(null);
+        setItems(collected);
+      } catch (cause) {
+        if (cancelled) {
+          return;
+        }
+        settleListFailure(cause instanceof Error ? cause.message : "Unable to load artifacts.");
       }
-      setListError(null);
-      setItems(collected);
     })();
     return () => {
       cancelled = true;
