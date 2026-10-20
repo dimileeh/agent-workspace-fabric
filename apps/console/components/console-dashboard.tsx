@@ -36,6 +36,7 @@ import type {
   FailureSummaryResponse,
 MergeQueueItem,
 ResourceSaturationSummary,
+WorkspaceOperatorAction,
 WorkspaceOverview,
 WorkspaceReliabilitySummary,
 } from "@/lib/types";
@@ -1145,7 +1146,64 @@ export function ConsoleDashboard() {
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
 
-  const refreshDashboard = () => {
+  // Stable pane callbacks: inline arrows would defeat the rail and inspector memo
+  // on every dashboard render (URL sync, live-stream status, fleet polls).
+  const toggleFiltersExpanded = useCallback(() => setFiltersExpanded((current) => !current), []);
+  const clearWorkspaceLogSelection = useCallback(() => setWorkspaceLogSelection([]), []);
+  const closeInspector = useCallback(() => setSelectedId(null), [setSelectedId]);
+  const retryInspectorWorkspace = useCallback(() => {
+    void retrySelectedWorkspace();
+  }, [retrySelectedWorkspace]);
+  const runInspectorOperatorAction = useCallback(
+    (action: WorkspaceOperatorAction, requestedTier?: number) => {
+      void runWorkspaceOperatorAction(action, requestedTier);
+    },
+    [runWorkspaceOperatorAction],
+  );
+  const toggleInspectorStream = useCallback(
+    (streamId: string, checked: boolean) =>
+      setSelectedStreams((current) => toggleStream(current, streamId, checked)),
+    [],
+  );
+  const selectAllInspectorStreams = useCallback(
+    () =>
+      setSelectedStreams(showWorkspaceLogs ? detail.streams.map((stream) => stream.stream_id) : []),
+    [detail.streams, showWorkspaceLogs],
+  );
+  const clearInspectorStreams = useCallback(() => setSelectedStreams([]), []);
+  const toggleInspectorSortDirection = useCallback(
+    () => setLogSortDirection((current) => (current === "desc" ? "asc" : "desc")),
+    [],
+  );
+
+  // Before the memo, the inspector re-rendered with every dashboard render, so
+  // its relative ages advanced on each poll. Keep that cadence explicitly; the
+  // overview settled version also moves on failed polls, unlike lastRefresh.
+  const inspectorRefreshTick = useMemo(
+    () =>
+      [
+        lastRefresh,
+        overviewLoadSettledVersion,
+        dashboardSummary,
+        resourceSaturation,
+        workspaceSummary,
+        cloudRuntime,
+        mergeQueue,
+        failureSummary,
+      ] as const,
+    [
+      lastRefresh,
+      overviewLoadSettledVersion,
+      dashboardSummary,
+      resourceSaturation,
+      workspaceSummary,
+      cloudRuntime,
+      mergeQueue,
+      failureSummary,
+    ],
+  );
+
+  const refreshDashboard = useCallback(() => {
     startTransition(() => {
       void (async () => {
         const epoch = authorizedFeedEpochRef.current;
@@ -1168,7 +1226,7 @@ export function ConsoleDashboard() {
         }
       })();
     });
-  };
+  }, [loadCapabilities, loadOverview, loadWorkspace, reloadAvailableFeeds, selectedIdRef]);
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -1217,7 +1275,7 @@ export function ConsoleDashboard() {
           onSearchText={setSearchText}
           onSortKey={setSortKey}
           onSortDirection={setSortDirection}
-          onToggleExpanded={() => setFiltersExpanded((current) => !current)}
+          onToggleExpanded={toggleFiltersExpanded}
           overviewHasMore={overviewHasMore}
           overviewHistoryLoading={overviewHistoryLoading}
           overviewHistoryComplete={overviewHistoryComplete}
@@ -1227,7 +1285,7 @@ export function ConsoleDashboard() {
           showWorkspaceLogs={showWorkspaceLogs}
           workspaceLogSelection={workspaceLogSelection}
           onOpenSelectedLogs={openSelectedWorkspaceLogs}
-          onClearLogSelection={() => setWorkspaceLogSelection([])}
+          onClearLogSelection={clearWorkspaceLogSelection}
           filteredOverview={filteredOverview}
           selectedId={selectedId}
           onSelect={setSelectedId}
@@ -1294,28 +1352,17 @@ export function ConsoleDashboard() {
         logTailSignal={logTailSignal}
         logTailRefreshError={logTailRefreshError}
         workspaceDetailError={workspaceDetailError}
-        onClose={() => setSelectedId(null)}
+        refreshTick={inspectorRefreshTick}
+        onClose={closeInspector}
         onRefresh={refreshDashboard}
-        onRetry={() => {
-          void retrySelectedWorkspace();
-        }}
-        onOperatorAction={(action, requestedTier) => {
-          void runWorkspaceOperatorAction(action, requestedTier);
-        }}
-        onToggleStream={(streamId, checked) =>
-          setSelectedStreams((current) => toggleStream(current, streamId, checked))
-        }
-        onSelectAllStreams={() =>
-          setSelectedStreams(
-            showWorkspaceLogs ? detail.streams.map((stream) => stream.stream_id) : [],
-          )
-        }
-        onClearStreams={() => setSelectedStreams([])}
+        onRetry={retryInspectorWorkspace}
+        onOperatorAction={runInspectorOperatorAction}
+        onToggleStream={toggleInspectorStream}
+        onSelectAllStreams={selectAllInspectorStreams}
+        onClearStreams={clearInspectorStreams}
         onReloadLogs={reloadSelectedLogs}
         onOpenFullscreen={openCurrentWorkspaceLogs}
-        onToggleSortDirection={() =>
-          setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
-        }
+        onToggleSortDirection={toggleInspectorSortDirection}
       />
       </div>
       <ConsoleDashboardOverlays

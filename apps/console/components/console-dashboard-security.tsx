@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import {
 Activity,
 AlertCircle,
@@ -237,7 +238,7 @@ export function SecretsLeasesPanel({
 }
 
 
-export function FailureAnalysisPanel({
+export const FailureAnalysisPanel = memo(function FailureAnalysisPanel({
   summary,
   status,
   error,
@@ -355,4 +356,4 @@ export function FailureAnalysisPanel({
       )}
     </Panel>
   );
-}
+});
