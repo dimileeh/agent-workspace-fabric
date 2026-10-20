@@ -46,6 +46,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictProtocolError,
     VerdictResult,
 )
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation import (
     PRE_PUSH_VALIDATION_FAILED_REASON,
 )
@@ -435,6 +438,51 @@ async def test_kept_hint_commit_under_an_active_grant_is_not_pushed(
     assert pushes == []
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
+
+
+@pytest.mark.unit
+async def test_rejected_kept_hint_commit_push_does_not_resync_the_commit_away(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked hint's kept-commit push never resets to an advanced remote head.
+
+    The non-fast-forward resync runs ``git reset --hard`` to the remote head, which
+    would drop the commit the park promises to keep while the hint stays
+    ``needs_human``. The push must surface the rejection with the commit intact.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _record_less_hint_runner(
+        factory, tmp_path, monkeypatch, workspace_id=workspace_id, pushes=[]
+    )
+    resync_flags: list[object] = []
+
+    async def _rejected(**kwargs: object) -> _GitPushResult:
+        resync_flags.append(kwargs.get("allow_resync_on_rejection", True))
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="! [rejected] HEAD -> awf/ws (fetch first)",
+            reason_code=_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+        )
+
+    monkeypatch.setattr(runner, "_validated_git_push_result", _rejected)
+    hint = _hint()
+    state = MonitorState(pending_operator_hint=hint)
+
+    result = await _run_cycle(
+        runner, workspace_id=workspace_id, hint=hint, state=state, tmp_path=tmp_path
+    )
+
+    assert resync_flags == [False]
+    assert result.failed is True
+    assert result.terminal_monitor_failure is False
+    assert result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert _HINT_FIX_HEAD[:12] in (state.pending_operator_hint.status_reason or "")
 
 
 @pytest.mark.unit

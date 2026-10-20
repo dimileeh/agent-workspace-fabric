@@ -719,10 +719,11 @@ async def _git_push_result(
         )
 
     if not allow_resync_on_rejection:
-        # The caller (an approve-and-keep operator-hint resume) must KEEP the
-        # preserved protected commit; resyncing here would reset --hard it away
-        # before the grant is consumed. Surface the rejection unrecovered so the
-        # caller re-blocks. ``recovered_by_resync`` stays False — no recovery ran.
+        # The caller (an approve-and-keep operator-hint resume, or a parked hint
+        # pushing its kept commit) must KEEP that commit; resyncing here would
+        # reset --hard it away. Surface the rejection unrecovered so the caller
+        # re-blocks or stays parked. ``recovered_by_resync`` stays False — no
+        # recovery ran.
         _log.warning(
             "monitor.push_rejected_resync_suppressed",
             worktree_path=str(worktree_path),

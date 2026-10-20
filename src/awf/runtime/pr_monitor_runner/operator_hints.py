@@ -723,8 +723,11 @@ async def _run_operator_hint_cycle(
             # to land before the grant is consumed, then no-op the next cycle and
             # wedge the hint at ``monitoring_pr`` where ``guide --grant`` is rejected.
             # Keep the commit and re-block instead (handled below)
-            # (PRRT_kwDOSJAM6s6KZK1v).
-            allow_resync_on_rejection=not active_grant_specs,
+            # (PRRT_kwDOSJAM6s6KZK1v). A parked hint's push suppresses it too: the
+            # reset would drop the kept commit its ``needs_human`` reason promises
+            # to preserve, so the rejection surfaces with the commit intact
+            # (PRRT_kwDOSJAM6s6uPSzO).
+            allow_resync_on_rejection=not active_grant_specs and not hint_parked,
             # Re-arm the terminal guard AFTER pre-push validation: the check above
             # ran before a validation suite (plus its fix passes) that can take
             # minutes, so the PR can go terminal in between
