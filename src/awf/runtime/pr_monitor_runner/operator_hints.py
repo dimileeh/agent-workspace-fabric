@@ -13,7 +13,6 @@ from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
 )
 from awf.control.quality_gates import QualityGateViolation
-from awf.db.enums import FailureReason
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
@@ -34,6 +33,9 @@ from awf.runtime.pr_monitor_runner.comments import MonitorVerdictResult, Verdict
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
+    _agent_verdict_protocol_failure_result,
 )
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint as _finalize_processed_operator_hint,
@@ -887,14 +889,8 @@ async def _operator_hint_agent_error_result(
     other error parks the hint for a human.
     """
     if isinstance(exc, AgentVerdictProtocolError):
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
-            failure_reason=FailureReason.agent_failure,
-        )
+        # Nothing was pushed, so the envelope must not say ``git push`` (#1074).
+        return _agent_verdict_protocol_failure_result(exc)
     if isinstance(exc, ProtectedScopeDiffError):
         push_result = cast(
             _GitPushResult,

@@ -1,4 +1,9 @@
-"""Exact provider-neutral decoder for PR-monitor verdict records."""
+"""Exact provider-neutral decoder for PR-monitor verdict records.
+
+``_parse_verdict_result`` is the protocol contract. ``_last_valid_verdict_record``
+uses the same record syntax but ignores position and count, so callers may act
+on it only behind an evidence gate (#1074).
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ from awf.runtime.pr_monitor_runner.constants import _REDACTION
 
 __all__ = (
     "_final_non_empty_line",
+    "_last_valid_verdict_record",
     "_parse_verdict",
     "_parse_verdict_result",
     "_sanitize_verdict_reason",
@@ -94,6 +100,37 @@ def _final_non_empty_line(stdout: str) -> str | None:
         while end > 0 and stdout[end - 1] == "\r":
             end -= 1
     return None
+
+
+def _last_valid_verdict_record(stdout: str) -> VerdictResult | None:
+    """Return the last valid exact record anywhere in stdout, or ``None``.
+
+    The record line is just as strict as in ``_parse_verdict_result``: the same
+    line-anchored syntax, a non-empty, non-placeholder reason, redaction and the
+    length bound. Only its position and the record count are not checked.
+    Invalid records are skipped, so a trailing template echo is never selected.
+    The scan runs upward with constant additional memory.
+    """
+    end = len(stdout)
+    while True:
+        start = stdout.rfind("\n", 0, end) + 1
+        line_end = end
+        if line_end > start and stdout[line_end - 1] == "\r":
+            line_end -= 1
+        matched = _EXACT_VERDICT.fullmatch(stdout, start, line_end)
+        if matched is not None:
+            reason = _sanitize_verdict_reason(
+                matched.group("reason"),
+                reject_template_placeholders=True,
+            )
+            if reason is not None:
+                return VerdictResult(
+                    verdict=_LABEL_TO_VERDICT[matched.group("label")],
+                    reason=reason,
+                )
+        if start == 0:
+            return None
+        end = start - 1
 
 
 def _count_exact_verdict_records(stdout: str) -> int:

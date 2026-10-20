@@ -120,10 +120,14 @@ async def test_provider_failure_on_the_reattempt_re_arms_the_anchor(
 
 
 @pytest.mark.unit
-async def test_protocol_violation_on_the_reattempt_re_arms_the_anchor(
+async def test_protocol_violation_on_the_reattempt_parks_and_consumes_the_anchor(
     tmp_path: Path,
 ) -> None:
-    """Two malformed answers end this attempt; the item's next pass keeps the anchor."""
+    """Two malformed answers now park the item, which is a verdict (#1074).
+
+    Like every other park, it consumes the anchor. The preserved commits stay at
+    HEAD for the human the park hands the item to.
+    """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -134,10 +138,11 @@ async def test_protocol_violation_on_the_reattempt_re_arms_the_anchor(
     runner.current_head = _PRESERVED_HEAD
     state = _state_after_preserved_timeout()
 
-    with pytest.raises(comment_verdict.AgentVerdictProtocolError):
-        await _invoke_reattempt(runner, state=state)
+    result = await _invoke_reattempt(runner, state=state)
 
-    assert state.threads_addressed_ids[item_start_head_state_key(_ITEM_ID)] == _ITEM_START_HEAD
+    assert result.verdict == "needs_human"
+    assert item_start_head_state_key(_ITEM_ID) not in state.threads_addressed_ids
+    assert runner.current_head == _REATTEMPT_HEAD
 
 
 @pytest.mark.unit

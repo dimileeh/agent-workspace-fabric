@@ -65,10 +65,14 @@ async def _invoke_reattempt(
 
 
 @pytest.mark.unit
-async def test_reattempt_malformed_twice_rolls_back_only_to_the_preserved_head(
+async def test_reattempt_malformed_twice_never_rewinds_the_preserved_head(
     tmp_path: Path,
 ) -> None:
-    """Two protocol violations terminate the item — without losing #932's commits."""
+    """Two protocol violations end the item — without losing #932's commits.
+
+    The item's range holds contentful work, so the park keeps it rather than
+    rolling anything back (#1074). Nothing is rewound past the preserved HEAD.
+    """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -78,12 +82,13 @@ async def test_reattempt_malformed_twice_rolls_back_only_to_the_preserved_head(
     )
     runner.current_head = _PRESERVED_HEAD
 
-    with pytest.raises(comment_verdict.AgentVerdictProtocolError) as caught:
-        await _invoke_reattempt(runner, state=_state_after_preserved_timeout())
+    result = await _invoke_reattempt(runner, state=_state_after_preserved_timeout())
 
-    assert caught.value.reason_code == comment_verdict.AGENT_VERDICT_PROTOCOL_VIOLATION
-    assert runner.reset_targets == [_PRESERVED_HEAD]
-    assert runner.current_head == _PRESERVED_HEAD
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert comment_verdict.AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
+    assert runner.reset_targets == []
+    assert runner.current_head == _REATTEMPT_HEAD
 
 
 @pytest.mark.unit

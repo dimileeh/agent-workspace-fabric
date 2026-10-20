@@ -337,13 +337,25 @@ record cannot be indented, decorated, quoted, fenced, duplicated, or followed
 by output. `FIXED` also requires a verified local (or hosted) HEAD advance for
 that review item.
 
+That strict contract is what agents are told and what AWF checks first. Beyond
+it, evidence decides, not stdout formatting. A valid `FIXED` record followed by
+more output (or by other records) is accepted only when it is the last valid
+record and AWF verifies an item-scoped fix commit for it. On the operator-hint
+path, where `FIXED` may be commit-less, that means a contentful commit made
+since the hint started. A non-`FIXED` record followed by output has no evidence
+AWF can check, so it keeps the strict outcome.
+
 Malformed output and FIXED-without-evidence each receive one immediate generic
-retry for the same item from the same starting HEAD. A second failure terminates
-the monitor as an agent failure with a stable reason code; it does not create a
-PR comment or human escalation. Provider execution failures do not consume this
-correction retry. `FALSE POSITIVE` and `DEFER` resolve without a commit, while a
-valid explicit `NEEDS_HUMAN` record is the only verdict-protocol path that asks
-an operator to intervene.
+retry for the same item from the same starting HEAD. If attempt 0's `FIXED` was
+refused only for missing evidence and the correction prints no record at all,
+the correction inherits that `FIXED`, and the correction's usual evidence gates
+judge it. A correction that still ends without an accepted verdict parks the
+item as `needs_human` with its reason code. A contentful commit the item made
+is kept and cited; otherwise its edits are rolled back first. The batch then
+continues to its normal push and the monitor stays in `monitoring_pr`. Only a
+rollback that itself fails terminates the monitor as an agent failure.
+Provider execution failures do not consume this correction retry.
+`FALSE POSITIVE` and `DEFER` resolve without a commit.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.

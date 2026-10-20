@@ -72,6 +72,18 @@ from awf.runtime.pr_monitor_runner.comment_verdict_entrypoint import (
 from awf.runtime.pr_monitor_runner.comment_verdict_entrypoint import (
     _invoke_cli_for_verdict_result as _invoke_cli_for_verdict_result,
 )
+
+# #1074: evidence decides, not stdout formatting. Re-exported (``X as X``) so a
+# monkeypatch here still reaches the protocol below.
+from awf.runtime.pr_monitor_runner.comment_verdict_evidence_tolerance import (
+    guarded_unscoped_fix_evidence as guarded_unscoped_fix_evidence,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_evidence_tolerance import (
+    park_unaccepted_correction as park_unaccepted_correction,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_evidence_tolerance import (
+    parse_verdict_with_fix_evidence as parse_verdict_with_fix_evidence,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_prelaunch import (
     prepare_item_protocol_anchors,
 )
@@ -280,8 +292,12 @@ async def _run_item_verdict_protocol(
     kept. ``FALSE POSITIVE`` / ``DEFER`` return ``fix_committed`` when
     item-scoped evidence exists, otherwise ``needs_human``; an explicit
     corrected ``NEEDS_HUMAN`` always stays ``needs_human`` so evidence cannot
-    override a requested human gate (#925, issue:5558086911). A FIXED with no
-    contentful change at all still terminates after its one correction. A corrected
+    override a requested human gate (#925, issue:5558086911). Evidence decides,
+    not stdout formatting (#1074): a FIXED record with extra output is accepted
+    only on the attempt's own item-scoped evidence, and a record-less correction
+    inherits attempt 0's evidence-refused FIXED for the gates above. A correction
+    that still ends unaccepted parks the item ``needs_human``, keeping a
+    contentful commit. A corrected
     non-FIXED verdict is accepted only when the correction attempt itself did
     not advance HEAD, commit dirty changes it authored, leave new PR-worthy
     uncommitted residue after a False commit sink, or otherwise mutate relative
@@ -310,7 +326,6 @@ async def _run_item_verdict_protocol(
     timeout_preserve_item_id = (evidence_item_id or "").strip() or None
     timeout_preserve_body_hash = (evidence_body_hash or "").strip() or None
     del evidence_item_id, evidence_body_hash
-    from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
     anchors = await prepare_item_protocol_anchors(
         runner,
@@ -347,11 +362,12 @@ async def _run_item_verdict_protocol(
     # None means the baseline probe failed (fail closed on mutation signals).
     correction_start_residue_fp: str | None = None
     correction_authored_mutation = False
-    # True once attempt 0 has been rejected specifically for missing line-anchored
-    # FIXED evidence. It selects the extra correction prompt context only: every
-    # correction attempt refuses to roll back a self-citing non-fix and re-checks
-    # evidence at path level (#925), whatever rejected attempt 0.
-    fixed_without_evidence_correction = False
+    # Attempt 0's FIXED once it has been rejected specifically for missing
+    # line-anchored evidence. It selects the extra correction prompt context and
+    # is what a record-less correction inherits (#1074); every correction attempt
+    # still refuses to roll back a self-citing non-fix and re-checks evidence at
+    # path level (#925), whatever rejected attempt 0.
+    fixed_without_evidence_verdict: VerdictResult | None = None
     # Set once the rollback floor has been raised past a timeout the service-
     # recovery loop reran over (PRRT_kwDOSJAM6s6fvdil). It holds the ordinary
     # floor as it stood before that raise — never as a rollback target
@@ -1057,7 +1073,12 @@ async def _run_item_verdict_protocol(
 
             protocol_error: AgentVerdictProtocolError | None = None
             try:
-                parsed = _parse_verdict_result(result.stdout)
+                parsed = parse_verdict_with_fix_evidence(
+                    result.stdout,
+                    workspace_id=workspace_id,
+                    fix_evidence=logical_fix_evidence,
+                    inherited=fixed_without_evidence_verdict,
+                )
             except AgentVerdictProtocolError as exc:
                 protocol_error = exc
             else:
@@ -1068,55 +1089,23 @@ async def _run_item_verdict_protocol(
                 ):
                     unscoped_fix_evidence = False
                     if protocol_attempt == 1:
-                        # Anchor-free probe: "did this item commit anything at
-                        # all?", never "is that commit the fix". It only decides
-                        # between preserving the commit and terminating the
-                        # protocol; path membership still cannot buy
-                        # ``fix_committed`` (issue:5558086911).
-                        #
-                        # It re-runs Git ancestry/tree checks after the
-                        # commit-sink evidence handler above has ended, so an
-                        # ordinary rev-parse/ancestry/repository failure would
-                        # escape without rollback or reason-code classification
-                        # and strand the unaccepted correction commit in the
-                        # worktree (PRRT_kwDOSJAM6s6fpjBu). Guard it like the
-                        # correction-end HEAD probe: roll back, then re-raise so
-                        # reason-coded causes reach fix_cycle unmasked.
-                        try:
-                            unscoped_fix_evidence = await _item_fix_evidence(
-                                runner,
-                                worktree_path=worktree_path,
-                                item_start_head=item_start_head,
-                                item_path=None,
-                                item_line=None,
-                                state=state,
-                                dirty_changes_committed=dirty_changes_committed,
-                            )
-                        except Exception as unscoped_exc:
-                            rollback_ok = await _rollback_or_classify_failure(
-                                runner,
-                                workspace_id=workspace_id,
-                                worktree_path=worktree_path,
-                                item_start_head=rollback_floor_head,
-                                item_start_last_push_sha=item_start_last_push_sha,
-                                state=state,
-                            )
-                            if not rollback_ok:
-                                _log.warning(
-                                    "monitor.agent_verdict_unscoped_evidence_rollback_failed",
-                                    workspace_id=workspace_id,
-                                    item_start_head=item_start_head,
-                                    protocol_attempt=protocol_attempt,
-                                    exc_type=type(unscoped_exc).__name__,
-                                )
-                                raise AgentVerdictProtocolError(
-                                    reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                                    message=(
-                                        "Could not roll back unaccepted edits after "
-                                        "unscoped fix-evidence probe failure."
-                                    ),
-                                ) from unscoped_exc
-                            raise
+                        # Anchor-free "did this item commit anything at all?",
+                        # guarded so a probe failure rolls back before re-raising.
+                        unscoped_fix_evidence = await guarded_unscoped_fix_evidence(
+                            runner,
+                            workspace_id=workspace_id,
+                            worktree_path=worktree_path,
+                            item_start_head=item_start_head,
+                            rollback_floor_head=rollback_floor_head,
+                            item_start_last_push_sha=item_start_last_push_sha,
+                            state=state,
+                            dirty_changes_committed=dirty_changes_committed,
+                            protocol_attempt=protocol_attempt,
+                            rollback_failure_message=(
+                                "Could not roll back unaccepted edits after "
+                                "unscoped fix-evidence probe failure."
+                            ),
+                        )
                     if unscoped_fix_evidence:
                         # A contentful commit exists but carries no item-scoped
                         # evidence (wrong file, or the reviewed file away from
@@ -1337,23 +1326,21 @@ async def _run_item_verdict_protocol(
 
             assert protocol_error is not None
             if protocol_attempt == 1:
-                rollback_ok = await _rollback_or_classify_failure(
+                # Keeps a contentful commit or rolls back, then parks the item
+                # instead of failing the workspace; a failed rollback raises.
+                return await park_unaccepted_correction(
                     runner,
                     workspace_id=workspace_id,
                     worktree_path=worktree_path,
-                    item_start_head=rollback_floor_head,
+                    item_start_head=item_start_head,
+                    rollback_floor_head=rollback_floor_head,
                     item_start_last_push_sha=item_start_last_push_sha,
                     state=state,
+                    protocol_error=protocol_error,
+                    dirty_changes_committed=dirty_changes_committed,
+                    rev_parse_head=rev_parse_head,
+                    fallback_tip=attempt_start_head or verified_attempt_tip,
                 )
-                if not rollback_ok:
-                    raise AgentVerdictProtocolError(
-                        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
-                        message=(
-                            "Could not roll back unaccepted edits before "
-                            "terminating after protocol violation."
-                        ),
-                    )
-                raise protocol_error
             # Capture tip only on the protocol-retry path (PRRT_kwDOSJAM6s6eJ2Tm):
             # ``verified_attempt_tip`` is only consumed when correction-start
             # rev-parse fails. Probing before parse discarded valid attempt-0
@@ -1403,12 +1390,12 @@ async def _run_item_verdict_protocol(
                 workspace_id=workspace_id,
                 reason_code=protocol_error.reason_code,
             )
-            fixed_without_evidence_correction = (
-                protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+            fixed_without_evidence_verdict = (
+                parsed if protocol_error.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE else None
             )
             correction_context = (
                 f"\n\n{_FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT}"
-                if fixed_without_evidence_correction
+                if fixed_without_evidence_verdict is not None
                 else ""
             )
             current_prompt = f"{prompt}{correction_context}{_VERDICT_PROTOCOL_CORRECTION_SUFFIX}"
