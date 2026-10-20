@@ -1,6 +1,6 @@
 "use client";
 
-import type { MutableRefObject } from "react";
+import { memo, type MutableRefObject } from "react";
 import { ConsoleWorkspaceTelemetryContainer } from "./console-workspace-telemetry-container";
 
 import type {
@@ -68,8 +68,14 @@ type ConsoleDashboardInspectorProps = {
   onToggleSortDirection: () => void;
 };
 
-/** Selected-workspace inspector body extracted for maintainability line budget. */
-export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps) {
+/**
+ * Selected-workspace inspector body extracted for maintainability line budget.
+ * Memoized with stable parent callbacks so dashboard renders that leave its
+ * props unchanged (URL sync, live-stream status, fleet polls) skip the pane.
+ */
+export const ConsoleDashboardInspector = memo(function ConsoleDashboardInspector(
+  props: ConsoleDashboardInspectorProps,
+) {
   const {
     selectedId,
     selectedOverview,
@@ -179,4 +185,4 @@ export function ConsoleDashboardInspector(props: ConsoleDashboardInspectorProps)
       </PanelContext.Provider>
     </WorkspaceInspector>
   );
-}
+});

@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import type { WorkspaceOverview } from "@/lib/types";
 import type { SortDirection, WorkspaceSortKey } from "./console-dashboard-shared";
 import {
@@ -46,8 +47,13 @@ type ConsoleDashboardWorkspaceRailProps = {
   onOpenLogs: (workspaceId: string) => void;
 };
 
-/** Left-rail filters + multi-select toolbar + workspace list. */
-export function ConsoleDashboardWorkspaceRail(props: ConsoleDashboardWorkspaceRailProps) {
+/**
+ * Left-rail filters + multi-select toolbar + workspace list. Memoized so
+ * inspector-only dashboard renders do not rebuild the whole result window.
+ */
+export const ConsoleDashboardWorkspaceRail = memo(function ConsoleDashboardWorkspaceRail(
+  props: ConsoleDashboardWorkspaceRailProps,
+) {
   return (
     <aside
       id="awf-workspaces"
@@ -98,4 +104,4 @@ export function ConsoleDashboardWorkspaceRail(props: ConsoleDashboardWorkspaceRa
       />
     </aside>
   );
-}
+});
