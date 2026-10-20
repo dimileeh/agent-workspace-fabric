@@ -250,6 +250,7 @@ async def park_unaccepted_correction(
             worktree_path=worktree_path,
             kept_tip=live_tip,
             reason_code=reason_code,
+            rev_parse_head=rev_parse_head,
         )
         preserved_tip = live_tip or fallback_tip
         _log.warning(
@@ -305,6 +306,7 @@ async def _clean_edits_above_kept_commit(
     worktree_path: Path,
     kept_tip: str | None,
     reason_code: str,
+    rev_parse_head: object,
 ) -> None:
     """Discard uncommitted edits left above a kept commit, keeping the commit.
 
@@ -317,11 +319,13 @@ async def _clean_edits_above_kept_commit(
     ``state``: HEAD does not move, and neither the hosted remote nor push
     tracking is rewound past the kept commit. An unreadable or raising residue
     probe fails closed into the clean (PRRT_kwDOSJAM6s6uOogH). With no path
-    residue, the item-start Git config is still restored (PRRT_kwDOSJAM6s6uO5Xk).
-    Both the clean and that restore need a saved item-start baseline
-    (PRRT_kwDOSJAM6s6uPByi). An unreadable tip, a failed clean, a missing
-    baseline or a failed config restore raises the typed terminal error, because
-    the worktree state is then unknown.
+    residue, the item-start Git config is still restored (PRRT_kwDOSJAM6s6uO5Xk),
+    and HEAD is re-read after it, because restored linkage can retarget HEAD
+    (PRRT_kwDOSJAM6s6uPDnk). Both the clean and that restore need a saved
+    item-start baseline (PRRT_kwDOSJAM6s6uPByi). An unreadable tip, a failed
+    clean, a missing baseline, a failed config restore or a HEAD that left the
+    kept tip raises the typed terminal error, because the worktree state is then
+    unknown.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
@@ -357,13 +361,31 @@ async def _clean_edits_above_kept_commit(
         # Config-only residue is just a ``git-meta:`` line, which the path check
         # ignores, so no clean runs. Restore the item-start Git config anyway so
         # ``include.path`` or ``url.*.insteadOf`` cannot reach the next item or
-        # the push (PRRT_kwDOSJAM6s6uO5Xk). The restore never touches HEAD.
+        # the push (PRRT_kwDOSJAM6s6uO5Xk). The restore also rewrites the
+        # gitfile, ``commondir`` and nested linkage, so HEAD can then resolve in
+        # a git-dir without the kept commit. Re-read it under the same lock, as
+        # the rollback does, and keep the commit only while HEAD is still the
+        # kept tip (PRRT_kwDOSJAM6s6uPDnk).
+        restored_tip: str | None = None
         async with _comment_verdict.hold_exclusive_worktree_writer_lock(worktree_path):
-            git_config_restored = has_git_config_baseline and restore_item_start_local_git_configs(
-                worktree_path
+            if has_git_config_baseline and restore_item_start_local_git_configs(worktree_path):
+                restored_tip = await _comment_verdict.preserved_correction_tip(
+                    runner,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    rev_parse_head=rev_parse_head,
+                    fallback=None,
+                )
+        if kept_tip is not None and restored_tip is not None:
+            if restored_tip.lower() == kept_tip.lower():
+                return
+            _log.warning(
+                "monitor.agent_verdict_correction_unaccepted_git_config_restore_moved_head",
+                workspace_id=workspace_id,
+                reason_code=reason_code,
+                attempt_tip=kept_tip,
+                live_head=restored_tip,
             )
-        if git_config_restored:
-            return
     elif (
         kept_tip is not None
         and has_git_config_baseline

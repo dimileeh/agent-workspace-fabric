@@ -286,6 +286,69 @@ async def test_a_failed_git_config_restore_above_a_kept_commit_is_typed_terminal
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("live_head", ["moved", "unreadable"])
+async def test_a_git_config_restore_that_loses_the_kept_commit_at_head_is_typed_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_head: str,
+) -> None:
+    """PRRT_kwDOSJAM6s6uPDnk: HEAD is re-read after the config-only restore.
+
+    The restore also rewrites the gitfile, ``commondir`` and nested linkage, so
+    HEAD can then resolve in a git-dir that does not hold the kept commit.
+    Parking with ``kept_commit`` would let the push publish that repository
+    instead of the kept tip, so a moved or unverifiable HEAD stays terminal.
+    """
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    runner = _committed_runner(tmp_path, [F3, F3])
+    restore_calls: list[Path] = []
+    moved_head = "c" * 40
+
+    def _restore(worktree_path: Path) -> bool:
+        restore_calls.append(worktree_path)
+        if live_head == "moved":
+            runner.current_head = moved_head
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint."
+        "restore_item_start_local_git_configs",
+        _restore,
+    )
+    if live_head == "unreadable":
+
+        async def _unreadable_tip(_runner: object, **kwargs: object) -> str | None:
+            return kwargs["fallback"]  # type: ignore[return-value]
+
+        monkeypatch.setattr(comment_verdict, "preserved_correction_tip", _unreadable_tip)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke_item(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "terminating after protocol violation" in str(caught.value)
+    assert clean_calls == []
+    assert restore_calls == [tmp_path / "ws_protocol"]
+    assert runner.reset_targets == []
+    moved = _events(
+        captured, "monitor.agent_verdict_correction_unaccepted_git_config_restore_moved_head"
+    )
+    if live_head == "moved":
+        assert len(moved) == 1
+        assert moved[0]["attempt_tip"] == _FIX_HEAD
+        assert moved[0]["live_head"] == moved_head
+    else:
+        assert moved == []
+    failed = _events(
+        captured, "monitor.agent_verdict_correction_unaccepted_leftover_edits_clean_failed"
+    )
+    assert len(failed) == 1
+
+
+@pytest.mark.unit
 async def test_config_only_residue_without_an_item_start_git_config_baseline_is_typed_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
