@@ -1176,6 +1176,13 @@ export function ConsoleDashboard() {
     [],
   );
 
+  // Before the memo, the inspector re-rendered with every dashboard render, so
+  // its relative ages advanced on each poll. Keep that cadence explicitly.
+  const inspectorRefreshTick = useMemo(
+    () => [lastRefresh, dashboardSummary, resourceSaturation, workspaceSummary, cloudRuntime, mergeQueue, failureSummary] as const,
+    [lastRefresh, dashboardSummary, resourceSaturation, workspaceSummary, cloudRuntime, mergeQueue, failureSummary],
+  );
+
   const refreshDashboard = useCallback(() => {
     startTransition(() => {
       void (async () => {
@@ -1325,7 +1332,7 @@ export function ConsoleDashboard() {
         logTailSignal={logTailSignal}
         logTailRefreshError={logTailRefreshError}
         workspaceDetailError={workspaceDetailError}
-        lastRefresh={lastRefresh}
+        refreshTick={inspectorRefreshTick}
         onClose={closeInspector}
         onRefresh={refreshDashboard}
         onRetry={retryInspectorWorkspace}

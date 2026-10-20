@@ -56,10 +56,10 @@ type ConsoleDashboardInspectorProps = {
   logTailSignal: number;
   logTailRefreshError: string | null;
   workspaceDetailError: string | null;
-  // Not read here: re-renders the memoized pane on each dashboard refresh so its
-  // relative ages ("Blocked for …", preflight "checked …") keep advancing while
-  // the overview row is unchanged and the detail feed keeps failing.
-  lastRefresh: Date | null;
+  // Not read here: changes whenever a polled dashboard feed delivers, so the
+  // memoized pane's relative ages ("Blocked for …", preflight "checked …") keep
+  // advancing while the overview row is unchanged and the detail feed keeps failing.
+  refreshTick: readonly unknown[];
   onClose: () => void;
   onRefresh: () => void;
   onRetry: () => void;

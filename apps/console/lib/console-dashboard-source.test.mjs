@@ -751,13 +751,27 @@ test("dashboard panes are memoized away from renders that leave their props unch
   );
   // The memoized inspector renders relative ages ("Blocked for …", preflight
   // "checked …"). A retained overview row keeps its identity and a failing detail
-  // feed keeps its error, so the refresh tick must still re-render the pane.
-  assert.match(inspector, /lastRefresh: Date \| null;/);
+  // feed keeps its error, so any polled feed delivering must still re-render the
+  // pane, as it did when the inspector rendered with every dashboard render.
+  assert.match(inspector, /refreshTick: readonly unknown\[\];/);
   const inspectorJsx = dashboard.slice(
     dashboard.indexOf("<ConsoleDashboardInspector"),
     dashboard.indexOf("/>", dashboard.indexOf("<ConsoleDashboardInspector")),
   );
-  assert.match(inspectorJsx, /lastRefresh=\{lastRefresh\}/);
+  assert.match(inspectorJsx, /refreshTick=\{inspectorRefreshTick\}/);
+  const tick = dashboard.match(/const inspectorRefreshTick = useMemo\(\s*\(\) => \[([^\]]*)\][^,]*,\s*\[([^\]]*)\]/);
+  assert.ok(tick, "Expected a memoized inspector refresh tick");
+  for (const feed of [
+    "lastRefresh",
+    "dashboardSummary",
+    "resourceSaturation",
+    "workspaceSummary",
+    "cloudRuntime",
+    "mergeQueue",
+    "failureSummary",
+  ]) {
+    assert.match(tick[2], new RegExp(`\\b${feed}\\b`), `Expected ${feed} to advance the inspector tick`);
+  }
 });
 
 test("capacity panel memoizes its snapshot body and keeps the generated age live", () => {
