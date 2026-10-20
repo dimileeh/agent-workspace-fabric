@@ -38,7 +38,8 @@ AWF never accepts a verdict it has no evidence to check.
   end-of-batch push; an operator hint pushes a kept commit through its own
   guarded push and stays parked. A rollback that itself fails still raises, and
   so does an item with no known floor or no local worktree, where no rollback
-  could run.
+  could run. An unexpected error after such a rollback parks the item too
+  (``comment_verdict_item_unexpected_error``, #1076).
 
 Sibling modules (``helpers_verdict``, ``helpers``, ``comment_verdict``) are
 resolved at call time. ``comment_verdict`` imports this module at load time, and
@@ -143,9 +144,11 @@ async def guarded_unscoped_fix_evidence(
     handler has ended. Unguarded, an ordinary rev-parse, ancestry or repository
     failure would escape without rollback or reason-code classification, and it
     would strand the unaccepted correction commit in the worktree
-    (PRRT_kwDOSJAM6s6fpjBu). So on failure, roll back first and then re-raise,
-    so reason-coded causes reach ``fix_cycle`` unmasked. A rollback that itself
-    fails raises the typed protocol error, chained to the probe failure.
+    (PRRT_kwDOSJAM6s6fpjBu). So on failure, roll back first. A cause with a
+    dedicated upstream handler is then re-raised unchanged, so its reason code
+    still reaches that handler; any other cause parks the item (#1076). A
+    rollback that itself fails raises the typed protocol error, chained to the
+    probe failure.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
 
@@ -180,7 +183,9 @@ async def guarded_unscoped_fix_evidence(
                 reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
                 message=rollback_failure_message,
             ) from unscoped_exc
-        raise
+        _comment_verdict.reraise_or_park_item(
+            unscoped_exc, "unscoped_fix_evidence_probe", rollback_floor_head, worktree_path
+        )
 
 
 async def park_unaccepted_correction(

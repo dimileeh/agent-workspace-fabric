@@ -24,7 +24,7 @@ import pytest
 import structlog
 
 from awf.common.github_client import RepoRef
-from awf.runtime.pr_monitor import ReviewThread
+from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner import (
     comment_verdict,
     comment_verdict_correction,
@@ -34,7 +34,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     _FIXED_WITHOUT_EVIDENCE_CORRECTION_CONTEXT,
     AGENT_NON_FIX_CITES_OWN_COMMIT,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.comments import _address_thread
+from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -61,7 +65,11 @@ def _thread(thread_id: str) -> ReviewThread:
     )
 
 
-async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
+async def _address(
+    runner: _VerdictRunner,
+    thread: ReviewThread,
+    state: MonitorState | None = None,
+) -> str:
     return await _address_thread(
         runner,  # type: ignore[arg-type]
         workspace_id="ws_protocol",
@@ -70,6 +78,7 @@ async def _address(runner: _VerdictRunner, thread: ReviewThread) -> str:
         thread=thread,
         compose_project="awf_ws_protocol",
         compose_file=Path("compose.yml"),
+        state=state,
         operation_start_head=_ITEM_START_HEAD,
     )
 
@@ -209,15 +218,16 @@ async def test_correction_needs_human_with_path_level_evidence_stays_needs_human
 
 
 @pytest.mark.unit
-async def test_path_level_probe_failure_rolls_back_under_the_sink_handler(
+async def test_path_level_probe_failure_rolls_back_then_parks_the_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The path-level probe shares the commit sink's rollback handling.
 
     It runs inside the same ``try`` as the line-anchored check, so an ordinary
-    Git failure rolls the unaccepted correction commit back to item start and
-    propagates unmasked instead of stranding it in the worktree.
+    Git failure rolls the unaccepted correction commit back to item start
+    instead of stranding it in the worktree. The rollback succeeded, so the
+    item then parks instead of failing the workspace (#1076).
     """
     (tmp_path / "ws_protocol").mkdir()
     real_evidence = comment_verdict._item_fix_evidence
@@ -241,9 +251,17 @@ async def test_path_level_probe_failure_rolls_back_under_the_sink_handler(
         line_touched=False,
     )
 
-    with pytest.raises(OSError, match="git rev-parse spawn failed"):
-        await _address(runner, _thread("thread_path_level_probe_raises"))
+    state = MonitorState()
 
+    verdict = await _address(runner, _thread("thread_path_level_probe_raises"), state)
+
+    assert verdict == "needs_human"
+    parked_reason = state.threads_addressed_ids[
+        _needs_human_reason_state_key("thread_path_level_probe_raises")
+    ]
+    assert parked_reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: OSError at commit_sink "
+    )
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
 

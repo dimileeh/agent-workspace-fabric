@@ -84,6 +84,12 @@ from awf.runtime.pr_monitor_runner.comment_verdict_evidence_tolerance import (
 from awf.runtime.pr_monitor_runner.comment_verdict_evidence_tolerance import (
     parse_verdict_with_fix_evidence as parse_verdict_with_fix_evidence,
 )
+
+# #1076: after a successful rollback an untyped error parks the item. Re-exported
+# (``X as X``) so the sibling sites resolve it through this module.
+from awf.runtime.pr_monitor_runner.comment_verdict_item_unexpected_error import (
+    reraise_or_park_item as reraise_or_park_item,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_prelaunch import (
     prepare_item_protocol_anchors,
 )
@@ -797,7 +803,7 @@ async def _run_item_verdict_protocol(
                         mirror_path=mirror_path,
                         stage="after_comment_agent_exception",
                     )
-                raise
+                reraise_or_park_item(exc, "agent_invocation", rollback_floor_head, worktree_path)
 
             if compose_cleanup_error is not None:
                 # Sinks the dirty worktree, rolls back to the attempt floor, then
@@ -1044,8 +1050,8 @@ async def _run_item_verdict_protocol(
                 # ``_commit_dirty_worktree`` / ``_item_fix_evidence`` can raise untyped
                 # failures (for example repository/session errors from supply-chain
                 # policy refresh) after the agent has already edited the worktree. Roll
-                # back before propagating so unaccepted residue does not wedge remonitor
-                # or get pushed later.
+                # back first, then park the item unless the cause has a dedicated
+                # upstream handler, so residue never wedges remonitor (#1076).
                 rollback_ok = await _rollback_unaccepted_protocol_retry_changes(
                     runner,
                     workspace_id=workspace_id,
@@ -1069,7 +1075,7 @@ async def _run_item_verdict_protocol(
                             "commit sink failure."
                         ),
                     ) from exc
-                raise
+                reraise_or_park_item(exc, "commit_sink", rollback_floor_head, worktree_path)
 
             protocol_error: AgentVerdictProtocolError | None = None
             try:
@@ -1382,7 +1388,9 @@ async def _run_item_verdict_protocol(
                                 "post-attempt tip probe failure."
                             ),
                         ) from tip_exc
-                    raise
+                    reraise_or_park_item(
+                        tip_exc, "post_attempt_tip_probe", rollback_floor_head, worktree_path
+                    )
                 if tip_after_attempt:
                     verified_attempt_tip = tip_after_attempt
             _log.warning(
