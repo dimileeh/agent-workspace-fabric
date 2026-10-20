@@ -323,6 +323,44 @@ async def test_config_only_residue_without_an_item_start_git_config_baseline_is_
 
 
 @pytest.mark.unit
+async def test_leftover_edits_without_an_item_start_git_config_baseline_are_typed_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6uPByi: the path-residue clean needs the baseline too.
+
+    The clean restores item-start Git config before resetting paths, and that
+    restore also reports success with no saved baseline. Cleaning the paths
+    would then let an agent-added ``include.path`` reach the next item or the
+    push, so it fails closed before the clean.
+    """
+
+    def _snapshot_fails(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    runner = _stranded_commit_runner(tmp_path)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke_item(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert clean_calls == []
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+    assert _events(captured, _LEFTOVER_CLEANED_EVENT) == []
+    failed = _events(
+        captured, "monitor.agent_verdict_correction_unaccepted_leftover_edits_clean_failed"
+    )
+    assert len(failed) == 1
+    assert failed[0]["attempt_tip"] == _FIX_HEAD
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("failure", ["clean_fails", "tip_unreadable"])
 async def test_leftover_edits_that_cannot_be_cleaned_are_typed_terminal(
     tmp_path: Path,

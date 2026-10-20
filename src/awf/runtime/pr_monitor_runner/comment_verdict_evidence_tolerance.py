@@ -317,10 +317,11 @@ async def _clean_edits_above_kept_commit(
     ``state``: HEAD does not move, and neither the hosted remote nor push
     tracking is rewound past the kept commit. An unreadable or raising residue
     probe fails closed into the clean (PRRT_kwDOSJAM6s6uOogH). With no path
-    residue, the item-start Git config is still restored (PRRT_kwDOSJAM6s6uO5Xk),
-    which needs a saved item-start baseline (PRRT_kwDOSJAM6s6uPByi). An
-    unreadable tip, a failed clean, a missing baseline or a failed config restore
-    raises the typed terminal error, because the worktree state is then unknown.
+    residue, the item-start Git config is still restored (PRRT_kwDOSJAM6s6uO5Xk).
+    Both the clean and that restore need a saved item-start baseline
+    (PRRT_kwDOSJAM6s6uPByi). An unreadable tip, a failed clean, a missing
+    baseline or a failed config restore raises the typed terminal error, because
+    the worktree state is then unknown.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
@@ -348,25 +349,31 @@ async def _clean_edits_above_kept_commit(
             exc_type=type(probe_exc).__name__,
         )
         residue_fp = None
+    # Without a saved baseline the item-start Git config restore is a no-op that
+    # still reports success, on its own and inside the clean, so it proves
+    # nothing and fails closed (PRRT_kwDOSJAM6s6uPByi).
+    has_git_config_baseline = item_start_has_local_git_config_snapshot(worktree_path)
     if residue_fp is not None and not _fingerprint_has_pr_worthy_path_residue(residue_fp):
         # Config-only residue is just a ``git-meta:`` line, which the path check
         # ignores, so no clean runs. Restore the item-start Git config anyway so
         # ``include.path`` or ``url.*.insteadOf`` cannot reach the next item or
-        # the push (PRRT_kwDOSJAM6s6uO5Xk). The restore never touches HEAD. With
-        # no saved baseline the restore is a no-op that still reports success, so
-        # it proves nothing and fails closed (PRRT_kwDOSJAM6s6uPByi).
+        # the push (PRRT_kwDOSJAM6s6uO5Xk). The restore never touches HEAD.
         async with _comment_verdict.hold_exclusive_worktree_writer_lock(worktree_path):
-            git_config_restored = item_start_has_local_git_config_snapshot(
+            git_config_restored = has_git_config_baseline and restore_item_start_local_git_configs(
                 worktree_path
-            ) and restore_item_start_local_git_configs(worktree_path)
+            )
         if git_config_restored:
             return
-    elif kept_tip is not None and await _comment_verdict._rollback_or_classify_failure(
-        runner,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        item_start_head=kept_tip,
-        state=None,
+    elif (
+        kept_tip is not None
+        and has_git_config_baseline
+        and await _comment_verdict._rollback_or_classify_failure(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            item_start_head=kept_tip,
+            state=None,
+        )
     ):
         _log.warning(
             "monitor.agent_verdict_correction_unaccepted_leftover_edits_cleaned",
