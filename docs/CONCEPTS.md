@@ -355,8 +355,9 @@ the correction inherits that `FIXED` (unless it names a non-`FIXED` verdict in
 any form), and the correction's usual evidence gates judge it. A correction
 that still ends without an accepted verdict parks the item as `needs_human`
 with its reason code. A contentful commit the item made is kept and cited,
-and edits left uncommitted above it are cleaned so the next item cannot absorb
-them; otherwise its edits are rolled back first. The batch then continues to its
+edits left uncommitted above it are cleaned, and its item-start local Git
+config is restored, so the next item cannot absorb them; otherwise its edits
+are rolled back first. The batch then continues to its
 normal push and the monitor stays in `monitoring_pr`. An operator hint parked
 this way pushes its kept commit through the same guarded push and stays
 `needs_human`, unless an approve-and-keep grant is active. Only a rollback or

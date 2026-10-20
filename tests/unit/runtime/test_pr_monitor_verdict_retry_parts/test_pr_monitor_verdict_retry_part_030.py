@@ -211,6 +211,80 @@ async def test_a_clean_worktree_above_a_kept_commit_needs_no_clean(
     assert clean_calls == []
 
 
+def _spy_git_config_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    restore_ok: bool,
+) -> list[Path]:
+    """Record item-start Git config restores; each returns ``restore_ok``."""
+    calls: list[Path] = []
+
+    def _restore(worktree_path: Path) -> bool:
+        calls.append(worktree_path)
+        return restore_ok
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint."
+        "restore_item_start_local_git_configs",
+        _restore,
+    )
+    return calls
+
+
+@pytest.mark.unit
+async def test_config_only_residue_above_a_kept_commit_restores_the_item_start_git_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6uO5Xk: a ``git-meta:``-only fingerprint still restores Git config.
+
+    Config-only residue carries no path residue, so no clean runs, but settings
+    such as ``include.path`` or ``url.*.insteadOf`` must not reach the next item
+    or the push. HEAD and the kept commit stay put.
+    """
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    restore_calls = _spy_git_config_restore(monkeypatch, restore_ok=True)
+    runner = _committed_runner(tmp_path, [F3, F3])
+
+    result = await _invoke_item(runner)
+
+    assert result.verdict == "needs_human"
+    assert result.kept_commit is True
+    assert clean_calls == []
+    assert restore_calls == [tmp_path / "ws_protocol"]
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+
+
+@pytest.mark.unit
+async def test_a_failed_git_config_restore_above_a_kept_commit_is_typed_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrestorable Git config leaves the worktree state unknown, so it stays terminal."""
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    restore_calls = _spy_git_config_restore(monkeypatch, restore_ok=False)
+    runner = _committed_runner(tmp_path, [F3, F3])
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke_item(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "terminating after protocol violation" in str(caught.value)
+    assert clean_calls == []
+    assert len(restore_calls) == 1
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+    failed = _events(
+        captured, "monitor.agent_verdict_correction_unaccepted_leftover_edits_clean_failed"
+    )
+    assert len(failed) == 1
+    assert failed[0]["attempt_tip"] == _FIX_HEAD
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("failure", ["clean_fails", "tip_unreadable"])
 async def test_leftover_edits_that_cannot_be_cleaned_are_typed_terminal(

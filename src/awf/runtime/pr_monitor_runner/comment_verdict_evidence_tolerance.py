@@ -316,13 +316,15 @@ async def _clean_edits_above_kept_commit(
     other unaccepted path. The rollback targets the live kept tip with no
     ``state``: HEAD does not move, and neither the hosted remote nor push
     tracking is rewound past the kept commit. An unreadable or raising residue
-    probe fails closed into the clean (PRRT_kwDOSJAM6s6uOogH). An unreadable tip
-    or a failed clean raises the typed terminal error, because the worktree state
-    is then unknown.
+    probe fails closed into the clean (PRRT_kwDOSJAM6s6uOogH). With no path
+    residue, the item-start Git config is still restored (PRRT_kwDOSJAM6s6uO5Xk).
+    An unreadable tip, a failed clean or a failed config restore raises the typed
+    terminal error, because the worktree state is then unknown.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
         _fingerprint_has_pr_worthy_path_residue,
+        restore_item_start_local_git_configs,
     )
 
     residue_fp: str | None
@@ -345,8 +347,15 @@ async def _clean_edits_above_kept_commit(
         )
         residue_fp = None
     if residue_fp is not None and not _fingerprint_has_pr_worthy_path_residue(residue_fp):
-        return
-    if kept_tip is not None and await _comment_verdict._rollback_or_classify_failure(
+        # Config-only residue is just a ``git-meta:`` line, which the path check
+        # ignores, so no clean runs. Restore the item-start Git config anyway so
+        # ``include.path`` or ``url.*.insteadOf`` cannot reach the next item or
+        # the push (PRRT_kwDOSJAM6s6uO5Xk). The restore never touches HEAD.
+        async with _comment_verdict.hold_exclusive_worktree_writer_lock(worktree_path):
+            git_config_restored = restore_item_start_local_git_configs(worktree_path)
+        if git_config_restored:
+            return
+    elif kept_tip is not None and await _comment_verdict._rollback_or_classify_failure(
         runner,
         workspace_id=workspace_id,
         worktree_path=worktree_path,
