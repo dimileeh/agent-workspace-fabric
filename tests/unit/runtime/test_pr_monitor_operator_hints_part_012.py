@@ -14,24 +14,40 @@ failing the workspace.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.control.quality_gates import GrantSpec
-from awf.db.enums import FailureReason
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import MonitorState, OperatorHint
+from awf.runtime.operator_hints import OPERATOR_HINT_STATE_KEY, persist_operator_hint
+from awf.runtime.pr_monitor import (
+    AddressOperatorHint,
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    OperatorHint,
+    PRStatus,
+)
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictProtocolError,
     VerdictResult,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation import (
+    PRE_PUSH_VALIDATION_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
@@ -419,3 +435,87 @@ async def test_kept_hint_commit_under_an_active_grant_is_not_pushed(
     assert pushes == []
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
+
+
+@pytest.mark.unit
+async def test_parked_hint_whose_kept_commit_push_fails_stays_parked_durably(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed kept-commit push records the failure and still persists the park.
+
+    The hint was parked before the push. A non-terminal push failure (pre-push
+    validation on the unaccepted commit) must not leave that park only in memory,
+    or a worker restart reloads the hint as ``pending`` and re-runs its agent.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _record_less_hint_runner(
+        factory, tmp_path, monkeypatch, workspace_id=workspace_id, pushes=[]
+    )
+
+    async def _validation_failed(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="pre-push validation failed",
+            reason_code=PRE_PUSH_VALIDATION_FAILED_REASON,
+        )
+
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validation_failed)
+    hint = _hint()
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = persist_operator_hint({}, hint)
+        await session.commit()
+    state = MonitorState(pending_operator_hint=hint)
+
+    handled = await runner._execute(  # type: ignore[attr-defined]
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=PRStatus(
+            number=42,
+            head_sha=_START_HEAD,
+            mergeable=MergeableState.MERGEABLE,
+            check_state=CheckState.SUCCESS,
+            unresolved_inline_threads=(),
+            unresolved_review_comments=(),
+            base_behind_count=0,
+            merge_state_status=MergeStateStatus.CLEAN,
+        ),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is False
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(workspace_id)
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert persisted is not None
+    assert persisted.status == WorkspaceStatus.monitoring_pr.value
+    persisted_hint = json.loads(dict(persisted.monitor_threads_addressed)[OPERATOR_HINT_STATE_KEY])
+    assert persisted_hint["status"] == "needs_human"
+    assert AGENT_VERDICT_PROTOCOL_VIOLATION in persisted_hint["status_reason"]
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result["reason_code"] == PRE_PUSH_VALIDATION_FAILED_REASON
