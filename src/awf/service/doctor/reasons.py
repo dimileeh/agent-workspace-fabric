@@ -81,6 +81,21 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("AGENT_NON_FIXED_WITH_MUTATION"),
     ),
+    "AGENT_VERDICT_ITEM_UNEXPECTED_ERROR": _ReasonText(
+        "An unexpected error ended a PR monitor review item after its edits were rolled back.",
+        (
+            "Read the parked item's reason for the failing step, exception type and rollback "
+            "floor. Fix the underlying Git, filesystem or repository fault, then guide or "
+            "remonitor the workspace."
+        ),
+        (
+            "A Git spawn, filesystem, timeout or repository/session error with no dedicated "
+            "monitor handler was raised while the item ran. AWF rolled the item back to its "
+            "attempt floor and parked it as needs_human instead of failing the workspace."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("AGENT_VERDICT_ITEM_UNEXPECTED_ERROR"),
+    ),
     "AGENT_VERDICT_PROTOCOL_VIOLATION": _ReasonText(
         "The PR monitor agent did not emit a valid machine-readable verdict record.",
         (

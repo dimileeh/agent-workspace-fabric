@@ -362,7 +362,17 @@ normal push and the monitor stays in `monitoring_pr`. An operator hint parked
 this way pushes its kept commit through the same guarded push and stays
 `needs_human`, unless an approve-and-keep grant is active. Only a rollback or
 cleanup that fails, or an item with no known start HEAD or local worktree to
-roll back, still terminates the monitor as an agent failure. Provider execution
+roll back, still terminates the monitor as an agent failure. Once an item's
+rollback has succeeded, an unexpected error does not fail the workspace either.
+An untyped failure (a Git spawn or filesystem error, a timeout, a repository or
+session error) that ends the item after its unaccepted edits were rolled back
+parks it as `needs_human` with `AGENT_VERDICT_ITEM_UNEXPECTED_ERROR`. The reason
+names the failing step, the exception type, a redacted message and the rollback
+floor. On the operator-hint path it is an ordinary parked hint with no kept
+commit. Errors that have their own monitor handler (reason-coded infrastructure
+exits, provider recovery, protected-scope and compose-cleanup failures, verdict
+protocol and provider execution errors) still reach that handler unchanged, and
+cancellation always propagates. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
 without a commit.
 
