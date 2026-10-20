@@ -15,7 +15,6 @@ Loader2,
 Server
 } from "lucide-react";
 import {
-memo,
 useMemo,
 useState
 } from "react";
@@ -153,7 +152,7 @@ export function CloudRuntimePanel({
   );
 }
 
-export const ReliabilityPanel = memo(function ReliabilityPanel({
+export function ReliabilityPanel({
   workspaceSummary,
   error,
   stale = false,
@@ -197,7 +196,7 @@ export const ReliabilityPanel = memo(function ReliabilityPanel({
       </div>
     </Panel>
   );
-});
+}
 
 export function ResourceCapacityPanel({
   saturation,
@@ -414,7 +413,7 @@ function localCapacityDetail(source: LocalCapacitySourceValue | null): string {
   }
 }
 
-export const MergeQueuePanel = memo(function MergeQueuePanel({
+export function MergeQueuePanel({
   items,
   hasMore,
   status,
@@ -498,7 +497,7 @@ export const MergeQueuePanel = memo(function MergeQueuePanel({
       )}
     </Panel>
   );
-});
+}
 
 export function MergeQueueRow({
   item,
@@ -886,7 +885,7 @@ export function satisfiedTierTone(label: string): ReturnType<typeof statusTone> 
   return "neutral";
 }
 
-export const StatusCountStrip = memo(function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
+export function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
   const items: [string, string, number][] = [
     ["requested", "requested", counts.requested],
     ["provisioning", "provisioning", counts.provisioning],
@@ -916,9 +915,9 @@ export const StatusCountStrip = memo(function StatusCountStrip({ counts }: { cou
       })}
     </div>
   );
-});
+}
 
-export const LaneMeter = memo(function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
+export function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
   const hasFiniteLimit = lane.limit > 0;
   const fill = hasFiniteLimit ? Math.min(100, Math.max(0, (lane.in_use / lane.limit) * 100)) : 0;
   const saturated = hasFiniteLimit && lane.in_use >= lane.limit;
@@ -941,9 +940,9 @@ export const LaneMeter = memo(function LaneMeter({ label, lane }: { label: strin
       </div>
     </div>
   );
-});
+}
 
-export const ResourceDimensionMeter = memo(function ResourceDimensionMeter({
+export function ResourceDimensionMeter({
   label,
   dimension,
   unit,
@@ -977,7 +976,7 @@ export const ResourceDimensionMeter = memo(function ResourceDimensionMeter({
       {safeDimension.reason_code ? <div className="mono mt-1 truncate text-[11px]">{safeDimension.reason_code}</div> : null}
     </div>
   );
-});
+}
 
 export function LifecycleRail({
   status,

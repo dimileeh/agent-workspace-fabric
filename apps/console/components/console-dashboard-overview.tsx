@@ -133,7 +133,7 @@ export function TopBar({
   );
 }
 
-export const PreferenceControls = memo(function PreferenceControls({
+export function PreferenceControls({
   preferences,
   onChange,
 }: {
@@ -190,7 +190,7 @@ export const PreferenceControls = memo(function PreferenceControls({
       </PreferenceButton>
     </div>
   );
-});
+}
 
 export function PreferenceButton({
   label,
@@ -253,7 +253,7 @@ export type FleetKpi = {
 // "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
 // KPIs dim per source (saturation vs reliability summary) so only the actually
 // stale values fade, while the warning above stays at full opacity.
-export const FleetHealthStrip = memo(function FleetHealthStrip({
+export function FleetHealthStrip({
   kpis,
   error,
   lastSuccessAt,
@@ -301,7 +301,7 @@ export const FleetHealthStrip = memo(function FleetHealthStrip({
       </div>
     </div>
   );
-});
+}
 
 const NAV_ITEMS: {
   id: string;

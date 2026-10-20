@@ -36,7 +36,6 @@ import type {
   FailureSummaryResponse,
 MergeQueueItem,
 ResourceSaturationSummary,
-WorkspaceOperatorAction,
 WorkspaceOverview,
 WorkspaceReliabilitySummary,
 } from "@/lib/types";
@@ -1146,37 +1145,7 @@ export function ConsoleDashboard() {
   const mergeStale = mergeErrored && mergeQueue.length > 0;
   const failureStale = failureErrored && failureSummary != null;
 
-  // Stable pane callbacks: inline arrows would defeat the rail and inspector memo
-  // on every dashboard render (URL sync, live-stream status, fleet polls).
-  const toggleFiltersExpanded = useCallback(() => setFiltersExpanded((current) => !current), []);
-  const clearWorkspaceLogSelection = useCallback(() => setWorkspaceLogSelection([]), []);
-  const closeInspector = useCallback(() => setSelectedId(null), [setSelectedId]);
-  const retryInspectorWorkspace = useCallback(() => {
-    void retrySelectedWorkspace();
-  }, [retrySelectedWorkspace]);
-  const runInspectorOperatorAction = useCallback(
-    (action: WorkspaceOperatorAction, requestedTier?: number) => {
-      void runWorkspaceOperatorAction(action, requestedTier);
-    },
-    [runWorkspaceOperatorAction],
-  );
-  const toggleInspectorStream = useCallback(
-    (streamId: string, checked: boolean) =>
-      setSelectedStreams((current) => toggleStream(current, streamId, checked)),
-    [],
-  );
-  const selectAllInspectorStreams = useCallback(
-    () =>
-      setSelectedStreams(showWorkspaceLogs ? detail.streams.map((stream) => stream.stream_id) : []),
-    [detail.streams, showWorkspaceLogs],
-  );
-  const clearInspectorStreams = useCallback(() => setSelectedStreams([]), []);
-  const toggleInspectorSortDirection = useCallback(
-    () => setLogSortDirection((current) => (current === "desc" ? "asc" : "desc")),
-    [],
-  );
-
-  const refreshDashboard = useCallback(() => {
+  const refreshDashboard = () => {
     startTransition(() => {
       void (async () => {
         const epoch = authorizedFeedEpochRef.current;
@@ -1199,7 +1168,7 @@ export function ConsoleDashboard() {
         }
       })();
     });
-  }, [loadCapabilities, loadOverview, loadWorkspace, reloadAvailableFeeds, selectedIdRef]);
+  };
 
   return (
     <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
@@ -1248,7 +1217,7 @@ export function ConsoleDashboard() {
           onSearchText={setSearchText}
           onSortKey={setSortKey}
           onSortDirection={setSortDirection}
-          onToggleExpanded={toggleFiltersExpanded}
+          onToggleExpanded={() => setFiltersExpanded((current) => !current)}
           overviewHasMore={overviewHasMore}
           overviewHistoryLoading={overviewHistoryLoading}
           overviewHistoryComplete={overviewHistoryComplete}
@@ -1258,7 +1227,7 @@ export function ConsoleDashboard() {
           showWorkspaceLogs={showWorkspaceLogs}
           workspaceLogSelection={workspaceLogSelection}
           onOpenSelectedLogs={openSelectedWorkspaceLogs}
-          onClearLogSelection={clearWorkspaceLogSelection}
+          onClearLogSelection={() => setWorkspaceLogSelection([])}
           filteredOverview={filteredOverview}
           selectedId={selectedId}
           onSelect={setSelectedId}
@@ -1325,16 +1294,28 @@ export function ConsoleDashboard() {
         logTailSignal={logTailSignal}
         logTailRefreshError={logTailRefreshError}
         workspaceDetailError={workspaceDetailError}
-        onClose={closeInspector}
+        onClose={() => setSelectedId(null)}
         onRefresh={refreshDashboard}
-        onRetry={retryInspectorWorkspace}
-        onOperatorAction={runInspectorOperatorAction}
-        onToggleStream={toggleInspectorStream}
-        onSelectAllStreams={selectAllInspectorStreams}
-        onClearStreams={clearInspectorStreams}
+        onRetry={() => {
+          void retrySelectedWorkspace();
+        }}
+        onOperatorAction={(action, requestedTier) => {
+          void runWorkspaceOperatorAction(action, requestedTier);
+        }}
+        onToggleStream={(streamId, checked) =>
+          setSelectedStreams((current) => toggleStream(current, streamId, checked))
+        }
+        onSelectAllStreams={() =>
+          setSelectedStreams(
+            showWorkspaceLogs ? detail.streams.map((stream) => stream.stream_id) : [],
+          )
+        }
+        onClearStreams={() => setSelectedStreams([])}
         onReloadLogs={reloadSelectedLogs}
         onOpenFullscreen={openCurrentWorkspaceLogs}
-        onToggleSortDirection={toggleInspectorSortDirection}
+        onToggleSortDirection={() =>
+          setLogSortDirection((current) => (current === "desc" ? "asc" : "desc"))
+        }
       />
       </div>
       <ConsoleDashboardOverlays

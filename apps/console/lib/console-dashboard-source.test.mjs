@@ -75,10 +75,6 @@ const dashboardSource = {
     new URL("../components/console-dashboard-workspace-detail.tsx", import.meta.url),
     "utf8",
   ),
-  security: readFileSync(
-    new URL("../components/console-dashboard-security.tsx", import.meta.url),
-    "utf8",
-  ),
 };
 
 // Source assertions follow the extracted modules. Keep the original dashboard
@@ -234,7 +230,7 @@ test("fleet grid stays one column when capacity section is absent", () => {
 });
 
 test("reliability panel renders independently of resource capacity", () => {
-  assert.match(dashboardSource.capacity, /export const ReliabilityPanel = memo\(function ReliabilityPanel\(/);
+  assert.match(dashboardSource.capacity, /export function ReliabilityPanel\(/);
   // Split maintainability extraction mounts ReliabilityPanel from fleet-panels.
   assert.match(
     dashboardSource.fleetPanels,
@@ -698,56 +694,6 @@ test("workspace cards are windowed and memoized away from inspector-only renders
     logTails,
     /const openWorkspaceLogs = useCallback\([\s\S]*?workspaceId !== selectedIdRef\.current[\s\S]*?\[\s*selectedIdRef,/,
     "Expected the per-card logs callback to read selection from a ref and remain stable",
-  );
-});
-
-test("dashboard panes are memoized away from renders that leave their props unchanged", () => {
-  // Opening the inspector also commits live-stream status, the Next.js URL sync
-  // and detail arrival. Each re-rendered the whole console, which pushed the
-  // telemetry spec's 1s open/close pane budget over on CI.
-  const { dashboard, inspector, rail, overview, capacity, security } = dashboardSource;
-  const memoized = [
-    [inspector, "ConsoleDashboardInspector"],
-    [rail, "ConsoleDashboardWorkspaceRail"],
-    [overview, "FleetHealthStrip"],
-    [overview, "PreferenceControls"],
-    [capacity, "ReliabilityPanel"],
-    [capacity, "MergeQueuePanel"],
-    [capacity, "StatusCountStrip"],
-    [capacity, "LaneMeter"],
-    [capacity, "ResourceDimensionMeter"],
-    [security, "FailureAnalysisPanel"],
-  ];
-  for (const [source, name] of memoized) {
-    assert.match(
-      source,
-      new RegExp(`export const ${name} = memo\\(function ${name}\\(`),
-      `Expected ${name} to be memoized`,
-    );
-  }
-  // Relative ages ("refreshed …", "generated …") advance only when their pane
-  // renders. A memo would freeze them while a feed keeps failing with one message.
-  for (const [source, name] of [
-    [overview, "TopBar"],
-    [capacity, "CloudRuntimePanel"],
-    [capacity, "ResourceCapacityPanel"],
-    [dashboardSource.fleetPanels, "ConsoleDashboardFleetPanels"],
-  ]) {
-    assert.match(source, new RegExp(`export function ${name}\\(`), `Expected ${name} to stay unmemoized`);
-  }
-  for (const name of ["ConsoleDashboardInspector", "ConsoleDashboardWorkspaceRail"]) {
-    const start = dashboard.indexOf(`<${name}`);
-    assert.ok(start >= 0, `Expected the dashboard to render ${name}`);
-    assert.doesNotMatch(
-      dashboard.slice(start, dashboard.indexOf("/>", start)),
-      /=\{\s*\(/,
-      `Expected ${name} callbacks to stay stable instead of inline arrows that defeat memo`,
-    );
-  }
-  assert.match(
-    dashboard,
-    /const refreshDashboard = useCallback\(/,
-    "Expected the refresh callback shared by the top bar and inspector to stay stable",
   );
 });
 
@@ -3288,7 +3234,7 @@ test("configured context query changes clear authorized state before capability 
 
 test("manual refresh stops when the authorized feed epoch changes", () => {
   const dashboard = dashboardSource.dashboard;
-  const refreshStart = dashboard.indexOf("const refreshDashboard = useCallback(");
+  const refreshStart = dashboard.indexOf("const refreshDashboard = () => {");
   const refreshEnd = dashboard.indexOf("\n\n  return (", refreshStart);
   assert.ok(refreshStart >= 0, "Expected the manual dashboard refresh callback");
   assert.ok(refreshEnd > refreshStart, "Expected the manual refresh callback boundary");
