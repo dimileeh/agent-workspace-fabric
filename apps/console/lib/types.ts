@@ -664,6 +664,18 @@ export interface WorkspaceArtifactList {
   has_more: boolean;
 }
 
+// Plan/Validation presence reads relative_path only. A full WorkspaceArtifact
+// still satisfies this shape; a hosted list must not invent filesystem metadata.
+export interface ArtifactPresenceItem {
+  relative_path: string;
+}
+
+export interface ArtifactPresencePage {
+  items: ArtifactPresenceItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
 export interface Operation {
   id: string;
   workspace_id: string;

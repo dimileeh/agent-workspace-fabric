@@ -325,17 +325,17 @@ async def test_a_protocol_violation_after_a_recovery_rerun_keeps_the_timed_out_c
     """A returned run can still end the item without a verdict.
 
     Both attempts come back with output that carries no verdict record, so the
-    item terminates through the protocol-violation rollback rather than through
-    an exception handler. That exit is no more entitled to delete the timed-out
-    run's commits than a provider failure is, so the floor must be raised on the
-    returning path too.
+    item ends through the protocol-violation park rather than through an
+    exception handler. That exit is no more entitled to delete the timed-out
+    run's commits than a provider failure is: the park keeps them (#1074).
     """
     runner = _recovery_rerun_runner(tmp_path, outcome="I had a look at the thread.")
 
-    with pytest.raises(comment_verdict.AgentVerdictProtocolError) as caught:
-        await _invoke_item(runner, state=MonitorState())
+    result = await _invoke_item(runner, state=MonitorState())
 
-    assert caught.value.reason_code == comment_verdict.AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert comment_verdict.AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
     assert runner.reset_targets == []
     assert runner.current_head == _TIMED_OUT_RUN_HEAD
 
@@ -630,17 +630,22 @@ async def test_a_provider_failure_after_a_recovery_rerun_re_arms_the_item_anchor
 
 
 @pytest.mark.unit
-async def test_a_protocol_violation_after_a_recovery_rerun_re_arms_the_item_anchor(
+async def test_a_protocol_violation_after_a_recovery_rerun_parks_without_an_anchor(
     tmp_path: Path,
 ) -> None:
-    """A verdict-less returned run owes the anchor just as a provider failure does."""
+    """A verdict-less returned run now parks the item, and a park is a verdict (#1074).
+
+    Consume-on-verdict holds: no anchor is left behind. The timed-out run's
+    commits stay at HEAD for the human the park hands the item to.
+    """
     runner = _recovery_rerun_runner(tmp_path, outcome="I had a look at the thread.")
     state = MonitorState()
 
-    with pytest.raises(comment_verdict.AgentVerdictProtocolError):
-        await _invoke_item(runner, state=state)
+    result = await _invoke_item(runner, state=state)
 
-    assert peek_item_start_head(state, _ITEM_ID) == _ITEM_START_HEAD
+    assert result.verdict == "needs_human"
+    assert peek_item_start_head(state, _ITEM_ID) is None
+    assert runner.current_head == _TIMED_OUT_RUN_HEAD
 
 
 @pytest.mark.unit

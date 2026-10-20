@@ -47,7 +47,8 @@ async def test_protocol_violation_retries_same_prompt_once(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
-async def test_second_protocol_violation_is_terminal_typed_error(tmp_path: Path) -> None:
+async def test_second_protocol_violation_parks_the_item(tmp_path: Path) -> None:
+    """After a successful rollback the item parks instead of failing the workspace (#1074)."""
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -55,10 +56,11 @@ async def test_second_protocol_violation_is_terminal_typed_error(tmp_path: Path)
         heads_after_attempt=["a" * 40, "a" * 40],
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(f"{AGENT_VERDICT_PROTOCOL_VIOLATION}:")
     assert len(runner.prompts) == 2
 
 
@@ -124,8 +126,8 @@ async def test_second_protocol_violation_rollback_preserves_reason_coded_excepti
 
     Mirrors the mutation / non-FIXED-accept guards for review 5097630917: typed
     reason-coded exceptions from rollback dependencies must propagate unchanged
-    when cleaning both attempts' residue before terminating after protocol
-    violation.
+    when cleaning both attempts' residue before parking after protocol
+    violation. Nothing contentful was committed, so the park rolls back (#1074).
     """
     from awf.runtime.pr_monitor_runner.types import (
         _MonitorAgentServiceRecoveryFailedError,
@@ -133,12 +135,10 @@ async def test_second_protocol_violation_rollback_preserves_reason_coded_excepti
 
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
-    edited_head = "b" * 40
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
         outputs=["garbled one", "garbled two"],
-        heads_after_attempt=[edited_head, edited_head],
-        dirty_after_attempt=[True, False],
+        heads_after_attempt=[item_start_head, item_start_head],
     )
     runner.current_head = item_start_head
 
@@ -166,11 +166,17 @@ async def test_second_protocol_violation_rollback_preserves_reason_coded_excepti
 
 
 @pytest.mark.unit
-async def test_second_protocol_violation_rolls_back_hosted_commits_before_terminal_error(
+@pytest.mark.parametrize("contentful", [False, True])
+async def test_second_protocol_violation_rolls_back_hosted_commits_before_parking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    contentful: bool,
 ) -> None:
-    """Terminal protocol failure must rewind hosted PR heads, not strand unaccepted edits."""
+    """The park must rewind hosted PR heads, not strand unaccepted edits.
+
+    A contentful hosted commit is the item's work: it is kept and the item parks
+    with the commit cited, exactly like a local one (#1074).
+    """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
     synced_head = "b" * 40
@@ -193,21 +199,35 @@ async def test_second_protocol_violation_rolls_back_hosted_commits_before_termin
         dirty_after_attempt=[True, False],
     )
     runner._deps.adapter.is_hosted = True
+    if not contentful:
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="ORIGINAL REVIEW PROMPT",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=item_start_head,
-            state=state,
-        )
+        async def _same_tree(**_kwargs: object) -> bool:
+            return False
 
-    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+        runner._commit_trees_differ = _same_tree
+
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item_start_head,
+        state=state,
+    )
+
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert AGENT_VERDICT_PROTOCOL_VIOLATION in result.reason
     assert len(runner.prompts) == 2
+    if contentful:
+        assert synced_head[:12] in result.reason
+        assert runner.reset_targets == []
+        assert runner.current_head == synced_head
+        assert state.last_push_sha == synced_head
+        assert remote_rollbacks == []
+        return
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head
     assert state.last_push_sha == item_start_head
@@ -218,7 +238,7 @@ async def test_second_protocol_violation_rolls_back_hosted_commits_before_termin
 
 
 @pytest.mark.unit
-async def test_fixed_without_evidence_gets_one_correction_then_fails(tmp_path: Path) -> None:
+async def test_fixed_without_evidence_gets_one_correction_then_parks(tmp_path: Path) -> None:
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -229,10 +249,11 @@ async def test_fixed_without_evidence_gets_one_correction_then_fails(tmp_path: P
         heads_after_attempt=["a" * 40, "a" * 40],
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _invoke(runner)
+    result = await _invoke(runner)
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(f"{AGENT_FIXED_WITHOUT_EVIDENCE}:")
     assert len(runner.prompts) == 2
 
 
@@ -277,18 +298,20 @@ async def test_protocol_retry_fixed_rejects_stale_first_attempt_evidence(
         dirty_after_attempt=[True, False],
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="ORIGINAL REVIEW PROMPT",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=item_start_head,
-        )
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="ORIGINAL REVIEW PROMPT",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=item_start_head,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(f"{AGENT_FIXED_WITHOUT_EVIDENCE}:")
+    assert runner.current_head == item_start_head
     assert len(runner.prompts) == 2
 
 

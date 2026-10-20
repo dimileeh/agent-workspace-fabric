@@ -337,13 +337,44 @@ record cannot be indented, decorated, quoted, fenced, duplicated, or followed
 by output. `FIXED` also requires a verified local (or hosted) HEAD advance for
 that review item.
 
+That strict contract is what agents are told and what AWF checks first. Beyond
+it, evidence decides, not stdout formatting. A valid `FIXED` record followed by
+more output (or by other records) is accepted only when it is the last valid
+record and AWF verifies an item-scoped fix commit for it. On the operator-hint
+path, where `FIXED` may be commit-less, that means a contentful commit made
+since the hint started. A non-`FIXED` record followed by output has no evidence
+AWF can check, so it keeps the strict outcome. Any later mention of a
+non-`FIXED` verdict overrules a `FIXED`, even a decorated, indented or
+wrong-case one that is not itself a record: evidence never turns a request for
+a human into a fix.
+
 Malformed output and FIXED-without-evidence each receive one immediate generic
-retry for the same item from the same starting HEAD. A second failure terminates
-the monitor as an agent failure with a stable reason code; it does not create a
-PR comment or human escalation. Provider execution failures do not consume this
-correction retry. `FALSE POSITIVE` and `DEFER` resolve without a commit, while a
-valid explicit `NEEDS_HUMAN` record is the only verdict-protocol path that asks
-an operator to intervene.
+retry for the same item from the same starting HEAD. If attempt 0's `FIXED` was
+refused only for missing evidence and the correction prints no record at all,
+the correction inherits that `FIXED` (unless it names a non-`FIXED` verdict in
+any form), and the correction's usual evidence gates judge it. A correction
+that still ends without an accepted verdict parks the item as `needs_human`
+with its reason code. A contentful commit the item made is kept and cited,
+edits left uncommitted above it are cleaned, and its item-start local Git
+config is restored, so the next item cannot absorb them; otherwise its edits
+are rolled back first. The batch then continues to its
+normal push and the monitor stays in `monitoring_pr`. An operator hint parked
+this way pushes its kept commit through the same guarded push and stays
+`needs_human`, unless an approve-and-keep grant is active. Only a rollback or
+cleanup that fails, or an item with no known start HEAD or local worktree to
+roll back, still terminates the monitor as an agent failure. Once an item's
+rollback has succeeded, an unexpected error does not fail the workspace either.
+An untyped failure (a Git spawn or filesystem error, a timeout, a repository or
+session error) that ends the item after its unaccepted edits were rolled back
+parks it as `needs_human` with `AGENT_VERDICT_ITEM_UNEXPECTED_ERROR`. The reason
+names the failing step, the exception type, a redacted message and the rollback
+floor. On the operator-hint path it is an ordinary parked hint with no kept
+commit. Errors that have their own monitor handler (reason-coded infrastructure
+exits, provider recovery, protected-scope and compose-cleanup failures, verdict
+protocol and provider execution errors) still reach that handler unchanged, and
+cancellation always propagates. Provider execution
+failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
+without a commit.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.

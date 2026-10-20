@@ -36,7 +36,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome,
     preserved_correction_tip,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.comments import _address_thread
+from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -369,10 +373,14 @@ async def test_self_citing_needs_human_after_protocol_violation_keeps_commit(
 
 
 @pytest.mark.unit
-async def test_fixed_without_any_change_still_terminates_after_correction(
+async def test_fixed_without_any_change_parks_after_correction(
     tmp_path: Path,
 ) -> None:
-    """Boundary: no contentful change at all is an unsupported claim, not a misplaced fix."""
+    """Boundary: no contentful change at all is an unsupported claim, not a misplaced fix.
+
+    It is still never accepted. After the correction the item parks with the
+    reason code instead of failing the monitor (#1074).
+    """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -383,15 +391,20 @@ async def test_fixed_without_any_change_still_terminates_after_correction(
         heads_after_attempt=[_ITEM_START_HEAD, _ITEM_START_HEAD],
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address(runner, _thread("PRRT_no_change_fixed"))
+    state = MonitorState()
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    verdict = await _address(runner, _thread("PRRT_no_change_fixed"), state)
+
+    assert verdict == "needs_human"
+    parked_reason = state.threads_addressed_ids[
+        _needs_human_reason_state_key("PRRT_no_change_fixed")
+    ]
+    assert parked_reason.startswith(f"{AGENT_FIXED_WITHOUT_EVIDENCE}:")
     assert len(runner.prompts) == 2
 
 
 @pytest.mark.unit
-async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
+async def test_unscoped_evidence_probe_failure_rolls_back_then_parks_the_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -399,6 +412,8 @@ async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
 
     A transient rev-parse/ancestry failure there must not escape with the
     unaccepted correction commit still in the worktree (PRRT_kwDOSJAM6s6fpjBu).
+    It rolls back first; the rollback succeeded, so the item then parks instead
+    of failing the workspace (#1076).
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -412,10 +427,18 @@ async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
         path_touched=False,
     )
     _fail_unscoped_evidence_probe(monkeypatch)
+    state = MonitorState()
 
-    with pytest.raises(OSError, match="git rev-parse spawn failed"):
-        await _address(runner, _thread("PRRT_unscoped_probe_raises"))
+    verdict = await _address(runner, _thread("PRRT_unscoped_probe_raises"), state)
 
+    assert verdict == "needs_human"
+    parked_reason = state.threads_addressed_ids[
+        _needs_human_reason_state_key("PRRT_unscoped_probe_raises")
+    ]
+    assert parked_reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: OSError at unscoped_fix_evidence_probe "
+    )
+    assert "git rev-parse spawn failed" in parked_reason
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
 
@@ -466,7 +489,9 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=_REVIEWED_PATH,
     )
     assert result.verdict == "needs_human"
-    # Publish-dependent: the preserved commit still has to reach the PR.
+    # Publish-dependent: the preserved commit still has to reach the PR, including
+    # an operator hint's guarded push (PRRT_kwDOSJAM6s6uXTbM).
+    assert result.kept_commit is True
     assert len(result.reason) <= 500
     assert result.reason.endswith("…")
     assert _REVIEWED_PATH in result.reason
@@ -479,4 +504,5 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=None,
     )
     assert unknown.verdict == "needs_human"
+    assert unknown.kept_commit is True
     assert "<unknown>" in unknown.reason

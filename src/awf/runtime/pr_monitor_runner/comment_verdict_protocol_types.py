@@ -16,6 +16,8 @@ from typing import Literal
 AGENT_VERDICT_PROTOCOL_VIOLATION = "AGENT_VERDICT_PROTOCOL_VIOLATION"
 AGENT_FIXED_WITHOUT_EVIDENCE = "AGENT_FIXED_WITHOUT_EVIDENCE"
 AGENT_NON_FIXED_WITH_MUTATION = "AGENT_NON_FIXED_WITH_MUTATION"
+# #1076: an untyped error ended the item after its rollback succeeded; parked.
+AGENT_VERDICT_ITEM_UNEXPECTED_ERROR = "AGENT_VERDICT_ITEM_UNEXPECTED_ERROR"
 
 AgentVerdict = Literal["fix_committed", "false_positive", "defer", "needs_human"]
 MonitorVerdict = Literal[
@@ -69,8 +71,13 @@ class AgentVerdictExecutionError(RuntimeError):
 class VerdictResult:
     verdict: AgentVerdict
     reason: str | None = None
-    # True when this verdict deliberately keeps an unpushed local commit the
-    # agent authored for the item (the #925 correction outcomes). Such a
+    # True when a ``needs_human`` park kept the item's contentful commit
+    # (``park_unaccepted_correction``, a preserving
+    # ``correction_self_citation_outcome``, or
+    # ``correction_unscoped_fix_outcome``). An operator hint then still pushes
+    # that commit through its guarded push, as a comment batch does, instead of
+    # leaving it local behind ``NotifyHuman`` (#1074).
+    kept_commit: bool = False
 
 
 @dataclass(frozen=True)

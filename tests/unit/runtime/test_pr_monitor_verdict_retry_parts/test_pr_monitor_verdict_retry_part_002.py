@@ -21,6 +21,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictExecutionError,
     AgentVerdictProtocolError,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.constants import _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.types import (
@@ -1254,10 +1257,14 @@ async def test_worker_cancellation_during_correction_start_head_read_rolls_back(
 
 
 @pytest.mark.unit
-async def test_correction_start_head_read_exception_rolls_back_before_reraise(
+async def test_correction_start_head_read_exception_rolls_back_then_parks_the_item(
     tmp_path: Path,
 ) -> None:
-    """Exception during correction-start rev-parse must roll back attempt-0 residue."""
+    """Exception during correction-start rev-parse rolls back attempt-0 residue first.
+
+    The rollback succeeded, so the untyped error then parks the item instead of
+    failing the workspace (#1076).
+    """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
     attempt_one_head = "b" * 40
@@ -1284,9 +1291,13 @@ async def test_correction_start_head_read_exception_rolls_back_before_reraise(
 
     runner._rev_parse_head = _raise_on_correction_start
 
-    with pytest.raises(RuntimeError, match="correction-start rev-parse"):
-        await _invoke(runner)
+    result = await _invoke(runner)
 
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: RuntimeError at agent_invocation "
+    )
     assert len(runner.prompts) == 1
     assert rev_parse_calls >= 4
     assert runner.reset_targets == [item_start_head]
