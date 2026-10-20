@@ -80,17 +80,11 @@ export function parseArtifactPresencePage(value: unknown): ArtifactPresencePage 
     return null;
   }
   const nextCursor = page.next_cursor;
-  if (typeof nextCursor !== "string" && nextCursor !== null) {
-    return null;
-  }
-  if (typeof nextCursor === "string" && nextCursor.length === 0) {
-    return null;
-  }
-  // Continuation was advertised but cannot be requested. Reject the page so
-  // callers surface a malformed list instead of hiding later artifacts.
-  if (page.has_more && nextCursor === null) {
-    return null;
-  }
+  const usableCursor = typeof nextCursor === "string" && nextCursor.length > 0;
+  // Reject a non-string cursor, an empty cursor, and has_more with no cursor.
+  // The last case advertises a later page that cannot be requested; returning
+  // null here is what stops collectArtifactsForPresence from keeping the prefix.
+  if (!usableCursor && (nextCursor !== null || page.has_more)) return null;
   return {
     items: page.items,
     next_cursor: nextCursor,
