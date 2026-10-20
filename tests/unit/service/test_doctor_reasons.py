@@ -224,6 +224,19 @@ def test_item_unexpected_error_reason_is_cataloged() -> None:
 
 
 @pytest.mark.unit
+def test_item_start_git_config_snapshot_failed_reason_is_cataloged() -> None:
+    text = _REASON_TEXT["AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED"]
+
+    assert "Git settings" in text.message
+    assert "without running the agent" in text.message
+    assert "needs_human" in text.likely_cause
+    assert text.related_command == "awf workspace logs <workspace_id>"
+    assert text.docs_link.endswith("#agent_verdict_item_start_git_config_snapshot_failed")
+    catalog = (Path(__file__).parents[3] / "docs" / "REASON_CATALOG.md").read_text()
+    assert "### AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED" in catalog
+
+
+@pytest.mark.unit
 def test_expected_claude_overlay_fallback_is_deliberately_not_cataloged() -> None:
     # ``CLAUDE_AUTH_OVERLAY_UNAVAILABLE`` is logged at INFO on every hosted/GKE
     # and force-copy host, where the per-workspace copy fallback is the correct
