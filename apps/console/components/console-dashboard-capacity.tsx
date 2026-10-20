@@ -208,25 +208,6 @@ export function ResourceCapacityPanel({
   error: string | null;
   stale?: boolean;
 }) {
-  const showOldestQueued =
-    saturation !== null &&
-    saturation.capacity_queue.queued_workspace_count > 0 &&
-    saturation.capacity_queue.oldest_wait_seconds !== null;
-  const queueBlockedReasonEntries = saturation
-    ? Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {})
-    : [];
-  const pressureReasons =
-    saturation === null
-      ? []
-      : saturation.allocated_capacity.pressure_reasons.length > 0
-        ? saturation.allocated_capacity.pressure_reasons
-        : saturation.capacity.pressure_reasons;
-  const runtimeCapacitySource = saturation ? localCapacitySourceLabel(saturation.local_capacity.source as LocalCapacitySourceValue | null) : "";
-  const runtimeCapacityLimits = saturation ? localCapacityLimitLabel(saturation) : "";
-  const runtimeCapacityDetail = saturation
-    ? localCapacityDetail(saturation.local_capacity.source as LocalCapacitySourceValue | null)
-    : "";
-
   return (
     <Panel
       title="Resource / Runtime Capacity"
@@ -246,6 +227,41 @@ export function ResourceCapacityPanel({
             ) : null}
             {/* Saturation-driven content dims with the saturation feed. */}
             <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
+              <ResourceCapacitySnapshot saturation={saturation} />
+              <div className="text-[11px] text-fg-muted">
+                generated {relativeTime(saturation.generated_at)}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// Saturation-derived body, memoized so inspector, URL and stream renders skip
+// it until a new snapshot arrives. The relative "generated" age stays in
+// ResourceCapacityPanel, which re-renders with the dashboard, so it keeps advancing.
+const ResourceCapacitySnapshot = memo(function ResourceCapacitySnapshot({
+  saturation,
+}: {
+  saturation: ResourceSaturationSummary;
+}) {
+  const showOldestQueued =
+    saturation.capacity_queue.queued_workspace_count > 0 &&
+    saturation.capacity_queue.oldest_wait_seconds !== null;
+  const queueBlockedReasonEntries = Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {});
+  const pressureReasons =
+    saturation.allocated_capacity.pressure_reasons.length > 0
+      ? saturation.allocated_capacity.pressure_reasons
+      : saturation.capacity.pressure_reasons;
+  const capacitySource = saturation.local_capacity.source as LocalCapacitySourceValue | null;
+  const runtimeCapacitySource = localCapacitySourceLabel(capacitySource);
+  const runtimeCapacityLimits = localCapacityLimitLabel(saturation);
+  const runtimeCapacityDetail = localCapacityDetail(capacitySource);
+
+  return (
+    <>
           <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("info")}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold">Scheduler capacity source</span>
@@ -359,16 +375,9 @@ export function ResourceCapacityPanel({
               ) : null}
             </div>
           </div>
-          <div className="text-[11px] text-fg-muted">
-            generated {relativeTime(saturation.generated_at)}
-          </div>
-            </div>
-          </>
-        )}
-      </div>
-    </Panel>
+    </>
   );
-}
+});
 
 function localCapacitySourceLabel(source: LocalCapacitySourceValue | null): string {
   switch (source) {

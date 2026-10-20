@@ -751,6 +751,24 @@ test("dashboard panes are memoized away from renders that leave their props unch
   );
 });
 
+test("capacity panel memoizes its snapshot body and keeps the generated age live", () => {
+  // The capacity body re-rendered on every inspector open/close commit even
+  // though only its "generated …" age depends on time.
+  const capacity = dashboardSource.capacity;
+  const panelStart = capacity.indexOf("export function ResourceCapacityPanel(");
+  const snapshotStart = capacity.indexOf(
+    "const ResourceCapacitySnapshot = memo(function ResourceCapacitySnapshot(",
+  );
+  assert.ok(panelStart >= 0, "Expected ResourceCapacityPanel to stay an unmemoized function");
+  assert.ok(snapshotStart > panelStart, "Expected a memoized ResourceCapacitySnapshot after the panel");
+  const panel = capacity.slice(panelStart, snapshotStart);
+  const snapshot = capacity.slice(snapshotStart, capacity.indexOf("\n});\n", snapshotStart));
+  assert.match(panel, /<ResourceCapacitySnapshot saturation=\{saturation\} \/>/);
+  assert.match(panel, /generated \{relativeTime\(saturation\.generated_at\)\}/);
+  assert.doesNotMatch(snapshot, /relativeTime|Date\.now|new Date/, "Expected no clock reads in the memoized body");
+  assert.match(snapshot, /<StatusCountStrip counts=\{saturation\.workspace_counts\} \/>/);
+});
+
 test("hot date formatting paths reuse module-level Intl formatters", () => {
   const format = dashboardSource.format;
   assert.match(format, /const dateTimeFormatter = new Intl\.DateTimeFormat/);
