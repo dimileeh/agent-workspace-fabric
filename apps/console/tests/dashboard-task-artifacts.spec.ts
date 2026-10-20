@@ -129,6 +129,14 @@ async function mockDashboard(page: Page) {
   // download error, or the plan view would leak the empty "No prompt stored"
   // placeholder once the banner is dismissed.
   const dlFailRefetch = baseWorkspace("ws_dlfail_refetch", "Download Error Refetch");
+  const minimal = baseWorkspace("ws_minimal", "Minimal Presence");
+  const malformed = baseWorkspace("ws_malformed", "Malformed Envelope");
+  const badItem = baseWorkspace("ws_bad_item", "Bad Item Identity");
+  const badPage = baseWorkspace("ws_bad_page", "Bad Pagination");
+  const malformedRefetch = baseWorkspace("ws_malformed_refetch", "Malformed Refetch");
+  const inflight = baseWorkspace("ws_inflight", "Inflight List");
+  const switched = baseWorkspace("ws_switch", "Switch During List");
+  const aborted = baseWorkspace("ws_abort", "Aborted List");
   let overviewCalls = 0;
   let refetchFailInitialOverviewCalls: number | null = null;
 
@@ -141,6 +149,11 @@ async function mockDashboard(page: Page) {
     const refetchFailSnapshot = { ...refetchFail, status: "running", updated_at: stamp };
     const staleContentSnapshot = { ...staleContent, status: "running", updated_at: stamp };
     const dlFailRefetchSnapshot = { ...dlFailRefetch, status: "running", updated_at: stamp };
+    const malformedRefetchSnapshot = {
+      ...malformedRefetch,
+      status: "running",
+      updated_at: stamp,
+    };
     await route.fulfill({
       json: {
         items: [
@@ -155,6 +168,14 @@ async function mockDashboard(page: Page) {
           refetchFailSnapshot,
           staleContentSnapshot,
           dlFailRefetchSnapshot,
+          minimal,
+          malformed,
+          badItem,
+          badPage,
+          malformedRefetchSnapshot,
+          inflight,
+          switched,
+          aborted,
         ],
         has_more: false,
       },
@@ -351,6 +372,99 @@ async function mockDashboard(page: Page) {
       headers: { "content-type": "application/json" },
       body: '{"status":"satisfied","gaps":[]}',
     });
+  });
+
+  // Presence only needs relative_path. Downloads still use the stable root name.
+  await page.route("/api/awf/workspaces/ws_minimal/artifacts*", async (route) => {
+    await route.fulfill({
+      json: {
+        items: [{ relative_path: "plan.md" }, { relative_path: "conformance.json" }],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_minimal/artifacts/download*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("path=plan.md")) {
+      await route.fulfill({
+        headers: { "content-type": "text/markdown" },
+        body: "# Minimal Plan\n",
+      });
+      return;
+    }
+    await route.fulfill({
+      headers: { "content-type": "application/json" },
+      body: '{"status":"satisfied","gaps":["minimal"]}',
+    });
+  });
+
+  await page.route("/api/awf/workspaces/ws_malformed/artifacts*", async (route) => {
+    await route.fulfill({
+      json: {
+        request_id: "req_malformed",
+        tenant: { id: "ten_malformed" },
+        artifacts: { workspace_id: "ws_malformed", artifact_ids: ["native_pr_evidence"] },
+      },
+    });
+  });
+
+  await page.route("/api/awf/workspaces/ws_bad_item/artifacts*", async (route) => {
+    await route.fulfill({
+      json: {
+        items: [{ artifact_id: "x" }],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+
+  await page.route("/api/awf/workspaces/ws_bad_page/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [], next_cursor: null, has_more: "yes" },
+    });
+  });
+
+  await page.route("/api/awf/workspaces/ws_malformed_refetch/artifacts*", async (route) => {
+    if (overviewCalls >= 3) {
+      await route.fulfill({
+        json: {
+          request_id: "req_refetch",
+          tenant: {},
+          artifacts: { workspace_id: "ws_malformed_refetch", artifact_ids: ["native_pr_evidence"] },
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [
+          artifact("ws_malformed_refetch", "plan.md"),
+          artifact("ws_malformed_refetch", "conformance.json"),
+        ],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_malformed_refetch/artifacts/download*", async (route) => {
+    await route.fulfill({
+      headers: { "content-type": "text/markdown" },
+      body: "# Refetch Plan Body\n",
+    });
+  });
+
+  // Default fulfill so a test that does not install a gate still settles.
+  // Close/switch tests replace this route before navigation.
+  await page.route("/api/awf/workspaces/ws_inflight/artifacts*", async (route) => {
+    await route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
+  });
+  await page.route("/api/awf/workspaces/ws_switch/artifacts*", async (route) => {
+    await route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
+  });
+
+  await page.route("/api/awf/workspaces/ws_abort/artifacts*", async (route) => {
+    await route.abort();
   });
 }
 
@@ -594,4 +708,203 @@ test("keeps the download error when a later list refetch succeeds", async ({ pag
   await expect(section).toContainText("Request failed with HTTP 500.");
   await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
   await expect(section).not.toContainText("No prompt stored for this workspace.");
+});
+
+const MALFORMED_LIST_ERROR = "Artifact list response was malformed.";
+
+function collectPageErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => {
+    errors.push(error.message);
+  });
+  return errors;
+}
+
+test("renders Plan and Validation from minimal relative_path entries", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_minimal");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  const planButton = section.getByRole("button", { name: "Plan" });
+  const validationButton = section.getByRole("button", { name: "Validation" });
+  await expect(planButton).toBeVisible();
+  await expect(validationButton).toBeVisible();
+
+  await planButton.click();
+  await expect(page.getByTestId("task-artifact-content")).toContainText("Minimal Plan");
+  await validationButton.click();
+  await expect(page.getByTestId("task-artifact-content")).toContainText('"gaps": [');
+  await expect(page.getByTestId("task-artifact-content")).toContainText("minimal");
+  expect(pageErrors).toEqual([]);
+});
+
+test("surfaces a malformed artifact list instead of hiding the section", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_malformed");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText(MALFORMED_LIST_ERROR);
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test("surfaces an explicit error when an artifact item has no relative_path", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_bad_item");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText(MALFORMED_LIST_ERROR);
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test("surfaces an explicit error for malformed pagination distinct from an empty list", async ({
+  page,
+}) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_bad_page");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText(MALFORMED_LIST_ERROR);
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Close task details" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await openDetails(page, "ws_none");
+  await expect(page.getByTestId("task-artifacts")).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test("replaces an open plan when a later list response is malformed", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_malformed_refetch");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await section.getByRole("button", { name: "Plan" }).click();
+  await expect(page.getByTestId("task-artifact-content")).toContainText("Refetch Plan Body");
+
+  await expect(section).toContainText(MALFORMED_LIST_ERROR, { timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("Refetch Plan Body");
+  await expect(section).not.toContainText("Loading");
+  expect(pageErrors).toEqual([]);
+});
+
+test("does not pageerror when details close during an in-flight artifact list", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.unroute("/api/awf/workspaces/ws_inflight/artifacts*");
+  await page.route("/api/awf/workspaces/ws_inflight/artifacts*", async (route) => {
+    await gate;
+    await route.fulfill({
+      json: {
+        request_id: "req_inflight",
+        tenant: {},
+        artifacts: { workspace_id: "ws_inflight", artifact_ids: ["native_pr_evidence"] },
+      },
+    });
+  });
+
+  try {
+    await page.goto("/");
+    const pending = page.waitForRequest(/\/workspaces\/ws_inflight\/artifacts\?/);
+    await openDetails(page, "ws_inflight");
+    await pending;
+    await page.getByRole("button", { name: "Close task details" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    const settled = page.waitForResponse(/\/workspaces\/ws_inflight\/artifacts\?/);
+    release();
+    await settled;
+    await page.waitForTimeout(250);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  } finally {
+    release();
+  }
+});
+
+test("keeps the next workspace healthy when a delayed malformed list resolves after close", async ({
+  page,
+}) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.unroute("/api/awf/workspaces/ws_switch/artifacts*");
+  await page.route("/api/awf/workspaces/ws_switch/artifacts*", async (route) => {
+    await gate;
+    await route.fulfill({
+      json: {
+        request_id: "req_switch",
+        tenant: {},
+        artifacts: { workspace_id: "ws_switch", artifact_ids: ["native_pr_evidence"] },
+      },
+    });
+  });
+
+  try {
+    await page.goto("/");
+    const pending = page.waitForRequest(/\/workspaces\/ws_switch\/artifacts\?/);
+    await openDetails(page, "ws_switch");
+    await pending;
+    await page.getByRole("button", { name: "Close task details" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await openDetails(page, "ws_full");
+    const section = page.getByTestId("task-artifacts");
+    await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+    await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+
+    release();
+    await page.waitForTimeout(300);
+    await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+    await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+    await expect(section).not.toContainText(MALFORMED_LIST_ERROR);
+    expect(pageErrors).toEqual([]);
+  } finally {
+    release();
+  }
+});
+
+test("surfaces the list error when the artifact request is aborted", async ({ page }) => {
+  const pageErrors = collectPageErrors(page);
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_abort");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText("Failed to fetch");
+  await expect(section).not.toContainText(MALFORMED_LIST_ERROR);
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+  await expect(page.getByTestId("task-artifacts")).toHaveCount(1);
+  expect(pageErrors).toEqual([]);
 });
