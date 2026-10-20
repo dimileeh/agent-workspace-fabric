@@ -36,6 +36,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome,
     preserved_correction_tip,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
@@ -401,7 +404,7 @@ async def test_fixed_without_any_change_parks_after_correction(
 
 
 @pytest.mark.unit
-async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
+async def test_unscoped_evidence_probe_failure_rolls_back_then_parks_the_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,6 +412,8 @@ async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
 
     A transient rev-parse/ancestry failure there must not escape with the
     unaccepted correction commit still in the worktree (PRRT_kwDOSJAM6s6fpjBu).
+    It rolls back first; the rollback succeeded, so the item then parks instead
+    of failing the workspace (#1076).
     """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
@@ -422,10 +427,18 @@ async def test_unscoped_evidence_probe_failure_rolls_back_before_propagating(
         path_touched=False,
     )
     _fail_unscoped_evidence_probe(monkeypatch)
+    state = MonitorState()
 
-    with pytest.raises(OSError, match="git rev-parse spawn failed"):
-        await _address(runner, _thread("PRRT_unscoped_probe_raises"))
+    verdict = await _address(runner, _thread("PRRT_unscoped_probe_raises"), state)
 
+    assert verdict == "needs_human"
+    parked_reason = state.threads_addressed_ids[
+        _needs_human_reason_state_key("PRRT_unscoped_probe_raises")
+    ]
+    assert parked_reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: OSError at unscoped_fix_evidence_probe "
+    )
+    assert "git rev-parse spawn failed" in parked_reason
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
 

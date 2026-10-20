@@ -62,7 +62,9 @@ async def read_correction_end_head(
     * an ordinary probe failure (``OSError``/``RuntimeError`` while spawning Git)
       is outside the caller's ``Exception`` handlers, whose surrounding handler
       catches only ``CancelledError``, so the correction attempt's edits would be
-      stranded (PRRT_kwDOSJAM6s6eJ2Tg, matching PRRT_kwDOSJAM6s6eJUbE);
+      stranded (PRRT_kwDOSJAM6s6eJ2Tg, matching PRRT_kwDOSJAM6s6eJUbE). After
+      that rollback, a cause without a dedicated upstream handler parks the item
+      instead of failing the workspace (#1076);
     * a transient ``None`` must not leave the end HEAD equal to
       ``attempt_start_head``: a clean self-commit would then miss mutation and a
       later successful rollback could accept FALSE POSITIVE / DEFER /
@@ -101,7 +103,9 @@ async def read_correction_end_head(
                     "Could not roll back unaccepted edits after correction-end HEAD probe failure."
                 ),
             ) from end_head_exc
-        raise
+        _comment_verdict.reraise_or_park_item(
+            end_head_exc, "correction_end_head_probe", rollback_floor_head, worktree_path
+        )
     if live_head:
         return live_head
     _log.warning(

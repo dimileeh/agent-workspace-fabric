@@ -14,6 +14,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictProtocolError,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentServiceRecoveryFailedError,
@@ -72,7 +75,7 @@ async def test_valid_fixed_verdict_does_not_probe_tip_before_parse(
 
 
 @pytest.mark.unit
-async def test_post_attempt_tip_head_read_exception_rolls_back_before_reraise(
+async def test_post_attempt_tip_head_read_exception_rolls_back_then_parks_the_item(
     tmp_path: Path,
 ) -> None:
     """Exception during post-attempt tip rev-parse must roll back attempt-0 residue.
@@ -81,7 +84,8 @@ async def test_post_attempt_tip_head_read_exception_rolls_back_before_reraise(
     self-commits, the post-attempt ``_rev_parse_head`` probe ran outside the
     Exception rollback regions (only CancelledError was caught around it). An
     OSError/RuntimeError while spawning Git left unaccepted local state intact
-    for a later monitor cycle.
+    for a later monitor cycle. After that rollback the item parks instead of
+    failing the workspace (#1076).
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -110,9 +114,13 @@ async def test_post_attempt_tip_head_read_exception_rolls_back_before_reraise(
 
     runner._rev_parse_head = _raise_on_post_attempt_tip
 
-    with pytest.raises(OSError, match="post-attempt tip rev-parse"):
-        await _invoke(runner)
+    result = await _invoke(runner)
 
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: OSError at post_attempt_tip_probe "
+    )
     assert len(runner.prompts) == 1
     assert rev_parse_calls >= 3
     assert runner.reset_targets == [item_start_head]
@@ -311,16 +319,17 @@ async def test_worker_cancellation_during_post_attempt_tip_head_read_rolls_back(
 
 
 @pytest.mark.unit
-async def test_correction_end_head_read_exception_rolls_back_before_reraise(
+async def test_correction_end_head_read_exception_rolls_back_then_parks_the_item(
     tmp_path: Path,
 ) -> None:
-    """Exception during correction-end rev-parse must roll back before re-raise.
+    """Exception during correction-end rev-parse must roll back first.
 
     Production regression for PRRT_kwDOSJAM6s6eJ2Tg: after the correction
     attempt edits or self-commits, the mutation-gate ``_rev_parse_head`` probe
     handled only a None return. An OSError/RuntimeError while spawning Git
     escaped the attempt loop (outer handler catches only CancelledError) and
-    left unaccepted local/hosted state for a later monitor cycle.
+    left unaccepted local/hosted state for a later monitor cycle. After that
+    rollback the item parks instead of failing the workspace (#1076).
     """
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
@@ -362,9 +371,13 @@ async def test_correction_end_head_read_exception_rolls_back_before_reraise(
 
     runner._rev_parse_head = _raise_on_correction_end
 
-    with pytest.raises(OSError, match="correction-end rev-parse"):
-        await _invoke(runner)
+    result = await _invoke(runner)
 
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: OSError at correction_end_head_probe "
+    )
     assert len(runner.prompts) == 2
     assert rev_parse_calls >= 7
     assert runner.reset_targets == [item_start_head]

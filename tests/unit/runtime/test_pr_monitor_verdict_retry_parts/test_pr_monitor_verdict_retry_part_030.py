@@ -33,6 +33,9 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
     AgentVerdictProtocolError,
     VerdictResult,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from tests.unit.runtime._verdict_retry_fixtures import _invoke, _VerdictRunner
@@ -626,19 +629,28 @@ def _fail_unscoped_evidence_probe(monkeypatch: pytest.MonkeyPatch, error: OSErro
 
 
 @pytest.mark.unit
-async def test_park_probe_failure_rolls_back_then_reraises_the_cause(
+async def test_park_probe_failure_rolls_back_then_parks_the_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The keep-or-rollback probe runs Git outside the sink handlers; never strand edits."""
+    """The keep-or-rollback probe runs Git outside the sink handlers; never strand edits.
+
+    It rolls back first. The rollback succeeded, so the untyped probe error then
+    parks the item instead of failing the workspace (#1076).
+    """
     probe_error = OSError("git rev-parse spawn failed")
     _fail_unscoped_evidence_probe(monkeypatch, probe_error)
     runner = _committed_runner(tmp_path, [F3, F3])
 
-    with pytest.raises(OSError) as caught:
-        await _invoke_item(runner)
+    result = await _invoke_item(runner)
 
-    assert caught.value is probe_error
+    assert result.verdict == "needs_human"
+    assert result.kept_commit is False
+    assert result.reason is not None
+    assert result.reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: OSError at unscoped_fix_evidence_probe "
+    )
+    assert "git rev-parse spawn failed" in result.reason
     assert runner.reset_targets == [_ITEM_START_HEAD]
     assert runner.current_head == _ITEM_START_HEAD
 

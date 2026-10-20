@@ -9,6 +9,9 @@ import pytest
 from awf.adapters.base import AgentRunResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+)
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError, _MonitorPolicyBlockedError
 from tests.unit.runtime._verdict_retry_fixtures import _invoke, _VerdictRunner
 
@@ -102,10 +105,10 @@ async def test_compose_cleanup_protected_scope_diff_during_commit_sink_rolls_bac
 
 
 @pytest.mark.unit
-async def test_unexpected_failure_during_commit_sink_rolls_back_before_reraise(
+async def test_unexpected_failure_during_commit_sink_rolls_back_then_parks_the_item(
     tmp_path: Path,
 ) -> None:
-    """Untyped commit-sink failures must roll back before propagating."""
+    """Untyped commit-sink failures roll back first, then park the item (#1076)."""
     (tmp_path / "ws_protocol").mkdir()
     item_start_head = "a" * 40
     fixed_head = "b" * 40
@@ -122,9 +125,13 @@ async def test_unexpected_failure_during_commit_sink_rolls_back_before_reraise(
 
     runner._commit_dirty_worktree = _raise_unexpected_during_commit
 
-    with pytest.raises(RuntimeError, match="unexpected commit sink failure"):
-        await _invoke(runner)
+    result = await _invoke(runner)
 
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(
+        f"{AGENT_VERDICT_ITEM_UNEXPECTED_ERROR}: RuntimeError at commit_sink "
+    )
     assert len(runner.prompts) == 1
     assert runner.reset_targets == [item_start_head]
     assert runner.current_head == item_start_head

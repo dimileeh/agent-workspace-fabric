@@ -32,6 +32,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
 
+### AGENT_VERDICT_ITEM_UNEXPECTED_ERROR
+**Problem:** An unexpected error ended a PR monitor review item after its edits were rolled back.
+**Likely Cause:** A Git spawn, filesystem, timeout or repository/session error with no dedicated monitor handler was raised while the item ran. AWF rolled the item back to its attempt floor and parked it as needs_human instead of failing the workspace.
+**Operator Fix:** Read the parked item's reason for the failing step, exception type and rollback floor. Fix the underlying Git, filesystem or repository fault, then guide or remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_verdict_item_unexpected_error](#agent_verdict_item_unexpected_error)
+
 ### AGENT_VERDICT_PROTOCOL_VIOLATION
 **Problem:** The PR monitor agent did not emit a valid machine-readable verdict record.
 **Likely Cause:** Both the initial response and its one protocol-correction attempt violated the exact case-sensitive final-line verdict grammar.
