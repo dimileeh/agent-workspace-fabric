@@ -42,6 +42,8 @@ export function artifactDownloadPath(workspaceId: string, name: string): string 
 export const ARTIFACT_LIST_PAGE_SIZE = 200;
 // Defensive ceiling on pages followed so a misbehaving cursor cannot loop
 // forever; 200 * 50 covers 10k artifacts, far beyond any real deposit.
+// Reaching the ceiling while a later page is still advertised is incomplete:
+// the collector returns null instead of a prefix that would hide later artifacts.
 export const ARTIFACT_LIST_MAX_PAGES = 50;
 
 export function artifactListPath(workspaceId: string, cursor: string | null): string {
@@ -93,16 +95,21 @@ export function parseArtifactPresencePage(value: unknown): ArtifactPresencePage 
 }
 
 // Accumulate artifacts across pages until both named artifacts are present (the
-// only thing the presence check needs) or the list is exhausted. ``fetchPage``
-// returns ``null`` to signal a failed request, which short-circuits to ``null``
-// so the caller can surface the error instead of a truncated list. A thrown
-// fetch or a page that is not an ArtifactPresencePage does the same.
+// only thing the presence check needs) or the provider ends the list.
+// ``fetchPage`` returns ``null`` to signal a failed request, which short-circuits
+// to ``null`` so the caller can surface the error instead of a truncated list.
+// A thrown fetch or a page that is not an ArtifactPresencePage does the same.
+// A next_cursor that repeats a cursor already requested is a cycle and returns
+// null before another fetch. Hitting the page ceiling while a later page is
+// still advertised also returns null, unless both targets were already found.
 export async function collectArtifactsForPresence(
   fetchPage: (cursor: string | null) => Promise<unknown>,
 ): Promise<ArtifactPresenceItem[] | null> {
   const collected: ArtifactPresenceItem[] = [];
+  const requestedCursors = new Set<string | null>();
   let cursor: string | null = null;
   for (let page = 0; page < ARTIFACT_LIST_MAX_PAGES; page += 1) {
+    requestedCursors.add(cursor);
     let raw: unknown;
     try {
       raw = await fetchPage(cursor);
@@ -118,14 +125,17 @@ export async function collectArtifactsForPresence(
     }
     collected.push(...data.items);
     if (hasPlanArtifact(collected) && hasConformanceArtifact(collected)) {
-      break;
+      return collected;
     }
     if (!data.has_more || !data.next_cursor) {
-      break;
+      return collected;
+    }
+    if (requestedCursors.has(data.next_cursor)) {
+      return null;
     }
     cursor = data.next_cursor;
   }
-  return collected;
+  return null;
 }
 
 // Pretty-print a conformance report; fall back to the raw text when it is not

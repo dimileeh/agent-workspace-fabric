@@ -144,14 +144,76 @@ test("collectArtifactsForPresence returns null when a page request fails", async
   assert.equal(collected, null);
 });
 
-test("collectArtifactsForPresence stops at the page ceiling for an endless cursor", async () => {
+test("collectArtifactsForPresence rejects a prefix when the page ceiling is still incomplete", async () => {
   let calls = 0;
   const collected = await collectArtifactsForPresence(async () => {
     calls += 1;
     return { items: [artifact(`f-${calls}.txt`)], next_cursor: `c-${calls}`, has_more: true };
   });
   assert.equal(calls, ARTIFACT_LIST_MAX_PAGES);
+  // Distinct cursors are not a cycle, but the provider never ended the list.
+  // Returning the prefix would hide plan.md / conformance.json past the cap.
+  assert.equal(collected, null);
+});
+
+test("collectArtifactsForPresence rejects a repeated cursor before the page ceiling", async () => {
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    calls += 1;
+    return { items: [{ relative_path: "a.txt" }], has_more: true, next_cursor: "same" };
+  });
+  assert.equal(collected, null);
+  // The first "same" cursor is a real next page. The repeat is a cycle and
+  // must not be followed out to the page ceiling.
+  assert.equal(calls, 2);
+});
+
+test("collectArtifactsForPresence rejects a cursor that returns to an earlier page", async () => {
+  const cursors = ["a", "b"];
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    const nextCursor = cursors[calls % cursors.length];
+    calls += 1;
+    return { items: [{ relative_path: "a.txt" }], has_more: true, next_cursor: nextCursor };
+  });
+  assert.equal(collected, null);
+  // null → a → b → a. The third page points back at "a", which was already requested.
+  assert.equal(calls, 3);
+});
+
+test("collectArtifactsForPresence returns both targets found on the final allowed page", async () => {
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    calls += 1;
+    const last = calls === ARTIFACT_LIST_MAX_PAGES;
+    return {
+      items: last
+        ? [artifact(PLAN_ARTIFACT_NAME), artifact(CONFORMANCE_ARTIFACT_NAME)]
+        : [artifact(`f-${calls}.txt`)],
+      next_cursor: `c-${calls}`,
+      has_more: true,
+    };
+  });
+  assert.equal(calls, ARTIFACT_LIST_MAX_PAGES);
+  assert.equal(hasPlanArtifact(collected), true);
+  assert.equal(hasConformanceArtifact(collected), true);
+});
+
+test("collectArtifactsForPresence keeps a list the provider exhausts on the final allowed page", async () => {
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    calls += 1;
+    const last = calls === ARTIFACT_LIST_MAX_PAGES;
+    return {
+      items: [artifact(`f-${calls}.txt`)],
+      next_cursor: last ? null : `c-${calls}`,
+      has_more: !last,
+    };
+  });
+  assert.equal(calls, ARTIFACT_LIST_MAX_PAGES);
   assert.equal(collected.length, ARTIFACT_LIST_MAX_PAGES);
+  assert.equal(hasPlanArtifact(collected), false);
+  assert.equal(hasConformanceArtifact(collected), false);
 });
 
 test("collectArtifactsForPresence resolves null when items is missing", async () => {
