@@ -170,6 +170,46 @@ def test_result_redacts_bounds_and_collapses_the_message() -> None:
     assert len(str(event["error"])) <= 240
 
 
+def _raise_git_fault(secret: str) -> None:
+    raise OSError(f"fetch https://user:{secret}@example.invalid failed")
+
+
+def test_warning_carries_a_redacted_traceback_of_the_cause() -> None:
+    """A park must not lose the frame that failed: the old raise logged a traceback."""
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    try:
+        _raise_git_fault(secret)
+    except OSError as cause:
+        park = _park(cause)
+    with structlog.testing.capture_logs() as captured:
+        result = item_unexpected_error_result(park, workspace_id="ws_x")
+    event = next(e for e in captured if e["event"] == _PARKED_EVENT)
+    trace = str(event["redacted_traceback"])
+    assert trace.startswith("Traceback (most recent call last)")
+    assert "_raise_git_fault" in trace
+    assert trace.rstrip().endswith("@example.invalid failed")
+    assert secret not in trace
+    # The reason is rendered into the PR's NotifyHuman comment: no traceback there.
+    assert "Traceback" not in (result.reason or "")
+
+
+def test_warning_traceback_keeps_its_innermost_frames_when_bounded() -> None:
+    def _deep(depth: int) -> None:
+        if depth == 0:
+            raise RuntimeError("innermost failure")
+        _deep(depth - 1)
+
+    try:
+        _deep(200)
+    except RuntimeError as cause:
+        park = _park(cause)
+    with structlog.testing.capture_logs() as captured:
+        item_unexpected_error_result(park, workspace_id="ws_x")
+    trace = str(next(e for e in captured if e["event"] == _PARKED_EVENT)["redacted_traceback"])
+    assert len(trace) <= 4000
+    assert trace.rstrip().endswith("RuntimeError: innermost failure")
+
+
 def test_result_keeps_an_untyped_causes_own_reason_code() -> None:
     class _CodedError(RuntimeError):
         reason_code = "SOME_GIT_FAULT"

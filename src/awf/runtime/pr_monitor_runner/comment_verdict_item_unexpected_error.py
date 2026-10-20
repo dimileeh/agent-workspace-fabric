@@ -39,6 +39,7 @@ with ``item_unexpected_error_result``. ``asyncio.CancelledError`` is a
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 from typing import Literal, NoReturn
 
@@ -79,6 +80,7 @@ DEDICATED_UPSTREAM_ERRORS: tuple[type[Exception], ...] = (
 )
 
 _MESSAGE_LIMIT = 240
+_TRACEBACK_LIMIT = 4000
 
 
 class ItemUnexpectedError(Exception):
@@ -123,7 +125,10 @@ def item_unexpected_error_result(
 
     The cause is redacted before it is bounded, so a cut cannot leave a token
     fragment behind. An untyped cause that still carries a ``reason_code`` keeps
-    it in the warning and the reason.
+    it in the warning and the reason. The warning also carries the cause's
+    redacted traceback, which the old raise left in the worker log: the park must
+    not hide which frame failed. It stays out of the reason, which is rendered
+    into the PR's NotifyHuman comment.
     """
     from awf.runtime.pr_monitor_runner.comment_verdict_correction import _bounded
 
@@ -131,6 +136,8 @@ def item_unexpected_error_result(
     exc_type = type(cause).__name__
     message = " ".join(redact_secrets(str(cause)).split())[:_MESSAGE_LIMIT] or "<no message>"
     cause_reason_code = getattr(cause, "reason_code", None)
+    # The tail keeps the innermost frame and the exception line.
+    redacted_traceback = redact_secrets("".join(traceback.format_exception(cause)))
     _log.warning(
         "monitor.agent_verdict_item_unexpected_error_parked",
         workspace_id=workspace_id,
@@ -140,6 +147,7 @@ def item_unexpected_error_result(
         rollback_floor_head=park.rollback_floor_head,
         cause_reason_code=cause_reason_code,
         error=message,
+        redacted_traceback=redacted_traceback[-_TRACEBACK_LIMIT:],
     )
     coded = f" ({cause_reason_code})" if cause_reason_code else ""
     return VerdictResult(
