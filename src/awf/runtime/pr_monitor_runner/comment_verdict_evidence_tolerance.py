@@ -31,8 +31,9 @@ AWF never accepts a verdict it has no evidence to check.
   that ``FIXED``. Evidence must never turn a request for a human into a fix.
 * **No workspace failure once a rollback succeeded** — a correction that still
   ends unaccepted parks the item as ``needs_human`` instead of raising. A
-  contentful commit is kept, as in ``correction_unscoped_fix_outcome``.
-  Otherwise the residue is rolled back first, as in
+  contentful commit is kept, as in ``correction_unscoped_fix_outcome``, and
+  edits left uncommitted above it are cleaned so the next item cannot absorb
+  them. Otherwise the residue is rolled back first, as in
   ``resolve_correction_non_fixed_mutation`` (#1020). The batch then reaches its
   end-of-batch push; an operator hint pushes a kept commit through its own
   guarded push and stays parked. A rollback that itself fails still raises, and
@@ -200,8 +201,9 @@ async def park_unaccepted_correction(
 
     This replaces the raise that failed the workspace. A contentful commit in the
     item's own range is kept, and the reason cites the preserved tip and the
-    reason code. With no such commit, the residue is rolled back to the floor,
-    just as the raise did before. Either way the item returns ``needs_human``.
+    reason code; uncommitted edits above it are cleaned first. With no such
+    commit, the residue is rolled back to the floor, just as the raise did
+    before. Either way the item returns ``needs_human``.
     ``_sync_needs_human_reason`` persists the reason on the thread, the merge
     gate keeps blocking, ``decide()`` answers ``NotifyHuman``, and the batch's
     accepted commits reach the remote through the ordinary end-of-batch push. A
@@ -235,13 +237,21 @@ async def park_unaccepted_correction(
         protocol_attempt=1,
         rollback_failure_message=_PARK_ROLLBACK_FAILURE_MESSAGE,
     ):
-        preserved_tip = await _comment_verdict.preserved_correction_tip(
+        live_tip = await _comment_verdict.preserved_correction_tip(
             runner,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             rev_parse_head=rev_parse_head,
-            fallback=fallback_tip,
+            fallback=None,
         )
+        await _clean_edits_above_kept_commit(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            kept_tip=live_tip,
+            reason_code=reason_code,
+        )
+        preserved_tip = live_tip or fallback_tip
         _log.warning(
             "monitor.agent_verdict_correction_unaccepted_commit_preserved",
             workspace_id=workspace_id,
@@ -285,4 +295,63 @@ async def park_unaccepted_correction(
             f"{rollback_floor_head[:12]}; the item is parked "
             f"for human review."
         ),
+    )
+
+
+async def _clean_edits_above_kept_commit(
+    runner: PullRequestMonitorRunner,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    kept_tip: str | None,
+    reason_code: str,
+) -> None:
+    """Discard uncommitted edits left above a kept commit, keeping the commit.
+
+    ``_commit_dirty_worktree`` can return False after ``git add`` or ``git
+    commit`` fails, even when the item already made a contentful commit. The
+    batch starts the next item at this HEAD, so those edits would be absorbed by
+    that item's agent or commit sink and counted as its fix
+    (PRRT_kwDOSJAM6s6uOQn5). They are unaccepted residue, so they go, as on every
+    other unaccepted path. The rollback targets the live kept tip with no
+    ``state``: HEAD does not move, and neither the hosted remote nor push
+    tracking is rewound past the kept commit. An unreadable residue probe fails
+    closed into the clean. An unreadable tip or a failed clean raises the typed
+    terminal error, because the worktree state is then unknown.
+    """
+    from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        _fingerprint_has_pr_worthy_path_residue,
+    )
+
+    residue_fp = await _comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+    )
+    if residue_fp is not None and not _fingerprint_has_pr_worthy_path_residue(residue_fp):
+        return
+    if kept_tip is not None and await _comment_verdict._rollback_or_classify_failure(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        item_start_head=kept_tip,
+        state=None,
+    ):
+        _log.warning(
+            "monitor.agent_verdict_correction_unaccepted_leftover_edits_cleaned",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            attempt_tip=kept_tip,
+        )
+        return
+    _log.warning(
+        "monitor.agent_verdict_correction_unaccepted_leftover_edits_clean_failed",
+        workspace_id=workspace_id,
+        reason_code=reason_code,
+        attempt_tip=kept_tip,
+    )
+    raise AgentVerdictProtocolError(
+        reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+        message=_PARK_ROLLBACK_FAILURE_MESSAGE,
     )

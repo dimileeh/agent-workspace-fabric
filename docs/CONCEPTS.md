@@ -354,14 +354,15 @@ refused only for missing evidence and the correction prints no record at all,
 the correction inherits that `FIXED` (unless it names a non-`FIXED` verdict in
 any form), and the correction's usual evidence gates judge it. A correction
 that still ends without an accepted verdict parks the item as `needs_human`
-with its reason code. A contentful commit the item made is kept and cited;
-otherwise its edits are rolled back first. The batch then continues to its
+with its reason code. A contentful commit the item made is kept and cited,
+and edits left uncommitted above it are cleaned so the next item cannot absorb
+them; otherwise its edits are rolled back first. The batch then continues to its
 normal push and the monitor stays in `monitoring_pr`. An operator hint parked
 this way pushes its kept commit through the same guarded push and stays
-`needs_human`, unless an approve-and-keep grant is active. Only a rollback that
-fails, or an item with no known start HEAD or local worktree to roll back,
-still terminates the monitor as an agent failure. Provider execution failures
-do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
+`needs_human`, unless an approve-and-keep grant is active. Only a rollback or
+cleanup that fails, or an item with no known start HEAD or local worktree to
+roll back, still terminates the monitor as an agent failure. Provider execution
+failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
 without a commit.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that

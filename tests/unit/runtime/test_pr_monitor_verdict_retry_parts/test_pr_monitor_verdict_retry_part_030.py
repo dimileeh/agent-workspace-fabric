@@ -45,6 +45,7 @@ _FIX_HEAD = "b" * 40
 _REVIEWED_PATH = "src/app.py"
 _PRESERVED_EVENT = "monitor.agent_verdict_correction_unaccepted_commit_preserved"
 _PARKED_EVENT = "monitor.agent_verdict_correction_unaccepted_item_parked"
+_LEFTOVER_CLEANED_EVENT = "monitor.agent_verdict_correction_unaccepted_leftover_edits_cleaned"
 
 
 async def _invoke_item(runner: _VerdictRunner) -> VerdictResult:
@@ -67,6 +68,7 @@ def _runner(
     outputs: list[str],
     heads: list[str],
     dirty: list[bool] | None = None,
+    stranded: list[bool] | None = None,
     reset_fails: bool = False,
 ) -> _VerdictRunner:
     (tmp_path / "ws_protocol").mkdir()
@@ -75,6 +77,7 @@ def _runner(
         outputs=list(outputs),
         heads_after_attempt=heads,
         dirty_after_attempt=dirty,
+        stranded_dirty_after_attempt=stranded,
         reset_fails=reset_fails,
     )
     runner.current_head = _ITEM_START_HEAD
@@ -131,6 +134,108 @@ async def test_record_less_item_with_a_contentful_commit_keeps_it_and_parks(
     assert preserved[0]["reason_code"] == AGENT_VERDICT_PROTOCOL_VIOLATION
     assert preserved[0]["attempt_tip"] == _FIX_HEAD
     assert _events(captured, _PARKED_EVENT) == []
+
+
+def _stranded_commit_runner(tmp_path: Path) -> _VerdictRunner:
+    """Attempt 0 self-commits a contentful change; the correction's sink strands later edits."""
+    return _runner(
+        tmp_path,
+        outputs=[F3, F3],
+        heads=[_FIX_HEAD, _FIX_HEAD],
+        stranded=[False, True],
+    )
+
+
+def _spy_leftover_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    clean_ok: bool | None = None,
+) -> list[dict[str, object]]:
+    """Record rollback calls; ``clean_ok`` replaces the result, ``None`` delegates."""
+    calls: list[dict[str, object]] = []
+    real_rollback = comment_verdict._rollback_or_classify_failure
+
+    async def _rollback(runner: object, **kwargs: object) -> bool:
+        calls.append(kwargs)
+        if clean_ok is not None:
+            return clean_ok
+        return await real_rollback(runner, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(comment_verdict, "_rollback_or_classify_failure", _rollback)
+    return calls
+
+
+@pytest.mark.unit
+async def test_leftover_edits_above_a_kept_commit_are_cleaned_before_parking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6uOQn5: the next item must not absorb this item's unfinished edits.
+
+    The sink failed after the item's contentful commit, so edits are still dirty.
+    They are cleaned back to the kept commit (HEAD unmoved, no hosted or push
+    tracking rewind), and the commit itself is kept.
+    """
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    runner = _stranded_commit_runner(tmp_path)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _invoke_item(runner)
+
+    assert result.verdict == "needs_human"
+    assert result.kept_commit is True
+    assert result.reason is not None
+    assert _FIX_HEAD[:12] in result.reason
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+    assert len(clean_calls) == 1
+    assert clean_calls[0]["item_start_head"] == _FIX_HEAD
+    assert clean_calls[0]["state"] is None
+    cleaned = _events(captured, _LEFTOVER_CLEANED_EVENT)
+    assert len(cleaned) == 1
+    assert cleaned[0]["attempt_tip"] == _FIX_HEAD
+    assert len(_events(captured, _PRESERVED_EVENT)) == 1
+
+
+@pytest.mark.unit
+async def test_a_clean_worktree_above_a_kept_commit_needs_no_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    runner = _committed_runner(tmp_path, [F3, F3])
+
+    result = await _invoke_item(runner)
+
+    assert result.kept_commit is True
+    assert clean_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["clean_fails", "tip_unreadable"])
+async def test_leftover_edits_that_cannot_be_cleaned_are_typed_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Unknown worktree state stays terminal, and the kept commit is never reset away."""
+    clean_calls = _spy_leftover_clean(monkeypatch, clean_ok=False)
+    if failure == "tip_unreadable":
+
+        async def _unreadable_tip(_runner: object, **kwargs: object) -> str | None:
+            return kwargs["fallback"]  # type: ignore[return-value]
+
+        monkeypatch.setattr(comment_verdict, "preserved_correction_tip", _unreadable_tip)
+    runner = _stranded_commit_runner(tmp_path)
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke_item(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "terminating after protocol violation" in str(caught.value)
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+    assert len(clean_calls) == (1 if failure == "clean_fails" else 0)
 
 
 @pytest.mark.unit
