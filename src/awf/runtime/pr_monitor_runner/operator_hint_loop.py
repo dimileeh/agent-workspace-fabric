@@ -253,6 +253,13 @@ async def handle_operator_hint_action(
                 failure_reason=push_result.failure_reason,
             )
             return True
+        if state.pending_operator_hint is not None and (
+            state.pending_operator_hint.status in {"needs_human", "agent_failed"}
+        ):
+            # A parked hint's kept-commit push failed (#1074). The hint was parked
+            # before the push, so persist that park as the success path does;
+            # otherwise a restart reloads the hint as pending and re-runs it.
+            await self._persist_state(workspace_id, state)
         state.iter_count += 1
         return False
     if push_result.pushed or (

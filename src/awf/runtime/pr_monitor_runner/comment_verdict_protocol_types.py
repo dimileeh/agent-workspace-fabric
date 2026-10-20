@@ -69,8 +69,11 @@ class AgentVerdictExecutionError(RuntimeError):
 class VerdictResult:
     verdict: AgentVerdict
     reason: str | None = None
-    # True when this verdict deliberately keeps an unpushed local commit the
-    # agent authored for the item (the #925 correction outcomes). Such a
+    # True when a ``needs_human`` park kept the item's contentful commit
+    # (``park_unaccepted_correction``). An operator hint then still pushes that
+    # commit through its guarded push, as a comment batch does, instead of
+    # leaving it local behind ``NotifyHuman`` (#1074).
+    kept_commit: bool = False
 
 
 @dataclass(frozen=True)

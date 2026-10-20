@@ -592,8 +592,8 @@ def correction_unscoped_fix_outcome(
     reason. The preserved commit travels with the cycle's ordinary push; on a
     push failure it follows the ordinary unpublished-repair path while the
     recorded reason keeps describing the change. A FIXED with no contentful
-    change at all is an unsupported claim rather than a misplaced fix and still
-    terminates.
+    change at all is an unsupported claim rather than a misplaced fix: it is
+    never accepted, and after its rollback the item parks (#1074).
     """
     from awf.runtime.pr_monitor_runner.comment_verdict import (
         AGENT_FIXED_WITHOUT_EVIDENCE,

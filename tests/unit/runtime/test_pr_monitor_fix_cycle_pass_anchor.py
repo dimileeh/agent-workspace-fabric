@@ -30,7 +30,6 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import comment_verdict
 from awf.runtime.pr_monitor_runner.comment_verdict import (
     AGENT_FIXED_WITHOUT_EVIDENCE,
-    AgentVerdictProtocolError,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
@@ -782,19 +781,21 @@ async def test_no_change_fixed_rejected_with_correct_pass_anchor(
 
     runner._run_monitor_agent_with_service_recovery = _fixed_agent  # type: ignore[method-assign]
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await comment_verdict._invoke_cli_for_verdict_result(
-            runner,
-            workspace_id="ws_protocol",
-            prompt="fix nothing",
-            commit_message="fix: review item",
-            compose_project="awf_ws_protocol",
-            compose_file=Path("compose.yml"),
-            operation_start_head=pass_head,
-            evidence_item_path="src/mod.py",
-            evidence_item_line=1,
-            evidence_anchor_head=pass_head,
-            commit_dirty_changes=False,
-        )
+    result = await comment_verdict._invoke_cli_for_verdict_result(
+        runner,
+        workspace_id="ws_protocol",
+        prompt="fix nothing",
+        commit_message="fix: review item",
+        compose_project="awf_ws_protocol",
+        compose_file=Path("compose.yml"),
+        operation_start_head=pass_head,
+        evidence_item_path="src/mod.py",
+        evidence_item_line=1,
+        evidence_anchor_head=pass_head,
+        commit_dirty_changes=False,
+    )
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    # Still rejected; after its correction the item parks instead of failing (#1074).
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(f"{AGENT_FIXED_WITHOUT_EVIDENCE}:")

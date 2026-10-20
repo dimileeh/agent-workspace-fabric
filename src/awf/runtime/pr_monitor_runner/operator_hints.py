@@ -13,7 +13,6 @@ from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
 )
 from awf.control.quality_gates import QualityGateViolation
-from awf.db.enums import FailureReason
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
@@ -34,6 +33,9 @@ from awf.runtime.pr_monitor_runner.comments import MonitorVerdictResult, Verdict
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle_terminal_provenance import (
+    _agent_verdict_protocol_failure_result,
 )
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint as _finalize_processed_operator_hint,
@@ -252,6 +254,8 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     acted_feedback_text = hint.directive
+    # Set when a parked verdict kept a commit that must still be pushed (#1074).
+    hint_parked = False
     if hint.directive or not active_grant_specs:
         if not hint.directive:
             acted_feedback_text = hint.reason
@@ -439,7 +443,19 @@ async def _run_operator_hint_cycle(
                 preserved_head_sha=preserved_head_sha,
             )
             mark_operator_hint_needs_human(state, reason)
-            return _GitPushResult(pushed=False, failed=False, returncode=0)
+            if not (
+                isinstance(verdict, VerdictResult)
+                and verdict.kept_commit
+                and not active_grant_specs
+            ):
+                return _GitPushResult(pushed=False, failed=False, returncode=0)
+            # The protocol parked this hint but kept its contentful commit (#1074).
+            # Returning here would leave that commit local while ``decide()``
+            # answers ``NotifyHuman``. Push it through the guarded push below, as a
+            # comment batch would, and skip every finalize step so the hint stays
+            # parked. An approve-and-keep grant is consumed only by a finalized
+            # resume, so a grant-bearing hint keeps the plain park above.
+            hint_parked = True
 
     # The operator-hint resume may have outlived its PR: ``decide()`` only
     # short-circuits merged/closed at the START of a poll cycle, so re-read PR
@@ -659,13 +675,14 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            hint=hint,
-            acted_feedback_text=acted_feedback_text,
-        )
+        if not hint_parked:
+            await _finalize_operator_hint_resume(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                hint=hint,
+                acted_feedback_text=acted_feedback_text,
+            )
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
         await self._repair_protected_scope_commits_before_push(
@@ -706,8 +723,11 @@ async def _run_operator_hint_cycle(
             # to land before the grant is consumed, then no-op the next cycle and
             # wedge the hint at ``monitoring_pr`` where ``guide --grant`` is rejected.
             # Keep the commit and re-block instead (handled below)
-            # (PRRT_kwDOSJAM6s6KZK1v).
-            allow_resync_on_rejection=not active_grant_specs,
+            # (PRRT_kwDOSJAM6s6KZK1v). A parked hint's push suppresses it too: the
+            # reset would drop the kept commit its ``needs_human`` reason promises
+            # to preserve, so the rejection surfaces with the commit intact
+            # (PRRT_kwDOSJAM6s6uPSzO).
+            allow_resync_on_rejection=not active_grant_specs and not hint_parked,
             # Re-arm the terminal guard AFTER pre-push validation: the check above
             # ran before a validation suite (plus its fix passes) that can take
             # minutes, so the PR can go terminal in between
@@ -846,13 +866,14 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
-        await _finalize_operator_hint_resume(
-            self,
-            workspace_id=workspace_id,
-            state=state,
-            hint=hint,
-            acted_feedback_text=acted_feedback_text,
-        )
+        if not hint_parked:
+            await _finalize_operator_hint_resume(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                hint=hint,
+                acted_feedback_text=acted_feedback_text,
+            )
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)
@@ -860,13 +881,15 @@ async def _run_operator_hint_cycle(
         state.last_push_sha = pushed_head_sha
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
-    await _finalize_operator_hint_resume(
-        self,
-        workspace_id=workspace_id,
-        state=state,
-        hint=hint,
-        acted_feedback_text=acted_feedback_text,
-    )
+    # A parked hint pushed only its kept commit and stays ``needs_human``.
+    if not hint_parked:
+        await _finalize_operator_hint_resume(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            hint=hint,
+            acted_feedback_text=acted_feedback_text,
+        )
     return cast(_GitPushResult, push_result)
 
 
@@ -887,14 +910,8 @@ async def _operator_hint_agent_error_result(
     other error parks the hint for a human.
     """
     if isinstance(exc, AgentVerdictProtocolError):
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=str(exc),
-            reason_code=exc.reason_code,
-            failure_reason=FailureReason.agent_failure,
-        )
+        # Nothing was pushed, so the envelope must not say ``git push`` (#1074).
+        return _agent_verdict_protocol_failure_result(exc)
     if isinstance(exc, ProtectedScopeDiffError):
         push_result = cast(
             _GitPushResult,

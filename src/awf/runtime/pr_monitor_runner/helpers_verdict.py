@@ -1,4 +1,9 @@
-"""Exact provider-neutral decoder for PR-monitor verdict records."""
+"""Exact provider-neutral decoder for PR-monitor verdict records.
+
+``_parse_verdict_result`` is the protocol contract. ``_last_valid_verdict_record``
+uses the same record syntax but ignores position and count, so callers may act
+on it only behind an evidence gate (#1074).
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,8 @@ from awf.runtime.pr_monitor_runner.constants import _REDACTION
 
 __all__ = (
     "_final_non_empty_line",
+    "_last_valid_verdict_record",
+    "_mentions_non_fixed_verdict",
     "_parse_verdict",
     "_parse_verdict_result",
     "_sanitize_verdict_reason",
@@ -26,6 +33,19 @@ _EXACT_VERDICT = re.compile(
     r"(?P<label>FIXED|FALSE POSITIVE|DEFER|NEEDS_HUMAN): "
     r"(?P<reason>[^\r\n]+)"
 )
+_VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
+_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = f"{_VERDICT_REASON_EDGE_DECORATION}[]"
+# Markdown or inline-HTML decoration around the prefix or the label.
+_LOOSE_VERDICT_DECORATION = (
+    rf"(?:[{re.escape(_VERDICT_REASON_TEMPLATE_EDGE_DECORATION)}]|<[^<>\r\n]{{0,16}}>)*"
+)
+# Any spelling of a non-FIXED verdict, decorated or not. Never a record, but still
+# the agent's own word against a FIXED it might otherwise be credited with.
+_LOOSE_NON_FIXED_VERDICT = re.compile(
+    rf"AWF-VERDICT{_LOOSE_VERDICT_DECORATION}:{_LOOSE_VERDICT_DECORATION}"
+    r"(?:FALSE[ \t_-]*POSITIVE|DEFER|NEEDS[ \t_-]*HUMAN)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
 _MAX_VERDICT_REASON_LENGTH = 500
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
     r"<\s*(?:what|one[-\s]?sentence|summary|reason|track|decision|defer|need)"
@@ -35,8 +55,6 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
 _VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(r"(?:…|\.{3})")
 _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
 _VERDICT_REASON_TEMPLATE_BACKSLASH_ESCAPE = re.compile(r"\\([<>])")
-_VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
-_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = f"{_VERDICT_REASON_EDGE_DECORATION}[]"
 _VERDICT_REASON_HTML_DECODE_MAX_PASSES = 4
 _LABEL_TO_VERDICT: dict[str, AgentVerdict] = {
     "FIXED": "fix_committed",
@@ -94,6 +112,44 @@ def _final_non_empty_line(stdout: str) -> str | None:
         while end > 0 and stdout[end - 1] == "\r":
             end -= 1
     return None
+
+
+def _last_valid_verdict_record(stdout: str) -> VerdictResult | None:
+    """Return the last valid exact record anywhere in stdout, or ``None``.
+
+    The record line is just as strict as in ``_parse_verdict_result``: the same
+    line-anchored syntax, a non-empty, non-placeholder reason, redaction and the
+    length bound. Only its position and the record count are not checked.
+    Invalid records are skipped, so a trailing template echo is never selected.
+    A ``FIXED`` record followed by any mention of a non-FIXED verdict is
+    contradicted by the agent itself, so nothing is returned. The scan runs
+    upward with constant additional memory.
+    """
+    end = len(stdout)
+    while True:
+        start = stdout.rfind("\n", 0, end) + 1
+        line_end = end
+        if line_end > start and stdout[line_end - 1] == "\r":
+            line_end -= 1
+        matched = _EXACT_VERDICT.fullmatch(stdout, start, line_end)
+        if matched is not None:
+            reason = _sanitize_verdict_reason(
+                matched.group("reason"),
+                reject_template_placeholders=True,
+            )
+            if reason is not None:
+                verdict = _LABEL_TO_VERDICT[matched.group("label")]
+                if verdict == "fix_committed" and _mentions_non_fixed_verdict(stdout, line_end):
+                    return None
+                return VerdictResult(verdict=verdict, reason=reason)
+        if start == 0:
+            return None
+        end = start - 1
+
+
+def _mentions_non_fixed_verdict(stdout: str, pos: int = 0) -> bool:
+    """Whether stdout from ``pos`` names a non-FIXED verdict in any spelling."""
+    return _LOOSE_NON_FIXED_VERDICT.search(stdout, pos) is not None
 
 
 def _count_exact_verdict_records(stdout: str) -> int:

@@ -37,6 +37,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     preserved_correction_tip,
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
+from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from tests.unit.runtime._verdict_retry_fixtures import _VerdictRunner
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -369,10 +370,14 @@ async def test_self_citing_needs_human_after_protocol_violation_keeps_commit(
 
 
 @pytest.mark.unit
-async def test_fixed_without_any_change_still_terminates_after_correction(
+async def test_fixed_without_any_change_parks_after_correction(
     tmp_path: Path,
 ) -> None:
-    """Boundary: no contentful change at all is an unsupported claim, not a misplaced fix."""
+    """Boundary: no contentful change at all is an unsupported claim, not a misplaced fix.
+
+    It is still never accepted. After the correction the item parks with the
+    reason code instead of failing the monitor (#1074).
+    """
     (tmp_path / "ws_protocol").mkdir()
     runner = _VerdictRunner(
         worktrees_root=tmp_path,
@@ -383,10 +388,15 @@ async def test_fixed_without_any_change_still_terminates_after_correction(
         heads_after_attempt=[_ITEM_START_HEAD, _ITEM_START_HEAD],
     )
 
-    with pytest.raises(AgentVerdictProtocolError) as caught:
-        await _address(runner, _thread("PRRT_no_change_fixed"))
+    state = MonitorState()
 
-    assert caught.value.reason_code == AGENT_FIXED_WITHOUT_EVIDENCE
+    verdict = await _address(runner, _thread("PRRT_no_change_fixed"), state)
+
+    assert verdict == "needs_human"
+    parked_reason = state.threads_addressed_ids[
+        _needs_human_reason_state_key("PRRT_no_change_fixed")
+    ]
+    assert parked_reason.startswith(f"{AGENT_FIXED_WITHOUT_EVIDENCE}:")
     assert len(runner.prompts) == 2
 
 
