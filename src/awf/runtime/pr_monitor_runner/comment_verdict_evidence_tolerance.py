@@ -38,8 +38,11 @@ AWF never accepts a verdict it has no evidence to check.
   end-of-batch push; an operator hint pushes a kept commit through its own
   guarded push and stays parked. A rollback that itself fails still raises, and
   so does an item with no known floor or no local worktree, where no rollback
-  could run. An unexpected error after such a rollback parks the item too
-  (``comment_verdict_item_unexpected_error``, #1076).
+  could run. A no-commit rollback without a saved item-start Git config baseline
+  raises too: restore would report success without rewriting config
+  (PRRT_kwDOSJAM6s6uXI6H). An unexpected error after a rollback that did restore
+  that baseline parks the item (``comment_verdict_item_unexpected_error``,
+  #1076).
 
 Sibling modules (``helpers_verdict``, ``helpers``, ``comment_verdict``) are
 resolved at call time. ``comment_verdict`` imports this module at load time, and
@@ -216,10 +219,15 @@ async def park_unaccepted_correction(
     before its push for other parked verdicts, pushes it too and stays parked. A
     rollback that fails still raises, unchanged: the worktree state is then
     unknown. With no known floor or no local worktree nothing can be measured or
-    rolled back, so ``protocol_error`` is raised exactly as before.
+    rolled back, so ``protocol_error`` is raised exactly as before. A no-commit
+    rollback without a saved item-start Git config baseline raises the same
+    typed terminal error (PRRT_kwDOSJAM6s6uXI6H).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_correction import _bounded
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        item_start_has_local_git_config_snapshot,
+    )
 
     reason_code = protocol_error.reason_code
     if rollback_floor_head is None or not worktree_path.exists():
@@ -274,6 +282,11 @@ async def park_unaccepted_correction(
             ),
             kept_commit=True,
         )
+    # Without a saved baseline the item-start Git config restore is a no-op that
+    # still reports success, so a True rollback proves nothing and must not park
+    # (PRRT_kwDOSJAM6s6uXI6H). Same gate as the kept-commit clean
+    # (PRRT_kwDOSJAM6s6uPByi).
+    has_git_config_baseline = item_start_has_local_git_config_snapshot(worktree_path)
     rollback_ok = await _comment_verdict._rollback_or_classify_failure(
         runner,
         workspace_id=workspace_id,
@@ -282,7 +295,14 @@ async def park_unaccepted_correction(
         item_start_last_push_sha=item_start_last_push_sha,
         state=state,
     )
-    if not rollback_ok:
+    if not has_git_config_baseline:
+        _log.warning(
+            "monitor.agent_verdict_correction_unaccepted_rollback_without_git_config_baseline",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            rollback_floor_head=rollback_floor_head,
+        )
+    if not rollback_ok or not has_git_config_baseline:
         raise AgentVerdictProtocolError(
             reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
             message=_PARK_ROLLBACK_FAILURE_MESSAGE,

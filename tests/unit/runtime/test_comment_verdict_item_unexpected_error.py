@@ -100,6 +100,11 @@ def test_dedicated_subclass_is_re_raised_unchanged(tmp_path: Path) -> None:
     ids=lambda e: type(e).__name__,
 )
 def test_untyped_cause_raises_the_park_signal_chained_to_it(exc: Exception, tmp_path: Path) -> None:
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        remember_item_start_local_git_configs,
+    )
+
+    assert remember_item_start_local_git_configs(tmp_path) is True
     with pytest.raises(ItemUnexpectedError) as caught:
         reraise_or_park_item(exc, "post_attempt_tip_probe", _FLOOR, tmp_path)
     assert caught.value.__cause__ is exc
@@ -119,6 +124,37 @@ def test_missing_worktree_re_raises_the_untyped_cause(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError) as caught:
         reraise_or_park_item(exc, "agent_invocation", _FLOOR, tmp_path / "gone")
     assert caught.value is exc
+
+
+def test_missing_git_config_baseline_does_not_park(tmp_path: Path) -> None:
+    """PRRT_kwDOSJAM6s6uXI6H: a no-op config restore is not safe to continue from.
+
+    ``restore_item_start_local_git_configs`` reports success when no item-start
+    snapshot was saved. Parking would leave agent-changed Git settings for the
+    next item and the push, so the cause stays a typed terminal error.
+    """
+    from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+        AGENT_VERDICT_PROTOCOL_VIOLATION,
+    )
+
+    exc = OSError("spawn failed")
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        reraise_or_park_item(exc, "agent_invocation", _FLOOR, tmp_path)
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.__cause__ is exc
+    assert "Git config baseline" in str(caught.value)
+    refused = [
+        event
+        for event in captured
+        if event["event"] == "monitor.agent_verdict_item_park_refused_without_git_config_baseline"
+    ]
+    assert len(refused) == 1
+    assert refused[0]["log_level"] == "warning"
+    assert refused[0]["site"] == "agent_invocation"
+    assert refused[0]["rollback_floor_head"] == _FLOOR
 
 
 def test_park_signal_is_not_itself_dedicated() -> None:

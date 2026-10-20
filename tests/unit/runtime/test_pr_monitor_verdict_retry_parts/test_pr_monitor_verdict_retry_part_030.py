@@ -506,6 +506,41 @@ async def test_an_unreadable_residue_probe_above_a_kept_commit_fails_closed_into
 
 
 @pytest.mark.unit
+async def test_no_commit_rollback_without_an_item_start_git_config_baseline_is_typed_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6uXI6H: a no-commit rollback with no saved baseline does not park.
+
+    The item-start snapshot can fail without aborting the item. Restore then
+    reports success without rewriting config, so parking would leave an
+    agent-added ``include.path`` for the next item and the push.
+    """
+
+    def _snapshot_fails(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    runner = _runner(tmp_path, outputs=[F3, F3], heads=[_ITEM_START_HEAD, _ITEM_START_HEAD])
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await _invoke_item(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert "terminating after protocol violation" in str(caught.value)
+    assert _events(captured, _PARKED_EVENT) == []
+    refused = _events(
+        captured,
+        "monitor.agent_verdict_correction_unaccepted_rollback_without_git_config_baseline",
+    )
+    assert len(refused) == 1
+    assert refused[0]["rollback_floor_head"] == _ITEM_START_HEAD
+
+
+@pytest.mark.unit
 async def test_record_less_item_without_any_change_parks(tmp_path: Path) -> None:
     """Scenario 6: F3 on both attempts, nothing committed → park, no raise."""
     runner = _runner(tmp_path, outputs=[F3, F3], heads=[_ITEM_START_HEAD, _ITEM_START_HEAD])

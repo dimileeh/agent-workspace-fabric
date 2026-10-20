@@ -280,6 +280,38 @@ async def test_untyped_error_after_successful_rollback_parks_the_item(
 
 
 @pytest.mark.unit
+async def test_untyped_error_without_a_git_config_baseline_stays_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6uXI6H: snapshot failure must not park after a no-op restore.
+
+    Remember warns and the agent still runs. Rollback then reports success
+    because nothing was snapshotted. Continuing would keep agent-changed Git
+    settings for the next item and the push, so the item stays terminal.
+    """
+
+    def _snapshot_fails(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    error = RuntimeError("agent transport dropped")
+    armed = _arm_agent_invocation(tmp_path, monkeypatch, error, False)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(AgentVerdictProtocolError) as caught,
+    ):
+        await armed.invoke()
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert caught.value.__cause__ is error
+    assert "Git config baseline" in str(caught.value)
+    assert armed.runner.reset_targets == [armed.floor]
+    assert _events(captured, _PARKED_EVENT) == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("site", _SITES)
 @pytest.mark.parametrize("error_type", _UNTYPED, ids=lambda t: t.__name__)
 async def test_untyped_error_with_failed_rollback_stays_terminal(

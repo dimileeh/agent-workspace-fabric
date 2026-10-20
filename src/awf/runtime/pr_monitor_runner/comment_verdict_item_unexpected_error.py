@@ -30,8 +30,12 @@ failed rollback never gets here: the site raises its typed terminal error
 first. A cause with a dedicated upstream handler is re-raised unchanged, so its
 reason code still reaches that handler. With no known floor or no local
 worktree, no rollback actually ran, so the cause is re-raised unchanged as well,
-as in ``park_unaccepted_correction``. Any other cause raises
-``ItemUnexpectedError`` chained to it. The protocol entry point
+as in ``park_unaccepted_correction``. A missing item-start Git config baseline
+is the same refusal: restore then reports success without rewriting config, so
+parking would leave agent-changed Git settings for the next item and the push
+(PRRT_kwDOSJAM6s6uXI6H). That raises ``AgentVerdictProtocolError`` chained to
+the cause. Any other cause raises ``ItemUnexpectedError`` chained to it. The
+protocol entry point
 (``comment_verdict_entrypoint``) turns that signal into a ``needs_human`` item
 with ``item_unexpected_error_result``. ``asyncio.CancelledError`` is a
 ``BaseException`` and never enters these handlers.
@@ -49,6 +53,7 @@ from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
     AGENT_VERDICT_ITEM_UNEXPECTED_ERROR,
+    AGENT_VERDICT_PROTOCOL_VIOLATION,
     AgentVerdictExecutionError,
     AgentVerdictProtocolError,
     VerdictResult,
@@ -106,13 +111,33 @@ def reraise_or_park_item(
     """Re-raise ``exc`` unchanged, or turn it into the item park signal.
 
     Call it from ``exc``'s own handler, and only after the rollback succeeded.
+    Without a saved item-start Git config baseline, that rollback did not restore
+    Git settings, so this raises ``AgentVerdictProtocolError`` instead of parking
+    (PRRT_kwDOSJAM6s6uXI6H).
     """
+    from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+        item_start_has_local_git_config_snapshot,
+    )
+
     if (
         isinstance(exc, DEDICATED_UPSTREAM_ERRORS)
         or rollback_floor_head is None
         or not worktree_path.exists()
     ):
         raise exc
+    if not item_start_has_local_git_config_snapshot(worktree_path):
+        _log.warning(
+            "monitor.agent_verdict_item_park_refused_without_git_config_baseline",
+            site=site,
+            rollback_floor_head=rollback_floor_head,
+        )
+        raise AgentVerdictProtocolError(
+            reason_code=AGENT_VERDICT_PROTOCOL_VIOLATION,
+            message=(
+                "Could not roll back unaccepted edits: no item-start Git config "
+                "baseline was saved, so Git settings cannot be restored."
+            ),
+        ) from exc
     raise ItemUnexpectedError(site=site, rollback_floor_head=rollback_floor_head) from exc
 
 
