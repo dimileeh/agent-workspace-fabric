@@ -20,6 +20,26 @@ def get_comment_repair_reasons(
 ) -> dict[str, _ReasonText]:
     """Return the comment-repair catalog reason text entries."""
     return {
+        "AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED": reason_text_cls(
+            (
+                "AWF could not save the worktree's Git settings at item start, so it parked the "
+                "PR monitor review item without running the agent."
+            ),
+            (
+                "Fix the worktree condition (trim the non-ignored entries, remove the unreadable "
+                "or symlinked path, or repair the gitdir linkage), then guide or remonitor the "
+                "workspace."
+            ),
+            (
+                "The item-start Git config snapshot failed: the worktree has more than 100k "
+                "non-ignored entries, the walk hit an unreadable or symlinked path, or the gitdir "
+                "linkage is unusual. Without that baseline AWF cannot safely undo an agent run, "
+                "so the item was not attempted and was parked as needs_human instead of failing "
+                "the workspace."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED"),
+        ),
         "COMMENT_REPAIR_REMOTE_HEAD_VERIFICATION_FAILED": reason_text_cls(
             "AWF could not verify the remote PR head before abandoning unpublished comment repairs.",
             (
