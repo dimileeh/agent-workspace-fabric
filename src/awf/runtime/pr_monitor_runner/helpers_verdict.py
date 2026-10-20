@@ -33,10 +33,17 @@ _EXACT_VERDICT = re.compile(
     r"(?P<label>FIXED|FALSE POSITIVE|DEFER|NEEDS_HUMAN): "
     r"(?P<reason>[^\r\n]+)"
 )
+_VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
+_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = f"{_VERDICT_REASON_EDGE_DECORATION}[]"
+# Markdown or inline-HTML decoration around the prefix or the label.
+_LOOSE_VERDICT_DECORATION = (
+    rf"(?:[{re.escape(_VERDICT_REASON_TEMPLATE_EDGE_DECORATION)}]|<[^<>\r\n]{{0,16}}>)*"
+)
 # Any spelling of a non-FIXED verdict, decorated or not. Never a record, but still
 # the agent's own word against a FIXED it might otherwise be credited with.
 _LOOSE_NON_FIXED_VERDICT = re.compile(
-    r"AWF-VERDICT:[ \t]*(?:FALSE[ \t_-]*POSITIVE|DEFER|NEEDS[ \t_-]*HUMAN)\b",
+    rf"AWF-VERDICT{_LOOSE_VERDICT_DECORATION}:{_LOOSE_VERDICT_DECORATION}"
+    r"(?:FALSE[ \t_-]*POSITIVE|DEFER|NEEDS[ \t_-]*HUMAN)(?![A-Z0-9])",
     re.IGNORECASE,
 )
 _MAX_VERDICT_REASON_LENGTH = 500
@@ -48,8 +55,6 @@ _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
 _VERDICT_REASON_TEMPLATE_ELLIPSIS = re.compile(r"(?:…|\.{3})")
 _VERDICT_REASON_TEMPLATE_EXIT_SUFFIX = re.compile(r"\s+and\s+exit\.?$", re.IGNORECASE)
 _VERDICT_REASON_TEMPLATE_BACKSLASH_ESCAPE = re.compile(r"\\([<>])")
-_VERDICT_REASON_EDGE_DECORATION = " \t*_~`\"'“”‘’"
-_VERDICT_REASON_TEMPLATE_EDGE_DECORATION = f"{_VERDICT_REASON_EDGE_DECORATION}[]"
 _VERDICT_REASON_HTML_DECODE_MAX_PASSES = 4
 _LABEL_TO_VERDICT: dict[str, AgentVerdict] = {
     "FIXED": "fix_committed",

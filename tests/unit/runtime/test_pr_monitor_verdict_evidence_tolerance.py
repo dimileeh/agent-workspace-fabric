@@ -315,6 +315,13 @@ _LOOSE_NON_FIXED = [
     "Done. AWF-VERDICT: FALSE POSITIVE: the reviewer misread the diff",
     "  AWF-VERDICT: NEEDS HUMAN: wrong separator, same request",
     "awf-verdict: false positive: wrong case, same answer",
+    "AWF-VERDICT: **NEEDS_HUMAN:** maintainer decision required",
+    "**AWF-VERDICT:** DEFER: decorated prefix",
+    "**AWF-VERDICT**: FALSE POSITIVE: decorated before the colon",
+    "AWF-VERDICT: `NEEDS_HUMAN`: code-wrapped label",
+    "AWF-VERDICT: __DEFER__: underscore emphasis",
+    "AWF-VERDICT: [FALSE POSITIVE]: bracketed label",
+    "AWF-VERDICT: <b>NEEDS_HUMAN</b>: html-wrapped label",
 ]
 
 
