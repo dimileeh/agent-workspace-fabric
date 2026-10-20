@@ -315,20 +315,35 @@ async def _clean_edits_above_kept_commit(
     (PRRT_kwDOSJAM6s6uOQn5). They are unaccepted residue, so they go, as on every
     other unaccepted path. The rollback targets the live kept tip with no
     ``state``: HEAD does not move, and neither the hosted remote nor push
-    tracking is rewound past the kept commit. An unreadable residue probe fails
-    closed into the clean. An unreadable tip or a failed clean raises the typed
-    terminal error, because the worktree state is then unknown.
+    tracking is rewound past the kept commit. An unreadable or raising residue
+    probe fails closed into the clean (PRRT_kwDOSJAM6s6uOogH). An unreadable tip
+    or a failed clean raises the typed terminal error, because the worktree state
+    is then unknown.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
         _fingerprint_has_pr_worthy_path_residue,
     )
 
-    residue_fp = await _comment_verdict._read_correction_pr_worthy_residue_fingerprint(
-        runner,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-    )
+    residue_fp: str | None
+    try:
+        residue_fp = await _comment_verdict._read_correction_pr_worthy_residue_fingerprint(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+    except Exception as probe_exc:
+        # Broad on purpose, like every other residue probe on this path: it
+        # spawns Git and can raise outside the git-spawn error set. Escaping here
+        # would leave a kept commit as an untyped failure instead of a park.
+        # ``asyncio.CancelledError`` is a ``BaseException`` and still propagates.
+        _log.warning(
+            "monitor.agent_verdict_correction_unaccepted_leftover_residue_probe_failed",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            exc_type=type(probe_exc).__name__,
+        )
+        residue_fp = None
     if residue_fp is not None and not _fingerprint_has_pr_worthy_path_residue(residue_fp):
         return
     if kept_tip is not None and await _comment_verdict._rollback_or_classify_failure(

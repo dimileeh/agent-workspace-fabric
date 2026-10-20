@@ -239,6 +239,58 @@ async def test_leftover_edits_that_cannot_be_cleaned_are_typed_terminal(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("probe", ["unreadable", "raises"])
+async def test_an_unreadable_residue_probe_above_a_kept_commit_fails_closed_into_the_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: str,
+) -> None:
+    """PRRT_kwDOSJAM6s6uOogH: a raising probe is unreadable, not an untyped failure.
+
+    The probe spawns Git and can raise outside its own fail-closed handlers. Once
+    a commit is kept, that must still clean back to the kept commit and park.
+    """
+    clean_calls = _spy_leftover_clean(monkeypatch)
+    real_tip = comment_verdict.preserved_correction_tip
+    real_probe = comment_verdict._read_correction_pr_worthy_residue_fingerprint
+    parking = False
+
+    async def _tip(runner: object, **kwargs: object) -> str | None:
+        nonlocal parking
+        parking = True
+        return await real_tip(runner, **kwargs)  # type: ignore[arg-type]
+
+    async def _probe(runner: object, **kwargs: object) -> str | None:
+        if not parking:
+            return await real_probe(runner, **kwargs)  # type: ignore[arg-type]
+        if probe == "raises":
+            raise RuntimeError("git status timed out")
+        return None
+
+    monkeypatch.setattr(comment_verdict, "preserved_correction_tip", _tip)
+    monkeypatch.setattr(comment_verdict, "_read_correction_pr_worthy_residue_fingerprint", _probe)
+    runner = _committed_runner(tmp_path, [F3, F3])
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _invoke_item(runner)
+
+    assert result.verdict == "needs_human"
+    assert result.kept_commit is True
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+    assert len(clean_calls) == 1
+    assert clean_calls[0]["item_start_head"] == _FIX_HEAD
+    assert clean_calls[0]["state"] is None
+    assert len(_events(captured, _LEFTOVER_CLEANED_EVENT)) == 1
+    probe_failures = _events(
+        captured, "monitor.agent_verdict_correction_unaccepted_leftover_residue_probe_failed"
+    )
+    assert [entry.get("exc_type") for entry in probe_failures] == (
+        ["RuntimeError"] if probe == "raises" else []
+    )
+
+
+@pytest.mark.unit
 async def test_record_less_item_without_any_change_parks(tmp_path: Path) -> None:
     """Scenario 6: F3 on both attempts, nothing committed → park, no raise."""
     runner = _runner(tmp_path, outputs=[F3, F3], heads=[_ITEM_START_HEAD, _ITEM_START_HEAD])
