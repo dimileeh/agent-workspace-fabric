@@ -25,12 +25,17 @@ AWF never accepts a verdict it has no evidence to check.
   exact record, the correction inherits that ``FIXED``. The caller's existing
   correction gates (line, path, package, callee; keep-and-escalate for
   contentful-but-unscoped work) then judge it.
+* **The agent's own word still counts** — a decorated, indented or wrong-case
+  ``NEEDS_HUMAN`` / ``DEFER`` / ``FALSE POSITIVE`` is never a record, but
+  after a ``FIXED`` (or anywhere on a record-less correction) it overrules
+  that ``FIXED``. Evidence must never turn a request for a human into a fix.
 * **No workspace failure once a rollback succeeded** — a correction that still
   ends unaccepted parks the item as ``needs_human`` instead of raising. A
   contentful commit is kept, as in ``correction_unscoped_fix_outcome``.
   Otherwise the residue is rolled back first, as in
   ``resolve_correction_non_fixed_mutation`` (#1020). The batch then reaches its
-  end-of-batch push. Only a rollback that itself fails still raises.
+  end-of-batch push. A rollback that itself fails still raises, and so does an
+  item with no known floor or no local worktree, where no rollback could run.
 
 Sibling modules (``helpers_verdict``, ``helpers``, ``comment_verdict``) are
 resolved at call time. ``comment_verdict`` imports this module at load time, and
@@ -75,12 +80,14 @@ def parse_verdict_with_fix_evidence(
     computed by the caller. ``inherited`` is attempt 0's evidence-refused
     ``FIXED``, passed only on the correction attempt. A tolerated ``FIXED`` wins
     over inheritance. Any exact record line on the correction, placeholder
-    included, blocks inheritance. Everything else re-raises the strict error.
+    included, blocks inheritance, and so does any non-FIXED mention. Everything
+    else re-raises the strict error.
     """
     from awf.runtime.pr_monitor_runner import helpers
     from awf.runtime.pr_monitor_runner.helpers_verdict import (
         _count_exact_verdict_records,
         _last_valid_verdict_record,
+        _mentions_non_fixed_verdict,
     )
 
     try:
@@ -95,7 +102,11 @@ def parse_verdict_with_fix_evidence(
                 verdict=record.verdict,
             )
             return record
-        if inherited is not None and _count_exact_verdict_records(stdout) == 0:
+        if (
+            inherited is not None
+            and _count_exact_verdict_records(stdout) == 0
+            and not _mentions_non_fixed_verdict(stdout)
+        ):
             _log.warning(
                 "monitor.agent_verdict_correction_inherited_fixed",
                 workspace_id=workspace_id,
@@ -193,13 +204,22 @@ async def park_unaccepted_correction(
     gate keeps blocking, ``decide()`` answers ``NotifyHuman``, and the batch's
     accepted commits reach the remote through the ordinary end-of-batch push. A
     rollback that fails still raises, unchanged: the worktree state is then
-    unknown.
+    unknown. With no known floor or no local worktree nothing can be measured or
+    rolled back, so ``protocol_error`` is raised exactly as before.
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.comment_verdict_correction import _bounded
 
     reason_code = protocol_error.reason_code
-    if await guarded_unscoped_fix_evidence(
+    if rollback_floor_head is None or not worktree_path.exists():
+        _log.warning(
+            "monitor.agent_verdict_correction_unaccepted_unmeasurable",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            rollback_floor_head=rollback_floor_head,
+        )
+        raise protocol_error
+    if await _comment_verdict.guarded_unscoped_fix_evidence(
         runner,
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -257,7 +277,7 @@ async def park_unaccepted_correction(
         reason=_bounded(
             f"{reason_code}: {protocol_error} The correction attempt ended without "
             f"an accepted AWF-VERDICT; its edits were rolled back to "
-            f"{(rollback_floor_head or '')[:12] or '<unknown>'}; the item is parked "
+            f"{rollback_floor_head[:12]}; the item is parked "
             f"for human review."
         ),
     )

@@ -307,6 +307,51 @@ def test_any_exact_record_on_the_correction_blocks_inheritance(stdout: str) -> N
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
 
 
+# Decorated, indented or wrong-case lines that name a non-FIXED verdict. They are
+# never records, but they are still the agent's own word against FIXED.
+_LOOSE_NON_FIXED = [
+    "**AWF-VERDICT: NEEDS_HUMAN: only partially addressed; a maintainer must decide**",
+    "`AWF-VERDICT: DEFER: track the remaining migration separately`",
+    "Done. AWF-VERDICT: FALSE POSITIVE: the reviewer misread the diff",
+    "  AWF-VERDICT: NEEDS HUMAN: wrong separator, same request",
+    "awf-verdict: false positive: wrong case, same answer",
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("contradiction", _LOOSE_NON_FIXED)
+def test_a_later_non_fixed_mention_contradicts_a_tolerated_fixed(contradiction: str) -> None:
+    """The agent's last word was not FIXED, so evidence cannot make it FIXED."""
+    stdout = f"AWF-VERDICT: FIXED: fixed the guard\n{contradiction}\n"
+
+    assert _last_valid_verdict_record(stdout) is None
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        _parse(stdout, fix_evidence=True)
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("earlier", _LOOSE_NON_FIXED)
+def test_an_earlier_non_fixed_mention_does_not_contradict_a_later_fixed(earlier: str) -> None:
+    """Like exact records, only what comes after the selected FIXED can overrule it."""
+    stdout = f"{earlier}\nAWF-VERDICT: FIXED: fixed it after all\nchatter"
+
+    assert _parse(stdout, fix_evidence=True) == VerdictResult(
+        verdict="fix_committed",
+        reason="fixed it after all",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("correction", _LOOSE_NON_FIXED)
+def test_a_non_fixed_mention_on_the_correction_blocks_inheritance(correction: str) -> None:
+    """A decorated NEEDS_HUMAN / DEFER / FALSE POSITIVE is no record, but not silence either."""
+    for fix_evidence in (True, False):
+        with pytest.raises(AgentVerdictProtocolError) as caught:
+            _parse(f"{F3}{correction}\n", fix_evidence=fix_evidence, inherited=_INHERITED)
+        assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+
+
 @pytest.mark.unit
 def test_a_tolerated_fixed_with_evidence_beats_inheritance() -> None:
     result = _parse(F1, fix_evidence=True, inherited=_INHERITED)

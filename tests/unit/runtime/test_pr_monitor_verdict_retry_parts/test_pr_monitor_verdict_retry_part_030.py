@@ -295,6 +295,74 @@ async def test_park_probe_failure_with_a_failed_rollback_is_typed_terminal(
     assert caught.value.__cause__ is probe_error
 
 
+@pytest.mark.unit
+async def test_an_unknown_rollback_floor_stays_terminal(tmp_path: Path) -> None:
+    """Nothing can be measured or rolled back, so the item must not park as rolled back.
+
+    With no readable start HEAD at all, a park would claim a rollback that never
+    happened and let the batch push publish the unaccepted commit.
+    """
+    (tmp_path / "ws_protocol").mkdir()
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[F3, F3],
+        heads_after_attempt=[_FIX_HEAD, _FIX_HEAD],
+        rev_parse_sequence=[None, None],
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await comment_verdict._invoke_cli_for_verdict_result(
+            runner,  # type: ignore[arg-type]
+            workspace_id="ws_protocol",
+            prompt="ORIGINAL REVIEW PROMPT",
+            commit_message="fix: review item",
+            compose_project="awf_ws_protocol",
+            compose_file=Path("compose.yml"),
+        )
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+async def test_a_missing_worktree_stays_terminal(tmp_path: Path) -> None:
+    """No local worktree means no rollback actually ran, so there is nothing to park on."""
+    runner = _VerdictRunner(
+        worktrees_root=tmp_path,
+        outputs=[F3, F3],
+        heads_after_attempt=[_ITEM_START_HEAD, _ITEM_START_HEAD],
+    )
+
+    with pytest.raises(AgentVerdictProtocolError) as caught:
+        await _invoke_item(runner)
+
+    assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert len(runner.prompts) == 2
+
+
+@pytest.mark.unit
+async def test_the_park_probe_resolves_through_comment_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-exported guarded probe is the seam a monkeypatch on ``comment_verdict`` reaches."""
+    calls: list[str | None] = []
+
+    async def _no_contentful_commit(_runner: object, **kwargs: object) -> bool:
+        calls.append(str(kwargs["rollback_failure_message"]))
+        return False
+
+    monkeypatch.setattr(comment_verdict, "guarded_unscoped_fix_evidence", _no_contentful_commit)
+    runner = _committed_runner(tmp_path, [F3, F3])
+
+    result = await _invoke_item(runner)
+
+    assert len(calls) == 1
+    assert "terminating after protocol violation" in (calls[0] or "")
+    assert result.verdict == "needs_human"
+    assert runner.reset_targets == [_ITEM_START_HEAD]
+
+
 async def _address(runner: _VerdictRunner, state: MonitorState) -> str:
     return await _address_thread(
         runner,  # type: ignore[arg-type]

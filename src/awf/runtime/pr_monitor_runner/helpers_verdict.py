@@ -22,6 +22,7 @@ from awf.runtime.pr_monitor_runner.constants import _REDACTION
 __all__ = (
     "_final_non_empty_line",
     "_last_valid_verdict_record",
+    "_mentions_non_fixed_verdict",
     "_parse_verdict",
     "_parse_verdict_result",
     "_sanitize_verdict_reason",
@@ -31,6 +32,12 @@ _EXACT_VERDICT = re.compile(
     r"AWF-VERDICT: "
     r"(?P<label>FIXED|FALSE POSITIVE|DEFER|NEEDS_HUMAN): "
     r"(?P<reason>[^\r\n]+)"
+)
+# Any spelling of a non-FIXED verdict, decorated or not. Never a record, but still
+# the agent's own word against a FIXED it might otherwise be credited with.
+_LOOSE_NON_FIXED_VERDICT = re.compile(
+    r"AWF-VERDICT:[ \t]*(?:FALSE[ \t_-]*POSITIVE|DEFER|NEEDS[ \t_-]*HUMAN)\b",
+    re.IGNORECASE,
 )
 _MAX_VERDICT_REASON_LENGTH = 500
 _VERDICT_REASON_TEMPLATE_PLACEHOLDER = re.compile(
@@ -109,7 +116,9 @@ def _last_valid_verdict_record(stdout: str) -> VerdictResult | None:
     line-anchored syntax, a non-empty, non-placeholder reason, redaction and the
     length bound. Only its position and the record count are not checked.
     Invalid records are skipped, so a trailing template echo is never selected.
-    The scan runs upward with constant additional memory.
+    A ``FIXED`` record followed by any mention of a non-FIXED verdict is
+    contradicted by the agent itself, so nothing is returned. The scan runs
+    upward with constant additional memory.
     """
     end = len(stdout)
     while True:
@@ -124,13 +133,18 @@ def _last_valid_verdict_record(stdout: str) -> VerdictResult | None:
                 reject_template_placeholders=True,
             )
             if reason is not None:
-                return VerdictResult(
-                    verdict=_LABEL_TO_VERDICT[matched.group("label")],
-                    reason=reason,
-                )
+                verdict = _LABEL_TO_VERDICT[matched.group("label")]
+                if verdict == "fix_committed" and _mentions_non_fixed_verdict(stdout, line_end):
+                    return None
+                return VerdictResult(verdict=verdict, reason=reason)
         if start == 0:
             return None
         end = start - 1
+
+
+def _mentions_non_fixed_verdict(stdout: str, pos: int = 0) -> bool:
+    """Whether stdout from ``pos`` names a non-FIXED verdict in any spelling."""
+    return _LOOSE_NON_FIXED_VERDICT.search(stdout, pos) is not None
 
 
 def _count_exact_verdict_records(stdout: str) -> int:

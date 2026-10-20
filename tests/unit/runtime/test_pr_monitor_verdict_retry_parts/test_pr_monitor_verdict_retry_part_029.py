@@ -262,6 +262,32 @@ async def test_inherited_fixed_with_no_change_at_all_parks_the_item(tmp_path: Pa
 
 
 @pytest.mark.unit
+async def test_a_decorated_needs_human_on_the_correction_is_never_fixed(tmp_path: Path) -> None:
+    """The correction asked for a human, decorated or not: no inherited FIXED.
+
+    The commit carries item-scoped evidence, so inheriting attempt 0's FIXED would
+    resolve the thread as fixed. The item parks instead, and the commit is kept.
+    """
+    runner = _runner(
+        tmp_path,
+        outputs=[
+            F2,
+            "**AWF-VERDICT: NEEDS_HUMAN: only partially addressed; a maintainer must decide**",
+        ],
+        heads=[_ITEM_START_HEAD, _FIX_HEAD],
+        dirty=[False, True],
+    )
+
+    result = await _invoke_item(runner)
+
+    assert result.verdict == "needs_human"
+    assert result.reason is not None
+    assert result.reason.startswith(f"{AGENT_VERDICT_PROTOCOL_VIOLATION}:")
+    assert runner.reset_targets == []
+    assert runner.current_head == _FIX_HEAD
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("attempt_zero", ["garbled prose with no record", F1])
 async def test_only_a_strict_evidence_refused_fixed_is_inherited(
     tmp_path: Path,
