@@ -759,10 +759,12 @@ test("dashboard panes are memoized away from renders that leave their props unch
     dashboard.indexOf("/>", dashboard.indexOf("<ConsoleDashboardInspector")),
   );
   assert.match(inspectorJsx, /refreshTick=\{inspectorRefreshTick\}/);
-  const tick = dashboard.match(/const inspectorRefreshTick = useMemo\(\s*\(\) => \[([^\]]*)\][^,]*,\s*\[([^\]]*)\]/);
+  const tick = dashboard.match(/const inspectorRefreshTick = useMemo\(\s*\(\) =>\s*\[([^\]]*)\][^,]*,\s*\[([^\]]*)\]/);
   assert.ok(tick, "Expected a memoized inspector refresh tick");
   for (const feed of [
     "lastRefresh",
+    // Bumps on every settled overview poll, failed ones included.
+    "overviewLoadSettledVersion",
     "dashboardSummary",
     "resourceSaturation",
     "workspaceSummary",

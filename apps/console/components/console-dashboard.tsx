@@ -1177,10 +1177,30 @@ export function ConsoleDashboard() {
   );
 
   // Before the memo, the inspector re-rendered with every dashboard render, so
-  // its relative ages advanced on each poll. Keep that cadence explicitly.
+  // its relative ages advanced on each poll. Keep that cadence explicitly; the
+  // overview settled version also moves on failed polls, unlike lastRefresh.
   const inspectorRefreshTick = useMemo(
-    () => [lastRefresh, dashboardSummary, resourceSaturation, workspaceSummary, cloudRuntime, mergeQueue, failureSummary] as const,
-    [lastRefresh, dashboardSummary, resourceSaturation, workspaceSummary, cloudRuntime, mergeQueue, failureSummary],
+    () =>
+      [
+        lastRefresh,
+        overviewLoadSettledVersion,
+        dashboardSummary,
+        resourceSaturation,
+        workspaceSummary,
+        cloudRuntime,
+        mergeQueue,
+        failureSummary,
+      ] as const,
+    [
+      lastRefresh,
+      overviewLoadSettledVersion,
+      dashboardSummary,
+      resourceSaturation,
+      workspaceSummary,
+      cloudRuntime,
+      mergeQueue,
+      failureSummary,
+    ],
   );
 
   const refreshDashboard = useCallback(() => {
