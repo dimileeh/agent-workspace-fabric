@@ -515,6 +515,7 @@ def correction_self_citation_outcome(
         return VerdictResult(
             verdict="needs_human",
             reason=_bounded(outcome),
+            kept_commit=True,
         )
     outcome = (
         f"Correction verdict cited this item's own commit {short_tip} without "
@@ -524,6 +525,7 @@ def correction_self_citation_outcome(
     return VerdictResult(
         verdict="needs_human",
         reason=_bounded(outcome),
+        kept_commit=True,
     )
 
 
@@ -617,6 +619,7 @@ def correction_unscoped_fix_outcome(
     return VerdictResult(
         verdict="needs_human",
         reason=_bounded(outcome),
+        kept_commit=True,
     )
 
 

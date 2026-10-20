@@ -489,7 +489,9 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=_REVIEWED_PATH,
     )
     assert result.verdict == "needs_human"
-    # Publish-dependent: the preserved commit still has to reach the PR.
+    # Publish-dependent: the preserved commit still has to reach the PR, including
+    # an operator hint's guarded push (PRRT_kwDOSJAM6s6uXTbM).
+    assert result.kept_commit is True
     assert len(result.reason) <= 500
     assert result.reason.endswith("…")
     assert _REVIEWED_PATH in result.reason
@@ -502,4 +504,5 @@ def test_correction_unscoped_fix_outcome_bounds_the_stored_reason() -> None:
         item_path=None,
     )
     assert unknown.verdict == "needs_human"
+    assert unknown.kept_commit is True
     assert "<unknown>" in unknown.reason

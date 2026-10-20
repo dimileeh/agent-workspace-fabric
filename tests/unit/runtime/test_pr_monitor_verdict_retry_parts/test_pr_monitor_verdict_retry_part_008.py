@@ -375,7 +375,9 @@ def test_correction_self_citation_outcome_preserves_explicit_needs_human() -> No
     )
     assert outcome.verdict == "needs_human"
     # The commit stays in the worktree, so the escalation is publish-dependent
-    # exactly like the no-evidence one (PRRT_kwDOSJAM6s6fpjBw).
+    # exactly like the no-evidence one (PRRT_kwDOSJAM6s6fpjBw). Flag it so an
+    # operator hint pushes before NotifyHuman (PRRT_kwDOSJAM6s6uXTbM).
+    assert outcome.kept_commit is True
     assert outcome.reason is not None
     assert "human review" in outcome.reason.lower() or "Agent reason:" in outcome.reason
 
@@ -494,6 +496,8 @@ def test_correction_self_citation_outcome_bounds_the_stored_reason() -> None:
     )
     assert fixed.verdict == "fix_committed"
     # An accepted fix already flows through the ordinary publish-dependent path.
+    # It is not a park, so the hint cycle must not treat it as a kept commit.
+    assert fixed.kept_commit is False
     assert fixed.reason is not None
     assert len(fixed.reason) == 500
     assert fixed.reason.endswith("…")
@@ -506,6 +510,7 @@ def test_correction_self_citation_outcome_bounds_the_stored_reason() -> None:
         has_path_evidence=False,
     )
     assert escalated.verdict == "needs_human"
+    assert escalated.kept_commit is True
     assert escalated.reason is not None
     assert escalated.reason.endswith("Agent reason: short")
 

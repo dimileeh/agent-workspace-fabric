@@ -72,8 +72,10 @@ class VerdictResult:
     verdict: AgentVerdict
     reason: str | None = None
     # True when a ``needs_human`` park kept the item's contentful commit
-    # (``park_unaccepted_correction``). An operator hint then still pushes that
-    # commit through its guarded push, as a comment batch does, instead of
+    # (``park_unaccepted_correction``, a preserving
+    # ``correction_self_citation_outcome``, or
+    # ``correction_unscoped_fix_outcome``). An operator hint then still pushes
+    # that commit through its guarded push, as a comment batch does, instead of
     # leaving it local behind ``NotifyHuman`` (#1074).
     kept_commit: bool = False
 
