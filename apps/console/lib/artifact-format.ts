@@ -60,7 +60,9 @@ function isArtifactPresenceItem(value: unknown): value is ArtifactPresenceItem {
 }
 
 // Accept a page only when every item has a usable relative_path and the
-// pagination envelope is well typed. Extra fields are left in place. One bad
+// pagination envelope is well typed. ``has_more`` advertises another page, so
+// it requires a non-empty cursor; a null cursor cannot be followed and must
+// not be treated as a complete list. Extra fields are left in place. One bad
 // item rejects the whole page so presence is never decided from a partial list.
 export function parseArtifactPresencePage(value: unknown): ArtifactPresencePage | null {
   if (typeof value !== "object" || value === null) {
@@ -78,7 +80,15 @@ export function parseArtifactPresencePage(value: unknown): ArtifactPresencePage 
     return null;
   }
   const nextCursor = page.next_cursor;
-  if (nextCursor !== null && (typeof nextCursor !== "string" || nextCursor.length === 0)) {
+  if (typeof nextCursor !== "string" && nextCursor !== null) {
+    return null;
+  }
+  if (typeof nextCursor === "string" && nextCursor.length === 0) {
+    return null;
+  }
+  // Continuation was advertised but cannot be requested. Reject the page so
+  // callers surface a malformed list instead of hiding later artifacts.
+  if (page.has_more && nextCursor === null) {
     return null;
   }
   return {

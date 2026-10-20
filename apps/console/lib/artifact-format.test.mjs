@@ -210,6 +210,8 @@ test("collectArtifactsForPresence resolves null for malformed pagination", async
     { items: [], next_cursor: null, has_more: "false" },
     { items: [], next_cursor: 1, has_more: false },
     { items: [], next_cursor: "", has_more: false },
+    // has_more advertises another page, but a null cursor cannot be followed.
+    { items: [], next_cursor: null, has_more: true },
   ];
   for (const page of pages) {
     const collected = await collectArtifactsForPresence(async () => page);
@@ -259,13 +261,14 @@ test("collectArtifactsForPresence returns an empty array for a valid empty page"
   assert.deepEqual(collected, []);
 });
 
-test("collectArtifactsForPresence stops when has_more is true but next_cursor is null", async () => {
+test("collectArtifactsForPresence rejects a prefix when has_more has no usable cursor", async () => {
   let calls = 0;
   const collected = await collectArtifactsForPresence(async () => {
     calls += 1;
     return { items: [artifact("only.txt")], next_cursor: null, has_more: true };
   });
   assert.equal(calls, 1);
-  assert.equal(collected.length, 1);
-  assert.equal(collected[0].relative_path, "only.txt");
+  // The advertised later page is unreachable. Returning the prefix would hide
+  // plan.md / conformance.json that sort after only.txt.
+  assert.equal(collected, null);
 });
