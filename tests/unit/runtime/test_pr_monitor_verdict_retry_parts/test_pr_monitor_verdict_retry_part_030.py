@@ -38,7 +38,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
 )
 from awf.runtime.pr_monitor_runner.comments import _address_thread
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
-from tests.unit.runtime._verdict_retry_fixtures import _invoke, _VerdictRunner
+from tests.unit.runtime._verdict_retry_fixtures import (
+    _invoke,
+    _lose_item_start_git_config_baseline,
+    _VerdictRunner,
+)
 from tests.unit.runtime._verdict_trailing_output_fixtures import F3, F4, F4_REASON
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -358,15 +362,13 @@ async def test_config_only_residue_without_an_item_start_git_config_baseline_is_
 ) -> None:
     """PRRT_kwDOSJAM6s6uPByi: a restore with no saved baseline proves nothing.
 
-    The item-start snapshot may fail without aborting the item, which leaves no
-    cached baseline. The restore then reports success without rewriting config,
-    so an agent-added ``include.path`` could reach the next item or the push.
+    With no cached baseline the restore reports success without rewriting
+    config, so an agent-added ``include.path`` could reach the next item or the
+    push. A failed snapshot now parks before the agent runs (#1081), so this pin
+    loses the baseline after a successful snapshot to keep the guard covered.
     """
 
-    def _snapshot_fails(_worktree_path: Path) -> bool:
-        return False
-
-    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    snapshotted = _lose_item_start_git_config_baseline(monkeypatch)
     clean_calls = _spy_leftover_clean(monkeypatch)
     runner = _committed_runner(tmp_path, [F3, F3])
 
@@ -377,6 +379,7 @@ async def test_config_only_residue_without_an_item_start_git_config_baseline_is_
         await _invoke_item(runner)
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert snapshotted == [tmp_path / "ws_protocol"]
     assert "terminating after protocol violation" in str(caught.value)
     assert clean_calls == []
     assert runner.reset_targets == []
@@ -398,13 +401,12 @@ async def test_leftover_edits_without_an_item_start_git_config_baseline_are_type
     The clean restores item-start Git config before resetting paths, and that
     restore also reports success with no saved baseline. Cleaning the paths
     would then let an agent-added ``include.path`` reach the next item or the
-    push, so it fails closed before the clean.
+    push, so it fails closed before the clean. A failed snapshot now parks
+    before the agent runs (#1081), so this pin loses the baseline after a
+    successful snapshot to keep the guard covered.
     """
 
-    def _snapshot_fails(_worktree_path: Path) -> bool:
-        return False
-
-    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    snapshotted = _lose_item_start_git_config_baseline(monkeypatch)
     clean_calls = _spy_leftover_clean(monkeypatch)
     runner = _stranded_commit_runner(tmp_path)
 
@@ -415,6 +417,7 @@ async def test_leftover_edits_without_an_item_start_git_config_baseline_are_type
         await _invoke_item(runner)
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert snapshotted == [tmp_path / "ws_protocol"]
     assert clean_calls == []
     assert runner.reset_targets == []
     assert runner.current_head == _FIX_HEAD
@@ -512,15 +515,13 @@ async def test_no_commit_rollback_without_an_item_start_git_config_baseline_is_t
 ) -> None:
     """PRRT_kwDOSJAM6s6uXI6H: a no-commit rollback with no saved baseline does not park.
 
-    The item-start snapshot can fail without aborting the item. Restore then
-    reports success without rewriting config, so parking would leave an
-    agent-added ``include.path`` for the next item and the push.
+    With no saved baseline, restore reports success without rewriting config,
+    so parking would leave an agent-added ``include.path`` for the next item and
+    the push. A failed snapshot now parks before the agent runs (#1081), so this
+    pin loses the baseline after a successful snapshot to keep the guard covered.
     """
 
-    def _snapshot_fails(_worktree_path: Path) -> bool:
-        return False
-
-    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    snapshotted = _lose_item_start_git_config_baseline(monkeypatch)
     runner = _runner(tmp_path, outputs=[F3, F3], heads=[_ITEM_START_HEAD, _ITEM_START_HEAD])
 
     with (
@@ -530,6 +531,7 @@ async def test_no_commit_rollback_without_an_item_start_git_config_baseline_is_t
         await _invoke_item(runner)
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert snapshotted == [tmp_path / "ws_protocol"]
     assert "terminating after protocol violation" in str(caught.value)
     assert _events(captured, _PARKED_EVENT) == []
     refused = _events(

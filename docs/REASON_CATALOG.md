@@ -32,6 +32,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#agent_runtime_ownership_repair_failed](#agent_runtime_ownership_repair_failed)
 
+### AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED
+**Problem:** AWF could not save the worktree's Git settings at item start, so it parked the PR monitor review item without running the agent.
+**Likely Cause:** The item-start Git config snapshot failed: the worktree has more than 100k non-ignored entries, the walk hit an unreadable or symlinked path, or the gitdir linkage is unusual. Without that baseline AWF cannot safely undo an agent run, so the item was not attempted and was parked as needs_human instead of failing the workspace.
+**Operator Fix:** Fix the worktree condition (trim the non-ignored entries, remove the unreadable or symlinked path, or repair the gitdir linkage), then guide or remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#agent_verdict_item_start_git_config_snapshot_failed](#agent_verdict_item_start_git_config_snapshot_failed)
+
 ### AGENT_VERDICT_ITEM_UNEXPECTED_ERROR
 **Problem:** An unexpected error ended a PR monitor review item after its edits were rolled back.
 **Likely Cause:** A Git spawn, filesystem, timeout or repository/session error with no dedicated monitor handler was raised while the item ran. AWF rolled the item back to its attempt floor and parked it as needs_human instead of failing the workspace.

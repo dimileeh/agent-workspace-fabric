@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from awf.common.logging import get_logger
+from awf.runtime.pr_monitor_runner.comment_verdict_item_start_snapshot_park import (
+    ItemStartGitConfigSnapshotFailedError,
+    item_start_git_config_snapshot_failed_result,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_item_unexpected_error import (
     ItemUnexpectedError,
     item_unexpected_error_result,
@@ -102,7 +106,9 @@ async def _invoke_cli_for_verdict_result(
     another attempt, so the anchor is put back: otherwise the next attempt would
     anchor at the preserved HEAD and drop the timed-out attempt's commits from its
     own ``FIXED`` evidence range (#934 audit). A returned verdict still consumes it,
-    and so does an item a site parks after a successful rollback (#1076).
+    and so does an item a site parks after a successful rollback (#1076) or one
+    pre-launch parks before any agent run because the item-start Git config
+    snapshot failed (#1081).
     An item can also *earn* an anchor mid-run without ever having had one: when the
     service-recovery loop preserves a watchdog timeout and reruns the agent inside
     the agent run, the #932 preserve handler never sees that timeout and never
@@ -181,6 +187,11 @@ async def _invoke_cli_for_verdict_result(
         # the item parks and the batch goes on (#1076). Like any verdict, the park
         # leaves the #932 anchor consumed.
         return item_unexpected_error_result(park, workspace_id=workspace_id)
+    except ItemStartGitConfigSnapshotFailedError:
+        # Pre-launch could not save the item-start Git config baseline, so the
+        # agent never ran: the item parks with nothing to undo (#1081). Like any
+        # verdict, the park leaves the #932 anchor consumed.
+        return item_start_git_config_snapshot_failed_result()
     except BaseException:
         # Every exit from here — infrastructure repair failure, provider failure,
         # protocol violation, worker cancellation — fails the fix cycle without

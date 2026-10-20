@@ -372,7 +372,14 @@ floor. On the operator-hint path it is an ordinary parked hint with no kept
 commit. Errors that have their own monitor handler (reason-coded infrastructure
 exits, provider recovery, protected-scope and compose-cleanup failures, verdict
 protocol and provider execution errors) still reach that handler unchanged, and
-cancellation always propagates. Provider execution
+cancellation always propagates. Every rollback restores the item-start local Git
+config, so it needs the snapshot AWF takes at item start. When that snapshot
+fails, AWF cannot safely undo an agent run and does not attempt the item: it
+parks `needs_human` with `AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED`
+before the agent runs, the worktree is untouched, and the batch still reaches
+its push. On the operator-hint path it is an ordinary parked hint with nothing
+to push. The rollback paths that need that baseline still refuse to park
+without it. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
 without a commit.
 

@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from awf.common.logging import get_logger
+from awf.runtime.pr_monitor_runner.comment_verdict_item_start_snapshot_park import (
+    ItemStartGitConfigSnapshotFailedError,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_timeout_preserve import (
     consume_item_start_head,
 )
@@ -74,7 +80,8 @@ async def prepare_item_protocol_anchors(
     missing anchor or floor from the live HEAD, then repairs agent runtime
     ownership and the mirror ``hooksPath`` and snapshots the worktree's local git
     configs. Raises ``_MonitorAgentRuntimeOwnershipRepairFailedError`` or the
-    hooks-repair failure exactly as the inline block did.
+    hooks-repair failure exactly as the inline block did, and
+    ``ItemStartGitConfigSnapshotFailedError`` when the snapshot fails (#1081).
     """
     from awf.runtime.pr_monitor_runner import comment_verdict as _comment_verdict
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
@@ -174,14 +181,16 @@ async def prepare_item_protocol_anchors(
         _comment_verdict.remember_item_start_local_git_configs,
         worktree_path,
     ):
-        # Fingerprint probes fail closed when local config cannot be snapshotted.
-        # Do not abort the item here: unit fixtures often use non-contained
-        # ``gitdir:`` stubs, and production still refuses config-blind non-FIXED
-        # acceptance via ``None`` residue fingerprints (PRRT_kwDOSJAM6s6e0Xdl).
+        # Without this baseline no rollback can undo Git settings the agent
+        # changes, and every rollback that needs it refuses to park. So the
+        # agent never runs: the entry point parks the item ``needs_human``
+        # before anything touches the worktree (#1081).
         _log.warning(
             "monitor.agent_verdict_item_start_git_config_snapshot_failed",
             workspace_id=workspace_id,
+            reason_code=AGENT_VERDICT_ITEM_START_GIT_CONFIG_SNAPSHOT_FAILED,
         )
+        raise ItemStartGitConfigSnapshotFailedError()
 
     return ItemProtocolAnchors(
         worktree_path=worktree_path,

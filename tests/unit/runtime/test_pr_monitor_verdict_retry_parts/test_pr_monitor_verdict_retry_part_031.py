@@ -42,7 +42,11 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
-from tests.unit.runtime._verdict_retry_fixtures import _invoke, _VerdictRunner
+from tests.unit.runtime._verdict_retry_fixtures import (
+    _invoke,
+    _lose_item_start_git_config_baseline,
+    _VerdictRunner,
+)
 from tests.unit.runtime._verdict_trailing_output_fixtures import F3
 
 pytest_plugins = ["tests.unit.runtime._verdict_retry_fixtures"]
@@ -284,17 +288,15 @@ async def test_untyped_error_without_a_git_config_baseline_stays_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PRRT_kwDOSJAM6s6uXI6H: snapshot failure must not park after a no-op restore.
+    """PRRT_kwDOSJAM6s6uXI6H: a missing baseline must not park after a no-op restore.
 
-    Remember warns and the agent still runs. Rollback then reports success
-    because nothing was snapshotted. Continuing would keep agent-changed Git
-    settings for the next item and the push, so the item stays terminal.
+    Rollback reports success because no baseline was saved. Continuing would
+    keep agent-changed Git settings for the next item and the push, so the item
+    stays terminal. A failed snapshot now parks before the agent runs (#1081),
+    so this pin loses the baseline after a successful snapshot to keep the
+    guard covered.
     """
-
-    def _snapshot_fails(_worktree_path: Path) -> bool:
-        return False
-
-    monkeypatch.setattr(comment_verdict, "remember_item_start_local_git_configs", _snapshot_fails)
+    snapshotted = _lose_item_start_git_config_baseline(monkeypatch)
     error = RuntimeError("agent transport dropped")
     armed = _arm_agent_invocation(tmp_path, monkeypatch, error, False)
 
@@ -305,6 +307,7 @@ async def test_untyped_error_without_a_git_config_baseline_stays_terminal(
         await armed.invoke()
 
     assert caught.value.reason_code == AGENT_VERDICT_PROTOCOL_VIOLATION
+    assert snapshotted == [tmp_path / "ws_protocol"]
     assert caught.value.__cause__ is error
     assert "Git config baseline" in str(caught.value)
     assert armed.runner.reset_targets == [armed.floor]

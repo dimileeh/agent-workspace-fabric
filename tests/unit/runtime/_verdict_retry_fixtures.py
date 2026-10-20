@@ -12,7 +12,11 @@ from awf.common.commands import CommandResult
 from awf.db.enums import AgentRuntime
 from awf.runtime import git_index_hide_flags
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner import comment_verdict, comment_verdict_residue
+from awf.runtime.pr_monitor_runner import (
+    comment_verdict,
+    comment_verdict_residue,
+    comment_verdict_residue_fingerprint_git_config,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
 
@@ -296,6 +300,32 @@ def _safe_ownership(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequ
         "_read_correction_pr_worthy_residue_fingerprint",
         _mock_read_correction_residue_fingerprint,
     )
+
+
+def _lose_item_start_git_config_baseline(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Take a real item-start snapshot, then drop the baseline it saved.
+
+    A failed snapshot now parks the item before the agent runs (#1081), so the
+    guards that refuse to park without a baseline are no longer reached through
+    it. This keeps them covered: the snapshot succeeds and the agent runs, but
+    the guard finds the same empty cache a failed snapshot leaves behind.
+    Returns the worktrees snapshotted, so a test can show the re-route ran.
+    """
+    real_snapshot = comment_verdict.remember_item_start_local_git_configs
+    snapshotted: list[Path] = []
+
+    def _snapshot_then_lose_baseline(worktree_path: Path) -> bool:
+        assert real_snapshot(worktree_path) is True
+        comment_verdict_residue_fingerprint_git_config._clear_item_start_git_caches(
+            str(worktree_path.resolve())
+        )
+        snapshotted.append(worktree_path)
+        return True
+
+    monkeypatch.setattr(
+        comment_verdict, "remember_item_start_local_git_configs", _snapshot_then_lose_baseline
+    )
+    return snapshotted
 
 
 def _agent_error(stdout: str = "") -> AgentRunError:
