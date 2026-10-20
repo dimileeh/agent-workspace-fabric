@@ -1325,6 +1325,7 @@ export function ConsoleDashboard() {
         logTailSignal={logTailSignal}
         logTailRefreshError={logTailRefreshError}
         workspaceDetailError={workspaceDetailError}
+        lastRefresh={lastRefresh}
         onClose={closeInspector}
         onRefresh={refreshDashboard}
         onRetry={retryInspectorWorkspace}

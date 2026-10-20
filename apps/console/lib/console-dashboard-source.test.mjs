@@ -749,6 +749,15 @@ test("dashboard panes are memoized away from renders that leave their props unch
     /const refreshDashboard = useCallback\(/,
     "Expected the refresh callback shared by the top bar and inspector to stay stable",
   );
+  // The memoized inspector renders relative ages ("Blocked for …", preflight
+  // "checked …"). A retained overview row keeps its identity and a failing detail
+  // feed keeps its error, so the refresh tick must still re-render the pane.
+  assert.match(inspector, /lastRefresh: Date \| null;/);
+  const inspectorJsx = dashboard.slice(
+    dashboard.indexOf("<ConsoleDashboardInspector"),
+    dashboard.indexOf("/>", dashboard.indexOf("<ConsoleDashboardInspector")),
+  );
+  assert.match(inspectorJsx, /lastRefresh=\{lastRefresh\}/);
 });
 
 test("capacity panel memoizes its snapshot body and keeps the generated age live", () => {
