@@ -55,7 +55,6 @@ async def test_provider_failure_cleans_dirty_worktree_when_head_unchanged(
     """Uncommitted agent edits must be discarded when provider failure leaves HEAD unchanged."""
     worktree = tmp_path / "ws_protocol"
     worktree.mkdir()
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
     item_start_head = "a" * 40
     cleanup_calls: list[dict[str, object]] = []
 

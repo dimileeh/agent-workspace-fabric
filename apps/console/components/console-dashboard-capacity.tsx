@@ -15,6 +15,7 @@ Loader2,
 Server
 } from "lucide-react";
 import {
+memo,
 useMemo,
 useState
 } from "react";
@@ -152,7 +153,7 @@ export function CloudRuntimePanel({
   );
 }
 
-export function ReliabilityPanel({
+export const ReliabilityPanel = memo(function ReliabilityPanel({
   workspaceSummary,
   error,
   stale = false,
@@ -196,7 +197,7 @@ export function ReliabilityPanel({
       </div>
     </Panel>
   );
-}
+});
 
 export function ResourceCapacityPanel({
   saturation,
@@ -207,25 +208,6 @@ export function ResourceCapacityPanel({
   error: string | null;
   stale?: boolean;
 }) {
-  const showOldestQueued =
-    saturation !== null &&
-    saturation.capacity_queue.queued_workspace_count > 0 &&
-    saturation.capacity_queue.oldest_wait_seconds !== null;
-  const queueBlockedReasonEntries = saturation
-    ? Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {})
-    : [];
-  const pressureReasons =
-    saturation === null
-      ? []
-      : saturation.allocated_capacity.pressure_reasons.length > 0
-        ? saturation.allocated_capacity.pressure_reasons
-        : saturation.capacity.pressure_reasons;
-  const runtimeCapacitySource = saturation ? localCapacitySourceLabel(saturation.local_capacity.source as LocalCapacitySourceValue | null) : "";
-  const runtimeCapacityLimits = saturation ? localCapacityLimitLabel(saturation) : "";
-  const runtimeCapacityDetail = saturation
-    ? localCapacityDetail(saturation.local_capacity.source as LocalCapacitySourceValue | null)
-    : "";
-
   return (
     <Panel
       title="Resource / Runtime Capacity"
@@ -245,6 +227,41 @@ export function ResourceCapacityPanel({
             ) : null}
             {/* Saturation-driven content dims with the saturation feed. */}
             <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
+              <ResourceCapacitySnapshot saturation={saturation} />
+              <div className="text-[11px] text-fg-muted">
+                generated {relativeTime(saturation.generated_at)}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+// Saturation-derived body, memoized so inspector, URL and stream renders skip
+// it until a new snapshot arrives. The relative "generated" age stays in
+// ResourceCapacityPanel, which re-renders with the dashboard, so it keeps advancing.
+const ResourceCapacitySnapshot = memo(function ResourceCapacitySnapshot({
+  saturation,
+}: {
+  saturation: ResourceSaturationSummary;
+}) {
+  const showOldestQueued =
+    saturation.capacity_queue.queued_workspace_count > 0 &&
+    saturation.capacity_queue.oldest_wait_seconds !== null;
+  const queueBlockedReasonEntries = Object.entries(saturation.capacity_queue.blocked_reason_counts ?? {});
+  const pressureReasons =
+    saturation.allocated_capacity.pressure_reasons.length > 0
+      ? saturation.allocated_capacity.pressure_reasons
+      : saturation.capacity.pressure_reasons;
+  const capacitySource = saturation.local_capacity.source as LocalCapacitySourceValue | null;
+  const runtimeCapacitySource = localCapacitySourceLabel(capacitySource);
+  const runtimeCapacityLimits = localCapacityLimitLabel(saturation);
+  const runtimeCapacityDetail = localCapacityDetail(capacitySource);
+
+  return (
+    <>
           <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("info")}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold">Scheduler capacity source</span>
@@ -358,16 +375,9 @@ export function ResourceCapacityPanel({
               ) : null}
             </div>
           </div>
-          <div className="text-[11px] text-fg-muted">
-            generated {relativeTime(saturation.generated_at)}
-          </div>
-            </div>
-          </>
-        )}
-      </div>
-    </Panel>
+    </>
   );
-}
+});
 
 function localCapacitySourceLabel(source: LocalCapacitySourceValue | null): string {
   switch (source) {
@@ -413,7 +423,7 @@ function localCapacityDetail(source: LocalCapacitySourceValue | null): string {
   }
 }
 
-export function MergeQueuePanel({
+export const MergeQueuePanel = memo(function MergeQueuePanel({
   items,
   hasMore,
   status,
@@ -497,7 +507,7 @@ export function MergeQueuePanel({
       )}
     </Panel>
   );
-}
+});
 
 export function MergeQueueRow({
   item,
@@ -885,7 +895,7 @@ export function satisfiedTierTone(label: string): ReturnType<typeof statusTone> 
   return "neutral";
 }
 
-export function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
+export const StatusCountStrip = memo(function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
   const items: [string, string, number][] = [
     ["requested", "requested", counts.requested],
     ["provisioning", "provisioning", counts.provisioning],
@@ -915,9 +925,9 @@ export function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary
       })}
     </div>
   );
-}
+});
 
-export function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
+export const LaneMeter = memo(function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
   const hasFiniteLimit = lane.limit > 0;
   const fill = hasFiniteLimit ? Math.min(100, Math.max(0, (lane.in_use / lane.limit) * 100)) : 0;
   const saturated = hasFiniteLimit && lane.in_use >= lane.limit;
@@ -940,9 +950,9 @@ export function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLan
       </div>
     </div>
   );
-}
+});
 
-export function ResourceDimensionMeter({
+export const ResourceDimensionMeter = memo(function ResourceDimensionMeter({
   label,
   dimension,
   unit,
@@ -976,7 +986,7 @@ export function ResourceDimensionMeter({
       {safeDimension.reason_code ? <div className="mono mt-1 truncate text-[11px]">{safeDimension.reason_code}</div> : null}
     </div>
   );
-}
+});
 
 export function LifecycleRail({
   status,

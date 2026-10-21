@@ -133,7 +133,7 @@ export function TopBar({
   );
 }
 
-export function PreferenceControls({
+export const PreferenceControls = memo(function PreferenceControls({
   preferences,
   onChange,
 }: {
@@ -190,7 +190,7 @@ export function PreferenceControls({
       </PreferenceButton>
     </div>
   );
-}
+});
 
 export function PreferenceButton({
   label,
@@ -253,7 +253,7 @@ export type FleetKpi = {
 // "is the fleet ok?" — the 5-7 KPIs an operator scans first, most critical first.
 // KPIs dim per source (saturation vs reliability summary) so only the actually
 // stale values fade, while the warning above stays at full opacity.
-export function FleetHealthStrip({
+export const FleetHealthStrip = memo(function FleetHealthStrip({
   kpis,
   error,
   lastSuccessAt,
@@ -301,7 +301,7 @@ export function FleetHealthStrip({
       </div>
     </div>
   );
-}
+});
 
 const NAV_ITEMS: {
   id: string;
@@ -705,6 +705,8 @@ function workspaceRowsBeforeOffset(rowOffsets: number[], offset: number): number
 }
 
 type WorkspaceCardProps = {
+  /** Unread: invalidates the memo so Date.now()-based ages advance on retained rows. */
+  ageRefreshTick: number;
   item: WorkspaceOverview;
   selected: boolean;
   selectedForLogs: boolean;
@@ -927,6 +929,7 @@ const WorkspaceCard = memo(function WorkspaceCard({
 });
 
 export function WorkspaceList({
+  ageRefreshTick,
   items,
   selectedId,
   showWorkspaceLogs = true,
@@ -942,6 +945,7 @@ export function WorkspaceList({
   loadedCount,
   onLoadMore,
 }: {
+  ageRefreshTick: number;
   items: WorkspaceOverview[];
   selectedId: string | null;
   showWorkspaceLogs?: boolean;
@@ -1454,6 +1458,7 @@ export function WorkspaceList({
         {items.slice(windowStart, windowEnd).map((item) => (
           <WorkspaceCard
             key={item.workspace_id}
+            ageRefreshTick={ageRefreshTick}
             item={item}
             selected={selectedId === item.workspace_id}
             selectedForLogs={selectedSet.has(item.workspace_id)}
