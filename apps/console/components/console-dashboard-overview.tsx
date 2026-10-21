@@ -705,6 +705,8 @@ function workspaceRowsBeforeOffset(rowOffsets: number[], offset: number): number
 }
 
 type WorkspaceCardProps = {
+  /** Unread: invalidates the memo so Date.now()-based ages advance on retained rows. */
+  ageRefreshTick: number;
   item: WorkspaceOverview;
   selected: boolean;
   selectedForLogs: boolean;
@@ -927,6 +929,7 @@ const WorkspaceCard = memo(function WorkspaceCard({
 });
 
 export function WorkspaceList({
+  ageRefreshTick,
   items,
   selectedId,
   showWorkspaceLogs = true,
@@ -942,6 +945,7 @@ export function WorkspaceList({
   loadedCount,
   onLoadMore,
 }: {
+  ageRefreshTick: number;
   items: WorkspaceOverview[];
   selectedId: string | null;
   showWorkspaceLogs?: boolean;
@@ -1454,6 +1458,7 @@ export function WorkspaceList({
         {items.slice(windowStart, windowEnd).map((item) => (
           <WorkspaceCard
             key={item.workspace_id}
+            ageRefreshTick={ageRefreshTick}
             item={item}
             selected={selectedId === item.workspace_id}
             selectedForLogs={selectedSet.has(item.workspace_id)}

@@ -10,6 +10,8 @@ import {
 } from "./console-dashboard-overview";
 
 type ConsoleDashboardWorkspaceRailProps = {
+  /** Overview settled version; re-renders card ages after failed polls. */
+  ageRefreshTick: number;
   statusFilters: string[];
   agentFilters: string[];
   modelFilters: string[];
@@ -87,6 +89,7 @@ export const ConsoleDashboardWorkspaceRail = memo(function ConsoleDashboardWorks
         />
       ) : null}
       <WorkspaceList
+        ageRefreshTick={props.ageRefreshTick}
         items={props.filteredOverview}
         selectedId={props.selectedId}
         showWorkspaceLogs={props.showWorkspaceLogs}

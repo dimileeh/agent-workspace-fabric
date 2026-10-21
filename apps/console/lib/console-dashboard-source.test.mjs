@@ -774,6 +774,17 @@ test("dashboard panes are memoized away from renders that leave their props unch
   ]) {
     assert.match(tick[2], new RegExp(`\\b${feed}\\b`), `Expected ${feed} to advance the inspector tick`);
   }
+  // Memoized cards render "Blocked for …" / awaiting-human ages. A failed poll
+  // keeps the last-good rows, so the settled version must reach each card.
+  const railJsx = dashboard.slice(
+    dashboard.indexOf("<ConsoleDashboardWorkspaceRail"),
+    dashboard.indexOf("/>", dashboard.indexOf("<ConsoleDashboardWorkspaceRail")),
+  );
+  assert.match(railJsx, /ageRefreshTick=\{overviewLoadSettledVersion\}/);
+  assert.match(rail, /ageRefreshTick: number;/);
+  assert.match(rail, /ageRefreshTick=\{props\.ageRefreshTick\}/);
+  assert.match(overview, /type WorkspaceCardProps = \{[^}]*\bageRefreshTick: number;/);
+  assert.match(overview, /<WorkspaceCard\s+key=\{item\.workspace_id\}\s+ageRefreshTick=\{ageRefreshTick\}/);
 });
 
 test("capacity panel memoizes its snapshot body and keeps the generated age live", () => {
