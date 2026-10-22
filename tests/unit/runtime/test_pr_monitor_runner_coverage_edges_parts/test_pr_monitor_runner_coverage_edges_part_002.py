@@ -214,8 +214,12 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
     merge_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
     assert len(merge_calls) == 1
     assert merge_calls[0].args[:3] == ["gh", "pr", "merge"]
-    # Only the bounded-retry bookkeeping key is left behind — no thread markers.
-    assert state.threads_addressed_ids == {"__awf_forge_transient_retry_count:merge_pr": "1"}
+    # Only the bounded-retry bookkeeping key is left behind — no thread markers —
+    # plus the (empty) legacy baseline the first disposition-gate run records (#1018).
+    assert state.threads_addressed_ids == {
+        "__awf_forge_transient_retry_count:merge_pr": "1",
+        "__awf_review_thread_disposition_baseline__": "[]",
+    }
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
