@@ -102,6 +102,9 @@ _present_optional_companion_env_secret_refs = (
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
 )
+_companions_with_set_env_secrets_for_resume = (
+    _companion_env._companions_with_set_env_secrets_for_resume
+)
 CompanionEnvSecretPrecheckError = _companion_env.CompanionEnvSecretPrecheckError
 _precheck_required_companion_env_secrets_for_resume = (
     _companion_env._precheck_required_companion_env_secrets_for_resume

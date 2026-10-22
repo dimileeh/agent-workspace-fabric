@@ -384,6 +384,31 @@ def _present_optional_companion_env_secret_refs(
     return present_refs
 
 
+def _companions_with_set_env_secrets_for_resume(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Return companions with an env-backed secret whose source is set.
+
+    Compose resolves the ``${SOURCE}`` placeholder at ``up`` time, so a rotated
+    value leaves compose.yml unchanged; ``--no-recreate`` would keep the old
+    value, so the resume force-recreates these companions.
+    """
+    return tuple(
+        sorted(
+            {
+                spec.name
+                for spec in companion_specs
+                for secret in spec.environment_secrets
+                if secret.provider == "env"
+                and secret.kind == "env"
+                and secret.value_from in environ
+            }
+        )
+    )
+
+
 class CompanionEnvSecretPrecheckError(ComposeOperationError):
     """Raised when monitor resume cannot satisfy required companion env secrets."""
 

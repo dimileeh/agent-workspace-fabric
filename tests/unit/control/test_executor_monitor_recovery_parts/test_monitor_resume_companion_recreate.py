@@ -193,3 +193,92 @@ async def test_resume_recreates_the_companions_the_refresh_rewrote(
     assert [call.get("services") for call in compose.calls if call.get("no_recreate")] == [
         ("worker",)
     ]
+
+
+@pytest.mark.unit
+def test_companions_with_a_set_env_secret_are_reported_even_when_compose_is_unchanged() -> None:
+    specs = companion_specs_from_task_policy(
+        {
+            "companions": [
+                {
+                    "name": "api",
+                    "repo_url": "git@github.com:x/api.git",
+                    "environment_secrets": {
+                        "API_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "API_TOKEN_SOURCE",
+                            "required": True,
+                        }
+                    },
+                },
+                *(
+                    {
+                        "name": name,
+                        "repo_url": f"git@github.com:x/{name}.git",
+                        "environment_secrets": {
+                            "OPTIONAL_TOKEN": {
+                                "provider": "env",
+                                "kind": "env",
+                                "value_from": "OPTIONAL_TOKEN_SOURCE",
+                                "required": False,
+                            }
+                        },
+                    }
+                    for name in ("backend", "worker")
+                ),
+                {"name": "plain", "repo_url": "git@github.com:x/plain.git"},
+            ]
+        }
+    )
+
+    # A rotated value keeps the same ``${SOURCE}`` placeholder, so set sources count.
+    assert monitor_handoff._companions_with_set_env_secrets_for_resume(
+        companion_specs=specs,
+        environ={"API_TOKEN_SOURCE": "rotated", "OPTIONAL_TOKEN_SOURCE": "rotated"},
+    ) == ("api", "backend", "worker")
+    assert monitor_handoff._companions_with_set_env_secrets_for_resume(
+        companion_specs=specs, environ={"API_TOKEN_SOURCE": "rotated"}
+    ) == ("api",)
+
+
+@pytest.mark.unit
+async def test_resume_recreates_declared_companions_with_set_env_secrets(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(_COMPOSE, encoding="utf-8")
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+
+    def _nothing_rewritten(**_kwargs: Any) -> tuple[str, ...]:
+        return ()
+
+    def _secret_companions(**_kwargs: Any) -> tuple[str, ...]:
+        # ``ghost`` has no compose service, so it is never handed to compose.
+        return ("ghost", "worker")
+
+    monkeypatch.setattr(
+        monitor_handoff, "_refresh_optional_companion_env_secrets_for_resume", _nothing_rewritten
+    )
+    monkeypatch.setattr(
+        monitor_handoff, "_companions_with_set_env_secrets_for_resume", _secret_companions
+    )
+    compose = _RecordingCompose()
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("agent", "worker")]
+    assert [call.get("services") for call in compose.calls if call.get("no_recreate")] == [
+        ("backend",)
+    ]

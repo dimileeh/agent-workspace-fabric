@@ -233,7 +233,8 @@ async def restart_runtime_for_monitor_resume(
     ``dependency_services`` lists the compose services that are not the agent;
     ``None`` (unreadable compose file) falls back to bringing up the whole project.
     ``recreate_services`` are dependencies force-recreated with the agent (env
-    rewritten in compose.yml, or still unsettled when the last attempt gave up);
+    rewritten in compose.yml or backed by a set env secret, or still unsettled
+    when the last attempt gave up);
     every other dependency is never recreated.
     When the dependency up fails, ``runtime_usable`` decides whether the agent is
     still recreated (auth overlays, env and #1090's setup replay depend on it);

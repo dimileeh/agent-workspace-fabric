@@ -936,7 +936,9 @@ are recovering on their own (#936):
    created, and the setup replay below keys off the agent's new identity. Two
    kinds of dependency are force-recreated in the same call (and skipped in
    steps 1 and 2): a companion whose environment the optional companion
-   env-secret refresh rewrote, since `--no-recreate` would never apply it, and,
+   env-secret refresh rewrote or that has a set env-backed secret (a rotated
+   value keeps the same `${SOURCE}` placeholder), since `--no-recreate` would
+   never apply either, and,
    on the first resume after a restart park, the dependencies still unsettled at
    the last dependency-wait timeout. If this call fails, the old agent is never
    treated as usable, however healthy the old stack looks: it has neither the

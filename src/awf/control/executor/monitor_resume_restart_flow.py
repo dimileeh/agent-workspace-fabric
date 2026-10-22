@@ -55,6 +55,16 @@ async def _restart_compose_runtime_for_monitor_resume(
             environ=os.environ,
         )
         requirements = _monitor_handoff._compose_runtime_requirements_from_file(compose_file)
+        # A rotated secret leaves the ``${SOURCE}`` placeholder unchanged, so
+        # every companion with a set env secret is recreated to pick it up.
+        secret_companions = {
+            name
+            for name in _monitor_handoff._companions_with_set_env_secrets_for_resume(
+                companion_specs=companion_specs,
+                environ=os.environ,
+            )
+            if requirements is None or name in requirements.service_names
+        }
         unsettled_services = await dependencies_to_recreate_after_exhaustion(
             self, workspace_id=workspace_id
         )
@@ -71,7 +81,9 @@ async def _restart_compose_runtime_for_monitor_resume(
             runtime_usable=lambda: _monitor_handoff._compose_runtime_usable_after_restart_failure(
                 compose_project, compose_file
             ),
-            recreate_services=tuple(sorted(set(rewritten_services) | set(unsettled_services))),
+            recreate_services=tuple(
+                sorted(set(rewritten_services) | secret_companions | set(unsettled_services))
+            ),
         )
         if tolerated_error is not None:
             await self._record_monitor_runtime_restart_failed(
