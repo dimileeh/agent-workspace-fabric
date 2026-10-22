@@ -451,6 +451,11 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
         "@@ -1,1 +1,1 @@\n-export abstract class Helper {\n+export abstract class Helper {\n"
     )
     assert callees._diff_text_changes_definition_names(export_class, frozenset({"Helper"})) is True
+    # A generic type-parameter list may follow a declared name (PRRT_kwDOSJAM6s6vMwSN).
+    generic = (
+        "@@ -1,1 +1,1 @@\n-export function helper<T>(v: T) {\n+export function helper<T>(v: T) {\n"
+    )
+    assert callees._diff_text_changes_definition_names(generic, frozenset({"helper"})) is True
     # A variable type annotation may precede the initializer (PRRT_kwDOSJAM6s6vMwSF);
     # a block-label colon is not an annotation.
     annotated = "@@ -1,1 +1,1 @@\n-const helper: Fn = () => {\n+const helper: Fn = () => {\n"

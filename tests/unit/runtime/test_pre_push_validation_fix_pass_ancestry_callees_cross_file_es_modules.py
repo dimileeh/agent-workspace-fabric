@@ -261,12 +261,29 @@ async def test_a_fix_to_a_tsx_generic_arrow_is_evidence(module: str) -> None:
         "export async function* record(value: number) {\n  return value + 1;\n}\n",
         "export function *record(value: number) {\n  return value + 1;\n}\n",
         "export function * record(value: number) {\n  return value + 1;\n}\n",
+        # A generic type-parameter list may follow the declared name
+        # (PRRT_kwDOSJAM6s6vMwSN).
+        "export function record<T>(value: T) {\n  return value;\n}\n",
+        "export async function record<T extends number>(value: T) {\n  return value;\n}\n",
+        "export function record<K, V = Row<K>>(value: V) {\n  return value;\n}\n",
     ],
 )
 async def test_a_fix_to_an_exported_generator_is_evidence(module: str) -> None:
     caller = _caller("import { record } from './telemetry';")
     probe = _EsProbe(
         files={_CALLER: caller, _TELEMETRY: module},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY)},
+    )
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_a_fix_to_a_generic_default_export_is_evidence() -> None:
+    """A named generic default export is a head too (PRRT_kwDOSJAM6s6vMwSN)."""
+    module = "export default async function record<T>(value: T) {\n  return value;\n}\n"
+    probe = _EsProbe(
+        files={_CALLER: _caller("import record from './telemetry';"), _TELEMETRY: module},
         diffs={_TELEMETRY: _body_edit(_TELEMETRY)},
     )
 

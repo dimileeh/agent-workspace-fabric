@@ -144,8 +144,10 @@ _DEFINITION_NAME_LINE_RE = re.compile(
     # does a named ``export default function`` (PRRT_kwDOSJAM6s6vLRfG). An
     # optional generator ``*`` keeps ``export function* helper`` a head too
     # (PRRT_kwDOSJAM6s6vL9Ae). ``export [default] [abstract] class`` heads a
-    # class the same way (PRRT_kwDOSJAM6s6vMeFV).
-    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
+    # class the same way (PRRT_kwDOSJAM6s6vMeFV). Optional TS type parameters
+    # after the name keep ``export function record<T>(`` a head
+    # (PRRT_kwDOSJAM6s6vMwSN).
+    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})[ \t]*{_TS_ARROW_TYPE_PARAMS}\s*\("
     rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
@@ -158,7 +160,7 @@ _CLASS_HEAD_RE = re.compile(
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
-    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
+    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})[ \t]*{_TS_ARROW_TYPE_PARAMS}\s*\("
     rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
@@ -622,7 +624,7 @@ def _definition_head_has_js_dynamic_this(
         return False
     scan = _definition_head_scan_lines(file_text, path=path)[start_line - 1]
     if re.match(
-        rf"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function[ \t]+{_JS_IDENT}\s*\(",
+        rf"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function[ \t]+{_JS_IDENT}[ \t]*{_TS_ARROW_TYPE_PARAMS}\s*\(",
         scan,
     ):
         return True
