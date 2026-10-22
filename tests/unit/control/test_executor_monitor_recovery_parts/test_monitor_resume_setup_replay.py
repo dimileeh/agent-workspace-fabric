@@ -8,6 +8,7 @@ Restart recovery, remonitor and guide-unblock all resume through
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -39,6 +40,7 @@ from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.resolver import ProfileResolutionError
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 from tests.unit.control.runtime_setup_replay_fakes import (
     TOOL_PATH,
     FakeAgentContainer,
@@ -170,6 +172,45 @@ async def test_restart_recovery_replays_setup_before_monitor_validation(
     assert events[0].payload["trigger"] == "monitor_resume"
     assert events[0].payload["previous_container_id"] == "agent-0"
     assert events[0].payload["container_id"] == "agent-1"
+
+
+@pytest.mark.unit
+async def test_resume_restart_and_replay_wait_for_worktree_writer_lock(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reclaimed monitor's agent-service recovery replays setup under the writer
+    lock; resume must not restart the runtime or replay setup underneath it."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    executor, compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _old_monitor_recovery() -> None:
+        async with hold_exclusive_worktree_writer_lock(executor._config.worktrees_root / ws_id):
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(_old_monitor_recovery())
+    await held.wait()
+    resume = asyncio.create_task(executor.resume_pr_monitor(ws_id))
+    await asyncio.sleep(0.3)
+
+    assert compose.calls == []
+    assert validation.setup_runs() == 0
+    release.set()
+    await holder
+    await resume
+    assert len(compose.calls) == 1
+    assert validation.setup_runs() == 1
 
 
 @pytest.mark.unit
