@@ -21,7 +21,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,19 +76,30 @@ async def _newest_streak_events(
     limit: int = _STREAK_QUERY_LIMIT,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Return the newest streak and boundary events, newest first, as (type, payload)."""
-    query = select(WorkspaceEvent.event_type, WorkspaceEvent.payload).where(
+    rows = await session.execute(
+        _newest_streak_events_query(
+            WorkspaceEvent.event_type,
+            WorkspaceEvent.payload,
+            workspace_id=workspace_id,
+            since=since,
+        ).limit(limit)
+    )
+    return [(event_type, payload or {}) for event_type, payload in rows.tuples()]
+
+
+def _newest_streak_events_query(
+    *columns: Any, workspace_id: str, since: datetime | None
+) -> Select[Any]:
+    query = select(*columns).where(
         WorkspaceEvent.workspace_id == workspace_id,
         WorkspaceEvent.event_type.in_(_STREAK_EVENT_TYPES),
     )
     if since is not None:
         query = query.where(WorkspaceEvent.occurred_at > since)
-    rows = await session.execute(
-        query.order_by(
-            WorkspaceEvent.event_order.desc().nulls_last(),
-            WorkspaceEvent.occurred_at.desc(),
-        ).limit(limit)
+    return query.order_by(
+        WorkspaceEvent.event_order.desc().nulls_last(),
+        WorkspaceEvent.occurred_at.desc(),
     )
-    return [(event_type, payload or {}) for event_type, payload in rows.tuples()]
 
 
 def _open_streak(events: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -124,11 +135,12 @@ async def _last_streak_failure_at(
     failures = len(_open_streak(await _newest_streak_events(session, workspace_id, since)))
     if failures == 0:
         return 0, None
+    # The open streak leads the same ordering, so its newest failure is the
+    # first row; a closed streak's failure never sizes the backoff.
     last_failed_at = await session.scalar(
-        select(func.max(WorkspaceEvent.occurred_at)).where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type == MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
-        )
+        _newest_streak_events_query(
+            WorkspaceEvent.occurred_at, workspace_id=workspace_id, since=since
+        ).limit(1)
     )
     return failures, last_failed_at
 

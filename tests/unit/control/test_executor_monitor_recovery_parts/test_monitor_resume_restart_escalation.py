@@ -961,3 +961,46 @@ async def test_backoff_lookup_failure_does_not_block_the_resume(
 
     assert sleeps == []
     assert len(compose.calls) > calls_before
+
+
+@pytest.mark.unit
+async def test_backoff_follows_the_open_streak_not_a_skewed_closed_failure(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed-streak failure stamped by a clock running ahead never sizes the backoff."""
+    ws_id = await _seed(factory, tmp_path)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        closed = await repo.add_event(
+            ws,
+            event_type=MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True},
+        )
+        await repo.add_event(
+            ws,
+            event_type=MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE,
+            payload={"previous_consecutive_failures": 1},
+        )
+        await repo.add_event(
+            ws,
+            event_type=MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True},
+        )
+        # The worker that wrote the closed streak had a clock running ahead.
+        closed.occurred_at = datetime.now(UTC) + timedelta(hours=1)
+        await session.commit()
+    executor = _executor(fake, factory, tmp_path, _ScriptedCompose())
+    sleeps = _record_backoff(monkeypatch, clock_offset=timedelta(0))
+
+    await monitor_resume_restart_escalation.pace_monitor_resume_restart(
+        executor, workspace_id=ws_id
+    )
+
+    assert sleeps == [pytest.approx(MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS[0], abs=5)]
