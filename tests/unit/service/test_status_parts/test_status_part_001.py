@@ -12,9 +12,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.exc import InterfaceError
 
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.service import status as status_mod
@@ -1213,3 +1215,53 @@ def test_service_status_includes_orphan_resource_summary(tmp_path: Path) -> None
         "worktree": 1,
     }
     assert orphan_resources["cleanup_readiness"]["dry_run_only"] is True
+
+
+@pytest.mark.unit
+async def test_cleanup_readiness_excludes_reclaimed_rows_and_clears_when_all_marked(tmp_path):
+    async with postgres_test_url() as database_url:
+        now = datetime.now(UTC)
+        ids = [
+            await _seed_cleanup_status_workspace(
+                database_url,
+                status=WorkspaceStatus.completed,
+                updated_at=now - timedelta(days=30),
+                title="cleanup marker",
+                pr=True,
+            )
+            for _ in range(2)
+        ]
+        engine = make_engine(database_url)
+        try:
+            factory = make_session_factory(engine)
+            async with factory() as session:
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == ids[0])
+                    .values(
+                        filesystem_reclaimed_at=now,
+                        updated_at=Workspace.updated_at,
+                    )
+                )
+                await session.commit()
+            settings = _settings(tmp_path, database_url=database_url)
+            status = await collect_workspace_cleanup_status(settings)
+            assert status["reason"] == "CLEANUP_CANDIDATES_READY"
+            assert status["candidate_count"] == 1
+            assert [item["workspace_id"] for item in status["examples"]] == [ids[1]]
+            async with factory() as session:
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == ids[1])
+                    .values(
+                        filesystem_reclaimed_at=now,
+                        updated_at=Workspace.updated_at,
+                    )
+                )
+                await session.commit()
+            status = await collect_workspace_cleanup_status(settings)
+            assert status["reason"] == "NO_CLEANUP_CANDIDATES"
+            assert status["candidate_count"] == 0
+            assert status["examples"] == []
+        finally:
+            await engine.dispose()

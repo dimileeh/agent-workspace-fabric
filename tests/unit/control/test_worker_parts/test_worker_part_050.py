@@ -211,10 +211,10 @@ async def test_successful_reclaim_is_logged_at_info(
     assert info[0][1]["reason_code"] == "WORKSPACE_GC_OK"
 
 
-async def test_clean_no_op_report_is_silent(
+async def test_clean_no_op_report_is_logged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A succeeded run that reclaimed nothing logs neither info nor warning."""
+    """A succeeded run that reclaimed nothing still emits a complete summary."""
     monkeypatch.setattr("awf.control.worker.cleanup.monotonic", lambda: 6_000.0)
     info: list[tuple[str, dict[str, object]]] = []
     warned: list[tuple[str, dict[str, object]]] = []
@@ -236,7 +236,19 @@ async def test_clean_no_op_report_is_silent(
 
     await worker._maybe_reap_terminal_workspace_gc()  # noqa: SLF001
 
-    assert info == []
+    assert info == [
+        (
+            "worker.terminal_workspace_gc_reaped",
+            {
+                "status": "succeeded",
+                "reason_code": "WORKSPACE_GC_OK",
+                "deleted_path_count": 0,
+                "candidate_count": 0,
+                "preserved_count": 0,
+                "delete_error_count": 0,
+            },
+        )
+    ]
     assert warned == []
 
 
@@ -312,3 +324,41 @@ async def test_cancelled_error_propagates() -> None:
 
     # Cursor is not rescheduled when the sweep is cancelled.
     assert worker._next_terminal_gc_reap_scan_at == 0.0  # noqa: SLF001
+
+
+@pytest.mark.parametrize("deleted", [0, 2])
+async def test_partial_emits_exactly_one_complete_summary(monkeypatch, deleted):
+    logged = []
+    for level in ("info", "warning"):
+        monkeypatch.setattr(
+            f"awf.control.worker.cleanup._log.{level}",
+            lambda event, _level=level, **fields: logged.append((_level, event, fields)),
+        )
+
+    async def reap():
+        return {
+            **_ok_report(),
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "deleted_path_count": deleted,
+            "candidate_count": 3,
+            "preserved_count": 1,
+            "delete_errors": [{"path": "/private/auth", "error": "sensitive"}],
+        }
+
+    worker = _make_worker(reap, terminal_workspace_gc_enabled=True)
+    await worker._maybe_reap_terminal_workspace_gc()
+    assert logged == [
+        (
+            "warning",
+            "worker.terminal_workspace_gc_partial",
+            {
+                "status": "partial",
+                "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+                "deleted_path_count": deleted,
+                "candidate_count": 3,
+                "preserved_count": 1,
+                "delete_error_count": 1,
+            },
+        )
+    ]
