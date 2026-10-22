@@ -1079,6 +1079,28 @@ def test_a_compound_header_target_binds_only_after_its_expression_runs() -> None
 
 
 @pytest.mark.unit
+def test_a_header_target_holding_a_call_keeps_its_bindings() -> None:
+    """A call inside a header target may run after that target binds the name.
+
+    ``class C: for validate, sink[validate()] in pairs:`` assigns ``validate``
+    before evaluating ``sink[validate()]``, so the call reaches the loop
+    target, not the import, and the target must still be read as a shadow
+    (PRRT_kwDOSJAM6s6vWtm4). The same holds for a ``with`` item's target, the
+    last one included. A target holding no call on the anchored line is still
+    dropped.
+    """
+    for_target = "class C:\n    for validate, sink[validate()] in pairs:\n        result = 1\n"
+    with_target = (
+        "class C:\n    with local() as (validate, sink[validate()]):\n        result = 1\n"
+    )
+    plain_target = "class C:\n    for validate, sink[0] in validate():\n        result = 1\n"
+
+    assert "validate" in cross_file._locally_rebound_names_at_line(for_target, 2, path=_CALLER)
+    assert "validate" in cross_file._locally_rebound_names_at_line(with_target, 2, path=_CALLER)
+    assert cross_file._locally_rebound_names_at_line(plain_target, 2, path=_CALLER) == frozenset()
+
+
+@pytest.mark.unit
 def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
     """A class-body import below the anchor has not run when the call does.
 

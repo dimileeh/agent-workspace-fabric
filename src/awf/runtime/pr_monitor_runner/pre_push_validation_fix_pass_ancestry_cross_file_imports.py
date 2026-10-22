@@ -671,15 +671,24 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
     validate:`` and ``for validate in validate():`` call the imported
     ``validate`` (PRRT_kwDOSJAM6s6vOa0H). Such a ``for`` keeps only its
     iterable, and a ``with`` item keeps its target only while a later item may
-    reach the anchored line; the same goes for an ``except ... as`` name.
+    reach the anchored line; the same goes for an ``except ... as`` name. A
+    target that itself holds a call on the anchored line is kept too, because
+    it binds its names left to right before such a call runs: ``for validate,
+    sink[validate()] in pairs:`` calls the loop's ``validate``
+    (PRRT_kwDOSJAM6s6vWtm4).
     """
-    if isinstance(statement, (ast.AsyncFor, ast.For)) and _header_holds_line(statement, line):
+    if (
+        isinstance(statement, (ast.AsyncFor, ast.For))
+        and _header_holds_line(statement, line)
+        and not _target_calls_on_line(statement.target, line)
+    ):
         return ast.Expr(value=statement.iter)
     trimmed = copy.copy(statement)
     if isinstance(trimmed, (ast.AsyncWith, ast.With)) and _header_holds_line(trimmed, line):
         trimmed.items = [
             item
             if any(later.context_expr.lineno <= line for later in trimmed.items[index + 1 :])
+            or _target_calls_on_line(item.optional_vars, line)
             else ast.withitem(context_expr=item.context_expr)
             for index, item in enumerate(trimmed.items)
         ]
@@ -722,6 +731,14 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
                 cases.append(case)
         trimmed.cases = cases
     return trimmed
+
+
+def _target_calls_on_line(target: ast.expr | None, line: int) -> bool:
+    """Whether a binding ``target`` holds a call spanning ``line``."""
+    return target is not None and any(
+        isinstance(node, ast.Call) and node.lineno <= line <= (node.end_lineno or node.lineno)
+        for node in ast.walk(target)
+    )
 
 
 def _statement_start(statement: ast.stmt) -> int:
