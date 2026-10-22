@@ -438,12 +438,17 @@ async def run_terminal_workspace_gc(
         compose_teardowns=compose_teardowns,
         worktree_remover=resolved_worktree_remover,
     )
-    await _record_filesystem_reclaimed(
-        session_factory, plan, path_outcomes, delete_errors, now=current_time
-    )
     reservation_releases = await _release_gc_reservations(
         session_factory,
         workspace_ids=side_effect_workspace_ids,
+    )
+    await _record_filesystem_reclaimed(
+        session_factory,
+        plan,
+        path_outcomes,
+        delete_errors,
+        reservation_releases=reservation_releases,
+        now=current_time,
     )
     companion_image_prune_result = (
         await companion_image_prune() if companion_image_prune is not None else None
@@ -757,12 +762,17 @@ async def run_workspace_filesystem_gc(
         compose_teardowns=compose_teardowns,
         worktree_remover=resolved_worktree_remover,
     )
-    await _record_filesystem_reclaimed(
-        session_factory, plan, path_outcomes, delete_errors, now=current_time
-    )
     reservation_releases = await _release_gc_reservations(
         session_factory,
         workspace_ids=side_effect_workspace_ids,
+    )
+    await _record_filesystem_reclaimed(
+        session_factory,
+        plan,
+        path_outcomes,
+        delete_errors,
+        reservation_releases=reservation_releases,
+        now=current_time,
     )
     return _gc_result(
         plan=plan,
@@ -783,10 +793,15 @@ async def _record_filesystem_reclaimed(
     outcomes: list[WorkspaceGCPathOutcome],
     errors: list[WorkspaceGCDeleteError],
     *,
+    reservation_releases: dict[str, dict[str, object]],
     now: datetime,
 ) -> None:
     """Record complete path outcomes without changing retention age or live rows."""
     failed_ids = {error.workspace_id for error in errors}
+    # Marked rows leave the GC backlog, so failed releases must remain retryable.
+    failed_ids.update(
+        workspace_id for workspace_id, result in reservation_releases.items() if "error" in result
+    )
     successful_paths = {
         (outcome.workspace_id, outcome.kind, outcome.path)
         for outcome in outcomes
