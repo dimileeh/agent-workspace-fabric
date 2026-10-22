@@ -1682,9 +1682,9 @@ def _es_calls(
     not heading a parameter list; a qualified one is ``qualifier.name(`` on a
     bare receiver, with either name on ``line``. With ``typescript``, type
     arguments may sit before the ``(`` (``record<Result>(``,
-    PRRT_kwDOSJAM6s6vRrub); plain JS reads them as a comparison. A correction that drops or
-    renames the call while leaving its import in place reaches the definition
-    through no call, so it fails closed (PRRT_kwDOSJAM6s6vO2G-); so does one
+    ``record?.<Result>(``, PRRT_kwDOSJAM6s6vRrub); plain JS reads them as a
+    comparison. A correction that drops or renames the call while leaving its
+    import in place reaches the definition through no call, so it fails closed (PRRT_kwDOSJAM6s6vO2G-); so does one
     whose only surviving call sits on another line (PRRT_kwDOSJAM6s6vRAzJ).
     """
     for index, token in enumerate(tokens):
@@ -1705,7 +1705,14 @@ def _es_calls(
         if line not in (token.line, tokens[callee].line):
             continue
         if typescript:
-            callee = _es_after_type_arguments(tokens, callee + 1) - 1
+            # An optional call writes its type arguments after ``?.``.
+            start = callee + 1
+            if _is(_token_at(tokens, start), "punct", "?.") and _is(
+                _token_at(tokens, start + 1), "punct", "<"
+            ):
+                start += 1
+            end = _es_after_type_arguments(tokens, start)
+            callee = callee if end == start else end - 1
         after = _token_at(tokens, callee + 1)
         if _is(after, "punct", "(") or (
             _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "(")

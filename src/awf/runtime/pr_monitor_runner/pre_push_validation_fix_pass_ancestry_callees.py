@@ -57,11 +57,12 @@ _CALLEE_REF_RE = re.compile(
 )
 # TypeScript lets type arguments sit between a callee and its argument list
 # (``record<Result>(value)``, ``tel.record<Map<K, V>>(value)``), one nesting
-# level deep. Plain JS and Python read ``a < b > (c)`` as a comparison, so only
-# TypeScript paths use this form (PRRT_kwDOSJAM6s6vRrub).
+# level deep; an optional call writes them after ``?.`` (``record?.<Result>(v)``).
+# Plain JS and Python read ``a < b > (c)`` as a comparison, so only TypeScript
+# paths use this form (PRRT_kwDOSJAM6s6vRrub).
 _TS_CALLEE_REF_RE = re.compile(
     rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
-    rf"(?:\s*<[^<>;()\n]*(?:<[^<>;()\n]*>[^<>;()\n]*)*>)?\s*(?:\?\.)?\s*\("
+    rf"\s*(?:(?:\?\.\s*)?<[^<>;()\n]*(?:<[^<>;()\n]*>[^<>;()\n]*)*>\s*|(?:\?\.)?\s*)\("
 )
 _TS_SUFFIXES = (".ts", ".tsx", ".mts", ".cts")
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(

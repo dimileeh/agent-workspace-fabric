@@ -793,6 +793,10 @@ async def test_a_corrected_caller_that_still_calls_the_callee_is_evidence(
         ("import * as tel from './telemetry';", "tel.record<Result>(value)", None),
         ("import * as tel from './telemetry';", "tel?.record<Result>(value)", None),
         ("import { record } from './telemetry';", "record<Map<string, Result>>(value)", None),
+        # TS writes an optional call's type arguments after ``?.``.
+        ("import { record } from './telemetry';", "record?.<Result>(value)", None),
+        ("import * as tel from './telemetry';", "tel.record?.<Result>(value)", None),
+        ("import { record } from './telemetry';", "record(value)", "record?.<Result>(value + 1)"),
         ("import { record } from './telemetry';", "record(value)", "record<Result>(value + 1)"),
         (
             "import * as tel from './telemetry';",
