@@ -35,7 +35,7 @@ from awf.runtime.monitor_prompts import (
     _redact_and_escape_markdown_inline,
 )
 from awf.runtime.monitor_state_keys import _disposition_unverified_key, _item_disposition_key
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     ItemCommitProvenance,
     chain_from_state,
@@ -185,6 +185,8 @@ def sync_item_disposition(
     state: MonitorState,
     item_id: str,
     result: VerdictResult | MonitorVerdictResult,
+    *,
+    thread: ReviewThread | None = None,
 ) -> None:
     """Record (or clear) the disposition an item's latest verdict will publish.
 
@@ -195,13 +197,19 @@ def sync_item_disposition(
     known yet stays pending until :func:`attach_item_commits` runs before push.
     Any other verdict clears the record so a stale disposition can never be
     published for a re-triaged item. A record whose reply already landed (a failed
-    resolve or push re-queued the item) is never replaced: it is what the thread
-    says, and the retried resolve reuses it instead of posting a second reply.
+    resolve or push re-queued the item) is kept: it is what the thread says, and
+    the retried resolve reuses it instead of posting a second reply — unless the
+    re-triaged ``thread`` carries feedback newer than that reply, which the new
+    verdict answers and so is owed its own reply.
     """
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
     posted = read_item_disposition(state, item_id)
-    if posted is not None and posted.reply_comment_id:
+    if (
+        posted is not None
+        and posted.reply_comment_id
+        and not _feedback_follows_reply(thread, posted.reply_comment_id)
+    ):
         return
     disposition_class = _VERDICT_CLASS.get(result.verdict)
     if disposition_class is None:
@@ -226,6 +234,18 @@ def sync_item_disposition(
             commit_base=commit_base,
         ),
     )
+
+
+def _feedback_follows_reply(thread: ReviewThread | None, reply_comment_id: str) -> bool:
+    """True when ``thread`` (oldest-first) has a comment after AWF's posted reply.
+
+    A thread whose comments do not include the reply (not fetched yet, or a
+    ``bbtask:`` reply posted outside the thread) proves no newer feedback.
+    """
+    comment_ids = [comment.comment_id for comment in thread.comments] if thread else []
+    if reply_comment_id not in comment_ids:
+        return False
+    return comment_ids.index(reply_comment_id) < len(comment_ids) - 1
 
 
 def _latest_chain_record(

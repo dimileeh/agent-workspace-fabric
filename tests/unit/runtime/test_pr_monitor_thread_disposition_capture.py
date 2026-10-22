@@ -10,6 +10,7 @@ tracking issue — which no longer gets a swallowed top-level PR comment.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -29,6 +30,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewComment,
     ReviewThread,
+    ReviewThreadComment,
     _review_thread_body_hash,
 )
 from awf.runtime.pr_monitor_runner import comments
@@ -155,6 +157,39 @@ async def test_address_thread_records_fixed_commit_from_provenance_chain(tmp_pat
     assert disposition.commits == (_FIX,)
     assert disposition.commit_base == _START
     assert disposition.reason == "guard None payloads"
+
+
+async def test_address_thread_answers_feedback_posted_after_awf_reply() -> None:
+    # The earlier reply landed but its resolve failed; a reviewer then pushed back
+    # in the thread. The re-triage must publish its own reason, not reuse the old.
+    state = MonitorState()
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id="PRRT_test_rt",
+            disposition_class="false_positive",
+            verdict="false_positive",
+            reason="the guard already rejects None",
+            reply_comment_id="reply-1",
+        ),
+    )
+    thread = replace(
+        _thread("PRRT_test_rt"),
+        comments=(
+            ReviewThreadComment(comment_id="c-1", body="worker crashes on None"),
+            ReviewThreadComment(comment_id="reply-1", body="AWF disposition: false positive"),
+            ReviewThreadComment(comment_id="c-3", body="that guard is bypassed by the retry"),
+        ),
+    )
+    reason = "the retry path is out of scope here"
+    runner = _verdict_runner(result=VerdictResult(verdict="defer", reason=reason))
+
+    await _address(runner, thread, state)
+
+    disposition = read_item_disposition(state, "PRRT_test_rt")
+    assert disposition is not None
+    assert (disposition.disposition_class, disposition.reason) == ("deferred", reason)
+    assert disposition.reply_comment_id is None
 
 
 async def test_address_thread_agent_failed_clears_disposition() -> None:

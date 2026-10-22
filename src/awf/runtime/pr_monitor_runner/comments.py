@@ -255,7 +255,7 @@ async def _address_thread(
         _sync_agent_failed_reason(state, thread.thread_id, result)
         # #1018: the reply posted before resolving this thread needs the agent's own
         # reason (FALSE POSITIVE / DEFER) or the item's commit (FIXED).
-        sync_item_disposition(state, thread.thread_id, result)
+        sync_item_disposition(state, thread.thread_id, result, thread=thread)
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it

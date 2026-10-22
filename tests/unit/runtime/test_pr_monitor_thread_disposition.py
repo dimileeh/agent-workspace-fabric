@@ -26,6 +26,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
     ReviewThread,
+    ReviewThreadComment,
 )
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     ItemCommitProvenance,
@@ -610,6 +611,85 @@ def test_sync_item_disposition_never_replaces_a_posted_reply(
     # The published record stays the disposition, so a re-queued resolve reuses the
     # reply already in the thread and never posts a second one.
     assert read_item_disposition(state, "PRRT_test_a") == posted
+
+
+def _thread_with(*comment_ids: str) -> ReviewThread:
+    return ReviewThread(
+        thread_id="PRRT_test_a",
+        path="widgets/core.py",
+        line=12,
+        body_excerpt="please guard None payloads",
+        author="review-bot",
+        comments=tuple(
+            ReviewThreadComment(comment_id=comment_id, body=f"comment {comment_id}")
+            for comment_id in comment_ids
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "thread",
+    [
+        _thread_with("c-1", "reply-1"),
+        # Not fetched yet, or a ``bbtask:`` reply posted outside the thread: nothing
+        # proves newer feedback, so the reply is reused rather than double-posted.
+        _thread_with("c-1"),
+    ],
+    ids=["reply-is-newest", "reply-not-in-thread"],
+)
+def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
+    thread: ReviewThread,
+) -> None:
+    state = MonitorState()
+    posted = replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
+    record_item_disposition(state, posted)
+
+    sync_item_disposition(
+        state, "PRRT_test_a", VerdictResult(verdict="defer", reason="later"), thread=thread
+    )
+
+    assert read_item_disposition(state, "PRRT_test_a") == posted
+
+
+def test_sync_item_disposition_replaces_a_posted_reply_superseded_by_new_feedback() -> None:
+    # A failed resolve cleared the verdict (so the stale-body drop skipped the
+    # thread), then a reviewer replied after AWF's FALSE POSITIVE reply. The
+    # re-triaged verdict answers that reply and is owed its own disposition.
+    state = MonitorState()
+    _seed_chain(
+        state,
+        ItemCommitProvenance(item_id="PRRT_test_a", item_start_head="0" * 40, head_sha="2" * 40),
+    )
+    record_item_disposition(
+        state, replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
+    )
+    thread = _thread_with("c-1", "reply-1", "c-3")
+
+    sync_item_disposition(
+        state,
+        "PRRT_test_a",
+        VerdictResult(verdict="fix_committed", reason="guarded"),
+        thread=thread,
+    )
+
+    fixed = read_item_disposition(state, "PRRT_test_a")
+    assert fixed is not None
+    assert (fixed.disposition_class, fixed.commits, fixed.reply_comment_id) == (
+        "fixed",
+        ("2" * 40,),
+        None,
+    )
+    # A re-triage that leaves the thread open drops the superseded record too.
+    record_item_disposition(
+        state, replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
+    )
+    sync_item_disposition(
+        state,
+        "PRRT_test_a",
+        VerdictResult(verdict="needs_human", reason="ask a human"),
+        thread=thread,
+    )
+    assert _item_disposition_key("PRRT_test_a") not in state.threads_addressed_ids
 
 
 def test_sync_item_disposition_replaces_an_unposted_record() -> None:

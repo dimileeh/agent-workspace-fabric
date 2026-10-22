@@ -14,7 +14,7 @@ from awf.common.commands import AsyncCommandRunner
 from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.node.compose_manager import ComposeTeardownResult
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner import comments as _comments
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
     MonitorVerdictResult,
@@ -116,9 +116,13 @@ def supply_fixed_item_commit(monkeypatch: pytest.MonkeyPatch, sha: str = "c" * 4
     real_sync = _comments.sync_item_disposition
 
     def _sync(
-        state: MonitorState, item_id: str, result: VerdictResult | MonitorVerdictResult
+        state: MonitorState,
+        item_id: str,
+        result: VerdictResult | MonitorVerdictResult,
+        *,
+        thread: ReviewThread | None = None,
     ) -> None:
-        real_sync(state, item_id, result)
+        real_sync(state, item_id, result, thread=thread)
         disposition = read_item_disposition(state, item_id)
         if (
             disposition is not None
