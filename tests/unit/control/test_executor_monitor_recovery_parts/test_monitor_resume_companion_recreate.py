@@ -586,3 +586,36 @@ async def test_resume_clears_the_pending_recreate_once_companions_were_recreated
     assert await _executor().resume_pr_monitor_handoff(ws_id) is not None
     recreate = [call for call in compose.calls if call.get("force_recreate")]
     assert [call["services"] for call in recreate] == [("agent",)]
+
+
+@pytest.mark.unit
+async def test_resume_keeps_pending_recreates_for_companions_it_could_not_recreate(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        _COMPOSE + "  extra:\n    image: extra\n    profiles: [extra]\n", encoding="utf-8"
+    )
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    marker = monitor_handoff._companion_env._pending_companion_recreates_path(compose_file)
+    marker.write_text("backend\nextra\n", encoding="utf-8")
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    compose = _RecordingCompose()
+
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
+    # ``extra`` is outside the active profiles, so only ``backend`` is recreated
+    # and ``extra`` stays pending until a resume can recreate it.
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
+    assert marker.read_text(encoding="utf-8") == "extra\n"

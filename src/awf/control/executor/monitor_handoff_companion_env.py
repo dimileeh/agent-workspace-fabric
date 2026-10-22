@@ -373,13 +373,23 @@ def _pending_companion_recreates_for_resume(
     return tuple(sorted({line.strip() for line in text.splitlines() if line.strip()}))
 
 
-def _clear_pending_companion_recreates_for_resume(*, workspace_id: str, compose_file: Path) -> None:
+def _clear_pending_companion_recreates_for_resume(
+    *, workspace_id: str, compose_file: Path, keep: tuple[str, ...] = ()
+) -> None:
     """Drop the marker once the resume recreated the pending companions.
 
-    A marker that cannot be removed only makes the next resume recreate them again.
+    ``keep`` names pending companions this resume did not recreate; they stay
+    pending. A marker that cannot be updated only makes the next resume recreate
+    them again.
     """
+    marker = _pending_companion_recreates_path(compose_file)
     try:
-        _pending_companion_recreates_path(compose_file).unlink(missing_ok=True)
+        if keep:
+            _atomic_write_text(
+                marker, "".join(f"{name}\n" for name in sorted(set(keep))), encoding="utf-8"
+            )
+        else:
+            marker.unlink(missing_ok=True)
     except OSError:
         _log.warning(
             "executor.resume_companion_pending_recreate_clear_failed",

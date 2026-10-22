@@ -63,12 +63,13 @@ async def _restart_compose_runtime_for_monitor_resume(
         # carries it (the refresh could not persist the removal), so
         # ``${SOURCE:-}`` clears the revoked value, or while a persisted rewrite
         # is still pending because an earlier recreate failed.
+        pending_recreates = _monitor_handoff._pending_companion_recreates_for_resume(
+            workspace_id=workspace_id, compose_file=compose_file
+        )
         secret_companions = {
             name
             for name in (
-                *_monitor_handoff._pending_companion_recreates_for_resume(
-                    workspace_id=workspace_id, compose_file=compose_file
-                ),
+                *pending_recreates,
                 *_monitor_handoff._companions_with_set_env_secrets_for_resume(
                     companion_specs=companion_specs,
                     environ=os.environ,
@@ -84,6 +85,9 @@ async def _restart_compose_runtime_for_monitor_resume(
         unsettled_services = await dependencies_to_recreate_after_exhaustion(
             self, workspace_id=workspace_id
         )
+        recreate_services = tuple(
+            sorted(set(rewritten_services) | secret_companions | set(unsettled_services))
+        )
         # Recreate the agent and what must change; recovering dependencies are left alone (#936).
         tolerated_error = await restart_runtime_for_monitor_resume(
             self._compose,
@@ -97,13 +101,14 @@ async def _restart_compose_runtime_for_monitor_resume(
             runtime_usable=lambda: _monitor_handoff._compose_runtime_usable_after_restart_failure(
                 compose_project, compose_file
             ),
-            recreate_services=tuple(
-                sorted(set(rewritten_services) | secret_companions | set(unsettled_services))
-            ),
+            recreate_services=recreate_services,
             # Cleared once the companions are recreated, so a later failure never
-            # makes the next resume recreate them again mid-recovery (#936).
+            # makes the next resume recreate them again mid-recovery (#936); a
+            # pending companion outside the active services stays pending.
             on_recreated=lambda: _monitor_handoff._clear_pending_companion_recreates_for_resume(
-                workspace_id=workspace_id, compose_file=compose_file
+                workspace_id=workspace_id,
+                compose_file=compose_file,
+                keep=tuple(name for name in pending_recreates if name not in recreate_services),
             ),
         )
         if tolerated_error is not None:
