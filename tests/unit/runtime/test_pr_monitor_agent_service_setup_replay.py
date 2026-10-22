@@ -18,9 +18,10 @@ from awf.control.executor.constants import (
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.profiles.resolver import ProfileResolutionError
 from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
 from tests.postgres import postgres_test_engine
 from tests.unit.control.runtime_setup_replay_fakes import (
@@ -262,3 +263,48 @@ async def test_failed_replay_terminates_monitor_with_reason_code(
     assert payload is not None
     assert payload["details"]["agent_service_recovery"]["restart_attempts"] == 1
     assert payload["details"]["command"].startswith("install-tool")
+
+
+@pytest.mark.unit
+async def test_unresolvable_profile_terminates_monitor_with_replay_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    adapter = _idle_timeout_adapter(retry_stdout=None)
+    validation = _OrderedValidation(container, adapter)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        validation=validation,
+    )
+    _patch_compose(mocker, container, recreate=True)
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_setup_replay._profile_for_workspace",
+        side_effect=ProfileResolutionError("unknown workspace profile_ref: gone"),
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as raised:
+        await _run(runner, workspace_id, tmp_path)
+
+    assert raised.value.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    assert raised.value.details is not None
+    assert raised.value.details["trigger"] == "monitor_agent_service_recovery"
+    assert validation.phase_calls == []
+    assert len(adapter.calls) == 1
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == FailureReason.profile_resolution_failure.value
+        failed = [
+            event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
+        ]
+    assert [event.reason_code for event in failed] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]

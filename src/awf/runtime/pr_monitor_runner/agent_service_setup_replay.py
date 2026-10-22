@@ -15,10 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from awf.control.executor import runtime_setup_replay as _replay
+from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.helpers import _profile_for_workspace
 from awf.db.enums import FailureReason
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import ProfileResolutionError
 from awf.runtime.ownership import MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME
+from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
 
 MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER = "monitor_agent_service_recovery"
@@ -43,25 +47,42 @@ async def replay_setup_after_monitor_agent_service_restart(
     if verdict.decision is _replay.RecreationDecision.unchanged:
         return
     worktree_path = self._worktrees_root / workspace_id
+    profile: WorkspaceProfile | None = None
     async with self._deps.session_factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         if workspace is None:  # pragma: no cover - superseded check ran just before
             return
-        profile = _profile_for_workspace(workspace, worktree_path=worktree_path)
-    outcome = await _replay.replay_setup_if_recreated(
-        self,
-        session_factory=self._deps.session_factory,
-        validation=validation,
-        workspace_id=workspace_id,
-        compose_project=compose_project,
-        compose_file=compose_file,
-        profile=profile,
-        worktree_path=worktree_path,
-        before=identity_before,
-        after=identity_after,
-        trigger=MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER,
-        ownership_event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
-    )
+        try:
+            profile = _profile_for_workspace(workspace, worktree_path=worktree_path)
+        except (OSError, ValueError, ProfileResolutionError):
+            _log.exception(
+                "monitor.agent_service_setup_replay_profile_unavailable",
+                workspace_id=workspace_id,
+            )
+    if profile is None:
+        outcome = _replay.SetupReplayOutcome(
+            ok=False,
+            replayed=False,
+            reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+            failure_reason=FailureReason.profile_resolution_failure,
+            message="runtime setup replay failed: workspace profile could not be resolved",
+            details={"trigger": MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER, "basis": verdict.basis},
+        )
+    else:
+        outcome = await _replay.replay_setup_if_recreated(
+            self,
+            session_factory=self._deps.session_factory,
+            validation=validation,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            worktree_path=worktree_path,
+            before=identity_before,
+            after=identity_after,
+            trigger=MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER,
+            ownership_event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        )
     if outcome.ok:
         return
     message = outcome.message or "runtime setup replay failed"

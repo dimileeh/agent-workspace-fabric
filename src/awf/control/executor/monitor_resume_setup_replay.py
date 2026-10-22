@@ -22,6 +22,7 @@ from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import ProfileResolutionError
 from awf.runtime.ownership import EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME
 
 MONITOR_RESUME_TRIGGER = "monitor_resume"
@@ -59,7 +60,7 @@ async def replay_setup_on_monitor_resume(
                 worktree_path=self._config.worktrees_root / workspace_id,
                 planning_max_iterations_default=self._config.planning_max_iterations_default,
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError, ProfileResolutionError):
             _log.exception(
                 "executor.resume_setup_replay_profile_unavailable", workspace_id=workspace_id
             )

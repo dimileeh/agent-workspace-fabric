@@ -28,6 +28,7 @@ from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
+from awf.profiles.resolver import ProfileResolutionError
 from tests.unit.control.runtime_setup_replay_fakes import (
     TOOL_PATH,
     FakeAgentContainer,
@@ -351,11 +352,16 @@ async def test_replay_is_skipped_when_status_changed_before_replay(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "resolve_error",
+    [ValueError("profile unavailable"), ProfileResolutionError("unknown workspace profile_ref")],
+)
 async def test_replay_without_resolved_profile_fails_with_reason_code(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    resolve_error: Exception,
 ) -> None:
     container = _provisioned_container()
     patch_identity(monkeypatch, container)
@@ -367,7 +373,7 @@ async def test_replay_without_resolved_profile_fails_with_reason_code(
     )
 
     def _profile_unavailable(*_args: Any, **_kwargs: Any) -> Any:
-        raise ValueError("profile unavailable")
+        raise resolve_error
 
     for module in ("monitor_handoff", "monitor_resume_setup_replay"):
         monkeypatch.setattr(
