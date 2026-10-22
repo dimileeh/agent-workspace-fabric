@@ -177,6 +177,25 @@ def test_angle_brackets_stay_punctuators_in_plain_typescript() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "head",
+    ["<T,>", "<T, U>", "<T = unknown>", "<T extends Row>", "<const T,>", "< T ,>"],
+)
+def test_tsx_generic_arrow_heads_are_not_jsx(head: str) -> None:
+    """TSX reads these ``<`` prefixes as type parameters (PRRT_kwDOSJAM6s6vMLga)."""
+    values = _values(f"export const record = {head}(value: T) => value;", "src/app.tsx")
+
+    assert values[4] == "<"
+    assert "value" in values
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("text", ["x = <T>{a}</T>", "x = <T extends/>", "x = <a extends='b'/>"])
+def test_tsx_jsx_that_resembles_a_generic_head_stays_jsx(text: str) -> None:
+    assert _values(text, "src/app.tsx")[-1] == "<"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("text", "path"),
     [
         ("'abc", "src/app.ts"),
@@ -197,7 +216,7 @@ def test_angle_brackets_stay_punctuators_in_plain_typescript() -> None:
         ("x = <div>", "src/app.tsx"),
         ("x = <a></b>", "src/app.tsx"),
         ("x = <a></a", "src/app.tsx"),
-        ("x = <T,>() => 1", "src/app.tsx"),
+        ("x = <a b ,>", "src/app.tsx"),
         ("x = <a b=c/>", "src/app.tsx"),
         ('x = <a b="c/>', "src/app.tsx"),
         ("x = <a b", "src/app.tsx"),

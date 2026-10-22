@@ -105,12 +105,13 @@ class _EsLexError(Exception):
 class _EsLexer:
     """A recursive tokenizer; templates and JSX expressions recurse into code."""
 
-    def __init__(self, text: str, *, jsx: bool) -> None:
+    def __init__(self, text: str, *, jsx: bool, tsx: bool = False) -> None:
         self.text = text
         self.pos = 0
         self.depth = 0
         self.newline = False
         self.jsx = jsx
+        self.tsx = tsx
         self.tokens: list[_EsToken] = []
         # Offset just past each line, so a position's line is one bisect away.
         self.line_ends = list(
@@ -242,7 +243,12 @@ class _EsLexer:
             elif ch == "/" and self.expression_may_start():
                 self.read_regex()
                 self.emit("regex", "")
-            elif ch == "<" and self.jsx and self.expression_may_start():
+            elif (
+                ch == "<"
+                and self.jsx
+                and self.expression_may_start()
+                and not (self.tsx and _masking._TSX_GENERIC_ARROW_RE.match(text, self.pos))
+            ):
                 self.read_jsx_element()
                 self.emit("jsx", "<")
             else:
@@ -432,8 +438,10 @@ def _es_module_tokens(text: str, *, path: str) -> tuple[_EsToken, ...] | None:
     an unbalanced bracket, a JSX element that does not close, text nesting so
     deep the tokenizer cannot follow it — returns None, which fails closed.
     """
-    jsx = f".{path.rsplit('.', 1)[-1].lower()}" in _JSX_CAPABLE_SUFFIXES
-    lexer = _EsLexer(text.removeprefix("﻿"), jsx=jsx)
+    suffix = f".{path.rsplit('.', 1)[-1].lower()}"
+    lexer = _EsLexer(
+        text.removeprefix("﻿"), jsx=suffix in _JSX_CAPABLE_SUFFIXES, tsx=suffix == ".tsx"
+    )
     try:
         lexer.lex_code(None)
     except (_EsLexError, RecursionError):

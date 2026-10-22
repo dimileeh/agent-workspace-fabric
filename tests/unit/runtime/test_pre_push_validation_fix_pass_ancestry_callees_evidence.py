@@ -48,6 +48,22 @@ def test_callee_refs_mask_jsx_text_nodes() -> None:
 
 
 @pytest.mark.unit
+def test_callee_refs_keep_tsx_generic_arrow_heads_unmasked() -> None:
+    """A TSX generic-arrow head is not a tag opener (PRRT_kwDOSJAM6s6vMLga)."""
+    line = "  const run = <T,>(value: T) => helper(value);"
+    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset(
+        {(None, "helper")}
+    )
+    # Plain JSX has no generics: an ``extends`` boolean attribute stays a tag.
+    assert (
+        callees._callee_refs_from_anchor_line(
+            "    return <a extends b>helper()</a>;", path="src/mod.jsx"
+        )
+        == frozenset()
+    )
+
+
+@pytest.mark.unit
 def test_callee_refs_mask_jsx_fragment_text_nodes() -> None:
     """Fragment openers ``<>`` must blank text nodes like named tags.
 

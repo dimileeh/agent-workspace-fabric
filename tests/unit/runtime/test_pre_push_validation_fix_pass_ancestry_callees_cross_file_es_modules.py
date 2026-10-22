@@ -206,6 +206,25 @@ async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> No
 @pytest.mark.parametrize(
     "module",
     [
+        "export const record = <T,>(value: T) => {\n  return value;\n};\n",
+        "export const record = <T extends number>(value: T) => {\n  return value;\n};\n",
+    ],
+)
+async def test_a_fix_to_a_tsx_generic_arrow_is_evidence(module: str) -> None:
+    """TSX generic-arrow heads are not misread as JSX (PRRT_kwDOSJAM6s6vMLga)."""
+    caller_path, module_path = "src/app/ingest.tsx", "src/app/telemetry.tsx"
+    probe = _EsProbe(
+        files={caller_path: _caller("import { record } from './telemetry';"), module_path: module},
+        diffs={module_path: _body_edit(module_path)},
+    )
+
+    assert await _accepted(probe, item_path=caller_path)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module",
+    [
         # An exported generator declaration is a head too (PRRT_kwDOSJAM6s6vL9Ae).
         "export function* record(value: number) {\n  return value + 1;\n}\n",
         "export async function* record(value: number) {\n  return value + 1;\n}\n",

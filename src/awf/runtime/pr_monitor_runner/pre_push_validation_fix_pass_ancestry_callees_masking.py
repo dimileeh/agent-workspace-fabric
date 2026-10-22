@@ -14,6 +14,8 @@ index-aligned with the raw file.
 
 from __future__ import annotations
 
+import re
+
 # ``str.splitlines()`` separators beyond ``\r``/``\n``. Masking must preserve
 # these so masked scan lines stay index-aligned with raw ``splitlines()``.
 _SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
@@ -29,6 +31,12 @@ def _mask_char_preserving_splitlines_separators(ch: str) -> str:
 # no-space comments like `#TODO helper()` becoming FIXED callee evidence.
 _JS_TS_PRIVATE_FIELD_SUFFIXES = frozenset(
     {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+)
+# The ``<`` prefixes TSX reads as a generic arrow's type parameters, not JSX:
+# ``<T,>``, ``<T = D>`` and ``<T extends U>`` (``const`` optional), the same
+# lookahead tsc applies (PRRT_kwDOSJAM6s6vMLga).
+_TSX_GENERIC_ARROW_RE = re.compile(
+    r"<\s*(?:const\s+)?(?:[^\W\d]|\$)[\w$]*\s*(?:[,=]|extends\b(?!\s*[=>/]))"
 )
 # Tokens after which a ``/`` may open a JS/TS regex literal (not division).
 _JS_REGEX_PREFIX_KEYWORDS = frozenset(
@@ -377,17 +385,20 @@ def _mask_comments_and_string_literals_for_callee_scan(
         i += 1
     masked = "".join(out)
     if _path_is_jsx(path):
-        return _mask_jsx_text_nodes_for_callee_scan(masked)
+        return _mask_jsx_text_nodes_for_callee_scan(
+            masked, tsx=(path or "").lower().endswith(".tsx")
+        )
     return masked
 
 
-def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
+def _mask_jsx_text_nodes_for_callee_scan(line: str, *, tsx: bool = False) -> str:
     """Blank JSX text between tags; keep ``{...}`` expression bodies scannable.
 
     Literal UI text such as ``<div>helper()</div>`` or ``<>helper()</>`` must
     not become FIXED call-site evidence. Attribute strings are already blanked
     by the prior quote pass. Comparisons without a ``<`` tag opener are left
-    unchanged. Fragment openers ``<>`` are recognized (next char ``>``).
+    unchanged. Fragment openers ``<>`` are recognized (next char ``>``). In
+    ``tsx`` a generic-arrow head such as ``<T,>(value: T) =>`` is not a tag.
     """
     if not line or "<" not in line:
         return line
@@ -395,6 +406,9 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     n = len(line)
     i = 0
     while i < n:
+        if tsx and _TSX_GENERIC_ARROW_RE.match(line, i):
+            i += 1
+            continue
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
             # Advance through the tag to its closing ``>`` (strings already blank).
