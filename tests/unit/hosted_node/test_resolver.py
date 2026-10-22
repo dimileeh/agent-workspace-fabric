@@ -234,3 +234,70 @@ async def test_resolver_revalidates_receiver_transitions(hosted, engine, transit
         await asyncio.to_thread(resolver.close)
         if successor is not None:
             await successor.close()
+
+
+@pytest.mark.parametrize(
+    "failure", ["engine", "factory", "store", "receiver", "timeout", "store_close", "dispose"]
+)
+def test_failed_initialization_cleans_up_on_bridge_thread(monkeypatch, failure):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from awf.hosted_node import resolver as module
+
+    release = threading.Event()
+    entered = threading.Event()
+    engine = SimpleNamespace(
+        dispose=AsyncMock(side_effect=OSError("dispose failed") if failure == "dispose" else None)
+    )
+    store = SimpleNamespace(
+        close=Mock(side_effect=OSError("close failed") if failure == "store_close" else None)
+    )
+    bridge = ProtectedResolver.__new__(ProtectedResolver)
+
+    def fail():
+        raise OSError("private initialization detail")
+
+    def make_store(root):
+        if failure == "store":
+            fail()
+        if failure == "timeout":
+            entered.set()
+            assert release.wait(5)
+        return store
+
+    monkeypatch.setattr(
+        module, "make_engine", lambda _url: fail() if failure == "engine" else engine
+    )
+    monkeypatch.setattr(
+        module, "make_session_factory", lambda _value: fail() if failure == "factory" else object()
+    )
+    monkeypatch.setattr(module, "MaterialStore", make_store)
+    monkeypatch.setattr(
+        module,
+        "Receiver",
+        lambda *_args: fail() if failure in {"receiver", "store_close", "dispose"} else object(),
+    )
+    try:
+        with pytest.raises(MaterialDeniedError, match="^RESOLVER_UNAVAILABLE$"):
+            bridge.__init__(
+                "unused", SimpleNamespace(material_root=None), object(), {}, timeout=0.1
+            )
+        if failure == "timeout":
+            assert entered.is_set()
+            assert bridge._thread.is_alive()
+            assert not bridge._loop.is_closed()
+    finally:
+        release.set()
+        bridge._thread.join(5)
+    assert not bridge._thread.is_alive()
+    assert bridge._loop.is_closed()
+    if failure == "engine":
+        engine.dispose.assert_not_awaited()
+    else:
+        engine.dispose.assert_awaited_once()
+    if failure in {"receiver", "timeout", "store_close", "dispose"}:
+        store.close.assert_called_once()
+    else:
+        store.close.assert_not_called()

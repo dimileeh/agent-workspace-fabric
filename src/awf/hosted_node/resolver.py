@@ -7,6 +7,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from types import MappingProxyType
 
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.db.session import make_engine, make_session_factory
 from awf.hosted_node.config import HostedSettings
@@ -42,28 +43,48 @@ class ProtectedResolver:
         self._closed = False
         self._gate = threading.Lock()
         self._loop = asyncio.new_event_loop()
+
+        def run_bridge() -> None:
+            try:
+                self._loop.run_forever()
+            finally:
+                self._loop.close()
+
         self._thread = threading.Thread(
-            target=self._loop.run_forever, daemon=True, name="awf-protected-resolver"
+            target=run_bridge, daemon=True, name="awf-protected-resolver"
         )
         self._thread.start()
 
+        engine: AsyncEngine | None = None
+        store: MaterialStore | None = None
+
         async def initialize() -> Receiver:
-            self._engine = make_engine(database_url)
-            return Receiver(
-                config,
-                make_session_factory(self._engine),
-                identity,
-                MaterialStore(config.material_root),
-            )
+            nonlocal engine, store
+            engine = self._engine = make_engine(database_url)
+            factory = make_session_factory(engine)
+            store = MaterialStore(config.material_root)
+            return Receiver(config, factory, identity, store)
+
+        async def cleanup_initialization() -> None:
+            try:
+                try:
+                    if store is not None:
+                        store.close()
+                finally:
+                    if engine is not None:
+                        await engine.dispose()
+            finally:
+                self._loop.call_soon(self._loop.stop)
 
         future = asyncio.run_coroutine_threadsafe(initialize(), self._loop)
         try:
             self._receiver = future.result(timeout)
         except BaseException:
-            future.cancel()
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            # Initialization is synchronous on the bridge. Queue cleanup behind it
+            # so even resources created after a timeout are released. The bridge
+            # owns loop closure once cleanup finishes, even after this join expires.
+            asyncio.run_coroutine_threadsafe(cleanup_initialization(), self._loop)
             self._thread.join(timeout)
-            self._loop.close()
             raise MaterialDeniedError("RESOLVER_UNAVAILABLE", 503) from None
 
     async def _resolve(
@@ -141,4 +162,3 @@ class ProtectedResolver:
             finally:
                 self._loop.call_soon_threadsafe(self._loop.stop)
                 self._thread.join(self.timeout)
-                self._loop.close()
