@@ -398,6 +398,23 @@ without it. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
 without a commit, after the disposition reply carrying the agent's reason is posted.
 
+The correction's last evidence gate is cross-file callee evidence: a fix counts
+when the item's range edits the definition of a function called on the anchored
+line, even though that definition lives in another file. Touching the file is
+not enough. The diff must overlap the definition, and the definition must still
+exist after the correction. A Python callee is tied to a file through the call
+site's own imports: it is held to the module its `from` or `import` statement
+names. A JS/TS call site (`.js .jsx .mjs .cjs .ts .tsx .mts .cts`) never accepts
+cross-file evidence: without a real ES-module parser its callee cannot be tied
+to one file, and matching by name let an edit to an unrelated same-named export
+count as the fix (#1047). Only languages with no binding reader keep the
+name-only match. A name that a scope binds shadows the import for the anchored
+call. In a Python class body, which runs top to bottom, a binding in a later
+top-level statement does not count. Every binding in the statement holding the
+anchored line does, even one that runs after the call, so such a call fails
+closed. Every rejection keeps the item's
+`AGENT_FIXED_WITHOUT_EVIDENCE` outcome and parks it as `needs_human`.
+
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
 
