@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     _clear_published_item_commit_provenance_chain,
     _complete_pending_item_commit_provenance,
     _settle_pending_item_commit_provenance,
+    chain_from_state,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
@@ -105,6 +106,7 @@ from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition import attach_item_commits
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
@@ -482,7 +484,7 @@ async def _run_fix_cycle(
             _mark_review_thread_addressed(state, t, verdict)
             if verdict == "defer":
                 # Follow-up defer (#305): durably capture the deferred work
-                # (explanatory comment + tracking issue) before the thread is
+                # (tracking issue, then the disposition reply) before the thread is
                 # resolved. On capture failure, downgrade to needs_human so the
                 # merge gate keeps blocking instead of silently resolving.
                 captured = await _capture_deferred_review_thread(
@@ -937,6 +939,9 @@ async def _run_fix_cycle(
             evidence=push_result.failure_evidence(),
         )
         return await _return_failed_fix_cycle_result(push_result)
+    # #1018: FIXED dispositions cite their item commit; take any still-pending one
+    # from the #935 chain before the publish below clears it.
+    attach_item_commits(state, chain_from_state(state))
     # Record the pushed HEAD before resolving review threads. The
     # pushed commit is local git state; a transient GraphQL resolve
     # failure should not affect the monitor's push bookkeeping.

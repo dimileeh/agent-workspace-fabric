@@ -208,10 +208,14 @@ def address_thread_prompt(
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
         '"fix: address <thread.thread_id> — <short summary>". Then print '
-        "`AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
+        "`AWF-VERDICT: FIXED: <one-sentence summary>` to stdout. AWF cites your "
+        "fix commit in its reply in this thread before resolving it.\n"
         "  (2) If the feedback is wrong, do NOT change code. Reply to the "
         "monitor only by printing `AWF-VERDICT: FALSE POSITIVE: "
-        "<one-sentence justification>` to stdout.\n"
+        "<one-sentence justification>` to stdout. A one-line reason is required: "
+        "AWF posts it in this review thread as its disposition reply before "
+        "resolving the thread, so state concretely why the feedback does not "
+        "apply.\n"
         "  (3) If you genuinely need a human decision you can't make yourself "
         "(e.g. a design decision from the user), "
         "print `AWF-VERDICT: NEEDS_HUMAN: <what you need>` and exit — AWF blocks "
@@ -219,10 +223,11 @@ def address_thread_prompt(
         "auto-resolved.\n"
         "  (4) If the feedback is a valid but non-blocking follow-up that is "
         "out of scope for this PR, print `AWF-VERDICT: DEFER: <what to track>` "
-        "and exit — AWF files a tracking issue, posts an explanatory comment, "
-        "and resolves the thread so the work is preserved without wedging the "
-        "PR.\n"
-        "Do not write any PR comment for verdict bookkeeping.\n"
+        "and exit — AWF files a tracking issue, replies in this thread with your "
+        "reason and the issue link, and resolves the thread so the work is "
+        "preserved without wedging the PR.\n"
+        "Do not write any PR comment or thread reply yourself; AWF posts the "
+        "disposition reply.\n"
         f"{_commit_footer(task_tag)}{_VERDICT_OUTPUT_CONTRACT}"
     )
 
@@ -506,6 +511,7 @@ def ready_to_merge_comment(
     blocker_reason: str | None = None,
     blocker_items: Sequence[Mapping[str, object]] = (),
     preserve_full_blocker_reason: bool = False,
+    disposition_count_rows: Sequence[tuple[str, int]] | None = None,
 ) -> str:
     """Body used when AWF stops for human action.
 
@@ -513,6 +519,11 @@ def ready_to_merge_comment(
     notification: AWF found a clean PR but is configured not to merge it.
     With a reason, the PR is *not* ready to merge; avoid claiming all
     gates are green.
+
+    ``disposition_count_rows`` (label, count) — every AWF disposition class,
+    then "resolved by others" last — comes from the exhaustive review-thread
+    audit (#1018), so "inline comments resolved" says how, not just that the
+    unresolved count is zero. ``None`` (no audit for this forge) keeps line 1.
     """
     if blocker_reason:
         reason = redact_secrets(blocker_reason)
@@ -528,10 +539,17 @@ def ready_to_merge_comment(
         if not blocker_items:
             return body
         return f"{body}\n\n{_render_blocker_items(blocker_items)}"
+    inline_gate = "1. Inline comments resolved."
+    if disposition_count_rows:
+        rows = tuple(disposition_count_rows)
+        head = ", ".join(f"{label} {count}" for label, count in rows[:-1])
+        inline_gate = (
+            f"1. Inline comments resolved — AWF dispositions: {head}; {rows[-1][0]} {rows[-1][1]}."
+        )
     return (
         f"✅ PR #{pr_number} is ready to merge at commit `{head_sha[:10]}`.\n\n"
         "All 5 AWF gates are green:\n"
-        "1. Inline comments resolved.\n"
+        f"{inline_gate}\n"
         "2. Outside-diff comments addressed.\n"
         "3. CI checks all SUCCESS or SKIPPED.\n"
         "4. Mergeable.\n"
@@ -712,6 +730,9 @@ def _truncate_blocker_reason(reason: str) -> str:
     detailed_prefixes = (
         "MERGE_METHOD_MISMATCH:",
         "GitHub rejected the workflow-file push because",
+        # #1018: these list review-thread ids the operator must act on.
+        "REVIEW_THREAD_DISPOSITION_UNVERIFIED:",
+        "REVIEW_THREAD_AUDIT_UNAVAILABLE:",
     )
     limit = 500 if reason.startswith(detailed_prefixes) else 160
     return _truncate_blocker_excerpt(reason, limit=limit)

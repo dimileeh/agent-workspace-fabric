@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.thread_disposition import attach_issue_url
 
 
 def _requeue_workflow_scope_publish_dependent_items(
@@ -80,10 +81,18 @@ def _deferred_issue_already_filed(state: MonitorState, thread: ReviewThread) -> 
     resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h /
     PRRT_kwDOSJAM6s6dfSq-.
     """
-    return any(
-        state.threads_addressed_ids.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))
-        for body_hash in review_thread_body_hashes(thread)
-    )
+    return _deferred_issue_url(state, thread) is not None
+
+
+def _deferred_issue_url(state: MonitorState, thread: ReviewThread) -> str | None:
+    """The tracking-issue URL filed for this conversation (any hash era), if any."""
+    for body_hash in review_thread_body_hashes(thread):
+        issue_url = state.threads_addressed_ids.get(
+            _deferred_issue_filed_marker(thread.thread_id, body_hash)
+        )
+        if issue_url:
+            return issue_url
+    return None
 
 
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
@@ -125,7 +134,9 @@ async def _capture_deferred_review_thread(
 ) -> bool | None:
     """Durably capture a follow-up ``defer`` before its thread is resolved (#305).
 
-    Posts an explanatory PR comment and files a tracking issue. Idempotent per
+    Files a tracking issue and records its URL on the thread's disposition; the
+    in-thread disposition reply (agent reason + issue link) is posted right
+    before the resolve, and a failed reply keeps the thread open (#1018). Idempotent per
     thread *and body*: a marker records that the issue was already filed so a
     later same-body resolve-retry (which clears the verdict and re-addresses the
     thread) does not file a duplicate, while new reviewer replies (a changed
@@ -138,7 +149,9 @@ async def _capture_deferred_review_thread(
     permanently downgrading a valid defer.
     """
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    if _deferred_issue_already_filed(state, thread):
+    filed_issue_url = _deferred_issue_url(state, thread)
+    if filed_issue_url is not None:
+        attach_issue_url(state, thread.thread_id, filed_issue_url)
         return True
     location = thread.path or "the PR diff"
     thread_ref = thread.url or f"PR #{pr_number}"
@@ -240,31 +253,13 @@ async def _capture_deferred_review_thread(
         context="capture_deferred_thread",
     )
     # Filing the tracking issue is the durable capture. Record it immediately so
-    # a later retry (e.g. after a failed push) never files a duplicate, even if
-    # the explanatory comment below fails. The comment is best-effort courtesy.
+    # a later retry (e.g. after a failed push) never files a duplicate. The
+    # explanation used to be a best-effort top-level PR comment whose failure was
+    # swallowed before the thread was resolved anyway (#1018). It is now the
+    # in-thread disposition reply posted right before the resolve — reason plus
+    # this issue link — and a failed reply parks the thread instead.
     state.mark_addressed(marker, issue_url)
-    try:
-        await self._deps.gh.post_comment(
-            repo=repo,
-            pr_number=pr_number,
-            body=(
-                f"AWF deferred the review thread on `{location}` and filed "
-                f"{issue_url} to track the follow-up. Resolving this thread; the "
-                "deferred work lives in that issue."
-            ),
-        )
-    except ForgeClientError as exc:
-        # The tracking issue is already filed and recorded; this explanatory
-        # comment is best-effort courtesy, so a failure on either forge is
-        # swallowed. Catching the shared base keeps a Bitbucket fault from escaping
-        # and terminating the monitor after the durable capture is already done.
-        # ``redacted_detail()`` normalizes the human detail across forges.
-        _log.warning(
-            "monitor.deferred_capture_comment_failed",
-            thread_id=thread.thread_id,
-            issue_url=issue_url,
-            stderr=_redact_and_truncate_forge_error(exc.redacted_detail()),
-        )
+    attach_issue_url(state, thread.thread_id, issue_url)
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,
         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

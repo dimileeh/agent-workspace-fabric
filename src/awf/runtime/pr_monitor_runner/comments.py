@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TaskTagUnset,
 )
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.thread_disposition import sync_item_disposition
 
 __all__ = (
     "AgentVerdict",
@@ -252,6 +253,9 @@ async def _address_thread(
     # (PRRT_kwDOSJAM6s6fz-6r).
     if state is not None:
         _sync_agent_failed_reason(state, thread.thread_id, result)
+        # #1018: the reply posted before resolving this thread needs the agent's own
+        # reason (FALSE POSITIVE / DEFER) or the item's commit (FIXED).
+        sync_item_disposition(state, thread.thread_id, result)
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -388,6 +392,8 @@ async def _address_review_comment_result(
     # its verdict.
     if state is not None:
         _sync_agent_failed_reason(state, comment.comment_id, result)
+        # #1018: kept so outdated hygiene can copy it onto the promoted thread.
+        sync_item_disposition(state, comment.comment_id, result)
     return result
 
 

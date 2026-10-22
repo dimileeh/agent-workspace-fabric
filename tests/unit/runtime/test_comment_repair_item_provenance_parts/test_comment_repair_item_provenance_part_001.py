@@ -31,6 +31,7 @@ from awf.runtime.pr_monitor_runner import (
     remote_repair_unpublished_provenance as _provenance,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import VerdictResult
+from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import seed_monitoring_workspace
 
@@ -569,7 +570,10 @@ async def test_failing_head_probe_warns_and_lets_the_batch_continue(
     )
 
     assert verdict == "fix_committed"
-    assert state.threads_addressed_ids == {}
+    # No chain record; only the #1018 FIXED disposition, still pending its commit.
+    assert set(state.threads_addressed_ids) == {"__awf_item_disposition__:PRRT_one"}
+    pending = read_item_disposition(state, "PRRT_one")
+    assert pending is not None and pending.commits == ()
 
 
 @pytest.mark.unit
@@ -605,7 +609,7 @@ async def test_failing_head_probe_keeps_the_review_comment_result(tmp_path: Path
     )
 
     assert result.verdict == "fix_committed"
-    assert state.threads_addressed_ids == {}
+    assert set(state.threads_addressed_ids) == {"__awf_item_disposition__:issue:99"}
 
 
 @pytest.mark.unit

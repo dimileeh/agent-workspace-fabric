@@ -12,8 +12,8 @@ Two regressions meet here:
   Under the new contract an unresolved inline thread blocks the merge whenever
   its verdict is ``defer`` or ``needs_human`` — author no longer matters for
   threads. A follow-up ``defer`` is allowed to clear the gate only after the
-  runner durably captures it (explanatory comment + filed tracking issue) and
-  RESOLVES the thread, at which point it leaves ``unresolved_inline_threads``
+  runner durably captures it (filed tracking issue + in-thread disposition reply)
+  and RESOLVES the thread, at which point it leaves ``unresolved_inline_threads``
   entirely. ``fix_committed`` and ``false_positive`` threads never block.
 """
 

@@ -89,10 +89,8 @@ class _RaisingCreateIssueClient:
 class _RaisingPostCommentClient:
     """gh stand-in whose ``create_issue`` succeeds but ``post_comment`` raises.
 
-    Used to exercise the best-effort courtesy comment after a durable capture:
-    on a Bitbucket workspace ``post_comment`` raises ``BitbucketClientError``,
-    which must be swallowed (the tracking issue is already filed) rather than
-    escaping to terminate the monitor.
+    Proves the deferred capture no longer posts a top-level PR comment (#1018):
+    reaching ``post_comment`` would raise ``BitbucketClientError`` out of it.
     """
 
     def __init__(self, *, issue_url: str, exc: BaseException) -> None:
@@ -576,15 +574,16 @@ async def test_permanent_deferred_capture_downgrade_clears_deferral_reason(
 
 
 @pytest.mark.unit
-async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
+async def test_deferred_capture_bitbucket_never_posts_top_level_comment(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # Filing the tracking issue is the durable capture; the explanatory PR comment
-    # is best-effort. On a Bitbucket workspace ``post_comment`` raises
-    # ``BitbucketClientError`` — it must be swallowed (not escape and terminate the
-    # monitor), and capture still succeeds (returns True) with the issue recorded
-    # as filed so a retry never opens a duplicate.
+    # Filing the tracking issue is the durable capture. The old best-effort
+    # top-level PR comment (whose failure was swallowed before resolving) is gone
+    # (#1018): the explanation is the in-thread disposition reply posted before
+    # the resolve. ``post_comment`` raises here, so reaching it would escape;
+    # capture succeeds (returns True) with the issue recorded as filed so a retry
+    # never opens a duplicate.
     from awf.common.bitbucket_client import BitbucketClientError
     from awf.runtime.pr_monitor import _mark_review_thread_addressed, _review_thread_body_hash
     from awf.runtime.pr_monitor_runner.fix_cycle import (
@@ -629,8 +628,8 @@ async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
         monitor_log=None,
     )
 
-    # True -> the comment failure was swallowed; capture is durable and the caller
-    # may resolve the thread. The filed-issue marker is recorded for idempotency.
+    # True -> capture is durable and the caller may reply and resolve. The
+    # filed-issue marker is recorded for idempotency.
     assert result is True
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
     assert state.threads_addressed_ids.get(marker) == issue_url

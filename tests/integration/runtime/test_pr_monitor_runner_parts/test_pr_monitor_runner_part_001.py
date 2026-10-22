@@ -1188,8 +1188,7 @@ class TestResolveStaleGuard:
         adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up nit")
         cmd.queue_result(
             returncode=0, stdout="https://github.com/o/r/issues/77\n"
-        )  # gh issue create
-        cmd.queue_result(returncode=0)  # gh pr comment
+        )  # gh issue create (no top-level capture comment since #1018)
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle: body CHANGED
         _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
