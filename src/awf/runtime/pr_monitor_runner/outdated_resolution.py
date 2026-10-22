@@ -793,6 +793,7 @@ async def _resolve_addressed_outdated_threads(
                         "resolved_thread_count": 0,
                         "requeued_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": [disposition.as_payload()],
                     },
                 )
                 # Flag the thread requeued so ``decide`` (which runs THIS iteration,
@@ -860,6 +861,7 @@ async def _resolve_addressed_outdated_threads(
                     "resolved_thread_count": 0,
                     "needs_human_thread_count": 1,
                     "error_message": str(exc),
+                    "dispositions": [disposition.as_payload()],
                 },
             )
             continue

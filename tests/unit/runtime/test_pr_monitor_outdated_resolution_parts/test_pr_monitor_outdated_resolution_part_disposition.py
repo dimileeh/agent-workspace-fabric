@@ -16,7 +16,9 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
@@ -51,6 +53,12 @@ pytestmark = pytest.mark.unit
 _MARKER = "<!-- AWF:thread-disposition:v1 class={cls} thread={tid} -->"
 _ISSUE = "https://github.com/acme/widgets/issues/7"
 _TRANSIENT = GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502")
+_PERMANENT = BitbucketClientError(
+    operation="bitbucket resolve_thread",
+    status=403,
+    body="thread resolution is not permitted for this token",
+    reason_code=BITBUCKET_API_ERROR,
+)
 
 
 def _mark(state: MonitorState, tid: str, verdict: str, *, path: str = "src/anchor.py") -> None:
@@ -110,6 +118,39 @@ async def test_outdated_fixed_thread_replies_then_resolves(
     ]
     assert succeeded[0].payload["evidence"]["dispositions"][0]["class"] == "fixed"
     assert succeeded[0].payload["evidence"]["dispositions"][0]["reply_comment_id"] == "reply-1"
+
+
+@pytest.mark.parametrize(
+    ("resolve_error", "outcome"),
+    [(_TRANSIENT, "requeued"), (_PERMANENT, "needs_human")],
+)
+async def test_failed_outdated_resolve_event_records_posted_disposition(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    resolve_error: ForgeClientError,
+    outcome: str,
+) -> None:
+    # PRRT_kwDOSJAM6s6vUJzD: the reply landed but the resolve failed; the audit
+    # event must still show which durable reply preceded the failed resolution.
+    gh = OrderedForge(FakeCommandRunner(), resolve_error=resolve_error)
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    tid = "PRRT_test_outdated_resolve_failed"
+    _mark(state, tid, "fix_committed")
+    seed_resolvable_disposition(state, tid, "fix_committed", commits=("e" * 40,))
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread(tid)),
+        state=state,
+        wait_on_transient=False,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed"]
+    failed = [e for e in await _events(factory, workspace_id) if e.payload["outcome"] == outcome]
+    dispositions = failed[0].payload["evidence"]["dispositions"]
+    assert [(d["class"], d["reply_comment_id"]) for d in dispositions] == [("fixed", "reply-1")]
 
 
 async def test_branch_evidence_seed_replies_citing_matched_commit(
