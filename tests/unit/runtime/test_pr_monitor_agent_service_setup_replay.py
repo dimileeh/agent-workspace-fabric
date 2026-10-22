@@ -248,6 +248,11 @@ async def test_failed_replay_terminates_monitor_with_reason_code(
     assert raised.value.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
     assert raised.value.details is not None
     assert raised.value.details["trigger"] == "monitor_agent_service_recovery"
+    assert raised.value.details["command"].startswith("install-tool")
+    # Operation handlers persist exc.details as the agent-service recovery payload.
+    assert raised.value.details["restart_attempts"] == 1
+    assert "source_reason_code" in raised.value.details
+    assert "service_healthy" in raised.value.details
     up.assert_awaited_once()
     assert len(adapter.calls) == 1
     assert validation.setup_runs() == 1

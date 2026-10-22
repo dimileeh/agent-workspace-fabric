@@ -94,8 +94,10 @@ async def replay_setup_after_monitor_agent_service_restart(
         details={**details, "agent_service_recovery": recovery_details},
         failure_reason=outcome.failure_reason or FailureReason.infrastructure_failure,
     )
+    # Monitor operation handlers persist exc.details as the agent-service recovery
+    # payload, so carry the recovery provenance alongside the replay evidence.
     raise _MonitorAgentServiceRecoveryFailedError(
         message,
         reason_code=outcome.reason_code,
-        details=details,
+        details={**details, **recovery_details},
     )
