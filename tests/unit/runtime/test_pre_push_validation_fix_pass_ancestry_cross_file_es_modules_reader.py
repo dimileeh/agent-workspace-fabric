@@ -758,6 +758,19 @@ def test_receivers_reached_as_properties_are_reported() -> None:
     assert es._es_chained_member_refs(_tokens("a.b"), 1) == frozenset()
 
 
+@pytest.mark.unit
+def test_direct_member_calls_are_reported_per_occurrence() -> None:
+    """A bare-receiver call keeps its pair beside a chained one (PRRT_kwDOSJAM6s6vOa0O)."""
+    text = "a = other.tel.record(1) + tel.record(2) + ns.go?.(3)\nb = x.ns.stop() + y.flush + z.\n  w.run()"
+
+    assert es._es_direct_member_calls(_tokens(text), 1) == frozenset(
+        {("tel", "record"), ("ns", "go")}
+    )
+    # ``x.ns.stop`` is chained, ``y.flush`` is no call and ``z.w`` is not called.
+    assert es._es_direct_member_calls(_tokens(text), 2) == frozenset()
+    assert es._es_direct_member_calls(_tokens(text), 3) == frozenset()
+
+
 # --- anchor lines and definition heads -------------------------------------------
 
 

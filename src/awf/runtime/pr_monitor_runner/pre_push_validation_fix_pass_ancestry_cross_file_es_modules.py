@@ -1058,6 +1058,33 @@ def _es_chained_member_refs(tokens: tuple[_EsToken, ...], line: int) -> frozense
     )
 
 
+def _es_direct_member_calls(tokens: tuple[_EsToken, ...], line: int) -> frozenset[tuple[str, str]]:
+    """``(receiver, name)`` pairs ``line`` calls as ``receiver.name(`` on a bare receiver.
+
+    The callee scan reports each pair once however often the line repeats it,
+    so ``other.tel.record(); tel.record()`` reads as one chained ``tel``.
+    A direct occurrence of the pair keeps it bound to the import whatever a
+    chained occurrence beside it reaches (PRRT_kwDOSJAM6s6vOa0O).
+    """
+    return frozenset(
+        (tokens[index].value, tokens[index + 2].value)
+        for index in range(len(tokens) - 3)
+        if line in (tokens[index].line, tokens[index + 2].line)
+        and _is(tokens[index], "ident")
+        and not _is_reference_position(tokens, index)
+        and _is(tokens[index + 1], "punct")
+        and tokens[index + 1].value in (".", "?.")
+        and _is(tokens[index + 2], "ident")
+        and (
+            _is(tokens[index + 3], "punct", "(")
+            or (
+                _is(tokens[index + 3], "punct", "?.")
+                and _is(_token_at(tokens, index + 4), "punct", "(")
+            )
+        )
+    )
+
+
 # Probe suffixes per specifier extension, in TS/Node resolution order. An
 # extensionless specifier also probes ``index`` files under it.
 _EXTENSIONLESS_PROBES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs")

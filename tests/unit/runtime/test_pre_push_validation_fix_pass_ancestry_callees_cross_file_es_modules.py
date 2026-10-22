@@ -193,6 +193,34 @@ async def test_an_unrelated_chain_elsewhere_does_not_block_the_anchored_call(tai
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "call",
+    [
+        "other.tel.record(1) + tel.record(value)",
+        "tel.record(value) + other?.tel?.record(1)",
+        "other.\n    tel.record(1) + tel.record(value)",
+    ],
+)
+async def test_a_chained_occurrence_does_not_block_a_direct_one_on_the_line(call: str) -> None:
+    """Chained status is per call occurrence, not per ``(tel, record)`` pair (PRRT_kwDOSJAM6s6vOa0O)."""
+    caller = _caller("import * as tel from './telemetry';", call)
+    item_line = 4 + call.count("\n")
+
+    assert await _accepted(_telemetry_probe(caller), item_line=item_line)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call", ["other.tel.record(1) + tel.flush(value)", "other.tel.record(1) + tel.record"]
+)
+async def test_only_a_direct_call_of_the_same_pair_lifts_a_chained_one(call: str) -> None:
+    """A direct ``tel.flush()`` or non-call ``tel.record`` says nothing about ``other.tel.record()``."""
+    probe = _telemetry_probe(_caller("import * as tel from './telemetry';", call))
+
+    assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "module",
     [
         # A directly exported arrow is its own definition head (PRRT_kwDOSJAM6s6vLkoD).
