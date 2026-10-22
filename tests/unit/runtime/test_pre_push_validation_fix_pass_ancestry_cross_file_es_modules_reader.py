@@ -771,6 +771,30 @@ def test_direct_member_calls_are_reported_per_occurrence() -> None:
     assert es._es_direct_member_calls(_tokens(text), 3) == frozenset()
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "qualifier", "name", "calls"),
+    [
+        ("record(1)", None, "record", True),
+        ("record?.(1)", None, "record", True),
+        ("tel.record(1)", "tel", "record", True),
+        ("tel?.record?.(1)", "tel", "record", True),
+        # A reference, a property call, a method head or a renamed member is no call.
+        ("const f = record", None, "record", False),
+        ("record?.x", None, "record", False),
+        ("box.record(1)", None, "record", False),
+        ("class A {\n  record(v) {}\n}", None, "record", False),
+        ("tel.other(1) + tel", "tel", "record", False),
+        ("tel.record + x.tel.record(1)", "tel", "record", False),
+    ],
+)
+def test_es_calls_requires_a_call_of_the_ref(
+    text: str, qualifier: str | None, name: str, calls: bool
+) -> None:
+    """A surviving import with no call reaches nothing (PRRT_kwDOSJAM6s6vO2G-)."""
+    assert es._es_calls(_tokens(text), qualifier, name) is calls
+
+
 # --- anchor lines and definition heads -------------------------------------------
 
 

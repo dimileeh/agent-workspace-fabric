@@ -728,6 +728,11 @@ async def test_the_call_site_itself_and_lines_without_callees_are_not_evidence()
         {_CALLER: "const broken = '\n"},
         # The correction shadows the import at the call site.
         {_CALLER: _caller("import { record } from './telemetry';").replace("(value", "(record")},
+        # The correction removes or renames the call, leaving the import unused.
+        {_CALLER: _caller("import { record } from './telemetry';", "value")},
+        {_CALLER: _caller("import { record, other } from './telemetry';", "other(value)")},
+        {_CALLER: _caller("import { record } from './telemetry';", "box.record(value)")},
+        {_CALLER: _caller("import { record } from './telemetry';", "[record]")},
     ],
 )
 async def test_the_corrected_caller_must_still_reach_the_definition(
@@ -736,6 +741,42 @@ async def test_the_corrected_caller_must_still_reach_the_definition(
     probe = _telemetry_probe(_caller("import { record } from './telemetry';"), right=right)
 
     assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call_after",
+    ["tel.other(value)", "value", "other.tel.record(value)", "tel.record"],
+)
+async def test_a_namespace_caller_must_still_call_the_member(call_after: str) -> None:
+    import_line = "import * as tel from './telemetry';"
+    probe = _telemetry_probe(
+        _caller(import_line, "tel.record(value)"),
+        right={_CALLER: _caller(import_line, call_after)},
+    )
+
+    assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("import_line", "call_after"),
+    [
+        ("import { record } from './telemetry';", "record?.(value + 1)"),
+        ("import * as tel from './telemetry';", "tel?.record(value + 1)"),
+        ("import * as tel from './telemetry';", "tel.record?.(value + 1)"),
+    ],
+)
+async def test_a_corrected_caller_that_still_calls_the_callee_is_evidence(
+    import_line: str, call_after: str
+) -> None:
+    call_before = "record(value)" if "{" in import_line else "tel.record(value)"
+    probe = _telemetry_probe(
+        _caller(import_line, call_before),
+        right={_CALLER: _caller(import_line, call_after)},
+    )
+
+    assert await _accepted(probe)
 
 
 _MOVED = "src/app/metrics.ts"

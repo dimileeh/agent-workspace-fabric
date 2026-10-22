@@ -1111,6 +1111,38 @@ def _es_direct_member_calls(tokens: tuple[_EsToken, ...], line: int) -> frozense
     )
 
 
+def _es_calls(tokens: tuple[_EsToken, ...], qualifier: str | None, name: str) -> bool:
+    """True when some occurrence anywhere in ``tokens`` calls ``qualifier.name`` / ``name``.
+
+    A bare call is ``name(`` (or ``name?.(``) outside a property position and
+    not heading a parameter list; a qualified one is ``qualifier.name(`` on a
+    bare receiver. A correction that drops or renames the call while leaving
+    its import in place reaches the definition through no call, so it fails
+    closed (PRRT_kwDOSJAM6s6vO2G-).
+    """
+    for index, token in enumerate(tokens):
+        if not _is(token, "ident", qualifier or name) or _is_reference_position(tokens, index):
+            continue
+        callee = index
+        if qualifier is not None:
+            dot = _token_at(tokens, index + 1)
+            if not (
+                _is(dot, "punct")
+                and dot.value in (".", "?.")
+                and _is(_token_at(tokens, index + 2), "ident", name)
+            ):
+                continue
+            callee = index + 2
+        elif _es_signature_head(tokens, index):
+            continue
+        after = _token_at(tokens, callee + 1)
+        if _is(after, "punct", "(") or (
+            _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "(")
+        ):
+            return True
+    return False
+
+
 # Probe suffixes per specifier extension, in TS/Node resolution order. An
 # extensionless specifier also probes ``index`` files under it.
 _EXTENSIONLESS_PROBES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs")

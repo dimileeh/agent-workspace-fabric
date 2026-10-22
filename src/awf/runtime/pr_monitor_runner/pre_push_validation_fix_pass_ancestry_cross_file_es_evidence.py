@@ -346,12 +346,17 @@ async def _es_caller_still_reaches(
 
     The anchored occurrence was already held to a non-chained receiver at
     ``left``; here only the corrected file's bindings matter, since its
-    anchor line is unknown and a chain elsewhere says nothing about it.
+    anchor line is unknown and a chain elsewhere says nothing about it. The
+    corrected file must still call the ref somewhere: a surviving import whose
+    call the correction removed or renamed reaches nothing
+    (PRRT_kwDOSJAM6s6vO2G-).
     """
     text = await reader.text(caller)
     call_site = None if text is None else _es_call_site_bindings(text, path=caller)
     if call_site is None:
         return None
-    imports, rebound, _tokens = call_site
+    imports, rebound, tokens = call_site
+    if not _es._es_calls(tokens, qualifier, name):
+        return None
     reached = _es._es_ref_target(imports, rebound, frozenset(), qualifier, name)
     return None if reached is None else await reader.target(caller, *reached)
