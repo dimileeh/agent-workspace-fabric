@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.control.executor import agent_service_recovery, runtime_setup_replay
 from awf.control.executor.constants import (
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
@@ -310,3 +311,41 @@ async def test_replay_without_worktree_path_fails_with_reason_code(
     kwargs = executor._mark_failed.await_args.kwargs
     assert kwargs["reason_code"] == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
     assert kwargs["failure_reason"] == FailureReason.infrastructure_failure
+
+
+@pytest.mark.unit
+async def test_replay_cleanup_failure_recovers_missing_head_like_execution_flow(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed_monitoring_pr(factory)
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(
+        container,
+        setup_error=ComposeExecCleanupError(
+            invocation_id="inv", source="validation", label="setup", message="stuck"
+        ),
+    )
+    executor = _executor(factory, tmp_path, container=container, validation=validation)
+    executor._recover_missing_git_head_or_mark_failed = AsyncMock(return_value=True)
+
+    async def _head_missing(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(agent_service_recovery, "verify_head_object_exists", _head_missing)
+
+    recovered, _result = await _recover(executor, validation, tmp_path, ws_id, [_timeout_error()])
+
+    assert recovered is False
+    executor._recover_missing_git_head_or_mark_failed.assert_awaited_once()
+    recovery = executor._recover_missing_git_head_or_mark_failed.await_args.kwargs
+    assert recovery["base_commit"] == "a" * 40
+    assert recovery["branch_name"] == "awf/x"
+    assert recovery["from_status"] == WorkspaceStatus.running
+    assert recovery["stage"] == "runtime_setup_replay_cleanup_failure"
+    assert recovery["mark_failed_on_failure"] is False
+    details = executor._mark_failed.await_args.kwargs["details"]
+    assert details["cause_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+    assert details["head_recovered"] is True

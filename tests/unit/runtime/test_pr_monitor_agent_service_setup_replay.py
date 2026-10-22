@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import runtime_setup_replay
 from awf.control.executor.constants import (
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
@@ -22,7 +23,10 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.profiles.resolver import ProfileResolutionError
-from awf.runtime.pr_monitor_runner.types import _MonitorAgentServiceRecoveryFailedError
+from awf.runtime.pr_monitor_runner.types import (
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorHeadObjectMissingError,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.control.runtime_setup_replay_fakes import (
     TOOL_PATH,
@@ -354,3 +358,50 @@ async def test_unresolvable_profile_terminates_monitor_with_replay_reason_code(
             event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
         ]
     assert [event.reason_code for event in failed] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("head_recovered", [True, False])
+async def test_replay_cleanup_failure_runs_monitor_head_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    head_recovered: bool,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    adapter = _idle_timeout_adapter(retry_stdout=None)
+    validation = _OrderedValidation(
+        container,
+        adapter,
+        setup_error=ComposeExecCleanupError(
+            invocation_id="inv", source="validation", label="setup", message="stuck"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        validation=validation,
+    )
+    _patch_compose(mocker, container, recreate=True)
+    repair = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery."
+        "_repair_monitor_git_after_recoverable_agent_cleanup_failure",
+        side_effect=None
+        if head_recovered
+        else _MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING_UNRECOVERABLE", "gone"),
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as raised:
+        await _run(runner, workspace_id, tmp_path)
+
+    repair.assert_awaited_once()
+    assert repair.await_args.kwargs["workspace_id"] == workspace_id
+    assert raised.value.details is not None
+    assert raised.value.details["head_recovered"] is head_recovered
+    assert len(adapter.calls) == 1

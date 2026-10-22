@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -1143,8 +1144,38 @@ async def _restart_monitor_agent_service_or_fail(
             service_healthy=service_healthy,
             restart_attempts=restart_attempts,
         ),
+        recover_missing_head=partial(
+            _recover_monitor_head_after_setup_replay_cleanup_failure,
+            self,
+            workspace_id=workspace_id,
+        ),
     )
     return restart_attempts
+
+
+async def _recover_monitor_head_after_setup_replay_cleanup_failure(
+    self: Any,
+    exc: ComposeExecCleanupError,
+    *,
+    workspace_id: str,
+) -> bool:
+    """Missing-HEAD recovery for a replay exec cleanup failure, anchored on the PR head."""
+    try:
+        await _repair_monitor_git_after_recoverable_agent_cleanup_failure(
+            self,
+            workspace_id=workspace_id,
+            operation_start_head=None,
+            command_evidence=None,
+        )
+    except (_MonitorHeadObjectMissingError, _MonitorMirrorHooksPathRepairFailedError) as error:
+        _log.warning(
+            "monitor.agent_service_setup_replay_head_recovery_failed",
+            workspace_id=workspace_id,
+            reason_code=error.reason_code,
+            cleanup_reason_code=exc.reason_code,
+        )
+        return False
+    return True
 
 
 async def _raise_if_monitor_agent_service_recovery_was_superseded(

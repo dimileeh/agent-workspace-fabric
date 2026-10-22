@@ -12,20 +12,25 @@ failures, so the worker finalizes the recovery without a retry.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import runtime_setup_replay as _replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.helpers import _profile_for_workspace
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
+from awf.db.repositories import MergeCandidateRepository
+from awf.node.git_manager import verify_head_object_exists
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
 from awf.runtime.ownership import EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME
 
 MONITOR_RESUME_TRIGGER = "monitor_resume"
+_SETUP_REPLAY_CLEANUP_FAILURE_STAGE = "runtime_setup_replay_cleanup_failure"
 
 
 async def replay_setup_on_monitor_resume(
@@ -87,6 +92,13 @@ async def replay_setup_on_monitor_resume(
             after=identity_after,
             trigger=MONITOR_RESUME_TRIGGER,
             ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            recover_missing_head=partial(
+                _recover_pr_head_after_cleanup_failure,
+                self,
+                ws=ws,
+                workspace_id=workspace_id,
+                worktree_path=self._config.worktrees_root / workspace_id,
+            ),
         )
     if outcome.ok:
         return True
@@ -109,3 +121,46 @@ async def replay_setup_on_monitor_resume(
         monitor_owner_id=monitor_owner_id,
     )
     return False
+
+
+async def _recover_pr_head_after_cleanup_failure(
+    self: Any,
+    exc: ComposeExecCleanupError,
+    *,
+    ws: Workspace,
+    workspace_id: str,
+    worktree_path: Path,
+) -> bool:
+    """Recover a missing HEAD onto the PR's pushed head after a replay cleanup failure.
+
+    The executor's filesystem recovery rebuilds the branch on the commit it is
+    given. ``base_commit`` would flatten the pushed PR history, so anchor it on
+    the open merge candidate head (else the last monitored commit) instead.
+    """
+    if await verify_head_object_exists(worktree_path):
+        return True
+    async with self._session_factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+    anchor = (candidate.head_sha if candidate is not None else None) or ws.monitor_last_commit_sha
+    if anchor is None:
+        _log.warning(
+            "executor.resume_setup_replay_head_unrecoverable",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+        )
+        return False
+    return bool(
+        await self._recover_missing_git_head_or_mark_failed(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            base_commit=anchor,
+            branch_name=ws.branch_name or f"awf/{workspace_id}",
+            from_status=WorkspaceStatus.monitoring_pr,
+            stage=_SETUP_REPLAY_CLEANUP_FAILURE_STAGE,
+            error=exc,
+            task_tag=ws.task_tag,
+            mark_failed_on_failure=False,
+        )
+    )

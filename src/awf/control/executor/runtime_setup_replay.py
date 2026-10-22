@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -48,6 +48,11 @@ from awf.db.enums import FailureReason
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.git_manager import (
+    GitOperationError,
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -59,6 +64,7 @@ _log = get_logger(__name__)
 SETUP_REPLAY_PHASE_NAMES: Final[tuple[str, ...]] = ("setup", "pre_agent")
 _AGENT_SERVICE_NAME: Final[str] = "agent"
 _OUTPUT_TAIL_CHARS: Final[int] = 2000
+_MIRROR_HOOKS_PATH_REPAIR_FAILED: Final[str] = "MIRROR_HOOKS_PATH_REPAIR_FAILED"
 IDENTITY_PROBE_TIMEOUT_SECONDS: float = 30.0
 """Upper bound on the ``docker ps``/``docker inspect`` calls behind one identity read."""
 
@@ -78,6 +84,9 @@ class IdentityUnavailable(enum.Enum):
 
 
 IDENTITY_UNAVAILABLE: Final = IdentityUnavailable.UNAVAILABLE
+
+MissingHeadRecovery = Callable[[ComposeExecCleanupError], Awaitable[bool]]
+"""Caller-owned HEAD recovery after an exec cleanup failure; ``True`` when HEAD is usable."""
 
 AgentIdentityObservation = AgentContainerIdentity | IdentityUnavailable | None
 """An identity, ``None`` (stack readable, no agent container), or unavailable."""
@@ -188,8 +197,14 @@ async def replay_setup_if_recreated(
     after: AgentIdentityObservation,
     trigger: str,
     ownership_event_name: str,
+    recover_missing_head: MissingHeadRecovery | None = None,
 ) -> SetupReplayOutcome:
-    """Replay ``setup``/``pre_agent`` once when the agent container was recreated."""
+    """Replay ``setup``/``pre_agent`` once when the agent container was recreated.
+
+    Like ``execution_flow``'s profile setup, the replay is bracketed by a mirror
+    ``core.hooksPath`` repair before and after the phases, and a Compose exec
+    cleanup failure is followed by the hooks repair plus ``recover_missing_head``.
+    """
     verdict = runtime_recreation_decision(before, after)
     if verdict.decision is RecreationDecision.unchanged:
         return SetupReplayOutcome(ok=True, replayed=False)
@@ -236,6 +251,12 @@ async def replay_setup_if_recreated(
             failure_reason=FailureReason.infrastructure_failure,
             message="runtime setup replay failed: agent runtime ownership repair failed",
         )
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    hooks_failure = await _repair_mirror_hooks(
+        mirror_path, workspace_id=workspace_id, stage="before_setup_replay"
+    )
+    if hooks_failure is not None:
+        return _mirror_hooks_failed(context, hooks_failure, workspace_id=workspace_id)
     try:
         result = await validation.run_profile_phases(
             workspace_id=workspace_id,
@@ -246,8 +267,22 @@ async def replay_setup_if_recreated(
             worktree_path=worktree_path,
         )
     except ComposeExecCleanupError as exc:
+        # A tagged process that outlived its exec can poison the mirror hooks
+        # path and leave HEAD missing; repair both before reporting the failure.
+        hooks_failure = await _repair_mirror_hooks(
+            mirror_path, workspace_id=workspace_id, stage="after_setup_replay_cleanup_failure"
+        )
+        if hooks_failure is not None:
+            return _mirror_hooks_failed(
+                {**context, "setup_cleanup_reason_code": exc.reason_code},
+                hooks_failure,
+                workspace_id=workspace_id,
+            )
+        details: dict[str, Any] = {**context, "cause_reason_code": exc.reason_code}
+        if recover_missing_head is not None:
+            details["head_recovered"] = await recover_missing_head(exc)
         return _failed(
-            {**context, "cause_reason_code": exc.reason_code},
+            details,
             workspace_id=workspace_id,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"runtime setup replay failed: {cleanup_failure_message(exc)}",
@@ -263,6 +298,11 @@ async def replay_setup_if_recreated(
             failure_reason=FailureReason.infrastructure_failure,
             message=f"runtime setup replay failed: {safe_error}",
         )
+    hooks_failure = await _repair_mirror_hooks(
+        mirror_path, workspace_id=workspace_id, stage="after_setup_replay"
+    )
+    if hooks_failure is not None:
+        return _mirror_hooks_failed(context, hooks_failure, workspace_id=workspace_id)
     if not result.all_passed:
         first_fail = result.first_failure
         details = {**context, **_first_failure_details(first_fail)}
@@ -289,6 +329,57 @@ async def replay_setup_if_recreated(
     )
     _log.info("executor.runtime_setup_replayed", workspace_id=workspace_id, **context)
     return SetupReplayOutcome(ok=True, replayed=True)
+
+
+@dataclass(frozen=True)
+class _MirrorHooksRepairFailure:
+    stage: str
+    reason_code: str
+
+
+async def _repair_mirror_hooks(
+    mirror_path: Path | None, *, workspace_id: str, stage: str
+) -> _MirrorHooksRepairFailure | None:
+    """Repair a poisoned mirror ``core.hooksPath``; return the failure, if any."""
+    if mirror_path is None:
+        return None
+    try:
+        await repair_mirror_hooks_path(mirror_path)
+    except GitOperationError as exc:
+        reason_code = exc.reason_code
+        error = redact_audit_text(exc.stderr, limit=400)
+    except OSError as exc:
+        reason_code = _MIRROR_HOOKS_PATH_REPAIR_FAILED
+        error = redact_audit_text(repr(exc), limit=400)
+    else:
+        return None
+    _log.warning(
+        "executor.runtime_setup_replay_mirror_hooks_repair_failed",
+        workspace_id=workspace_id,
+        reason_code=reason_code,
+        stage=stage,
+        error=error,
+    )
+    return _MirrorHooksRepairFailure(stage=stage, reason_code=reason_code)
+
+
+def _mirror_hooks_failed(
+    context: dict[str, Any],
+    failure: _MirrorHooksRepairFailure,
+    *,
+    workspace_id: str,
+) -> SetupReplayOutcome:
+    stage = failure.stage.replace("_", " ")
+    return _failed(
+        {
+            **context,
+            "cause_reason_code": failure.reason_code,
+            "mirror_hooks_repair_stage": failure.stage,
+        },
+        workspace_id=workspace_id,
+        failure_reason=FailureReason.infrastructure_failure,
+        message=f"runtime setup replay failed: could not repair poisoned mirror hooks path {stage}",
+    )
 
 
 def _container_id(identity: AgentIdentityObservation) -> str | None:

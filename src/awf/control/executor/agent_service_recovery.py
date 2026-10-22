@@ -25,11 +25,14 @@ from awf.common.compose_exec import (
 from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.git_ops import GIT_AGENT_WRITABILITY_FAILED_REASON_CODE
+from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.git_manager import verify_head_object_exists
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
@@ -41,6 +44,7 @@ _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEO
 AGENT_SERVICE_RECOVERY_ABORTED = "AGENT_SERVICE_RECOVERY_ABORTED"
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
 _EXECUTOR_RECOVERY_TRIGGER = "executor_agent_service_recovery"
+_SETUP_REPLAY_CLEANUP_FAILURE_STAGE = "runtime_setup_replay_cleanup_failure"
 _BeforeMarkFailed = Callable[..., None | Awaitable[None]]
 _RecoveryCallbackResult = bool | str
 
@@ -815,6 +819,13 @@ async def _replay_setup_after_agent_service_restart(
             after=identity_after,
             trigger=_EXECUTOR_RECOVERY_TRIGGER,
             ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            recover_missing_head=partial(
+                _recover_head_after_setup_replay_cleanup_failure,
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                from_status=failure_from_status,
+            ),
         )
     if outcome.ok:
         return True
@@ -843,6 +854,36 @@ async def _replay_setup_after_agent_service_restart(
         details=details,
     )
     return False
+
+
+async def _recover_head_after_setup_replay_cleanup_failure(
+    self: Any,
+    exc: ComposeExecCleanupError,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    from_status: WorkspaceStatus,
+) -> bool:
+    """Missing-HEAD recovery for a replay exec cleanup failure, as ``execution_flow`` does."""
+    async with self._session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:  # pragma: no cover - the status recheck ran just before
+            return False
+        base_commit = workspace.base_commit
+        branch_name = workspace.branch_name or f"awf/{workspace_id}"
+        task_tag = workspace.task_tag
+    return await recover_missing_head_after_cleanup_failure(
+        exc,
+        executor=self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_commit=base_commit,
+        branch_name=branch_name,
+        task_tag=task_tag,
+        stage=_SETUP_REPLAY_CLEANUP_FAILURE_STAGE,
+        verify_head_object_exists_fn=verify_head_object_exists,
+        from_status=from_status,
+    )
 
 
 async def _mark_agent_service_unhealthy(

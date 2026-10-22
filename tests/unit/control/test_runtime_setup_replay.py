@@ -33,6 +33,7 @@ from awf.control.executor.runtime_setup_replay import (
 from awf.db.enums import FailureReason
 from awf.db.models import WorkspaceEvent
 from awf.db.session import make_session_factory
+from awf.node.git_manager import GitOperationError
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -97,6 +98,7 @@ async def _replay(
     *,
     before: Any,
     after: Any,
+    recover_missing_head: Any = None,
 ) -> runtime_setup_replay.SetupReplayOutcome:
     return await replay_setup_if_recreated(
         SimpleNamespace(),
@@ -111,6 +113,7 @@ async def _replay(
         after=after,
         trigger="monitor_resume",
         ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        recover_missing_head=recover_missing_head,
     )
 
 
@@ -592,6 +595,208 @@ class TestReplayFailureDetails:
         tail = outcome.details["stdout_tail"]
         assert tail.endswith("ERROR: final failure line")
         assert "GITHUB_TOKEN=ab" not in tail
+
+
+class _MirrorHooks:
+    """Record mirror hooks-path repairs in the validation trace; optionally fail one."""
+
+    def __init__(self, trace: list[str], *, fail_on_call: int | None = None) -> None:
+        self.trace = trace
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    async def repair(self, mirror_path: Path) -> bool:
+        self.calls += 1
+        self.trace.append(f"repair_hooks:{mirror_path.name}")
+        if self.calls == self.fail_on_call:
+            raise GitOperationError(
+                operation="config.unset",
+                returncode=1,
+                stdout="",
+                stderr="locked",
+                reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+            )
+        return False
+
+
+@pytest.fixture
+def mirror_hooks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    def _install(trace: list[str], *, fail_on_call: int | None = None) -> _MirrorHooks:
+        hooks = _MirrorHooks(trace, fail_on_call=fail_on_call)
+        monkeypatch.setattr(
+            runtime_setup_replay, "mirror_path_for_worktree", lambda _wt: tmp_path / "mirror.git"
+        )
+        monkeypatch.setattr(runtime_setup_replay, "repair_mirror_hooks_path", hooks.repair)
+        return hooks
+
+    return _install
+
+
+class TestReplayGitBracket:
+    """The replay runs inside the agent runtime like execution_flow's setup, so it
+    brackets setup with mirror hooks-path repair and recovers a missing HEAD after
+    a Compose exec cleanup failure."""
+
+    @pytest.mark.unit
+    async def test_mirror_hooks_repaired_before_and_after_setup(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path, mirror_hooks: Any
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(FakeAgentContainer())
+        mirror_hooks(validation.trace)
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert outcome.ok and outcome.replayed
+        assert validation.trace == [
+            "repair_hooks:mirror.git",
+            "phases:setup,pre_agent",
+            "repair_hooks:mirror.git",
+        ]
+
+    @pytest.mark.unit
+    async def test_mirror_hooks_repaired_after_failed_setup(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path, mirror_hooks: Any
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(FakeAgentContainer(), setup_returncode=1)
+        mirror_hooks(validation.trace)
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert not outcome.ok
+        assert outcome.details is not None
+        assert outcome.details["command"] == SETUP_COMMAND
+        assert validation.trace[-1] == "repair_hooks:mirror.git"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("fail_on_call", "stage", "setup_runs"),
+        [(1, "before_setup_replay", 0), (2, "after_setup_replay", 1)],
+    )
+    async def test_mirror_hooks_repair_failure_fails_replay(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        mirror_hooks: Any,
+        fail_on_call: int,
+        stage: str,
+        setup_runs: int,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(FakeAgentContainer())
+        mirror_hooks(validation.trace, fail_on_call=fail_on_call)
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert not outcome.ok
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason == FailureReason.infrastructure_failure
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert outcome.details["mirror_hooks_repair_stage"] == stage
+        assert validation.setup_runs() == setup_runs
+        assert await _replay_events(factory, ws_id) == []
+
+    @pytest.mark.unit
+    async def test_mirror_hooks_repair_os_error_fails_replay(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _repair_os_error(_mirror_path: Path) -> bool:
+            raise PermissionError("mirror config unreadable")
+
+        monkeypatch.setattr(
+            runtime_setup_replay, "mirror_path_for_worktree", lambda _wt: tmp_path / "mirror.git"
+        )
+        monkeypatch.setattr(runtime_setup_replay, "repair_mirror_hooks_path", _repair_os_error)
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(FakeAgentContainer())
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert not outcome.ok
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert validation.setup_runs() == 0
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("recovered", [True, False])
+    async def test_cleanup_failure_repairs_hooks_then_recovers_missing_head(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        mirror_hooks: Any,
+        recovered: bool,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        cleanup_error = ComposeExecCleanupError(
+            invocation_id="inv", source="validation", label="setup", message="stuck"
+        )
+        validation = FakeToolValidation(FakeAgentContainer(), setup_error=cleanup_error)
+        mirror_hooks(validation.trace)
+        seen: list[ComposeExecCleanupError] = []
+
+        async def _recover_missing_head(exc: ComposeExecCleanupError) -> bool:
+            validation.trace.append("recover_head")
+            seen.append(exc)
+            return recovered
+
+        outcome = await _replay(
+            factory,
+            validation,
+            ws_id,
+            tmp_path,
+            before=_OLD,
+            after=_NEW,
+            recover_missing_head=_recover_missing_head,
+        )
+
+        assert validation.trace == [
+            "repair_hooks:mirror.git",
+            "phases:setup,pre_agent",
+            "repair_hooks:mirror.git",
+            "recover_head",
+        ]
+        assert seen == [cleanup_error]
+        assert not outcome.ok
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert outcome.details["head_recovered"] is recovered
+
+    @pytest.mark.unit
+    async def test_cleanup_failure_skips_head_recovery_when_hooks_repair_fails(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path, mirror_hooks: Any
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(
+            FakeAgentContainer(),
+            setup_error=ComposeExecCleanupError(
+                invocation_id="inv", source="validation", label="setup", message="stuck"
+            ),
+        )
+        mirror_hooks(validation.trace, fail_on_call=2)
+
+        async def _recover_missing_head(_exc: ComposeExecCleanupError) -> bool:
+            raise AssertionError("HEAD recovery must not run on a poisoned mirror")
+
+        outcome = await _replay(
+            factory,
+            validation,
+            ws_id,
+            tmp_path,
+            before=_OLD,
+            after=_NEW,
+            recover_missing_head=_recover_missing_head,
+        )
+
+        assert not outcome.ok
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+        assert outcome.details["mirror_hooks_repair_stage"] == "after_setup_replay_cleanup_failure"
+        assert outcome.details["setup_cleanup_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
 
 
 class _BrokenSession:

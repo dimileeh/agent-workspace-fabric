@@ -36,6 +36,7 @@ async def replay_setup_after_monitor_agent_service_restart(
     compose_file: Path,
     identity_before: _replay.AgentIdentityObservation,
     recovery_details: dict[str, object],
+    recover_missing_head: _replay.MissingHeadRecovery | None = None,
 ) -> None:
     """Replay setup when the restart recreated the agent; raise on a failed replay."""
     identity_after = await _replay.capture_agent_container_identity(compose_project)
@@ -95,6 +96,7 @@ async def replay_setup_after_monitor_agent_service_restart(
             after=identity_after,
             trigger=MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER,
             ownership_event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            recover_missing_head=recover_missing_head,
         )
     if outcome.ok:
         return

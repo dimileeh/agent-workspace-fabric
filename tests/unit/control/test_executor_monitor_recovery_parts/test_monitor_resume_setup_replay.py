@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -18,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import monitor_handoff, runtime_setup_replay
+from awf.common.compose_exec import ComposeExecCleanupError
+from awf.control.executor import (
+    monitor_handoff,
+    monitor_resume_setup_replay,
+    runtime_setup_replay,
+)
 from awf.control.executor.constants import (
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
@@ -460,3 +466,91 @@ async def test_recovery_operation_reports_replay_failure_after_usable_compose_fa
     )
     assert error_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
     assert "runtime setup replay failed" in message
+
+
+def _cleanup_failure() -> ComposeExecCleanupError:
+    return ComposeExecCleanupError(
+        invocation_id="inv", source="validation", label="setup", message="stuck"
+    )
+
+
+async def _set_monitor_last_commit(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str, sha: str
+) -> None:
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_last_commit_sha = sha
+        await session.commit()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("monitor_last_commit_sha", "expected_anchor"), [("c" * 40, "c" * 40), (None, None)]
+)
+async def test_replay_cleanup_failure_recovers_missing_head_onto_pr_head(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    monitor_last_commit_sha: str | None,
+    expected_anchor: str | None,
+) -> None:
+    """HEAD recovery must rebuild on the pushed PR head, never flatten onto base_commit."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container, setup_error=_cleanup_failure())
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    if monitor_last_commit_sha is not None:
+        await _set_monitor_last_commit(factory, ws_id, monitor_last_commit_sha)
+    executor, _compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+
+    async def _head_missing(_worktree_path: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(monitor_resume_setup_replay, "verify_head_object_exists", _head_missing)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    if expected_anchor is None:
+        recover.assert_not_awaited()
+        return
+    recover.assert_awaited_once()
+    kwargs = recover.await_args.kwargs
+    assert kwargs["base_commit"] == expected_anchor
+    assert kwargs["branch_name"] == "awf/x"
+    assert kwargs["from_status"] == WorkspaceStatus.monitoring_pr
+    assert kwargs["stage"] == "runtime_setup_replay_cleanup_failure"
+    assert kwargs["mark_failed_on_failure"] is False
+
+
+@pytest.mark.unit
+async def test_replay_cleanup_failure_skips_head_recovery_when_head_present(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container, setup_error=_cleanup_failure())
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    executor, _compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    recover = AsyncMock(return_value=True)
+    monkeypatch.setattr(executor, "_recover_missing_git_head_or_mark_failed", recover)
+
+    async def _head_present(_worktree_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(monitor_resume_setup_replay, "verify_head_object_exists", _head_present)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    recover.assert_not_awaited()
