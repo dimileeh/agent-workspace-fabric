@@ -33,7 +33,10 @@ from typing import Any
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
-from awf.runtime.feedback_policy import preferred_duplicate_review_thread
+from awf.runtime.feedback_policy import (
+    preferred_duplicate_review_thread,
+    review_thread_body_hash,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
     _operator_decision_key,
@@ -427,7 +430,9 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
             continue
         _mark_review_thread_addressed(state, thread, "fix_committed")
         # #1018: this monitor never produced a verdict for the thread, so its
-        # disposition reply cites the branch commit the evidence matched.
+        # disposition reply cites the branch commit the evidence matched. The
+        # conversation hash lets a re-triage after a failed resolve tell newer
+        # reviewer feedback from the one this reply answers (PRRT_kwDOSJAM6s6vRfXm).
         record_item_disposition(
             state,
             ThreadDisposition(
@@ -436,6 +441,7 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
                 verdict="fix_committed",
                 commits=(matched_sha,),
                 source="branch_evidence",
+                thread_body_hash=review_thread_body_hash(thread),
             ),
         )
 

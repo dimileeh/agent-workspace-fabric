@@ -21,7 +21,11 @@ from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import MonitorState, _review_thread_body_hash
-from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    read_item_disposition,
+    sync_item_disposition,
+)
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -37,6 +41,7 @@ from tests.unit.runtime.test_pr_monitor_outdated_resolution_parts._helpers impor
     _outdated_thread,
     _outdated_thread_with_comment,
     _outdated_thread_with_distinct_comment,
+    _outdated_thread_with_reply,
     _resolution_events,
     _status_with_outdated,
 )
@@ -139,6 +144,56 @@ async def test_branch_evidence_seed_replies_citing_matched_commit(
     body = gh.events[0][2]
     assert body.splitlines()[0] == _MARKER.format(cls="fixed_branch_evidence", tid=tid)
     assert matched in body
+
+
+async def test_branch_evidence_reply_is_superseded_by_feedback_after_failed_resolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # PRRT_kwDOSJAM6s6vRfXm: the seeded reply lands, the resolve fails, then a
+    # reviewer replies. The re-triaged verdict must not reuse the stale
+    # branch-evidence reply, so the seed records the conversation it answers.
+    cmd = FakeCommandRunner()
+    gh = OrderedForge(cmd, resolve_error=_TRANSIENT)
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    tid = "PRRT_test_seeded_then_feedback"
+    cmd.respond_when(
+        lambda argv: "log" in argv and "--grep" in argv,
+        stdout=f"{'d' * 40} 2026-10-01T10:00:00+00:00\n",
+    )
+    thread = _outdated_thread(tid)
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+        wait_on_transient=False,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed"]
+    posted = read_item_disposition(state, tid)
+    assert posted is not None
+    assert posted.reply_comment_id == "reply-1"
+    assert posted.thread_body_hash == _review_thread_body_hash(thread)
+
+    followed_up = _outdated_thread_with_reply(
+        tid,
+        addressed_comment_id="c1",
+        addressed_at=datetime(2026, 9, 30, tzinfo=UTC),
+        reply_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+    sync_item_disposition(
+        state,
+        tid,
+        VerdictResult(verdict="false_positive", reason="the follow-up is out of scope"),
+        thread=followed_up,
+    )
+
+    retriaged = read_item_disposition(state, tid)
+    assert retriaged is not None
+    assert (retriaged.disposition_class, retriaged.reply_comment_id) == ("false_positive", None)
 
 
 async def test_branch_evidence_seed_without_sha_does_not_seed(
