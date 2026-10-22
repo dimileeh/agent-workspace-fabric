@@ -12,10 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
-from awf.common.github_client_parsing import _clean_optional_str, _connection_nodes, _dig
+from awf.common.github_client_parsing import (
+    _clean_optional_str,
+    _connection_nodes,
+    _dig,
+    _parse_github_datetime,
+)
 from awf.common.github_graphql import (
     _GQL_ADD_REVIEW_THREAD_REPLY,
     _GQL_REVIEW_THREAD_AUDIT,
@@ -135,12 +141,24 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
         comment_nodes.extend(_connection_nodes(page))
         cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
     viewer_bodies: list[str] = []
+    viewer_posted_at: list[datetime | None] = []
     superseded = 0
+    latest_edit: datetime | None = None
     for comment in comment_nodes:  # oldest first
         if comment.get("viewerDidAuthor") is not True:
             superseded = len(viewer_bodies)  # newer feedback outdates earlier replies
+            edited_at = _parse_github_datetime(comment.get("lastEditedAt"))
+            if edited_at is not None and (latest_edit is None or edited_at > latest_edit):
+                latest_edit = edited_at
         elif isinstance(body := comment.get("body"), str):
             viewer_bodies.append(body)
+            viewer_posted_at.append(_parse_github_datetime(comment.get("createdAt")))
+    if latest_edit is not None:
+        # An edit keeps the feedback's place in the list, so a reply posted before
+        # it (or not provably after it) answered the older text.
+        for index, posted_at in enumerate(viewer_posted_at):
+            if posted_at is None or posted_at <= latest_edit:
+                superseded = max(superseded, index + 1)
     return AuditedReviewThread(
         thread_id=thread_id,
         is_resolved=node.get("isResolved") is True,

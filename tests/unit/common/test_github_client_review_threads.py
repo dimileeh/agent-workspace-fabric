@@ -269,3 +269,142 @@ async def test_audit_fingerprints_the_whole_thread_conversation() -> None:
         await _conversation_digest([{"body": "P1: edited", "viewerDidAuthor": False}, reply]),
     }
     assert len(changed) == 3 and original not in changed
+
+
+async def test_audit_supersedes_a_reply_posted_before_feedback_was_edited() -> None:
+    fake = FakeCommandRunner()
+    thread = _audit_thread(
+        "PRRT_test_a",
+        comments=[
+            {
+                "body": "P1: crash on None — and on empty input too",
+                "viewerDidAuthor": False,
+                "createdAt": "2026-10-22T10:00:00Z",
+                "lastEditedAt": "2026-10-22T12:00:00Z",
+            },
+            {
+                "body": "<!-- first disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T10:30:00Z",
+            },
+            {
+                "body": "nit: rename",
+                "viewerDidAuthor": False,
+                "createdAt": "2026-10-22T10:45:00Z",
+                "lastEditedAt": "2026-10-22T10:50:00Z",
+            },
+            {
+                "body": "<!-- second disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T11:00:00Z",
+            },
+        ],
+    )
+    fake.queue_result(stdout=_audit_page([thread], cursor=None))
+
+    audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
+
+    # The edit keeps the feedback's place in the list, but every reply answered the old text.
+    assert audited[0].superseded_viewer_comments == 2
+    assert audited[0].current_viewer_comment_bodies == ()
+    query = next(a for a in fake.calls[0].args if a.startswith("query="))
+    assert "createdAt" in query and "lastEditedAt" in query
+
+
+async def test_audit_keeps_a_reply_posted_after_the_feedback_edit() -> None:
+    fake = FakeCommandRunner()
+    thread = _audit_thread(
+        "PRRT_test_a",
+        comments=[
+            {
+                "body": "P1: crash on None",
+                "viewerDidAuthor": False,
+                "createdAt": "2026-10-22T10:00:00Z",
+                "lastEditedAt": "2026-10-22T10:30:00Z",
+            },
+            {
+                "body": "<!-- stale disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T10:15:00Z",
+            },
+            {
+                "body": "<!-- disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T11:00:00Z",
+            },
+        ],
+    )
+    fake.queue_result(stdout=_audit_page([thread], cursor=None))
+
+    audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
+
+    assert audited[0].current_viewer_comment_bodies == ("<!-- disposition -->",)
+
+
+async def test_audit_keeps_every_reply_when_the_feedback_was_edited_before_them() -> None:
+    fake = FakeCommandRunner()
+    thread = _audit_thread(
+        "PRRT_test_a",
+        comments=[
+            {
+                "body": "P1: crash on None",
+                "viewerDidAuthor": False,
+                "createdAt": "2026-10-22T10:00:00Z",
+                "lastEditedAt": "2026-10-22T10:05:00Z",
+            },
+            {
+                "body": "<!-- disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T11:00:00Z",
+            },
+        ],
+    )
+    fake.queue_result(stdout=_audit_page([thread], cursor=None))
+
+    audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
+
+    assert audited[0].superseded_viewer_comments == 0
+    assert audited[0].current_viewer_comment_bodies == ("<!-- disposition -->",)
+
+
+async def test_audit_fails_closed_on_a_reply_with_no_posting_time_after_an_edit() -> None:
+    fake = FakeCommandRunner()
+    fake.queue_result(
+        stdout=_audit_page([_audit_thread("PRRT_test_a", comments_next="k1")], cursor=None)
+    )
+    fake.queue_result(
+        stdout=json.dumps(
+            {
+                "data": {
+                    "node": {
+                        "comments": {
+                            "nodes": [
+                                {"body": "<!-- undated -->", "viewerDidAuthor": True},
+                                {
+                                    "body": "P2: also the docs",
+                                    "viewerDidAuthor": False,
+                                    "createdAt": "2026-10-22T09:00:00Z",
+                                    "lastEditedAt": "2026-10-22T09:30:00Z",
+                                },
+                                {
+                                    "body": "<!-- disposition -->",
+                                    "viewerDidAuthor": True,
+                                    "createdAt": "2026-10-22T10:00:00Z",
+                                },
+                                {"body": "<!-- also undated -->", "viewerDidAuthor": True},
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+    audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
+
+    # A reply AWF cannot place after the newest edit is not proof it answered it.
+    assert audited[0].superseded_viewer_comments == 3
+    assert audited[0].current_viewer_comment_bodies == ()
+    query = next(a for a in fake.calls[1].args if a.startswith("query="))
+    assert "createdAt" in query and "lastEditedAt" in query

@@ -447,8 +447,9 @@ failing closed on a truncated page. Every thread resolved by AWF's own forge
 identity must carry the marker in a comment that identity authored — the
 marker, not the login, is the evidence, because that identity can be the
 operator's own account. The marker must also follow the thread's newest comment
-by anyone else: an older one answered feedback that has since moved on, so a
-reopened thread resolved silently after new feedback blocks. Threads resolved
+by anyone else, and be posted after the newest edit to such a comment: an older
+one answered feedback that has since moved on, so a reopened thread resolved
+silently after new or edited feedback blocks. Threads resolved
 by any other login are that person's or bot's disposition and never block. A
 failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
