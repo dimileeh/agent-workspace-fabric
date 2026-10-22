@@ -332,7 +332,7 @@ class _EsLexer:
                 ch == "<"
                 and self.jsx
                 and self.expression_may_start()
-                and not (self.tsx and _masking._TSX_GENERIC_ARROW_RE.match(text, self.pos))
+                and not (self.tsx and _masking._tsx_generic_arrow_type_params_at(text, self.pos))
             ):
                 self.read_jsx_element()
                 self.emit("jsx", "<")

@@ -449,7 +449,7 @@ def _tsx_generic_arrow_head_at(line: str, index: int) -> bool:
     ``async``). A ``<`` at line start may be a JSX child on its own line, so it
     stays a tag (fail closed: its text is blanked) (PRRT_kwDOSJAM6s6vMe0Y).
     """
-    if not _TSX_GENERIC_ARROW_RE.match(line, index):
+    if not _tsx_generic_arrow_type_params_at(line, index):
         return False
     prefix = line[:index].rstrip(" \t")
     if not prefix:
@@ -458,3 +458,26 @@ def _tsx_generic_arrow_head_at(line: str, index: int) -> bool:
         return True
     # The prefix rule for ``/`` regex openers is the expression-start rule.
     return _js_slash_can_start_regex(line, index)
+
+
+def _tsx_generic_arrow_type_params_at(text: str, index: int) -> bool:
+    """True when ``text[index]`` opens a TSX generic arrow's type parameters.
+
+    Beyond the ``_TSX_GENERIC_ARROW_RE`` lookahead, the list must close with a
+    ``>`` followed by the arrow's ``(``. Otherwise a JSX-first parser (Babel)
+    reads ``<T extends U>helper()</T>`` as an element whose text must stay
+    masked, so the ``<`` fails closed to a tag (PRRT_kwDOSJAM6s6vTvFZ).
+    """
+    if not _TSX_GENERIC_ARROW_RE.match(text, index):
+        return False
+    depth = 0
+    for pos in range(index, len(text)):
+        ch = text[pos]
+        if ch == "<":
+            depth += 1
+        elif ch == ">" and text[pos - 1] != "=":  # ``=>`` inside a function type
+            depth -= 1
+            if depth == 0:
+                rest = text[pos + 1 :].lstrip()
+                return rest.startswith("(")
+    return False
