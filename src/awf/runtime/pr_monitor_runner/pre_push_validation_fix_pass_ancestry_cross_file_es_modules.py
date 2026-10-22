@@ -146,14 +146,17 @@ class _EsLexer:
 
         TS reads ``x!`` / ``f()!`` / ``a[0]!`` as a non-null assertion when no
         line break precedes the ``!``. An identifier counts unless it is a
-        keyword taking an operand (``return !x``), a ``)`` unless it closes a
+        keyword taking an operand (``return !x``) rather than a member name
+        (``a.return!``), a ``)`` unless it closes a
         statement condition, and a ``!`` only when it is itself postfix.
         """
         token = self.tokens[index] if index >= 0 else None
         if token is None:
             return False
         if token.kind == "ident":
-            return token.value not in _masking._JS_REGEX_PREFIX_KEYWORDS
+            return token.value not in _masking._JS_REGEX_PREFIX_KEYWORDS or self.is_member_name(
+                index
+            )
         if token.value == "!":
             return not token.newline_before and self.ends_operand(index - 1)
         if token.value == ")":
@@ -165,7 +168,7 @@ class _EsLexer:
 
         The same rule ``_js_slash_can_start_regex`` applies per line: after an
         operator or an opening bracket, or after a keyword that takes an
-        operand. A ``}`` ends a block far more often than an expression, and a
+        operand — not a member name such as ``a.return``. A ``}`` ends a block far more often than an expression, and a
         ``)`` closing an ``if`` / ``for`` / ``while`` / ``with`` condition ends
         a statement head, so both start an expression too: reading a regex
         there as division would let a quote or backtick inside it swallow the
@@ -191,8 +194,15 @@ class _EsLexer:
         if prev.kind == "punct":
             return prev.value not in ("]", "++", "--")
         if prev.kind == "ident":
-            return prev.value in _masking._JS_REGEX_PREFIX_KEYWORDS
+            return prev.value in _masking._JS_REGEX_PREFIX_KEYWORDS and not self.is_member_name(
+                len(self.tokens) - 1
+            )
         return False
+
+    def is_member_name(self, index: int) -> bool:
+        """True when ``tokens[index]`` follows ``.`` / ``?.``: a property, never a keyword."""
+        prev = self.tokens[index - 1] if index > 0 else None
+        return prev is not None and prev.kind == "punct" and prev.value in (".", "?.")
 
     def skip_trivia(self) -> None:
         text, n = self.text, len(self.text)
@@ -238,7 +248,12 @@ class _EsLexer:
         tail = [(t.kind, t.value) for t in self.tokens[-2:]]
         if tail[-1:] == [("ident", "await")]:
             return tail[:1] == [("ident", "for")]
-        return bool(tail) and tail[-1][0] == "ident" and tail[-1][1] in _CONDITION_KEYWORDS
+        return (
+            bool(tail)
+            and tail[-1][0] == "ident"
+            and tail[-1][1] in _CONDITION_KEYWORDS
+            and not self.is_member_name(len(self.tokens) - 1)
+        )
 
     def line_end(self, start: int) -> int:
         end = start

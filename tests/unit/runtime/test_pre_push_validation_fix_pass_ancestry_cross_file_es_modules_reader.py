@@ -139,6 +139,19 @@ def test_a_brace_closing_a_class_or_function_expression_is_followed_by_division(
 
 
 @pytest.mark.unit
+def test_a_keyword_named_property_is_followed_by_division() -> None:
+    text = "const q = obj.return / (record = replacement) / 2;"
+    assert _values(text)[6:] == ["/", "(", "record", "=", "replacement", ")", "/", "2", ";"]
+    assert es._es_assigned_names(_tokens(text), frozenset({"record"})) == frozenset({"record"})
+    assert _values("x = a?.typeof / b / c").count("/") == 2
+    assert _values("x = a.in! / b / c").count("/") == 2
+    assert _values("x = a.if (b) / c / d").count("/") == 2
+    # The keyword itself still takes an operand, so a regex may follow it.
+    assert _values("return /`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("x = '.'\nreturn /`/.test(s)")[-6:-4] == ["", "."]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "text", ["x = a ? b : class {} / 2", "return\nfunction f() {}\n/`/.test(s)"]
 )
