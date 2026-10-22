@@ -289,12 +289,17 @@ def attach_issue_url(state: MonitorState, item_id: str, issue_url: str) -> None:
 
     A legacy / in-flight defer recorded before #1018 has no disposition yet; it
     is rebuilt from the agent's stashed defer reason so the reply can still cite
-    it (a reasonless one then parks rather than resolving).
+    it (a reasonless one then parks rather than resolving). A record whose reply
+    already landed is kept as is: :func:`sync_item_disposition` kept it for a
+    same-conversation re-triage, and it is what the thread says, so the resolve
+    reuses it instead of posting a second reply.
     """
     from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
     disposition = read_item_disposition(state, item_id)
+    if disposition is not None and disposition.reply_comment_id:
+        return
     if disposition is None or disposition.disposition_class != "deferred":
         disposition = ThreadDisposition(
             item_id=item_id,

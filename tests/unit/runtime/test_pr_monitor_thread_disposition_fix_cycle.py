@@ -437,6 +437,70 @@ async def test_active_thread_resolve_retry_reuses_recorded_reply_without_reposti
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
 
 
+async def test_same_conversation_retriage_to_defer_keeps_the_posted_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6vS7Wm: DEFER capture never drops a posted reply.
+
+    A replied-but-unresolved item re-triaged to DEFER on an unchanged conversation
+    keeps its posted record at verdict time; the capture's issue attach must not
+    rebuild it as a first, reply-less deferred record that posts a second reply.
+    """
+    gh = OrderedForge(
+        FakeCommandRunner(),
+        resolve_error=GitHubClientError(
+            operation="gh api graphql", returncode=1, stderr="HTTP 502"
+        ),
+    )
+    tid = "PRRT_test_retriage_defer"
+    thread = _thread(tid)
+
+    def _verdict(verdict: str, reason: str) -> AddressFn:
+        # What ``comments._address_thread`` records at verdict time.
+        def _record(state: MonitorState, addressed: ReviewThread) -> None:
+            sync_item_disposition(
+                state,
+                addressed.thread_id,
+                VerdictResult(verdict=verdict, reason=reason),
+                thread=addressed,
+            )
+            if verdict == "defer":
+                state.mark_addressed(f"__defer_reason__:{addressed.thread_id}", reason)
+
+        return _record
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_verdict("false_positive", "the reviewed code already handles this case"),
+        thread=thread,
+    )
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed"]
+
+    gh.resolve_error = None
+    await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="defer",
+        on_address=_verdict("defer", "track the follow-up"),
+        thread=thread,
+        state=state,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed", "resolve"]
+    assert len(gh.replies()) == 1
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and recorded.reply_comment_id == "reply-1"
+    assert recorded.disposition_class == "false_positive"
+
+
 async def test_fixed_resolve_retry_reuses_reply_after_the_chain_was_cleared(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
