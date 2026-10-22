@@ -161,6 +161,33 @@ def test_a_slash_after_an_ambiguous_class_or_function_body_is_unparseable(text: 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "path"),
+    [
+        ("const q = generic<T> / ((record = replacement) as unknown as number) / 2;", "a.ts"),
+        ("x = f<A<B>> / (record = r) / 2", "a.mts"),
+        ("x = f<A<B<C>>> / (record = r) / 2", "a.cts"),
+        ("x = generic<T> / (record = r) / 2", "a.tsx"),
+    ],
+)
+def test_a_slash_after_a_possible_ts_type_argument_close_is_unparseable(
+    text: str, path: str
+) -> None:
+    """A TS ``>`` may close an instantiation expression's type arguments: fail closed."""
+    assert es._es_module_tokens(text, path=path) is None
+
+
+@pytest.mark.unit
+def test_a_slash_after_a_greater_than_in_js_opens_a_regex() -> None:
+    """JS has no type arguments, so a ``>`` is an operator and a regex may follow it."""
+    assert _values("x = a > /`/.test(s)", path="a.js")[4:6] == ["", "."]
+    assert _values("x = a >> /`/.source", path="a.mjs")[4:6] == ["", "."]
+    # A ``>`` inside a string, or a TS ``>=``, is no type-argument close.
+    assert _values("x = '>' / 2") == ["x", "=", ">", "/", "2"]
+    assert _values("x = a >= /`/.test(s)")[4:6] == ["", "."]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("text", ["x = {a: {b: 1} / 2, c: d / 3}", "L: {}\n/`/.test(s)"])
 def test_a_slash_after_a_brace_opened_after_a_colon_is_unparseable(text: str) -> None:
     """``{`` after ``:`` opens an object, a label's block or a case block: fail closed."""

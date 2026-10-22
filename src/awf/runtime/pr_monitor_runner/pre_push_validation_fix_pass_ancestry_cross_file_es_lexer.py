@@ -24,6 +24,10 @@ _JS_TS_CALL_SITE_SUFFIXES = _masking._JS_TS_PRIVATE_FIELD_SUFFIXES
 # Suffixes whose ``<`` at an expression start opens a JSX element. Plain
 # ``.ts`` / ``.mts`` / ``.cts`` use ``<`` for generics and type assertions.
 _JSX_CAPABLE_SUFFIXES = frozenset({".js", ".jsx", ".mjs", ".cjs", ".tsx"})
+_TS_SUFFIXES = frozenset({".ts", ".tsx", ".mts", ".cts"})
+# Tokens that may close a TS type-argument list (``generic<T> / x``,
+# ``f<A<B>> / x``), so a ``/`` after them is ambiguous in TS.
+_TYPE_ARGUMENT_CLOSERS = frozenset({">", ">>", ">>>"})
 
 _IDENT_RE = re.compile(r"(?:[^\W\d]|\$)[\w$]*")
 _NUMBER_RE = re.compile(r"\d[\w$.]*|\.\d[\w$]*")
@@ -102,13 +106,16 @@ class _EsLexError(Exception):
 class _EsLexer:
     """A recursive tokenizer; templates and JSX expressions recurse into code."""
 
-    def __init__(self, text: str, *, jsx: bool, tsx: bool = False) -> None:
+    def __init__(
+        self, text: str, *, jsx: bool, tsx: bool = False, typescript: bool = False
+    ) -> None:
         self.text = text
         self.pos = 0
         self.depth = 0
         self.newline = False
         self.jsx = jsx
         self.tsx = tsx
+        self.typescript = typescript
         self.tokens: list[_EsToken] = []
         # Offset just past each line, so a position's line is one bisect away.
         self.line_ends = list(
@@ -189,6 +196,27 @@ class _EsLexer:
                 len(self.tokens) - 1
             )
         return False
+
+    def slash_opens_regex(self) -> bool:
+        """True when a ``/`` here opens a regex; raises when TS leaves it ambiguous.
+
+        In TS a ``>`` may close a type-argument list, an instantiation
+        expression that ends an operand (``generic<T> / x`` divides), or a
+        comparison or shift, after which a regex starts. The tokens cannot
+        tell the two apart, so a ``/`` there fails closed; reading division
+        as a regex would swallow the code up to the next ``/``.
+        """
+        if not self.expression_may_start():
+            return False
+        prev = self.tokens[-1] if self.tokens else None
+        if (
+            self.typescript
+            and prev is not None
+            and prev.kind == "punct"
+            and prev.value in _TYPE_ARGUMENT_CLOSERS
+        ):
+            raise _EsLexError
+        return True
 
     def is_member_name(self, index: int) -> bool:
         """True when ``tokens[index]`` follows ``.`` / ``?.``: a property, never a keyword."""
@@ -297,7 +325,7 @@ class _EsLexer:
                 self.emit("string", self.read_string(ch))
             elif ch == "`":
                 self.read_template()
-            elif ch == "/" and self.expression_may_start():
+            elif ch == "/" and self.slash_opens_regex():
                 self.read_regex()
                 self.emit("regex", "")
             elif (
@@ -533,7 +561,10 @@ def _es_module_tokens(text: str, *, path: str) -> tuple[_EsToken, ...] | None:
     """
     suffix = f".{path.rsplit('.', 1)[-1].lower()}"
     lexer = _EsLexer(
-        text.removeprefix("﻿"), jsx=suffix in _JSX_CAPABLE_SUFFIXES, tsx=suffix == ".tsx"
+        text.removeprefix("﻿"),
+        jsx=suffix in _JSX_CAPABLE_SUFFIXES,
+        tsx=suffix == ".tsx",
+        typescript=suffix in _TS_SUFFIXES,
     )
     try:
         lexer.lex_code(None)
