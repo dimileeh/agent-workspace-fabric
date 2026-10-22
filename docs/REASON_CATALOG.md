@@ -851,6 +851,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#release_sync_forge_not_supported](#release_sync_forge_not_supported)
 
+### RUNTIME_SETUP_REPLAY_FAILED
+**Problem:** AWF recreated the workspace agent runtime and could not re-run the profile's setup phase, so the workspace failed instead of validating without its tools.
+**Likely Cause:** A monitor resume (restart recovery, remonitor or guide) or an agent-service recovery created a new agent container. Setup state inside the old container, such as tools installed under /tmp, was gone, and replaying the profile's setup and pre_agent phases failed.
+**Operator Fix:** Read the failing setup command and its output in the failure details or workspace logs, fix the profile setup or the dependency it needs, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#runtime_setup_replay_failed](#runtime_setup_replay_failed)
+
 ### SERVICE_STATUS_COLLECTION_FAILED
 **Problem:** AWF service status checks could not be collected.
 **Likely Cause:** Service discovery or database connection failed.
