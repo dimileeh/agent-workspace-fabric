@@ -23,7 +23,7 @@ import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,7 +43,7 @@ from awf.db.enums import FailureReason
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
-from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.runtime.inspection import RuntimeInspector
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     repair_agent_runtime_ownership,
@@ -100,14 +100,10 @@ class SetupReplayOutcome:
     details: dict[str, Any] | None = None
 
 
-class _Inspector(Protocol):
-    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
-
-
 async def capture_agent_container_identity(
     compose_project: str | None,
     *,
-    inspector: _Inspector | None = None,
+    inspector: RuntimeInspector | None = None,
 ) -> AgentIdentityObservation:
     """Read the agent container's id and ``StartedAt`` through compose labels."""
     try:

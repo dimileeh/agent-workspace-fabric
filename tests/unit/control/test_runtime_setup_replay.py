@@ -34,6 +34,13 @@ from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
 )
+from awf.runtime.validation import (
+    SETUP_DEPENDENCY_NETWORK_FAILURE,
+    SETUP_DEPENDENCY_NETWORK_METADATA_KEY,
+    ValidationCommandResult,
+    ValidationResult,
+)
+from awf.runtime.validation_types import ValidationCoverageResult
 from tests.postgres import postgres_test_engine
 from tests.unit.control.runtime_setup_replay_fakes import (
     SETUP_COMMAND,
@@ -419,3 +426,74 @@ class TestReplaySetupIfRecreated:
 
         assert outcome.ok and outcome.replayed
         assert validation.setup_runs() == 1
+
+
+class _FixedResultValidation:
+    """Validation double returning one canned setup result."""
+
+    def __init__(self, result: ValidationResult) -> None:
+        self._result = result
+        self.calls = 0
+
+    async def run_profile_phases(self, **_kwargs: Any) -> ValidationResult:
+        self.calls += 1
+        return self._result
+
+
+class TestReplayFailureDetails:
+    @pytest.mark.unit
+    async def test_output_is_read_from_artifacts_and_dependency_details_are_kept(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        stdout_path = tmp_path / "setup.stdout"
+        stdout_path.write_text(f"fetch with token={_SECRET}\nresolve failed\n", encoding="utf-8")
+        failing = ValidationCommandResult(
+            command="uv sync --extra dev",
+            returncode=1,
+            duration_seconds=0.1,
+            stdout_path=stdout_path,
+            stderr_path=tmp_path / "missing.stderr",
+            phase="setup",
+            reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE,
+            metadata={
+                SETUP_DEPENDENCY_NETWORK_METADATA_KEY: {
+                    "reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE,
+                    "host": "files.pythonhosted.org",
+                    "retry_exhausted": True,
+                }
+            },
+        )
+        validation = _FixedResultValidation(ValidationResult(commands=[failing]))
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        details = outcome.details
+        assert details is not None
+        assert details["stdout_tail"].endswith("resolve failed\n")
+        assert _SECRET not in details["stdout_tail"]
+        assert details["stderr_tail"] == ""
+        assert details["setup_dependency_network"]["host"] == "files.pythonhosted.org"
+
+    @pytest.mark.unit
+    async def test_failure_without_failing_command_still_surfaces(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        coverage_failure = ValidationCoverageResult(
+            provider="pytest-cov",
+            percent=None,
+            minimum_percent=99.0,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_FAILED",
+        )
+        validation = _FixedResultValidation(ValidationResult(coverage=coverage_failure))
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert not outcome.ok
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.message == "runtime setup replay failed: profile setup failed"
+        assert outcome.details == {"trigger": "monitor_resume", "basis": "identity_changed"}
