@@ -92,7 +92,6 @@ async def replay_setup_after_monitor_agent_service_restart(
         )
     else:
         outcome = await _replay.replay_setup_if_recreated(
-            self,
             session_factory=self._deps.session_factory,
             validation=validation,
             workspace_id=workspace_id,

@@ -9,10 +9,11 @@ commands fail with 127 (#787, #1006).
 Recreation is detected from the agent container's identity (container id and
 ``State.StartedAt``) captured before and after the ``up``, never from the
 ``force_recreate`` flag. When identity cannot be read (including a Docker probe
-that exceeds ``IDENTITY_PROBE_TIMEOUT_SECONDS``), the env-health probe of
-the blocked-resume path (#743) decides, with its "on any doubt, re-run setup"
-rule (#746). One ``workspace.runtime_setup_replayed`` event is persisted per
-recreation, and an existing event for the same identity suppresses a second run.
+that exceeds ``IDENTITY_PROBE_TIMEOUT_SECONDS``), setup is replayed: the
+blocked-resume env-health probe (#743) only checks that validate executables
+resolve, which cannot prove that setup-installed packages survived. One
+``workspace.runtime_setup_replayed`` event is persisted per recreation, and an
+existing event for the same identity suppresses a second run.
 
 This module never transitions the workspace. Callers apply their own failure
 convention to an unsuccessful ``SetupReplayOutcome``.
@@ -44,7 +45,6 @@ from awf.control.executor.constants import (
 from awf.control.executor.helpers import _failure_reason_for_phase
 from awf.control.executor.logging_ops import _setup_dependency_network_failure_details
 from awf.control.executor.monitor_handoff_audit import record_setup_dependency_network_events
-from awf.control.executor.state_ops import _blocked_resume_setup_phase_names
 from awf.db.enums import FailureReason
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
@@ -130,7 +130,7 @@ async def capture_agent_container_identity(
         )
     except TimeoutError:
         # A hung Docker daemon must not stall the resume or recovery. Unavailable
-        # identity routes the replay decision to the env-health probe.
+        # identity makes the caller replay setup.
         _log.warning(
             "executor.runtime_identity_unavailable",
             compose_project=compose_project,
@@ -177,7 +177,7 @@ def runtime_recreation_decision(
         return RecreationVerdict(RecreationDecision.recreated, "agent_container_created")
     if before is IDENTITY_UNAVAILABLE:
         # ``after`` may still be the unchanged, initially provisioned container,
-        # which has no replay event to dedupe against: let the env probe decide.
+        # which has no replay event to dedupe against: setup is replayed anyway.
         return RecreationVerdict(RecreationDecision.unknown, "previous_identity_unavailable")
     if before == after:
         return RecreationVerdict(RecreationDecision.unchanged, "identity_unchanged")
@@ -185,7 +185,6 @@ def runtime_recreation_decision(
 
 
 async def replay_setup_if_recreated(
-    self: Any,
     *,
     session_factory: async_sessionmaker[AsyncSession],
     validation: Any,
@@ -219,18 +218,9 @@ async def replay_setup_if_recreated(
             container_id=after.container_id,
         )
         return SetupReplayOutcome(ok=True, replayed=False)
-    if verdict.decision is RecreationDecision.unknown:
-        phase_names = await _blocked_resume_setup_phase_names(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            profile=profile,
-            validation=validation,
-            worktree_path=worktree_path,
-        )
-        if "setup" not in phase_names:
-            return SetupReplayOutcome(ok=True, replayed=False)
+    # An ``unknown`` verdict replays too: the env-health probe checks only that
+    # validate executables resolve (``python`` for ``python -m pytest``), so it
+    # cannot prove that packages setup installed survived a recreation.
 
     context: dict[str, Any] = {"trigger": trigger, "basis": verdict.basis}
     _log.info(

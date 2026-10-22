@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -105,7 +104,6 @@ async def _replay(
     recover_missing_head: Any = None,
 ) -> runtime_setup_replay.SetupReplayOutcome:
     return await replay_setup_if_recreated(
-        SimpleNamespace(),
         session_factory=factory,
         validation=validation,
         workspace_id=workspace_id,
@@ -325,9 +323,11 @@ class TestReplaySetupIfRecreated:
         assert len(await _replay_events(factory, ws_id)) == 2
 
     @pytest.mark.unit
-    async def test_unknown_identity_with_healthy_env_does_not_replay(
+    async def test_unknown_identity_replays_even_when_validate_tools_resolve(
         self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
     ) -> None:
+        # Resolving validate executables (``python`` for ``python -m pytest``) does
+        # not prove setup-installed packages survived a possible recreation.
         ws_id = await _seed_monitoring_pr(factory)
         container = FakeAgentContainer()
         container.tmp.add(TOOL_PATH)
@@ -337,22 +337,8 @@ class TestReplaySetupIfRecreated:
             factory, validation, ws_id, tmp_path, before=_OLD, after=IDENTITY_UNAVAILABLE
         )
 
-        assert outcome.ok and not outcome.replayed
-        assert validation.probe_calls == 1
-        assert validation.phase_calls == []
-
-    @pytest.mark.unit
-    async def test_unknown_identity_with_missing_tool_replays(
-        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
-    ) -> None:
-        ws_id = await _seed_monitoring_pr(factory)
-        validation = FakeToolValidation(FakeAgentContainer())
-
-        outcome = await _replay(
-            factory, validation, ws_id, tmp_path, before=_OLD, after=IDENTITY_UNAVAILABLE
-        )
-
         assert outcome.ok and outcome.replayed
+        assert validation.probe_calls == 0
         assert validation.phase_calls == [("setup", "pre_agent")]
         events = await _replay_events(factory, ws_id)
         assert len(events) == 1
@@ -361,38 +347,26 @@ class TestReplaySetupIfRecreated:
         assert events[0].payload["container_id"] is None
 
     @pytest.mark.unit
-    async def test_unknown_previous_identity_with_healthy_env_does_not_replay(
+    async def test_unknown_previous_identity_replays_once_even_when_validate_tools_resolve(
         self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
     ) -> None:
-        # Only the pre-up read failed: the post-up identity may be the same,
-        # initially provisioned container, which has no replay event to dedupe on.
+        # Only the pre-up read failed: the post-up container may or may not be the
+        # initially provisioned one, so setup replays once and the event dedupes.
         ws_id = await _seed_monitoring_pr(factory)
         container = FakeAgentContainer()
         container.tmp.add(TOOL_PATH)
         validation = FakeToolValidation(container)
 
-        outcome = await _replay(
-            factory, validation, ws_id, tmp_path, before=IDENTITY_UNAVAILABLE, after=_OLD
+        first = await _replay(
+            factory, validation, ws_id, tmp_path, before=IDENTITY_UNAVAILABLE, after=_NEW
         )
-
-        assert outcome.ok and not outcome.replayed
-        assert validation.probe_calls == 1
-        assert validation.phase_calls == []
-        assert await _replay_events(factory, ws_id) == []
-
-    @pytest.mark.unit
-    async def test_unknown_previous_identity_with_missing_tool_replays(
-        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
-    ) -> None:
-        ws_id = await _seed_monitoring_pr(factory)
-        validation = FakeToolValidation(FakeAgentContainer())
-
-        outcome = await _replay(
+        second = await _replay(
             factory, validation, ws_id, tmp_path, before=IDENTITY_UNAVAILABLE, after=_NEW
         )
 
-        assert outcome.ok and outcome.replayed
-        assert validation.probe_calls == 1
+        assert first.ok and first.replayed
+        assert second.ok and not second.replayed
+        assert validation.probe_calls == 0
         assert validation.phase_calls == [("setup", "pre_agent")]
         events = await _replay_events(factory, ws_id)
         assert len(events) == 1

@@ -909,8 +909,9 @@ agent-service recreate.
 
 The decision is based on identity, never on the `force_recreate` flag. If the
 identity cannot be read, or the Docker probe times out
-(`RUNTIME_IDENTITY_PROBE_TIMEOUT`), the blocked-resume env-health probe decides
-and re-runs setup on any doubt. Each recreation gets at most one replay and one
+(`RUNTIME_IDENTITY_PROBE_TIMEOUT`), AWF replays setup: the blocked-resume
+env-health probe only checks that validate executables resolve, so it cannot
+prove that packages setup installed survived. Each recreation gets at most one replay and one
 `workspace.runtime_setup_replayed` event (`RUNTIME_SETUP_REPLAYED`). Like
 first-run setup, the replay repairs a poisoned mirror `core.hooksPath` before
 and after the phases, and recovers a missing `HEAD` after an exec cleanup

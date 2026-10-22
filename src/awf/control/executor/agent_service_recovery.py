@@ -807,7 +807,6 @@ async def _replay_setup_after_agent_service_restart(
         )
     else:
         outcome = await _runtime_setup_replay.replay_setup_if_recreated(
-            self,
             session_factory=self._session_factory,
             validation=self._validation,
             workspace_id=workspace_id,

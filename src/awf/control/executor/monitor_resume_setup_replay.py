@@ -91,7 +91,6 @@ async def replay_setup_on_monitor_resume(
         )
     else:
         outcome = await _replay.replay_setup_if_recreated(
-            self,
             session_factory=self._session_factory,
             validation=self._validation,
             workspace_id=workspace_id,
