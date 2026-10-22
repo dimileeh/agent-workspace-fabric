@@ -16,7 +16,6 @@ from typing import Any
 
 from awf.common.audit import redact_audit_text
 from awf.control.executor import monitor_handoff as _monitor_handoff
-from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.executor.monitor_resume_restart_escalation import (
     dependencies_to_recreate_after_exhaustion,
     escalate_monitor_resume_restart_failure,
@@ -40,9 +39,12 @@ async def _restart_compose_runtime_for_monitor_resume(
     compose_file: Path,
     companion_specs: tuple[WorkspaceCompanionSpec, ...],
     compose_up_timeout_seconds: int,
-    identity_before: _runtime_setup_replay.AgentIdentityObservation,
 ) -> bool:
-    """Restart the compose runtime for monitor resume; ``False`` means stop the resume."""
+    """Restart the compose runtime for monitor resume; ``False`` means stop the resume.
+
+    ``True`` only when the final agent recreate ran and succeeded in this attempt,
+    which is also the only path that resets the restart streak.
+    """
     try:
         _monitor_handoff._precheck_required_companion_env_secrets_for_resume(
             companion_specs=companion_specs,
@@ -68,7 +70,7 @@ async def _restart_compose_runtime_for_monitor_resume(
         unsettled_services = await dependencies_to_recreate_after_exhaustion(
             self, workspace_id=workspace_id
         )
-        # Recreate only the agent; recovering dependencies are left alone (#936).
+        # Recreate the agent and what must change; recovering dependencies are left alone (#936).
         tolerated_error = await restart_runtime_for_monitor_resume(
             self._compose,
             compose_project=compose_project,
@@ -115,10 +117,11 @@ async def _restart_compose_runtime_for_monitor_resume(
         )
         return False
     except ComposeOperationError as exc:
-        agent_recreate_failed = isinstance(exc, AgentRecreateError)
+        # Whatever the old stack looks like, compose never confirmed a fresh agent
+        # with refreshed auth/env and a new identity to replay setup for.
         _log.error(
             "executor.resume_agent_recreate_failed"
-            if agent_recreate_failed
+            if isinstance(exc, AgentRecreateError)
             else "executor.resume_compose_up_failed",
             workspace_id=workspace_id,
             reason_code=exc.reason_code,
@@ -130,44 +133,13 @@ async def _restart_compose_runtime_for_monitor_resume(
             compose_file_path=str(compose_file),
             error=exc,
         )
-        # Any other error was raised before the agent recreate was reached.
-        # The old stack may look healthy, but its stale agent has no
-        # refreshed auth/env and no new identity to replay setup for.
-        if not agent_recreate_failed or not await _monitor_handoff._agent_recreated_despite_error(
-            compose_project, identity_before
-        ):
-            await escalate_monitor_resume_restart_failure(
-                self,
-                workspace_id=workspace_id,
-                monitor_owner_id=monitor_owner_id,
-                compose_project=compose_project,
-                error=exc,
-            )
-            return False
-        runtime_usable = await _monitor_handoff._compose_runtime_usable_after_restart_failure(
-            compose_project,
-            compose_file,
-        )
-        if not runtime_usable:
-            _log.warning(
-                "executor.resume_compose_up_failed_runtime_unusable",
-                workspace_id=workspace_id,
-                compose_project_name=compose_project,
-                reason_code=exc.reason_code,
-            )
-            await escalate_monitor_resume_restart_failure(
-                self,
-                workspace_id=workspace_id,
-                monitor_owner_id=monitor_owner_id,
-                compose_project=compose_project,
-                error=exc,
-            )
-            return False
-        _log.warning(
-            "executor.resume_compose_up_failed_runtime_still_usable",
+        await escalate_monitor_resume_restart_failure(
+            self,
             workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            reason_code=exc.reason_code,
+            monitor_owner_id=monitor_owner_id,
+            compose_project=compose_project,
+            error=exc,
         )
+        return False
     await reset_monitor_resume_restart_streak(self, workspace_id=workspace_id)
     return True

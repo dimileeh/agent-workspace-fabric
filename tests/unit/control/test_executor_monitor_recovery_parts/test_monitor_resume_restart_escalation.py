@@ -26,6 +26,7 @@ from awf.control.executor import (
     monitor_handoff,
     monitor_resume_restart_escalation,
     monitor_resume_runtime,
+    runtime_setup_replay,
 )
 from awf.control.executor.constants import (
     MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS,
@@ -383,6 +384,48 @@ async def test_failed_agent_recreate_counts_and_parks_even_with_a_healthy_old_st
     assert await _status(factory, ws_id) == WorkspaceStatus.blocked.value
     assert len(await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE)) == 1
     await _assert_never_failed(factory, ws_id)
+
+
+@pytest.mark.unit
+async def test_failed_agent_recreate_counts_even_when_the_agent_identity_changed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6vY2fP: only an agent recreate that succeeded passes the resume.
+
+    A failed recreate whose container id changed anyway, on a stack that looks
+    usable, used to reset the streak and resume on an agent compose never
+    confirmed: no attempt may pass without the final recreate succeeding.
+    """
+    ws_id = await _seed(factory, tmp_path)
+    executor = _executor(fake, factory, tmp_path, _AgentRecreateFails())
+    incarnations = iter(range(1000))
+
+    async def _new_identity(
+        _project: str | None, **_kwargs: Any
+    ) -> runtime_setup_replay.AgentContainerIdentity:
+        return runtime_setup_replay.AgentContainerIdentity(f"agent-{next(incarnations)}")
+
+    async def _usable(*_args: Any) -> bool:
+        return True
+
+    replays: list[str] = []
+
+    async def _replay(_self: Any, *, workspace_id: str, **_kwargs: Any) -> bool:
+        replays.append(workspace_id)
+        return True
+
+    monkeypatch.setattr(runtime_setup_replay, "capture_agent_container_identity", _new_identity)
+    monkeypatch.setattr(monitor_handoff, "_compose_runtime_usable_after_restart_failure", _usable)
+    monkeypatch.setattr(monitor_handoff, "replay_setup_on_monitor_resume", _replay)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert replays == []
+    assert await _streak(factory, ws_id) == 1
+    assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE) == []
 
 
 @pytest.mark.unit

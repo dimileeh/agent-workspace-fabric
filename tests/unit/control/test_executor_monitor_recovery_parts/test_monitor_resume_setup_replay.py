@@ -777,7 +777,9 @@ async def test_recovery_operation_reports_replay_failure_after_usable_compose_fa
 
     async def _up_partially_fails(**kwargs: Any) -> None:
         compose.calls.append(kwargs)
-        container.recreate()
+        if kwargs.get("force_recreate"):
+            container.recreate()
+            return
         raise ComposeOperationError(
             operation="up", returncode=1, stdout="", stderr="companion unhealthy"
         )

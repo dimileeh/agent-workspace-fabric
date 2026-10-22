@@ -374,7 +374,6 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 compose_file=compose_file,
                 companion_specs=companion_specs,
                 compose_up_timeout_seconds=compose_up_timeout_seconds,
-                identity_before=identity_before,
             ):
                 return None
             if not await replay_setup_on_monitor_resume(
@@ -582,15 +581,6 @@ async def run_resumed_pr_monitor(
 async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
     """Inspect the persisted compose project; isolated for test monkeypatching."""
     return await RuntimeInspector().inspect(compose_project)
-
-
-async def _agent_recreated_despite_error(
-    compose_project: str, identity_before: _runtime_setup_replay.AgentIdentityObservation
-) -> bool:
-    """Return whether a failed agent force-recreate still replaced the agent container."""
-    identity_after = await _runtime_setup_replay.capture_agent_container_identity(compose_project)
-    verdict = _runtime_setup_replay.runtime_recreation_decision(identity_before, identity_after)
-    return verdict.decision is _runtime_setup_replay.RecreationDecision.recreated
 
 
 async def _compose_runtime_usable_after_restart_failure(
