@@ -13,7 +13,10 @@ from typing import Any
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
-from awf.runtime.feedback_policy import review_thread_body_hashes
+from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
+    review_thread_body_hashes,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -31,7 +34,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
-from awf.runtime.pr_monitor_runner.thread_disposition import attach_issue_url
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    attach_issue_url,
+    read_item_disposition,
+)
 
 
 def _requeue_workflow_scope_publish_dependent_items(
@@ -95,6 +101,23 @@ def _deferred_issue_url(state: MonitorState, thread: ReviewThread) -> str | None
     return None
 
 
+def _recorded_deferred_issue_url(state: MonitorState, thread: ReviewThread) -> str | None:
+    """The tracking issue the thread's saved DEFER disposition cites, if still current.
+
+    The disposition reply is saved durably with its issue link, so a reloaded
+    row that lost the filed-issue marker still proves the issue exists — but
+    only for the conversation that disposition was bound to (#1018).
+    """
+    disposition = read_item_disposition(state, thread.thread_id)
+    if (
+        disposition is None
+        or disposition.disposition_class != "deferred"
+        or not recorded_review_thread_body_matches(disposition.thread_body_hash, thread)
+    ):
+        return None
+    return disposition.issue_url
+
+
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
     """Render the full review-bundle history for the tracking-issue body.
 
@@ -140,7 +163,9 @@ async def _capture_deferred_review_thread(
     thread *and body*: a marker records that the issue was already filed so a
     later same-body resolve-retry (which clears the verdict and re-addresses the
     thread) does not file a duplicate, while new reviewer replies (a changed
-    body) are captured into a fresh issue. Returns ``True`` when the deferred
+    body) are captured into a fresh issue. A reloaded row that lost the marker
+    still carries the saved DEFER disposition bound to the same conversation, so
+    its issue is recovered from there before filing. Returns ``True`` when the deferred
     work is durably captured (caller may resolve the thread); ``False`` on a
     *permanent* capture failure (caller downgrades to ``needs_human`` so the
     merge stays blocked and the operator is notified); or ``None`` on a
@@ -149,8 +174,13 @@ async def _capture_deferred_review_thread(
     permanently downgrading a valid defer.
     """
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    filed_issue_url = _deferred_issue_url(state, thread)
+    filed_issue_url = _deferred_issue_url(state, thread) or _recorded_deferred_issue_url(
+        state, thread
+    )
     if filed_issue_url is not None:
+        # Re-anchor the marker: an issue recovered from the saved disposition
+        # stays durable with the thread's next save, never filed twice.
+        state.mark_addressed(marker, filed_issue_url)
         attach_issue_url(state, thread.thread_id, filed_issue_url)
         return True
     location = thread.path or "the PR diff"

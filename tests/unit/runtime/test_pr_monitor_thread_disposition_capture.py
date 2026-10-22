@@ -342,6 +342,48 @@ async def test_deferred_capture_already_filed_takes_issue_url_from_marker() -> N
     assert disposition.reason == "follow up later"
 
 
+@pytest.mark.parametrize(
+    "same_conversation", [True, False], ids=["same-conversation", "conversation-moved"]
+)
+async def test_deferred_capture_recovers_the_issue_from_the_saved_disposition(
+    same_conversation: bool,
+) -> None:
+    # The DEFER reply was saved with its issue link, but the reloaded row lost the
+    # filed-issue marker. The saved disposition proves the issue exists for the
+    # conversation it answered (PRRT_kwDOSJAM6s6vW9qI); feedback since then is
+    # owed a fresh issue.
+    gh = _DeferForge()
+    runner = _defer_runner(gh)
+    state = MonitorState()
+    thread = _thread("PRRT_test_recover")
+    answered = thread if same_conversation else replace(thread, body_excerpt="earlier wording")
+    filed = "https://github.com/acme/widgets/issues/5"
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=thread.thread_id,
+            disposition_class="deferred",
+            verdict="defer",
+            reason="track the follow-up",
+            issue_url=filed,
+            reply_comment_id="reply-1",
+            thread_body_hash=_review_thread_body_hash(answered),
+        ),
+    )
+
+    captured = await _capture(runner, thread, state)
+
+    assert captured is True
+    marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
+    if same_conversation:
+        assert gh.issues == []
+        # The marker is re-anchored, so the next save keeps the issue durable.
+        assert state.threads_addressed_ids[marker] == filed
+    else:
+        assert len(gh.issues) == 1
+        assert state.threads_addressed_ids[marker] == _ISSUE
+
+
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
