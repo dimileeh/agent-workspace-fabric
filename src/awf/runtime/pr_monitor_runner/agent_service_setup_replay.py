@@ -12,7 +12,7 @@ with ``RUNTIME_SETUP_REPLAY_FAILED``, mirroring
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from awf.control.executor import runtime_setup_replay as _replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
@@ -38,14 +38,27 @@ async def replay_setup_after_monitor_agent_service_restart(
     recovery_details: dict[str, object],
 ) -> None:
     """Replay setup when the restart recreated the agent; raise on a failed replay."""
-    validation = self._deps.validation
-    if validation is None:
-        # No local validation runner: nothing in this monitor runs profile phases.
-        return
     identity_after = await _replay.capture_agent_container_identity(compose_project)
     verdict = _replay.runtime_recreation_decision(identity_before, identity_after)
     if verdict.decision is _replay.RecreationDecision.unchanged:
         return
+    validation = self._deps.validation
+    if validation is None:
+        # The recreated runtime lost its setup state and nothing here can replay
+        # it, so fail closed rather than retry the agent without setup.
+        await _terminate_failed_replay(
+            self,
+            workspace_id=workspace_id,
+            outcome=_replay.SetupReplayOutcome(
+                ok=False,
+                replayed=False,
+                reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+                failure_reason=FailureReason.infrastructure_failure,
+                message="runtime setup replay failed: no validation runner configured",
+                details={"trigger": MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER, "basis": verdict.basis},
+            ),
+            recovery_details=recovery_details,
+        )
     worktree_path = self._worktrees_root / workspace_id
     profile: WorkspaceProfile | None = None
     async with self._deps.session_factory() as session:
@@ -85,6 +98,21 @@ async def replay_setup_after_monitor_agent_service_restart(
         )
     if outcome.ok:
         return
+    await _terminate_failed_replay(
+        self,
+        workspace_id=workspace_id,
+        outcome=outcome,
+        recovery_details=recovery_details,
+    )
+
+
+async def _terminate_failed_replay(
+    self: Any,
+    *,
+    workspace_id: str,
+    outcome: _replay.SetupReplayOutcome,
+    recovery_details: dict[str, object],
+) -> NoReturn:
     message = outcome.message or "runtime setup replay failed"
     details = dict(outcome.details or {})
     await self._terminate_failed(

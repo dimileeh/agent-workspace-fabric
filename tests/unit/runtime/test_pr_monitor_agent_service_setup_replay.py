@@ -196,7 +196,47 @@ async def test_unchanged_agent_identity_does_not_replay_setup(
 
 
 @pytest.mark.unit
-async def test_runner_without_validation_skips_replay(
+async def test_runner_without_validation_fails_closed_when_agent_recreated(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    adapter = _idle_timeout_adapter(retry_stdout=None)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    _patch_compose(mocker, container, recreate=True)
+
+    with pytest.raises(_MonitorAgentServiceRecoveryFailedError) as raised:
+        await _run(runner, workspace_id, tmp_path)
+
+    assert raised.value.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    assert raised.value.details is not None
+    assert raised.value.details["trigger"] == "monitor_agent_service_recovery"
+    assert raised.value.details["restart_attempts"] == 1
+    # The agent is never retried in a runtime whose setup was not replayed.
+    assert len(adapter.calls) == 1
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == FailureReason.infrastructure_failure.value
+        failed = [
+            event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
+        ]
+    assert [event.reason_code for event in failed] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
+
+
+@pytest.mark.unit
+async def test_runner_without_validation_retries_when_agent_unchanged(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
@@ -213,10 +253,11 @@ async def test_runner_without_validation_skips_replay(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    _patch_compose(mocker, container, recreate=True)
+    _patch_compose(mocker, container, recreate=False)
 
-    await _run(runner, workspace_id, tmp_path)
+    result = await _run(runner, workspace_id, tmp_path)
 
+    assert result.stdout == "AWF-VERDICT: FIXED: retried"
     assert len(adapter.calls) == 2
 
 
