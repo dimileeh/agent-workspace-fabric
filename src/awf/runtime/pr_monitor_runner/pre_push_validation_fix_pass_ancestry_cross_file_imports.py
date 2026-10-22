@@ -38,8 +38,14 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebindi
 )
 
 # Suffixes whose bare-name bindings the import reader below understands. A bare
-# callee in any other language keeps the name-only rule.
+# callee in any other language keeps the name-only rule, except JS/TS.
 _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
+# JS/TS call sites have no binding reader, and the name-only rule lets an edit
+# to an unrelated same-named export count as a fix (issue #1047), so they never
+# accept cross-file evidence.
+_JS_TS_CALL_SITE_SUFFIXES = frozenset(
+    {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+)
 
 # A Python identifier's first character: a word character that is not a digit,
 # which is the ASCII ``[A-Za-z_]`` plus every Unicode letter Python admits.
