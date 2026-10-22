@@ -380,6 +380,62 @@ async def test_acknowledgement_posted_after_an_unseen_edit_is_not_accepted(
     assert len(gh.thread_replies) == 2
 
 
+async def test_re_acknowledgement_right_after_a_rejected_reply_binds_the_re_audited_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.edit_during_reply = "conversation-1-edited"
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+
+    # The operator re-acknowledges at once, with no gate run in between: the
+    # flag they answer must already be the conversation the re-audit saw, or
+    # the gate drops the guide as stale behind the same, deduped blocker.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    passed = await _gate(runner, workspace_id, state)
+
+    assert passed.blocker is None
+    assert passed.count_rows is not None
+    assert dict(passed.count_rows)["operator acknowledged"] == 1
+    assert len(gh.thread_replies) == 2
+
+
+async def test_acknowledgement_is_not_accepted_when_the_re_audit_misses_the_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    post_reply = gh.reply_to_thread
+
+    async def _reply_then_vanish(*, thread_id: str, body: str) -> str:
+        reply_id = await post_reply(thread_id=thread_id, body=body)
+
+        async def _without_threads(*, repo: RepoRef, pr_number: int) -> ReviewThreadAudit:
+            del repo, pr_number
+            return ReviewThreadAudit(supported=True, viewer_login="awf-operator")
+
+        monkeypatch.setattr(gh, "fetch_review_thread_audit", _without_threads)
+        return reply_id
+
+    monkeypatch.setattr(gh, "reply_to_thread", _reply_then_vanish)
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    # Nothing proves the reply followed the acknowledged conversation: fail closed.
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert len(gh.thread_replies) == 1
+
+
 async def test_acknowledgement_is_not_accepted_once_the_re_audit_finds_a_reopen(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

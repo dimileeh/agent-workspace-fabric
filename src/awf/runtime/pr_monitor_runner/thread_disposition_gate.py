@@ -146,6 +146,9 @@ async def review_thread_disposition_gate(
     counts: Counter[str] = Counter()
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
+    # The conversation each unverified flag binds to (an acknowledgement's re-audit
+    # can move it on).
+    digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
     for thread in audit.threads:
         legacy_conversation = legacy_conversations.get(thread.thread_id)
         if legacy_conversation is not None and (
@@ -189,6 +192,7 @@ async def review_thread_disposition_gate(
                 workspace_id=workspace_id,
                 repo=repo,
                 pr_number=pr_number,
+                digests=digests,
             )
         if (
             disposition_class is None
@@ -211,7 +215,6 @@ async def review_thread_disposition_gate(
             workspace_id=workspace_id,
             pr_number=pr_number,
         )
-    digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
     if baseline_record is None:
         # A thread this monitor recorded a disposition for (or that carries an
         # AWF marker) was handled after the rollout, so its unmarked resolution
@@ -425,12 +428,15 @@ async def _post_operator_acknowledgement(
     workspace_id: str,
     repo: RepoRef,
     pr_number: int,
+    digests: dict[str, str],
 ) -> DispositionClass | None:
     """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified.
 
     The audit can be stale by the time the reply lands, so it counts only once a
     re-audit shows the thread still resolved and the reply following the
-    acknowledged conversation.
+    acknowledged conversation. A re-audit that refuses it rebinds the thread's
+    ``digests`` entry to the conversation it saw, so the unverified flag — and an
+    immediate re-acknowledgement of it — answers the thread as it now reads.
     """
     thread_id = thread.thread_id
     disposition = read_item_disposition(state, thread_id)
@@ -474,6 +480,8 @@ async def _post_operator_acknowledgement(
         )
         return None
     posted = next((t for t in audit.threads if t.thread_id == thread_id), None)
+    if posted is not None:
+        digests[thread_id] = posted.conversation_digest
     if (
         posted is None
         or not posted.is_resolved  # reopened meanwhile: the acknowledged resolution is gone
