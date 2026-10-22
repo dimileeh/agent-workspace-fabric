@@ -361,6 +361,15 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         # across identity capture, restart and replay keeps a reclaimed lease's
         # resume from replaying concurrently with the old runner's recovery.
         async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+            # The claim may have been reclaimed while waiting for the lock; fence
+            # again so a superseded resume cannot force-recreate the new owner's runtime.
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_compose_locked",
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
             identity_before = await _runtime_setup_replay.capture_agent_container_identity(
                 compose_project
             )

@@ -214,6 +214,53 @@ async def test_resume_restart_and_replay_wait_for_worktree_writer_lock(
 
 
 @pytest.mark.unit
+async def test_resume_rechecks_monitor_claim_after_acquiring_worktree_writer_lock(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A monitor claim reclaimed while resume waits for the writer lock must stop the
+    superseded resume before it force-recreates the new owner's runtime."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-old"
+        await session.commit()
+    executor, compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _old_monitor_recovery() -> None:
+        async with hold_exclusive_worktree_writer_lock(executor._config.worktrees_root / ws_id):
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(_old_monitor_recovery())
+    await held.wait()
+    resume = asyncio.create_task(executor.resume_pr_monitor_handoff(ws_id))
+    await asyncio.sleep(0.3)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-new"
+        await session.commit()
+    release.set()
+    await holder
+
+    assert await resume is None
+    assert compose.calls == []
+    assert validation.setup_runs() == 0
+
+
+@pytest.mark.unit
 async def test_without_replay_recreated_runtime_reproduces_missing_tool(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
