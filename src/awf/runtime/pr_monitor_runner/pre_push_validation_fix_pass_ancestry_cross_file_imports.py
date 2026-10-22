@@ -607,14 +607,21 @@ def _statements_through_line(
     local`` still calls the imported ``validate`` (PRRT_kwDOSJAM6s6vLPzj),
     following only the arm that holds the anchor (see
     ``_compound_through_line``). ``first_pass`` trims a loop holding the anchor the same way, giving what
-    has run by the anchor's *first* pass rather than by any pass.
+    has run by the anchor's *first* pass rather than by any pass. A ``for``
+    whose header holds the anchor is trimmed either way: its iterable runs once,
+    before any pass (PRRT_kwDOSJAM6s6vOa0H).
     """
     kept: list[ast.stmt] = []
     for statement in statements:
         if _statement_start(statement) > line:
             continue
         trimmable = _RUN_ONCE_COMPOUNDS + (_LOOP_COMPOUNDS if first_pass else ())
-        if isinstance(statement, trimmable) and (statement.end_lineno or statement.lineno) >= line:
+        in_for_header = isinstance(statement, (ast.AsyncFor, ast.For)) and _header_holds_line(
+            statement, line
+        )
+        if in_for_header or (
+            isinstance(statement, trimmable) and (statement.end_lineno or statement.lineno) >= line
+        ):
             statement = _compound_through_line(statement, line, first_pass=first_pass)
         kept.append(statement)
     return kept
@@ -645,8 +652,24 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
     follow any of them. A ``case`` below the anchor is dropped; an earlier one
     keeps only its pattern and guard, which a failed match may still have
     bound, and the one holding the anchor has its body cut the same way.
+
+    A header target binds only after its header expression has run, so an
+    anchor in the header does not see it: ``class C: with validate() as
+    validate:`` and ``for validate in validate():`` call the imported
+    ``validate`` (PRRT_kwDOSJAM6s6vOa0H). Such a ``for`` keeps only its
+    iterable, and a ``with`` item keeps its target only while a later item may
+    reach the anchored line; the same goes for an ``except ... as`` name.
     """
+    if isinstance(statement, (ast.AsyncFor, ast.For)) and _header_holds_line(statement, line):
+        return ast.Expr(value=statement.iter)
     trimmed = copy.copy(statement)
+    if isinstance(trimmed, (ast.AsyncWith, ast.With)) and _header_holds_line(trimmed, line):
+        trimmed.items = [
+            item
+            if any(later.context_expr.lineno <= line for later in trimmed.items[index + 1 :])
+            else ast.withitem(context_expr=item.context_expr)
+            for index, item in enumerate(trimmed.items)
+        ]
     for field in ("body", "orelse", "finalbody"):
         if hasattr(statement, field):
             setattr(
@@ -662,6 +685,8 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
         for handler in trimmed.handlers:
             if in_finally or handler.lineno <= line <= (handler.end_lineno or handler.lineno):
                 handler = copy.copy(handler)
+                if _header_holds_line(handler, line):
+                    handler.name = None
                 handler.body = _statements_through_line(handler.body, line, first_pass=first_pass)
                 handlers.append(handler)
         trimmed.handlers = handlers
@@ -683,6 +708,13 @@ def _statement_start(statement: ast.stmt) -> int:
     """The first line of ``statement``, counting its decorators."""
     decorators: list[ast.expr] = getattr(statement, "decorator_list", [])
     return min([statement.lineno, *(decorator.lineno for decorator in decorators)])
+
+
+def _header_holds_line(
+    node: ast.AsyncFor | ast.AsyncWith | ast.ExceptHandler | ast.For | ast.With, line: int
+) -> bool:
+    """Whether ``line`` falls in ``node``'s header, before its body starts."""
+    return node.lineno <= line < _statement_start(node.body[0])
 
 
 def _arm_holds_line(statements: list[ast.stmt], line: int) -> bool:

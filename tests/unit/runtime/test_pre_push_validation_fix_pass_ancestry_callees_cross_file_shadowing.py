@@ -962,6 +962,41 @@ def test_only_the_compound_arm_holding_the_anchor_is_followed() -> None:
 
 
 @pytest.mark.unit
+def test_a_compound_header_target_binds_only_after_its_expression_runs() -> None:
+    """A ``with`` / ``for`` / ``except`` target is bound after its header's expression.
+
+    ``class C: with validate() as validate:`` and ``for validate in
+    validate():`` call the imported ``validate`` before the target binds it, so
+    the target must not be read as a shadow of a call in that header
+    (PRRT_kwDOSJAM6s6vOa0H). A ``for`` iterable runs once, before any pass, so
+    this holds without the first-pass cut. A ``with`` item's target still
+    precedes a later item that reaches the anchored line, and a target still
+    shadows a call in its body.
+    """
+    with_header = "class C:\n    with validate() as validate:\n        result = 1\n"
+    for_header = "class C:\n    for validate in validate():\n        result = 1\n"
+    handler_header = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except validate() as validate:\n"
+        "        result = 1\n"
+    )
+    later_item = "class C:\n    with (\n        validate() as validate,\n        other() as x,\n    ):\n        result = 1\n"
+    earlier_item = "class C:\n    with local() as validate, validate() as x:\n        result = 1\n"
+    body = "class C:\n    with local() as validate:\n        result = validate()\n"
+
+    assert cross_file._locally_rebound_names_at_line(with_header, 2, path=_CALLER) == frozenset()
+    assert cross_file._locally_rebound_names_at_line(for_header, 2, path=_CALLER) == frozenset()
+    assert cross_file._locally_rebound_names_at_line(handler_header, 4, path=_CALLER) == frozenset(
+        {"before"}
+    )
+    assert cross_file._locally_rebound_names_at_line(later_item, 3, path=_CALLER) == frozenset()
+    assert "validate" in cross_file._locally_rebound_names_at_line(earlier_item, 2, path=_CALLER)
+    assert "validate" in cross_file._locally_rebound_names_at_line(body, 3, path=_CALLER)
+
+
+@pytest.mark.unit
 def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
     """A class-body import below the anchor has not run when the call does.
 
