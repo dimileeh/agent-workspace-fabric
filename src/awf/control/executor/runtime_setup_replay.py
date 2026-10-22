@@ -8,7 +8,8 @@ commands fail with 127 (#787, #1006).
 
 Recreation is detected from the agent container's identity (container id and
 ``State.StartedAt``) captured before and after the ``up``, never from the
-``force_recreate`` flag. When identity cannot be read, the env-health probe of
+``force_recreate`` flag. When identity cannot be read (including a Docker probe
+that exceeds ``IDENTITY_PROBE_TIMEOUT_SECONDS``), the env-health probe of
 the blocked-resume path (#743) decides, with its "on any doubt, re-run setup"
 rule (#746). One ``workspace.runtime_setup_replayed`` event is persisted per
 recreation, and an existing event for the same identity suppresses a second run.
@@ -19,6 +20,7 @@ convention to an unsuccessful ``SetupReplayOutcome``.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import sys
 from collections.abc import Mapping
@@ -34,6 +36,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
 from awf.control.executor.constants import (
+    RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE,
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
     RUNTIME_SETUP_REPLAYED_REASON_CODE,
@@ -56,6 +59,8 @@ _log = get_logger(__name__)
 SETUP_REPLAY_PHASE_NAMES: Final[tuple[str, ...]] = ("setup", "pre_agent")
 _AGENT_SERVICE_NAME: Final[str] = "agent"
 _OUTPUT_TAIL_CHARS: Final[int] = 2000
+IDENTITY_PROBE_TIMEOUT_SECONDS: float = 30.0
+"""Upper bound on the ``docker ps``/``docker inspect`` calls behind one identity read."""
 
 
 @dataclass(frozen=True)
@@ -109,7 +114,20 @@ async def capture_agent_container_identity(
 ) -> AgentIdentityObservation:
     """Read the agent container's id and ``StartedAt`` through compose labels."""
     try:
-        snapshot = await (inspector or RuntimeInspector()).inspect(compose_project)
+        snapshot = await asyncio.wait_for(
+            (inspector or RuntimeInspector()).inspect(compose_project),
+            timeout=IDENTITY_PROBE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        # A hung Docker daemon must not stall the resume or recovery. Unavailable
+        # identity routes the replay decision to the env-health probe.
+        _log.warning(
+            "executor.runtime_identity_unavailable",
+            compose_project=compose_project,
+            reason_code=RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE,
+            timeout_seconds=IDENTITY_PROBE_TIMEOUT_SECONDS,
+        )
+        return IDENTITY_UNAVAILABLE
     except (OSError, RuntimeError, ValueError) as exc:
         _log.warning(
             "executor.runtime_identity_unavailable",

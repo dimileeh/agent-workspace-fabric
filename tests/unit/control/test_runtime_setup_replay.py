@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.control.executor import runtime_setup_replay
 from awf.control.executor.constants import (
+    RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE,
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
     RUNTIME_SETUP_REPLAYED_REASON_CODE,
@@ -206,6 +209,31 @@ class TestCaptureAgentContainerIdentity:
         inspector = _Inspector(error=OSError("docker exploded"))
         identity = await capture_agent_container_identity("awf_x", inspector=inspector)
         assert identity is IDENTITY_UNAVAILABLE
+
+    @pytest.mark.unit
+    async def test_hung_docker_inspect_times_out_as_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wedged Docker CLI must not stall the resume/recovery that captures identity."""
+
+        class _HungInspector:
+            async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        monkeypatch.setattr(runtime_setup_replay, "IDENTITY_PROBE_TIMEOUT_SECONDS", 0.01)
+
+        with capture_logs() as logs:
+            identity = await capture_agent_container_identity(
+                "awf_x", inspector=cast(Any, _HungInspector())
+            )
+
+        assert identity is IDENTITY_UNAVAILABLE
+        timeouts = [log for log in logs if log["event"] == "executor.runtime_identity_unavailable"]
+        assert [log["reason_code"] for log in timeouts] == [
+            RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE
+        ]
+        assert timeouts[0]["timeout_seconds"] == 0.01
 
     @pytest.mark.unit
     async def test_default_inspector_is_runtime_inspector(

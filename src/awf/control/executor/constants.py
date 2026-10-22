@@ -74,6 +74,8 @@ RUNTIME_SETUP_REPLAYED_REASON_CODE = "RUNTIME_SETUP_REPLAYED"
 
 RUNTIME_SETUP_REPLAYED_EVENT_TYPE = "workspace.runtime_setup_replayed"
 
+RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE = "RUNTIME_IDENTITY_PROBE_TIMEOUT"
+
 # Adopt-pr handoff skips the coding agent (PR_ADOPTION_SKIP_AGENT), so the
 # profile's ``setup`` phase is the only thing that provisions the workspace. If
 # a ``validate``-phase command's executable is still not on PATH after setup,
