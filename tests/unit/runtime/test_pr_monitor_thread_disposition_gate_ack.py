@@ -63,11 +63,16 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 class _SilentAuditForge(DefaultMergeMethodGitHubClient):
-    """One thread resolved by AWF's identity with no AWF marker in it."""
+    """One thread resolved by AWF's identity with no AWF marker in it.
+
+    Replies AWF posts are served back on later audits (``visible_replies``) until
+    a test deletes them.
+    """
 
     def __init__(self, runner: FakeCommandRunner, *, reply_error: ForgeClientError | None = None):
         super().__init__(runner)
         self.reply_error = reply_error
+        self.visible_replies: list[str] = []
 
     async def fetch_review_thread_audit(
         self, *, repo: RepoRef, pr_number: int
@@ -82,6 +87,7 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
                     is_resolved=True,
                     is_outdated=False,
                     resolved_by="awf-operator",
+                    viewer_comment_bodies=tuple(self.visible_replies),
                 ),
             ),
         )
@@ -89,6 +95,7 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         if self.reply_error is not None:
             raise self.reply_error
+        self.visible_replies.append(body)
         return await super().reply_to_thread(thread_id=thread_id, body=body)
 
 
@@ -220,10 +227,40 @@ async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
     assert "follow-up issue" not in body  # the directive text is never published
     assert "@" not in body
 
-    # The forge may still serve the pre-reply audit: the recorded reply is reused.
+    # Later audits find the posted reply's marker: no second post.
     again = await _gate(runner, workspace_id, state)
     assert again.blocker is None
     assert len(gh.thread_replies) == 1
+
+
+async def test_deleted_acknowledgement_reply_blocks_until_re_acknowledged(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    await _gate(runner, workspace_id, state)
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    gh.visible_replies.clear()  # the acknowledgement reply was deleted from the thread
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    # The saved reply id prevents a duplicate post; it is not evidence on its own.
+    assert blocked.blocker is not None
+    assert blocked.blocker.startswith("REVIEW_THREAD_DISPOSITION_UNVERIFIED:")
+    assert _SILENT in blocked.blocker
+    assert blocked.count_rows is None
+    assert len(gh.thread_replies) == 1
+    assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
+
+    # A fresh guide re-acknowledges the flagged thread and the reply is re-posted.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    restored = await _gate(runner, workspace_id, state)
+    assert restored.blocker is None
+    assert len(gh.thread_replies) == 2
 
 
 async def test_acknowledgement_reply_failure_keeps_the_thread_blocked(

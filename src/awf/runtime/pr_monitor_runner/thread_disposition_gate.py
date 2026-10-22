@@ -228,8 +228,10 @@ async def _post_operator_acknowledgement(
     if disposition is None or disposition.disposition_class != "operator_acknowledged":
         return None
     if disposition.reply_comment_id:
-        # Already posted; the forge read may simply predate it.
-        return "operator_acknowledged"
+        # Posted on an earlier run, yet this audit (fetched after it) finds no
+        # marker: the reply was deleted or edited away. The saved id only prevents
+        # a duplicate post, it is not evidence; a new guide re-acknowledges.
+        return None
     try:
         reply_id = await self._deps.gh.reply_to_thread(
             thread_id=thread_id,
