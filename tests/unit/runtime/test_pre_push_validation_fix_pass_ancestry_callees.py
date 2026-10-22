@@ -447,6 +447,10 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
     assert (
         callees._diff_text_changes_definition_names(export_default, frozenset({"helper"})) is True
     )
+    export_class = (
+        "@@ -1,1 +1,1 @@\n-export abstract class Helper {\n+export abstract class Helper {\n"
+    )
+    assert callees._diff_text_changes_definition_names(export_class, frozenset({"Helper"})) is True
 
 
 @pytest.mark.unit

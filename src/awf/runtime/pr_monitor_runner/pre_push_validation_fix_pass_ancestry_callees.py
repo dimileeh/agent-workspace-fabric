@@ -139,15 +139,16 @@ _DEFINITION_NAME_LINE_RE = re.compile(
     # count as definition heads (body-only repairs stay FIXED-with-evidence), as
     # does a named ``export default function`` (PRRT_kwDOSJAM6s6vLRfG). An
     # optional generator ``*`` keeps ``export function* helper`` a head too
-    # (PRRT_kwDOSJAM6s6vL9Ae).
+    # (PRRT_kwDOSJAM6s6vL9Ae). ``export [default] [abstract] class`` heads a
+    # class the same way (PRRT_kwDOSJAM6s6vMeFV).
     rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
-    rf"|class[ \t]+({_JS_IDENT}){_IDENT_END}"
+    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
     rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
-    rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
+    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 # Single-character probes for the right-anchored receiver-chain scan in

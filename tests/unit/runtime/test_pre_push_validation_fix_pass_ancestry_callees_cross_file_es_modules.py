@@ -204,6 +204,32 @@ async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> No
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("import_line", "module"),
+    [
+        # A directly exported class is its own definition head (PRRT_kwDOSJAM6s6vMeFV).
+        ("import { Recorder } from './telemetry';", "export class Recorder {\n"),
+        ("import Recorder from './telemetry';", "export default class Recorder {\n"),
+        ("import { Recorder } from './telemetry';", "export abstract class Recorder {\n"),
+        ("import Recorder from './telemetry';", "export default abstract class Recorder {\n"),
+    ],
+)
+async def test_a_fix_to_a_directly_exported_class_is_evidence(
+    import_line: str, module: str
+) -> None:
+    body = f"{module}  constructor(value: number) {{\n    this.value = value;\n  }}\n}}\n"
+    probe = _EsProbe(
+        files={_CALLER: _caller(import_line, "new Recorder(value)"), _TELEMETRY: body},
+        diffs={
+            _TELEMETRY: f"--- a/{_TELEMETRY}\n+++ b/{_TELEMETRY}\n@@ -3 +3 @@\n"
+            "-    this.value = value;\n+    this.value = value + 1;\n"
+        },
+    )
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "module",
     [
         "export const record = <T,>(value: T) => {\n  return value;\n};\n",
