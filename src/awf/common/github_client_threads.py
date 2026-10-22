@@ -132,15 +132,18 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
         page = _dig(payload, "data", "node", "comments")
         comment_nodes.extend(_connection_nodes(page))
         cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
+    viewer_bodies: list[str] = []
+    superseded = 0
+    for comment in comment_nodes:  # oldest first
+        if comment.get("viewerDidAuthor") is not True:
+            superseded = len(viewer_bodies)  # newer feedback outdates earlier replies
+        elif isinstance(body := comment.get("body"), str):
+            viewer_bodies.append(body)
     return AuditedReviewThread(
         thread_id=thread_id,
         is_resolved=node.get("isResolved") is True,
         is_outdated=node.get("isOutdated") is True,
         resolved_by=_clean_optional_str(_dig(node, "resolvedBy", "login")),
-        viewer_comment_bodies=tuple(
-            body
-            for comment in comment_nodes
-            if comment.get("viewerDidAuthor") is True
-            and isinstance(body := comment.get("body"), str)
-        ),
+        viewer_comment_bodies=tuple(viewer_bodies),
+        superseded_viewer_comments=superseded,
     )

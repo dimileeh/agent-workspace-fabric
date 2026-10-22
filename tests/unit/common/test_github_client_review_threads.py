@@ -184,6 +184,7 @@ async def test_audit_paginates_thread_comments_for_marker() -> None:
     )
     audit = await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)
     assert audit.threads[0].viewer_comment_bodies == ("<!-- marker on page 2 -->",)
+    assert audit.threads[0].current_viewer_comment_bodies == ("<!-- marker on page 2 -->",)
     assert "threadId=PRRT_test_a" in fake.calls[1].args
     assert "cursor=k1" in fake.calls[1].args
 
@@ -218,3 +219,28 @@ async def test_audit_reports_missing_viewer_login_as_none() -> None:
     audit = await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)
     assert audit.supported is True
     assert audit.viewer_login is None
+
+
+async def test_audit_marks_viewer_comments_older_than_the_newest_feedback() -> None:
+    fake = FakeCommandRunner()
+    thread = _audit_thread(
+        "PRRT_test_a",
+        comments=[
+            {"body": "P1: crash on None", "viewerDidAuthor": False},
+            {"body": "<!-- first disposition -->", "viewerDidAuthor": True},
+            {"body": "still crashes", "viewerDidAuthor": False},
+            {"body": "<!-- second disposition -->", "viewerDidAuthor": True},
+            {"body": "and once more", "viewerDidAuthor": None},
+        ],
+    )
+    fake.queue_result(stdout=_audit_page([thread], cursor=None))
+
+    audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
+
+    # Comments arrive oldest first; feedback after a reply supersedes it.
+    assert audited[0].viewer_comment_bodies == (
+        "<!-- first disposition -->",
+        "<!-- second disposition -->",
+    )
+    assert audited[0].superseded_viewer_comments == 2
+    assert audited[0].current_viewer_comment_bodies == ()

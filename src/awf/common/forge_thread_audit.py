@@ -15,6 +15,8 @@ class AuditedReviewThread:
 
     ``viewer_comment_bodies`` holds the raw markdown of comments the token's own
     identity authored (only those can carry AWF's disposition marker), oldest first.
+    The first ``superseded_viewer_comments`` of them predate the thread's newest
+    comment by anyone else, so they answered earlier feedback, not the current one.
     """
 
     thread_id: str
@@ -22,6 +24,12 @@ class AuditedReviewThread:
     is_outdated: bool
     resolved_by: str | None
     viewer_comment_bodies: tuple[str, ...] = ()
+    superseded_viewer_comments: int = 0
+
+    @property
+    def current_viewer_comment_bodies(self) -> tuple[str, ...]:
+        """The viewer bodies posted after the thread's newest feedback, oldest first."""
+        return self.viewer_comment_bodies[self.superseded_viewer_comments :]
 
 
 @dataclass(frozen=True)

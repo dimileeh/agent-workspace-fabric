@@ -141,6 +141,7 @@ def _thread(
     resolved_by: str | None = _VIEWER,
     bodies: tuple[str, ...] = (),
     resolved: bool = True,
+    superseded: int = 0,
 ) -> AuditedReviewThread:
     return AuditedReviewThread(
         thread_id=tid,
@@ -148,6 +149,7 @@ def _thread(
         is_outdated=False,
         resolved_by=resolved_by,
         viewer_comment_bodies=bodies,
+        superseded_viewer_comments=superseded,
     )
 
 
@@ -412,6 +414,39 @@ async def test_gate_identity_edges(
         assert result.blocker is None
         assert result.count_rows is not None
         assert dict(result.count_rows)["resolved by others"] == 1
+
+
+async def test_gate_rejects_a_marker_older_than_the_threads_newest_feedback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A dispositioned thread is reopened, gets new reviewer feedback and is then
+    # resolved silently by AWF's (shared) identity: its marker answered the earlier
+    # feedback, not this resolution. A re-triage reply after the feedback counts.
+    retriaged = "PRRT_test_retriaged"
+    audit = ReviewThreadAudit(
+        supported=True,
+        viewer_login=_VIEWER,
+        threads=(
+            _thread(_SILENT, bodies=(_marker("fixed", _SILENT),), superseded=1),
+            _thread(
+                retriaged,
+                bodies=(_marker("false_positive", retriaged), _marker("fixed", retriaged)),
+                superseded=1,
+            ),
+        ),
+    )
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    result = await _gate(runner, workspace_id, settled_baseline_state())
+
+    assert result.blocker is not None
+    assert result.blocker.startswith("REVIEW_THREAD_DISPOSITION_UNVERIFIED:")
+    assert _SILENT in result.blocker and retriaged not in result.blocker
+    events = await _audit_events(factory, workspace_id)
+    assert [e["evidence"]["thread_ids"] for e in events] == [[_SILENT]]
+    assert events[0]["evidence"]["disposition_counts"] == {"fixed": 1}
 
 
 async def test_gate_missing_viewer_login_fails_closed(

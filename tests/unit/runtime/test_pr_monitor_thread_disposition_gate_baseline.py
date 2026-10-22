@@ -73,13 +73,16 @@ def _marker(cls: str, tid: str) -> str:
     return f"<!-- AWF:thread-disposition:v1 class={cls} thread={tid} -->"
 
 
-def _thread(tid: str, *, bodies: tuple[str, ...] = (), resolved_by: str = _VIEWER) -> Any:
+def _thread(
+    tid: str, *, bodies: tuple[str, ...] = (), resolved_by: str = _VIEWER, superseded: int = 0
+) -> Any:
     return AuditedReviewThread(
         thread_id=tid,
         is_resolved=True,
         is_outdated=False,
         resolved_by=resolved_by,
         viewer_comment_bodies=bodies,
+        superseded_viewer_comments=superseded,
     )
 
 
@@ -346,3 +349,30 @@ async def test_first_gate_run_never_grandfathers_a_thread_this_monitor_dispositi
     ) == [_LEGACY]
     events = await _baseline_events(factory, workspace_id)
     assert [event["evidence"]["thread_ids"] for event in events] == [[_LEGACY]]
+
+
+async def test_a_thread_whose_marker_newer_feedback_outdated_is_never_legacy(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # An AWF marker dates the thread's handling after the rollout, so feedback
+    # posted after it and a silent resolution block — on the very first audit
+    # and even for a thread the baseline recorded before AWF dispositioned it.
+    stale = (_marker("fixed", _LATER),)
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LATER, bodies=stale, superseded=1),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    first = MonitorState()
+
+    result = await _gate(runner, workspace_id, first)
+
+    assert result.blocker is not None and _LATER in result.blocker
+    assert first.threads_addressed_ids[_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY] == "[]"
+    assert await _baseline_events(factory, workspace_id) == []
+
+    gh.threads = (_thread(_LEGACY, bodies=(_marker("fixed", _LEGACY),), superseded=1),)
+    baselined = MonitorState()
+    baselined.mark_addressed(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, json.dumps([_LEGACY]))
+
+    result = await _gate(runner, workspace_id, baselined)
+
+    assert result.blocker is not None and _LEGACY in result.blocker

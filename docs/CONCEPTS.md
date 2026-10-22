@@ -446,8 +446,11 @@ monitors), AWF re-enumerates every review thread with exhaustive pagination,
 failing closed on a truncated page. Every thread resolved by AWF's own forge
 identity must carry the marker in a comment that identity authored — the
 marker, not the login, is the evidence, because that identity can be the
-operator's own account. Threads resolved by any other login are that person's
-or bot's disposition and never block. A failing thread is
+operator's own account. The marker must also follow the thread's newest comment
+by anyone else: an older one answered feedback that has since moved on, so a
+reopened thread resolved silently after new feedback blocks. Threads resolved
+by any other login are that person's or bot's disposition and never block. A
+failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
 ids (never a workspace failure); a failed enumeration is
 `REVIEW_THREAD_AUDIT_UNAVAILABLE`, whose public text stays stable across an
@@ -465,7 +468,8 @@ that first run still blocks. A PR AWF opens itself (a feature PR, or a release
 PR it creates) has no pre-rollout history, so its handoff settles the baseline
 empty: no first-run exemption, and every unmarked resolution blocks. On a
 reused or adopted PR, a thread the monitor already recorded a disposition for
-was handled after the rollout, so the first run never baselines it either.
+(or that carries an AWF marker at all) was handled after the rollout, so no
+baseline ever exempts it.
 
 An operator acknowledges flagged threads with the ordinary guide path and an
 explicit token per thread (`awf workspace guide <id> --directive 'ACK-THREAD

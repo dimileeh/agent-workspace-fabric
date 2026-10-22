@@ -5,7 +5,8 @@ to mean "zero unresolved threads" — a thread AWF resolved silently looked the
 same as one it handled. Before the release cert is posted, and before a feature
 monitor merges, this gate re-enumerates EVERY review thread (exhaustive
 pagination, failing closed) and checks each thread resolved by AWF's own forge
-identity for an AWF disposition marker in a comment that identity authored.
+identity for an AWF disposition marker in a comment that identity authored
+after the thread's newest feedback (an older marker answered earlier feedback).
 
 * The marker, not the login, is the evidence: AWF's identity can be the human
   operator's own account, so a resolution by that login proves nothing alone.
@@ -135,20 +136,29 @@ async def review_thread_disposition_gate(
     legacy_baseline = _decode_baseline(baseline_record)
     counts: Counter[str] = Counter()
     unverified: list[str] = []
+    marked: set[str] = set()  # carry an AWF marker: handled after the rollout
     for thread in audit.threads:
         if not thread.is_resolved:
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
             counts[RESOLVED_BY_OTHERS] += 1  # that person's or bot's own disposition
             continue
+        if disposition_marker_class(thread.viewer_comment_bodies, thread_id=thread.thread_id):
+            marked.add(thread.thread_id)
+        # Only a marker after the newest feedback dispositions the current
+        # conversation; an older one answered feedback that has since moved on.
         disposition_class: DispositionClass | None = disposition_marker_class(
-            thread.viewer_comment_bodies, thread_id=thread.thread_id
+            thread.current_viewer_comment_bodies, thread_id=thread.thread_id
         )
         if disposition_class is None:
             disposition_class = await _post_operator_acknowledgement(
                 self, state=state, thread_id=thread.thread_id, workspace_id=workspace_id
             )
-        if disposition_class is None and thread.thread_id in legacy_baseline:
+        if (
+            disposition_class is None
+            and thread.thread_id in legacy_baseline
+            and thread.thread_id not in marked
+        ):
             counts[LEGACY_BASELINE] += 1  # resolved before AWF replied before resolving
             continue
         if disposition_class is None:
@@ -157,12 +167,13 @@ async def review_thread_disposition_gate(
         counts[disposition_class] += 1
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
     if baseline_record is None:
-        # A thread this monitor recorded a disposition for was handled after
-        # the rollout, so its unmarked resolution is no legacy: it still blocks.
+        # A thread this monitor recorded a disposition for (or that carries an
+        # AWF marker) was handled after the rollout, so its unmarked resolution
+        # is no legacy: it still blocks.
         legacy = [
             tid
             for tid in unverified
-            if _item_disposition_key(tid) not in state.threads_addressed_ids
+            if tid not in marked and _item_disposition_key(tid) not in state.threads_addressed_ids
         ]
         await _record_legacy_baseline(
             self,
