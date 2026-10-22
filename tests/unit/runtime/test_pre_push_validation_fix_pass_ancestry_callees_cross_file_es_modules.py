@@ -838,6 +838,12 @@ async def test_a_corrected_caller_that_still_calls_the_callee_is_evidence(
         # TS writes an optional call's type arguments after ``?.``.
         ("import { record } from './telemetry';", "record?.<Result>(value)", None),
         ("import * as tel from './telemetry';", "tel.record?.<Result>(value)", None),
+        # A postfix non-null assertion sits between the callee and its call.
+        ("import { record } from './telemetry';", "record!(value)", None),
+        ("import * as tel from './telemetry';", "tel.record!(value)", None),
+        ("import { record } from './telemetry';", "record!<Result>(value)", None),
+        ("import * as tel from './telemetry';", "tel.record!?.(value)", None),
+        ("import { record } from './telemetry';", "record(value)", "record!(value + 1)"),
         ("import { record } from './telemetry';", "record(value)", "record?.<Result>(value + 1)"),
         ("import { record } from './telemetry';", "record(value)", "record<Result>(value + 1)"),
         (
@@ -888,6 +894,8 @@ async def test_angle_brackets_in_javascript_compare_rather_than_call() -> None:
         ("record < a && b > (value)", False),
         # An unclosed ``<`` compares; the call beside it still counts.
         ("record < limit || record<Result>(value)", True),
+        # ``!`` after a line break starts a new statement rather than asserting.
+        ("record\n    !(value)", False),
     ],
 )
 async def test_typescript_comparisons_are_not_type_arguments(call: str, accepted: bool) -> None:

@@ -898,9 +898,14 @@ def _es_call_open(tokens: tuple[_EsToken, ...], callee: int, *, typescript: bool
     """Index of the ``(`` after the name at ``callee`` (or its ``?.(``), else None.
 
     With ``typescript``, type arguments may sit before the ``(``, after ``?.``
-    for an optional call (``record?.<Result>(``).
+    for an optional call (``record?.<Result>(``), and postfix non-null
+    assertions (``record!(``) on the callee's line (PRRT_kwDOSJAM6s6vU-6w).
     """
     if typescript:
+        while (
+            _is(after := _token_at(tokens, callee + 1), "punct", "!") and not after.newline_before
+        ):
+            callee += 1
         start = callee + 1
         if _is(_token_at(tokens, start), "punct", "?.") and _is(
             _token_at(tokens, start + 1), "punct", "<"

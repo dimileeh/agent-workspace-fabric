@@ -927,6 +927,22 @@ def test_direct_member_calls_read_typescript_type_arguments() -> None:
 
 
 @pytest.mark.unit
+def test_typescript_calls_read_a_postfix_non_null_assertion() -> None:
+    """``record!(1)`` and ``tel.record!(2)`` are TS calls (PRRT_kwDOSJAM6s6vU-6w)."""
+    tokens = _tokens("a = record!(1) + tel.record!(2)\nb = go\n!(3)")
+
+    assert es._es_calls(tokens, None, "record", 1, typescript=True)
+    assert es._es_calls(tokens, "tel", "record", 1, typescript=True)
+    assert es._es_line_calls(tokens, 1, typescript=True) == frozenset(
+        {(None, "record"), ("tel", "record")}
+    )
+    assert es._es_direct_member_calls(tokens, 1, typescript=True) == frozenset({("tel", "record")})
+    # Plain JS has no non-null assertion, and a ``!`` after a line break negates.
+    assert not es._es_calls(tokens, None, "record", 1)
+    assert not es._es_calls(tokens, None, "go", 2, typescript=True)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("text", "qualifier", "name", "calls"),
     [
