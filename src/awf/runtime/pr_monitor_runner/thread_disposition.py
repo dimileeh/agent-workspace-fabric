@@ -183,7 +183,9 @@ def sync_item_disposition(
     chain, cites the head the hosted agent pushed. A FIXED whose commit is not
     known yet stays pending until :func:`attach_item_commits` runs before push.
     Any other verdict clears the record so a stale disposition can never be
-    published for a re-triaged item.
+    published for a re-triaged item. An unchanged disposition whose reply already
+    landed (a failed resolve re-queued the item) keeps that posted record, so the
+    retried resolve reuses the reply instead of posting a second one.
     """
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
@@ -199,6 +201,14 @@ def sync_item_disposition(
             commits, commit_base = (record.head_sha,), record.item_start_head
         elif state.hosted_terminal_head_advanced and state.last_push_sha:
             commits = (state.last_push_sha,)
+    posted = read_item_disposition(state, item_id)
+    if (
+        posted is not None
+        and posted.reply_comment_id
+        and (posted.disposition_class, posted.verdict, posted.commits)
+        == (disposition_class, result.verdict, commits)
+    ):
+        return
     record_item_disposition(
         state,
         ThreadDisposition(

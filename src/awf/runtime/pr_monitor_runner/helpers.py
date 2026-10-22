@@ -346,6 +346,7 @@ def _clear_addressed_state_by_id(
     item_id: str,
     *,
     restore_operator_decision: bool = True,
+    keep_posted_reply: bool = False,
 ) -> None:
     """Clear verdict, body, and reason markers for ``item_id``.
 
@@ -358,7 +359,15 @@ def _clear_addressed_state_by_id(
     where the clear means "superseded by fresh reviewer feedback" rather than
     "rolled back": that feedback is not what the operator ruled on. A ruling the
     operator has since re-issued likewise wins over the parked copy.
+
+    Pass ``keep_posted_reply=True`` when the rollback follows a failed resolve:
+    the disposition reply already landed in the thread (#1018), so its record is
+    kept and an unchanged re-addressed disposition reuses that reply instead of
+    posting a second one.
     """
+    from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
+
+    posted = read_item_disposition(state, item_id) if keep_posted_reply else None
     body_snapshot = state.threads_addressed_ids.get(_review_thread_body_state_key(item_id))
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
@@ -367,7 +376,8 @@ def _clear_addressed_state_by_id(
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_agent_failed_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
-    state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
+    if posted is None or posted.reply_comment_id is None:
+        state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None
     )

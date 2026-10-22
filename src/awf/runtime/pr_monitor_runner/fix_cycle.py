@@ -1166,9 +1166,10 @@ async def _run_fix_cycle(
                 # the permanent path below special-cases tasks to needs_human).
                 # #484: an already-OUTDATED-only thread is the exception — preserve
                 # its verdict so the next poll's outdated-resolution step retries it,
-                # since it can never re-route through AddressComments.
+                # since it can never re-route through AddressComments. #1018: the
+                # posted disposition reply is kept so the re-address never re-posts it.
                 if tid not in outdated_only_thread_ids:
-                    _clear_addressed_state_by_id(state, tid)
+                    _clear_addressed_state_by_id(state, tid, keep_posted_reply=True)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -1292,9 +1293,9 @@ async def _run_fix_cycle(
             # strands it (it can never re-route through AddressComments), so preserve
             # its verdict and let the next poll's outdated-resolution step retry the
             # resolve or escalate it to ``needs_human`` via that path's own permanent
-            # arm — never silently merging over it.
+            # arm — never silently merging over it. The posted reply is kept (#1018).
             if tid not in outdated_only_thread_ids:
-                _clear_addressed_state_by_id(state, tid)
+                _clear_addressed_state_by_id(state, tid, keep_posted_reply=True)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

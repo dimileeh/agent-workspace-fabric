@@ -34,12 +34,14 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 from awf.runtime.pr_monitor_runner import fix_cycle as fix_cycle_module
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
     attach_issue_url,
     read_item_disposition,
     record_item_disposition,
+    sync_item_disposition,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -106,6 +108,7 @@ async def _run_cycle(
     on_address: AddressFn | None,
     thread: ReviewThread,
     pushed: bool = True,
+    state: MonitorState | None = None,
 ) -> tuple[str, MonitorState, Any]:
     workspace_id = await seed_monitoring_workspace(factory)
     worktrees_root = tmp_path / "worktrees"
@@ -118,7 +121,7 @@ async def _run_cycle(
         worktrees_root=worktrees_root,
         gh=gh,
     )
-    state = MonitorState()
+    state = state if state is not None else MonitorState()
 
     async def _start_head(**_kwargs: object) -> tuple[str, None]:
         return (_START, None)
@@ -302,6 +305,68 @@ async def test_fix_cycle_reply_failure_parks_without_resolve_and_keeps_pushed_co
     assert parked[0]["evidence"]["thread_ids"] == [tid]
     assert parked[0]["evidence"]["forge_reason_code"] == "GITHUB_API_ERROR"
     assert parked[0]["evidence"]["disposition"]["class"] == "fixed"
+
+
+@pytest.mark.parametrize(
+    "resolve_stderr",
+    ["HTTP 502", "HTTP 404: Not Found"],
+    ids=["transient", "deterministic"],
+)
+async def test_active_thread_resolve_retry_reuses_recorded_reply_without_reposting(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolve_stderr: str,
+) -> None:
+    gh = OrderedForge(
+        FakeCommandRunner(),
+        resolve_error=GitHubClientError(
+            operation="gh api graphql", returncode=1, stderr=resolve_stderr
+        ),
+    )
+    tid = "PRRT_test_active_retry"
+    thread = _thread(tid)
+
+    def _verdict(reason: str) -> AddressFn:
+        # What ``comments._address_thread`` records at verdict time.
+        def _record(state: MonitorState, addressed: ReviewThread) -> None:
+            sync_item_disposition(
+                state, addressed.thread_id, VerdictResult(verdict="false_positive", reason=reason)
+            )
+
+        return _record
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_verdict("the reviewed code already handles this case"),
+        thread=thread,
+    )
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed"]
+    # The active thread still re-enters AddressComments, but its posted reply is kept.
+    assert tid not in state.threads_addressed_ids
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and recorded.reply_comment_id == "reply-1"
+
+    gh.resolve_error = None
+    await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=_verdict("re-run wording of the same false positive"),
+        thread=thread,
+        state=state,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed", "resolve"]
+    assert len(gh.replies()) == 1
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and recorded.reply_comment_id == "reply-1"
 
 
 async def test_fix_cycle_false_positive_without_reason_parks(

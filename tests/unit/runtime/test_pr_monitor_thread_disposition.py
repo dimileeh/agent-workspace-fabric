@@ -513,3 +513,46 @@ def test_clear_addressed_state_by_id_drops_item_disposition() -> None:
     _clear_addressed_state_by_id(state, "PRRT_test_a")
     assert _item_disposition_key("PRRT_test_a") not in state.threads_addressed_ids
     assert "PRRT_test_a" not in state.threads_addressed_ids
+
+
+def test_clear_addressed_state_by_id_keeps_posted_reply_only_when_asked() -> None:
+    state = MonitorState()
+    posted = replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
+    record_item_disposition(state, posted)
+    record_item_disposition(state, replace(_fp(), item_id="PRRT_test_b"))
+    _clear_addressed_state_by_id(state, "PRRT_test_a", keep_posted_reply=True)
+    _clear_addressed_state_by_id(state, "PRRT_test_b", keep_posted_reply=True)
+    assert read_item_disposition(state, "PRRT_test_a") == posted
+    # Nothing was posted for b, so there is no reply to keep.
+    assert _item_disposition_key("PRRT_test_b") not in state.threads_addressed_ids
+    _clear_addressed_state_by_id(state, "PRRT_test_a")
+    assert _item_disposition_key("PRRT_test_a") not in state.threads_addressed_ids
+
+
+def test_sync_item_disposition_keeps_posted_reply_only_for_unchanged_disposition() -> None:
+    state = MonitorState()
+    posted = replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
+    record_item_disposition(state, posted)
+    sync_item_disposition(
+        state, "PRRT_test_a", VerdictResult(verdict="false_positive", reason="re-run wording")
+    )
+    assert read_item_disposition(state, "PRRT_test_a") == posted
+
+    # A different class, or a FIXED citing a new commit, is a new disposition to post.
+    sync_item_disposition(state, "PRRT_test_a", VerdictResult(verdict="defer", reason="later"))
+    deferred = read_item_disposition(state, "PRRT_test_a")
+    assert deferred is not None
+    assert deferred.disposition_class == "deferred" and deferred.reply_comment_id is None
+    _seed_chain(
+        state,
+        ItemCommitProvenance(item_id="PRRT_test_f", item_start_head="0" * 40, head_sha="2" * 40),
+    )
+    record_item_disposition(
+        state, replace(_fixed(("1" * 40,)), item_id="PRRT_test_f", reply_comment_id="reply-2")
+    )
+    sync_item_disposition(
+        state, "PRRT_test_f", VerdictResult(verdict="fix_committed", reason="guarded")
+    )
+    fixed = read_item_disposition(state, "PRRT_test_f")
+    assert fixed is not None
+    assert fixed.commits == ("2" * 40,) and fixed.reply_comment_id is None
