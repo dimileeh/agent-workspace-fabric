@@ -785,6 +785,83 @@ async def test_a_corrected_caller_that_still_calls_the_callee_is_evidence(
     assert await _accepted(probe)
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("import_line", "call", "call_after"),
+    [
+        ("import { record } from './telemetry';", "record<Result>(value)", None),
+        ("import * as tel from './telemetry';", "tel.record<Result>(value)", None),
+        ("import * as tel from './telemetry';", "tel?.record<Result>(value)", None),
+        ("import { record } from './telemetry';", "record<Map<string, Result>>(value)", None),
+        ("import { record } from './telemetry';", "record(value)", "record<Result>(value + 1)"),
+        (
+            "import * as tel from './telemetry';",
+            "tel.record<Result>(value)",
+            "tel.record<Result, Extra>(value + 1)",
+        ),
+    ],
+)
+async def test_a_typescript_call_with_type_arguments_is_evidence(
+    import_line: str, call: str, call_after: str | None
+) -> None:
+    """``record<Result>(value)`` calls ``record`` in TS (PRRT_kwDOSJAM6s6vRrub)."""
+    right = None if call_after is None else {_CALLER: _caller(import_line, call_after)}
+
+    assert await _accepted(_telemetry_probe(_caller(import_line, call), right=right))
+
+
+@pytest.mark.unit
+async def test_angle_brackets_in_javascript_compare_rather_than_call() -> None:
+    """In plain JS ``record < limit > (value)`` is a comparison, so it fails closed."""
+    caller_path, telemetry_path = "src/app/ingest.js", "src/app/telemetry.js"
+    probe = _EsProbe(
+        files={
+            caller_path: _caller(
+                "import { record } from './telemetry.js';", "record<limit>(value)"
+            ).replace("value: number", "value"),
+            telemetry_path: _RECORD_DEFINITION.replace("value: number", "value"),
+        },
+        diffs={telemetry_path: _body_edit(telemetry_path)},
+    )
+
+    assert not await _accepted(probe, item_path=caller_path)
+    assert await _accepted(
+        _EsProbe(
+            files={**probe.files, caller_path: probe.files[caller_path].replace("<limit>", "")},
+            diffs=probe.diffs,
+        ),
+        item_path=caller_path,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("call", "accepted"),
+    [
+        # ``a && b`` is no type, so TS reads a comparison and nothing is called.
+        ("record < a && b > (value)", False),
+        # An unclosed ``<`` compares; the call beside it still counts.
+        ("record < limit || record<Result>(value)", True),
+    ],
+)
+async def test_typescript_comparisons_are_not_type_arguments(call: str, accepted: bool) -> None:
+    caller = _caller("import { record } from './telemetry';", call)
+
+    assert await _accepted(_telemetry_probe(caller)) is accepted
+
+
+@pytest.mark.unit
+async def test_a_generic_method_head_on_the_anchored_line_is_not_a_call() -> None:
+    """``record<T>(value: T) {`` defines a generic method; it calls nothing."""
+    caller = (
+        "import { record } from './telemetry';\n"
+        "export class Ingest {\n  record<T>(value: T) {\n    return value;\n  }\n}\n"
+    )
+    anchor = 3
+
+    assert not await _accepted(_telemetry_probe(caller), item_line=anchor)
+
+
 _IMPORT_RECORD = "import { record } from './telemetry';"
 _AUDIT_HELPER = "export function audit(value: number) {\n  return record(value);\n}\n"
 

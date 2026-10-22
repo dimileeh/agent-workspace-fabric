@@ -55,6 +55,15 @@ _CALLEE_REF_RE = re.compile(
     rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
     rf"\s*(?:\?\.)?\s*\("
 )
+# TypeScript lets type arguments sit between a callee and its argument list
+# (``record<Result>(value)``, ``tel.record<Map<K, V>>(value)``), one nesting
+# level deep. Plain JS and Python read ``a < b > (c)`` as a comparison, so only
+# TypeScript paths use this form (PRRT_kwDOSJAM6s6vRrub).
+_TS_CALLEE_REF_RE = re.compile(
+    rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
+    rf"(?:\s*<[^<>;()\n]*(?:<[^<>;()\n]*>[^<>;()\n]*)*>)?\s*(?:\?\.)?\s*\("
+)
+_TS_SUFFIXES = (".ts", ".tsx", ".mts", ".cts")
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(
     {
         "if",
@@ -860,6 +869,11 @@ def _bare_callee_follows_attribute_dot(scan_text: str, match_start: int) -> bool
     return _BARE_CALLEE_AFTER_ATTR_DOT_RE.search(scan_text[:match_start]) is not None
 
 
+def _path_is_typescript(path: str | None) -> bool:
+    """True when ``path`` is a TypeScript source, where calls may carry type arguments."""
+    return path is not None and path.lower().endswith(_TS_SUFFIXES)
+
+
 def _callee_ref_matches_from_anchor_line(
     anchor_line: str, *, path: str | None = None
 ) -> tuple[str, list[re.Match[str]]]:
@@ -883,8 +897,9 @@ def _callee_ref_matches_from_anchor_line(
         open_paren = anchor_line.find("(")
         scan_from = open_paren if 0 <= open_paren < colon else colon + 1
     scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line, path=path)
+    callee_ref_re = _TS_CALLEE_REF_RE if _path_is_typescript(path) else _CALLEE_REF_RE
     matches: list[re.Match[str]] = []
-    for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
+    for match in callee_ref_re.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
             continue

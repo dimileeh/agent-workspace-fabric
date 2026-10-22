@@ -1182,13 +1182,15 @@ def _es_signature_head(tokens: tuple[_EsToken, ...], index: int) -> bool:
 
     ``name( ... )`` followed by ``{``, ``:`` or ``=>`` is a method, accessor,
     object-literal method or interface signature (``record(v: number) {``,
-    ``get size() {``, ``flush(): void;``). A call followed by a ternary ``:``
-    also reads as one, which only fails it closed.
+    ``get size() {``, ``flush(): void;``), type parameters included
+    (``record<T>(v: T) {``). A call followed by a ternary ``:`` also reads as
+    one, which only fails it closed.
     """
-    opener = _token_at(tokens, index + 1)
-    if not _is(opener, "punct", "("):
+    open_index = _es_after_type_parameters(tokens, index + 1)
+    opener = None if open_index is None else _token_at(tokens, open_index)
+    if open_index is None or not _is(opener, "punct", "("):
         return False
-    close = index + 2
+    close = open_index + 1
     while not (tokens[close].depth == opener.depth and _is(tokens[close], "punct", ")")):
         close += 1
     after = _token_at(tokens, close + 1)
@@ -1649,12 +1651,38 @@ def _es_direct_member_calls(tokens: tuple[_EsToken, ...], line: int) -> frozense
     )
 
 
-def _es_calls(tokens: tuple[_EsToken, ...], qualifier: str | None, name: str, line: int) -> bool:
+def _es_after_type_arguments(tokens: tuple[_EsToken, ...], index: int) -> int:
+    """The index after the TS type arguments at ``index``, ``index`` itself when none.
+
+    Only type punctuators may sit at the arguments' own depth, so a comparison
+    such as ``a < b && c > (d)`` carries no type arguments.
+    """
+    end = _es_after_type_parameters(tokens, index)
+    if end is None or any(
+        token.kind == "punct"
+        and token.depth == tokens[index].depth
+        and token.value not in _TARGET_TYPE_PUNCTUATORS | {","}
+        for token in tokens[index:end]
+    ):
+        return index
+    return end
+
+
+def _es_calls(
+    tokens: tuple[_EsToken, ...],
+    qualifier: str | None,
+    name: str,
+    line: int,
+    *,
+    typescript: bool = False,
+) -> bool:
     """True when an occurrence on ``line`` calls ``qualifier.name`` / ``name``.
 
     A bare call is ``name(`` (or ``name?.(``) outside a property position and
     not heading a parameter list; a qualified one is ``qualifier.name(`` on a
-    bare receiver, with either name on ``line``. A correction that drops or
+    bare receiver, with either name on ``line``. With ``typescript``, type
+    arguments may sit before the ``(`` (``record<Result>(``,
+    PRRT_kwDOSJAM6s6vRrub); plain JS reads them as a comparison. A correction that drops or
     renames the call while leaving its import in place reaches the definition
     through no call, so it fails closed (PRRT_kwDOSJAM6s6vO2G-); so does one
     whose only surviving call sits on another line (PRRT_kwDOSJAM6s6vRAzJ).
@@ -1676,6 +1704,8 @@ def _es_calls(tokens: tuple[_EsToken, ...], qualifier: str | None, name: str, li
             continue
         if line not in (token.line, tokens[callee].line):
             continue
+        if typescript:
+            callee = _es_after_type_arguments(tokens, callee + 1) - 1
         after = _token_at(tokens, callee + 1)
         if _is(after, "punct", "(") or (
             _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "(")
