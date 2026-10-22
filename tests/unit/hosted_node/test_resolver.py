@@ -355,3 +355,62 @@ def test_timeout_keeps_resolutions_serial_until_cancellation_finishes(monkeypatc
         resolver._loop.call_soon_threadsafe(release.set)
         assert finished.wait(5)
         resolver.close()
+
+
+@pytest.mark.parametrize("transition", ["revoke", "refresh"])
+async def test_resolver_rechecks_grant_after_selecting_mount(hosted, monkeypatch, transition):
+    client, receiver, _ = hosted
+    binding = await prepare(hosted)
+    installed = await client.post(
+        "/v1/hosted-node/materials/install", json={**binding, "material": "YQ=="}
+    )
+    assert installed.json()["status"] == "current"
+    old_file = next(receiver.store.root.glob("*/*.material"))
+    resolver = ProtectedResolver.__new__(ProtectedResolver)
+    resolver._receiver = receiver
+    resolver.bindings = {"key": Binding.model_validate(binding)}
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "secrets": [
+                {
+                    "name": "key",
+                    "target": binding["target"],
+                    "provider": "protected",
+                    "kind": "mount",
+                }
+            ],
+        }
+    )
+    original_status = receiver.status
+    changed = False
+
+    async def status_then_transition(value):
+        nonlocal changed
+        status = await original_status(value)
+        if not changed:
+            changed = True
+            assert status.status == "current"
+
+            def cleanup_failed(*args):
+                raise OSError("cleanup unavailable")
+
+            # The durable grant change must dominate even when cleanup fails.
+            with monkeypatch.context() as patch:
+                patch.setattr(receiver.store, "remove", cleanup_failed)
+                newer = {**binding, "idempotency_key": transition, "fence": 2}
+                if transition == "refresh":
+                    newer.update(
+                        revision=2,
+                        material="Yg==",
+                        predecessor=installed.json()["receipt_id"],
+                    )
+                await client.post(f"/v1/hosted-node/materials/{transition}", json=newer)
+            assert old_file.read_bytes() == b"a"
+            assert (await original_status(value)).status != "current"
+        return status
+
+    monkeypatch.setattr(receiver, "status", status_then_transition)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
+        await resolver._resolve(profile, "ws")
+    assert changed

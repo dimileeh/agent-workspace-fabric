@@ -92,6 +92,7 @@ class ProtectedResolver:
         self, profile: WorkspaceProfile, workspace_id: str
     ) -> LocalSecretLeaseResolution:
         mounts = []
+        selected = []
         seen = set()
         for declaration in profile.secrets:
             binding = self.bindings.get(declaration.name)
@@ -121,8 +122,15 @@ class ProtectedResolver:
                     mode="ro",
                 )
             )
+            selected.append((binding, status.receipt_id))
         # Even a profile without declarations cannot bypass owner liveness.
         await self._receiver.identity_status()
+        # Owner liveness alone does not detect grant revocation or refresh
+        # while mounts were being assembled (including failed file cleanup).
+        for binding, receipt_id in selected:
+            status = await self._receiver.status(binding)
+            if status.status != "current" or status.receipt_id != receipt_id:
+                raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
         return LocalSecretLeaseResolution(
             mounts=tuple(mounts), metadata={"protected_mount_count": len(mounts)}
         )
