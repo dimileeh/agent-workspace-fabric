@@ -752,6 +752,15 @@ _CLASS_BODY_CALL_AFTER_BINDING_TEXT = (
     "    depth = record_ready_queue_depth(1)\n"
 )
 
+# The class body calls the name on line 2 and only imports it on line 3, so the
+# call reaches whatever the module scope binds — here nothing but a builtin —
+# and never the import below it.
+_CLASS_BODY_CALL_BEFORE_IMPORT_TEXT = (
+    "class Pools:\n"
+    "    depth = record_ready_queue_depth(1)\n"
+    "    from pkg_b.observability.execution_platform_metrics import record_ready_queue_depth\n"
+)
+
 
 @pytest.mark.unit
 def test_a_class_body_binding_after_the_anchor_does_not_shadow() -> None:
@@ -873,6 +882,30 @@ def test_a_non_loop_compound_holding_the_anchor_is_trimmed_by_execution_order() 
 
 
 @pytest.mark.unit
+def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
+    """A class-body import below the anchor has not run when the call does.
+
+    ``class C: size = len(items); from helpers import len`` calls the builtin
+    ``len``, so the import must not be read as that call's binding: the name is
+    reported here, which holds it to the unmatchable target instead of
+    ``helpers`` (PRRT_kwDOSJAM6s6vLRfX). An import at or above the anchor does
+    bind it and is not reported, and neither is one in a method below, which
+    binds a local of that method only.
+    """
+    later = "class C:\n    size = len(items)\n    if ok:\n        from helpers import len\n"
+    earlier = "class C:\n    from helpers import len\n    size = len(items)\n"
+    method = "class C:\n    size = len(items)\n    def m(self):\n        from helpers import len\n"
+
+    assert cross_file._locally_rebound_names_at_line(later, 2, path=_CALLER) == frozenset(
+        {"size", "len"}
+    )
+    assert cross_file._locally_rebound_names_at_line(earlier, 3, path=_CALLER) == frozenset(
+        {"size"}
+    )
+    assert cross_file._locally_rebound_names_at_line(method, 2, path=_CALLER) == frozenset({"size"})
+
+
+@pytest.mark.unit
 async def test_a_correction_to_an_import_the_class_body_rebinds_later_is_evidence() -> None:
     """End to end: the earlier class-body call reaches the import, so its fix counts."""
     probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_BEFORE_BINDING_TEXT)
@@ -886,3 +919,11 @@ async def test_a_correction_to_an_import_the_class_body_rebound_earlier_fails_cl
     probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_AFTER_BINDING_TEXT)
 
     assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+async def test_a_correction_to_a_class_body_import_below_the_call_fails_closed() -> None:
+    """End to end: the earlier class-body call never reaches the later import."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_BEFORE_IMPORT_TEXT)
+
+    assert not await _probe(probe, item_line=2)

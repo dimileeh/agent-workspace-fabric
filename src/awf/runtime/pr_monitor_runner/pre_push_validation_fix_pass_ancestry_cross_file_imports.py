@@ -34,6 +34,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _import_lines_hidden_from,
+    _scope_own_import_names,
 )
 
 # Suffixes whose bare-name bindings the import reader below understands. JS/TS
@@ -534,7 +535,11 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     sits in directly is read as well (PRRT_kwDOSJAM6s6q_ywe) — but only through
     the anchored line, because a class body runs top to bottom and a binding
     below the call has not happened yet when it runs (issue #1045 item 2, see
-    ``_class_body_through_line``). A comprehension is
+    ``_class_body_through_line``). For the same reason a class-body import
+    below the anchor is reported too: the import readers still yield it, but
+    ``class C: size = len(items); from helpers import len`` calls the builtin,
+    so holding that later import as the call's binding would credit a
+    correction to ``helpers.len`` (PRRT_kwDOSJAM6s6vLRfX). A comprehension is
     anchored as well, because its generator targets bind inside it — they shadow
     the import for the calls it contains and for nothing else
     (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
@@ -559,7 +564,9 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
             bound.update(_names_bound_in_scope(node))
     anchored_class = _anchored_class_scope(tree, line)
     if anchored_class is not None:
-        bound.update(_names_bound_in_scope(_class_body_through_line(anchored_class, line)))
+        trimmed = _class_body_through_line(anchored_class, line)
+        bound.update(_names_bound_in_scope(trimmed))
+        bound.update(_scope_own_import_names(anchored_class) - _scope_own_import_names(trimmed))
     return frozenset(bound)
 
 
