@@ -14,8 +14,6 @@ index-aligned with the raw file.
 
 from __future__ import annotations
 
-import re
-
 # ``str.splitlines()`` separators beyond ``\r``/``\n``. Masking must preserve
 # these so masked scan lines stay index-aligned with raw ``splitlines()``.
 _SPLITLINES_SEPARATOR_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
@@ -31,12 +29,6 @@ def _mask_char_preserving_splitlines_separators(ch: str) -> str:
 # no-space comments like `#TODO helper()` becoming FIXED callee evidence.
 _JS_TS_PRIVATE_FIELD_SUFFIXES = frozenset(
     {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
-)
-# The ``<`` prefixes TSX reads as a generic arrow's type parameters, not JSX:
-# ``<T,>``, ``<T = D>`` and ``<T extends U>`` (``const`` optional), the same
-# lookahead tsc applies (PRRT_kwDOSJAM6s6vMLga).
-_TSX_GENERIC_ARROW_RE = re.compile(
-    r"<\s*(?:const\s+)?(?:[^\W\d]|\$)[\w$]*\s*(?:[,=]|extends\b(?!\s*[=>/]))"
 )
 # Tokens after which a ``/`` may open a JS/TS regex literal (not division).
 _JS_REGEX_PREFIX_KEYWORDS = frozenset(
@@ -385,33 +377,24 @@ def _mask_comments_and_string_literals_for_callee_scan(
         i += 1
     masked = "".join(out)
     if _path_is_jsx(path):
-        return _mask_jsx_text_nodes_for_callee_scan(
-            masked, tsx=(path or "").lower().endswith(".tsx")
-        )
+        return _mask_jsx_text_nodes_for_callee_scan(masked)
     return masked
 
 
-def _mask_jsx_text_nodes_for_callee_scan(line: str, *, tsx: bool = False) -> str:
+def _mask_jsx_text_nodes_for_callee_scan(line: str) -> str:
     """Blank JSX text between tags; keep ``{...}`` expression bodies scannable.
 
     Literal UI text such as ``<div>helper()</div>`` or ``<>helper()</>`` must
     not become FIXED call-site evidence. Attribute strings are already blanked
     by the prior quote pass. Comparisons without a ``<`` tag opener are left
-    unchanged. Fragment openers ``<>`` are recognized (next char ``>``). In
-    ``tsx`` a generic-arrow head such as ``<T,>(value: T) =>`` is not a tag.
+    unchanged. Fragment openers ``<>`` are recognized (next char ``>``).
     """
     if not line or "<" not in line:
         return line
     chars = list(line)
     n = len(line)
     i = 0
-    in_children = False
     while i < n:
-        # A ``<`` ending a text node opens a child tag, never a generic arrow.
-        if tsx and not in_children and _tsx_generic_arrow_head_at(line, i):
-            i += 1
-            continue
-        in_children = False
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
             # Advance through the tag to its closing ``>`` (strings already blank).
@@ -435,73 +418,6 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str, *, tsx: bool = False) -> str
                     continue
                 chars[i] = _mask_char_preserving_splitlines_separators(line[i])
                 i += 1
-            in_children = True
             continue
         i += 1
     return "".join(chars)
-
-
-def _tsx_generic_arrow_head_at(line: str, index: int) -> bool:
-    """True when ``line[index]`` opens a TSX generic-arrow head, not a JSX tag.
-
-    Like the ES lexer's ``expression_may_start()`` gate, the head must sit
-    where an expression may start (after ``=``, ``(``, ``return`` ... or
-    ``async``). A ``<`` at line start may be a JSX child on its own line, so it
-    stays a tag (fail closed: its text is blanked) (PRRT_kwDOSJAM6s6vMe0Y).
-    """
-    if not _tsx_generic_arrow_type_params_at(line, index):
-        return False
-    prefix = line[:index].rstrip(" \t")
-    if not prefix:
-        return False
-    if re.search(r"(?<![\w$])async$", prefix):
-        return True
-    # The prefix rule for ``/`` regex openers is the expression-start rule.
-    return _js_slash_can_start_regex(line, index)
-
-
-def _tsx_generic_arrow_type_params_at(text: str, index: int) -> bool:
-    """True when ``text[index]`` opens a TSX generic arrow's type parameters.
-
-    Beyond the ``_TSX_GENERIC_ARROW_RE`` lookahead, the list must close with a
-    ``>`` followed by the arrow's ``(``. Otherwise a JSX-first parser (Babel)
-    reads ``<T extends U>helper()</T>`` as an element whose text must stay
-    masked, so the ``<`` fails closed to a tag (PRRT_kwDOSJAM6s6vTvFZ). The
-    parameter list must then reach ``=>`` too: ``<T extends U>(helper())</T>``
-    is an element whose text merely starts with ``(`` (PRRT_kwDOSJAM6s6vUbix).
-    """
-    if not _TSX_GENERIC_ARROW_RE.match(text, index):
-        return False
-    depth = 0
-    for pos in range(index, len(text)):
-        ch = text[pos]
-        if ch == "<":
-            depth += 1
-        elif ch == ">" and text[pos - 1] != "=":  # ``=>`` inside a function type
-            depth -= 1
-            if depth == 0:
-                rest = text[pos + 1 :].lstrip()
-                return rest.startswith("(") and _tsx_arrow_params_reach_arrow(rest)
-    return False
-
-
-def _tsx_arrow_params_reach_arrow(rest: str) -> bool:
-    """True when the ``(...)`` group opening ``rest`` is followed by ``=>``.
-
-    A ``:`` return-type annotation may sit between them; it only counts when a
-    later ``=>`` is reached before any ``</`` closing tag. An unbalanced group
-    fails closed (False).
-    """
-    depth = 0
-    for pos, ch in enumerate(rest):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                after = rest[pos + 1 :].lstrip()
-                if after.startswith("=>"):
-                    return True
-                arrow = after.find("=>")
-                return after.startswith(":") and arrow > 0 and "</" not in after[:arrow]
-    return False

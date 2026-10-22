@@ -37,9 +37,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebindi
     _scope_own_import_names,
 )
 
-# Suffixes whose bare-name bindings the import reader below understands. JS/TS
-# call sites bind through ``..._cross_file_es_modules`` instead (issue #1047);
-# a bare callee in any other language keeps the name-only rule.
+# Suffixes whose bare-name bindings the import reader below understands. A bare
+# callee in any other language keeps the name-only rule.
 _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
 
 # A Python identifier's first character: a word character that is not a digit,

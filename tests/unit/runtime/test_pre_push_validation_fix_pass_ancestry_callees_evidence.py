@@ -10,9 +10,6 @@ import pytest
 from awf.common.commands import FakeCommandRunner
 from awf.runtime.pr_monitor_runner import pre_push_validation_fix_pass_ancestry as ancestry
 from awf.runtime.pr_monitor_runner import pre_push_validation_fix_pass_ancestry_callees as callees
-from awf.runtime.pr_monitor_runner import (
-    pre_push_validation_fix_pass_ancestry_callees_masking as masking,
-)
 
 
 @pytest.mark.unit
@@ -48,94 +45,6 @@ def test_callee_refs_mask_jsx_text_nodes() -> None:
         "}\n"
     )
     assert callees._callee_refs_from_file_line(decoy, 6, path="src/mod.tsx") == frozenset()
-
-
-@pytest.mark.unit
-def test_callee_refs_keep_tsx_generic_arrow_heads_unmasked() -> None:
-    """A TSX generic-arrow head is not a tag opener (PRRT_kwDOSJAM6s6vMLga)."""
-    line = "  const run = <T,>(value: T) => helper(value);"
-    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset(
-        {(None, "helper")}
-    )
-    # Plain JSX has no generics: an ``extends`` boolean attribute stays a tag.
-    assert (
-        callees._callee_refs_from_anchor_line(
-            "    return <a extends b>helper()</a>;", path="src/mod.jsx"
-        )
-        == frozenset()
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "line",
-    [
-        # A child tag after a text node or a closing tag is never a generic arrow.
-        "    return <div>see <a extends b>helper()</a></div>;",
-        "    return <div><a extends b>helper()</a></div>;",
-        "    return <div>return <a , b>helper()</a></div>;",
-        # A JSX child on its own line keeps its text blanked (fail closed).
-        "      <a extends b>helper()</a>",
-        "      <a extends b>(helper())</a>",
-        # Outside an expression start (``foo <T,`` is a comparison) it stays a tag.
-        "    foo <a extends b>helper()</a>;",
-    ],
-)
-def test_callee_refs_mask_tsx_child_tags_shaped_like_generic_heads(line: str) -> None:
-    """Generic-arrow heads count only where an expression starts (PRRT_kwDOSJAM6s6vMe0Y)."""
-    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset()
-
-
-@pytest.mark.unit
-def test_callee_refs_keep_tsx_extends_generic_arrow_heads_unmasked() -> None:
-    line = "  const run = <T extends U>(value: T) => helper(value);"
-    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset(
-        {(None, "helper")}
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "line",
-    [
-        "    return <T extends U>helper()</T>;",
-        "  const view = <T extends U>see helper()</T>;",
-        "  const view = <T = U>helper()</T>;",
-        # Text that merely starts with ``(`` never reaches ``=>`` (PRRT_kwDOSJAM6s6vUbix).
-        "    return <T extends U>(helper())</T>;",
-        "  const view = <T extends U>(see) helper()</T>;",
-        "  const view = <T extends U>(a): helper()</T>;",
-        "  const view = <T extends U>(a): helper()</T> => 1;",
-    ],
-)
-def test_callee_refs_mask_tsx_extends_tags_not_followed_by_arrow_params(line: str) -> None:
-    """A head whose ``>`` is not followed by ``(`` is JSX text (PRRT_kwDOSJAM6s6vTvFZ)."""
-    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("x = <T extends Box<U>>(v: T) => v", True),
-        ("x = <T extends () => void>\n(v: T) => v", True),
-        ("x = <T extends Box<U>>helper()</T>", False),
-        ("x = <T extends Box<U", False),
-        ("x = <T extends U>(v: T): Box<T> => v", True),
-        ("x = <T extends U>(helper())</T>", False),
-        ("x = <T extends U>(v: (T", False),
-    ],
-)
-def test_tsx_generic_arrow_type_params_close_before_arrow_params(text: str, expected: bool) -> None:
-    assert masking._tsx_generic_arrow_type_params_at(text, 4) is expected
-
-
-@pytest.mark.unit
-def test_callee_refs_keep_tsx_async_generic_arrow_heads_unmasked() -> None:
-    line = "  const run = async <T,>(value: T) => helper(value);"
-    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset(
-        {(None, "helper")}
-    )
 
 
 @pytest.mark.unit

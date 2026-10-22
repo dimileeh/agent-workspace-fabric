@@ -443,25 +443,6 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
         "@@ -1,1 +1,1 @@\n-export async function helper() {\n+export async function helper() {\n"
     )
     assert callees._diff_text_changes_definition_names(export_async, frozenset({"helper"})) is True
-    export_default = "@@ -1,1 +1,1 @@\n-export default function helper() {\n+export default function helper() {\n"
-    assert (
-        callees._diff_text_changes_definition_names(export_default, frozenset({"helper"})) is True
-    )
-    export_class = (
-        "@@ -1,1 +1,1 @@\n-export abstract class Helper {\n+export abstract class Helper {\n"
-    )
-    assert callees._diff_text_changes_definition_names(export_class, frozenset({"Helper"})) is True
-    # A generic type-parameter list may follow a declared name (PRRT_kwDOSJAM6s6vMwSN).
-    generic = (
-        "@@ -1,1 +1,1 @@\n-export function helper<T>(v: T) {\n+export function helper<T>(v: T) {\n"
-    )
-    assert callees._diff_text_changes_definition_names(generic, frozenset({"helper"})) is True
-    # A variable type annotation may precede the initializer (PRRT_kwDOSJAM6s6vMwSF);
-    # a block-label colon is not an annotation.
-    annotated = "@@ -1,1 +1,1 @@\n-const helper: Fn = () => {\n+const helper: Fn = () => {\n"
-    assert callees._diff_text_changes_definition_names(annotated, frozenset({"helper"})) is True
-    label = "@@ -1,1 +1,1 @@\n-else: helper = lambda: 1\n+else: helper = lambda: 2\n"
-    assert callees._diff_text_changes_definition_names(label, frozenset({"else"})) is False
 
 
 @pytest.mark.unit
@@ -670,10 +651,6 @@ def test_definition_head_has_js_dynamic_this_guards_and_forms() -> None:
         is True
     )
     assert callees._definition_head_has_js_dynamic_this("  const inner = () => {\n", 1) is False
-    assert (
-        callees._definition_head_has_js_dynamic_this("export default function record() {\n", 1)
-        is True
-    )
     # Same-line comments must not hide dynamic ``this`` (discovery uses masked lines).
     assert (
         callees._definition_head_has_js_dynamic_this(
@@ -905,40 +882,6 @@ def test_resolve_callee_definition_span_bare_call_skips_class_method() -> None:
         )
         is None
     )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "head",
-    ["export class Foo {", "export default class Foo {", "export abstract class Foo {"],
-)
-def test_resolve_callee_definition_span_bare_call_skips_exported_class_method(head: str) -> None:
-    """Exported class heads are classes, not function scopes (PRRT_kwDOSJAM6s6vMtvk).
-
-    A bare ``helper()`` inside a method of ``export [default] [abstract] class``
-    must not link the class-body ``helper`` member as its callee.
-    """
-    text = (
-        "function helper() {\n"
-        "  return 99;\n"
-        "}\n"
-        "\n"
-        f"{head}\n"
-        "  helper = () => {\n"
-        "    return 1;\n"
-        "  }\n"
-        "  reviewed = () => {\n"
-        "    return helper();\n"
-        "  }\n"
-        "}\n"
-    )
-    assert callees._resolve_callee_definition_span(
-        text, call_line=10, qualifier=None, name="helper", path="src/mod.ts"
-    ) == (1, 4)
-    assert callees._enclosing_class_span(text, 10, path="src/mod.ts") == (5, 12)
-    assert callees._resolve_callee_definition_span(
-        text, call_line=10, qualifier="this", name="helper", path="src/mod.ts"
-    ) == (6, 8)
 
 
 @pytest.mark.unit

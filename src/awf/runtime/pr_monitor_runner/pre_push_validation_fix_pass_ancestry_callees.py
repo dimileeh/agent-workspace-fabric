@@ -55,16 +55,6 @@ _CALLEE_REF_RE = re.compile(
     rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
     rf"\s*(?:\?\.)?\s*\("
 )
-# TypeScript lets type arguments sit between a callee and its argument list
-# (``record<Result>(value)``, ``tel.record<Map<K, V>>(value)``), one nesting
-# level deep; an optional call writes them after ``?.`` (``record?.<Result>(v)``).
-# Plain JS and Python read ``a < b > (c)`` as a comparison, so only TypeScript
-# paths use this form (PRRT_kwDOSJAM6s6vRrub).
-_TS_CALLEE_REF_RE = re.compile(
-    rf"(?:({_IDENT_BOUNDARY}{_JS_IDENT})\s*\??\.\s*)?({_IDENT_BOUNDARY}{_JS_IDENT})"
-    rf"\s*(?:(?:\?\.\s*)?<[^<>;()\n]*(?:<[^<>;()\n]*>[^<>;()\n]*)*>\s*|(?:\?\.)?\s*)\("
-)
-_TS_SUFFIXES = (".ts", ".tsx", ".mts", ".cts")
 _CALLEE_KEYWORD_BLOCKLIST = frozenset(
     {
         "if",
@@ -120,20 +110,10 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
 # Optional TS return type between params and ``=>`` so
 # ``const helper = (value: number): number =>`` / ``async (...): Promise<T> =>``
 # still record a definition span (body-only repairs stay FIXED-with-evidence).
-# Optional ``export`` before the declaration keyword so a directly exported
-# ``export const helper = () =>`` is a head too (PRRT_kwDOSJAM6s6vLkoD).
-# Optional TS generic type parameters (one nesting level) before the arrow
-# params so ``const helper = <T>(value: T) =>`` / ``async <T,>(...)`` are heads
-# too (PRRT_kwDOSJAM6s6vL9AV). An optional variable type annotation, as the
-# plain-assignment matcher accepts, so ``export const record: Recorder = (value) =>``
-# is a head too (PRRT_kwDOSJAM6s6vMwSF); block-label colons such as ``else:`` /
-# ``default:`` are not annotations.
 _TS_ARROW_RETURN_TYPE = r"(?::(?![ \t]*=>)[^;=\n]*?)?"
-_TS_ARROW_TYPE_PARAMS = r"(?:<[^<>;\n]*(?:<[^<>;\n]*>[^<>;\n]*)*>[ \t]*)?"
 _ASSIGNMENT_DEFINITION_HEAD = (
-    rf"(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?"
-    rf"(?!(?:else|try|finally|default)[ \t]*:)({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*="
-    rf"[ \t]*(?:async[ \t]+)?{_TS_ARROW_TYPE_PARAMS}(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
+    rf"(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
+    rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
 # A plain assignment binding simple targets: ``validate = replacement``,
@@ -150,28 +130,15 @@ _DEFINITION_NAME_LINE_RE = re.compile(
     r"^[-+](?!\+\+|--)[ \t]*(?:"
     rf"(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
     # Optional ``export`` so ``export function helper`` / ``export async function``
-    # count as definition heads (body-only repairs stay FIXED-with-evidence), as
-    # does a named ``export default function`` (PRRT_kwDOSJAM6s6vLRfG). An
-    # optional generator ``*`` keeps ``export function* helper`` a head too
-    # (PRRT_kwDOSJAM6s6vL9Ae). ``export [default] [abstract] class`` heads a
-    # class the same way (PRRT_kwDOSJAM6s6vMeFV). Optional TS type parameters
-    # after the name keep ``export function record<T>(`` a head
-    # (PRRT_kwDOSJAM6s6vMwSN).
-    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})[ \t]*{_TS_ARROW_TYPE_PARAMS}\s*\("
-    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
+    # count as definition heads (body-only repairs stay FIXED-with-evidence).
+    rf"|(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
+    rf"|class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
-)
-# Class heads only — the class alternative of ``_ENCLOSING_DEFINITION_RE`` —
-# so class-span lookups and class/function scope classification accept the
-# same ``export [default] [abstract]`` prefixes as definition discovery
-# (PRRT_kwDOSJAM6s6vMtvk).
-_CLASS_HEAD_RE = re.compile(
-    rf"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
-    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})[ \t]*{_TS_ARROW_TYPE_PARAMS}\s*\("
-    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
+    rf"|^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
+    rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
 # Single-character probes for the right-anchored receiver-chain scan in
@@ -458,7 +425,8 @@ def _enclosing_class_span(
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     idx = min(line, len(lines)) - 1
     while idx >= 0:
-        if _CLASS_HEAD_RE.match(scan_lines[idx]) is not None:
+        class_match = re.match(r"^[ \t]*class[ \t]+(\w+)\b", scan_lines[idx])
+        if class_match is not None:
             class_indent = _leading_indent(lines[idx])
             start = idx + 1
             # Any nonblank equal-or-lower indent ends the class (not only the
@@ -525,7 +493,7 @@ def _containing_definition_identity(
 
 def _definition_span_is_class(file_text: str, start_line: int) -> bool:
     """Return True when the definition head at ``start_line`` is a class."""
-    return _CLASS_HEAD_RE.match(file_text.splitlines()[start_line - 1]) is not None
+    return re.match(r"^[ \t]*class[ \t]+\w+\b", file_text.splitlines()[start_line - 1]) is not None
 
 
 def _definition_is_nested_in_other(
@@ -634,7 +602,7 @@ def _definition_head_has_js_dynamic_this(
         return False
     scan = _definition_head_scan_lines(file_text, path=path)[start_line - 1]
     if re.match(
-        rf"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function[ \t]+{_JS_IDENT}[ \t]*{_TS_ARROW_TYPE_PARAMS}\s*\(",
+        rf"^[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+{_JS_IDENT}\s*\(",
         scan,
     ):
         return True
@@ -870,11 +838,6 @@ def _bare_callee_follows_attribute_dot(scan_text: str, match_start: int) -> bool
     return _BARE_CALLEE_AFTER_ATTR_DOT_RE.search(scan_text[:match_start]) is not None
 
 
-def _path_is_typescript(path: str | None) -> bool:
-    """True when ``path`` is a TypeScript source, where calls may carry type arguments."""
-    return path is not None and path.lower().endswith(_TS_SUFFIXES)
-
-
 def _callee_ref_matches_from_anchor_line(
     anchor_line: str, *, path: str | None = None
 ) -> tuple[str, list[re.Match[str]]]:
@@ -898,9 +861,8 @@ def _callee_ref_matches_from_anchor_line(
         open_paren = anchor_line.find("(")
         scan_from = open_paren if 0 <= open_paren < colon else colon + 1
     scan_text = _mask_comments_and_string_literals_for_callee_scan(anchor_line, path=path)
-    callee_ref_re = _TS_CALLEE_REF_RE if _path_is_typescript(path) else _CALLEE_REF_RE
     matches: list[re.Match[str]] = []
-    for match in callee_ref_re.finditer(scan_text, scan_from):
+    for match in _CALLEE_REF_RE.finditer(scan_text, scan_from):
         qualifier, name = match.group(1), match.group(2)
         if name.lower() in _CALLEE_KEYWORD_BLOCKLIST:
             continue

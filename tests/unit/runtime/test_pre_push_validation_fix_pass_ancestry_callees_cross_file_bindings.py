@@ -501,13 +501,8 @@ def test_the_shared_root_may_be_empty_or_the_whole_call_site_package() -> None:
 
 
 @pytest.mark.unit
-async def test_js_ts_call_sites_no_longer_take_the_name_only_rule() -> None:
-    """A JS/TS callee binds through its ES import, never by name alone (#1047).
-
-    ``helper`` is imported from ``./other``, so an edit to a same-named
-    ``helper`` in an unrelated ``src/pkg_b/metrics.ts`` is not evidence about
-    the call: the binding resolves to a file the range did not change.
-    """
+async def test_non_python_call_sites_keep_the_name_only_rule() -> None:
+    """The binding reader only understands Python imports; JS/TS is unchanged."""
     caller_path = "src/pkg_a/services/pools.ts"
     callee_path = "src/pkg_b/metrics.ts"
     caller = (
@@ -530,33 +525,6 @@ async def test_js_ts_call_sites_no_longer_take_the_name_only_rule() -> None:
                 "@@ -2 +2 @@\n"
                 "-  return value;\n"
                 "+  return value.depth;\n"
-            )
-        },
-    )
-
-    assert not await _probe(probe, item_path=caller_path, item_line=4)
-
-
-@pytest.mark.unit
-async def test_call_sites_without_a_binding_reader_keep_the_name_only_rule() -> None:
-    """A language with neither the Python nor the ES-module reader is unchanged (#1047).
-
-    The JS/TS fix does not widen the name-only rule, and does not narrow it for
-    other languages either: a Ruby call site still links a same-named
-    definition in another changed file by name.
-    """
-    caller_path = "src/pkg_a/services/pools.rb"
-    callee_path = "src/pkg_b/metrics.rb"
-    caller = "require_relative 'other'\n\ndef refresh(value)\n  helper(value)\nend\n"
-    probe = _Probe(
-        texts={
-            (_LEFT, caller_path): caller,
-            (_LEFT, callee_path): "def helper(value)\n  value\nend\n",
-        },
-        changed_paths=(callee_path,),
-        diffs={
-            callee_path: (
-                f"--- a/{callee_path}\n+++ b/{callee_path}\n@@ -2 +2 @@\n-  value\n+  value + 1\n"
             )
         },
     )
