@@ -172,7 +172,7 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
         conversation_digest_before_reply=_conversation_digest(comment_nodes[:-1])
         if comment_nodes and comment_nodes[-1].get("viewerDidAuthor") is True
         else "",
-        has_external_comment=any(
+        external_comment_count=sum(
             comment.get("viewerDidAuthor") is not True for comment in comment_nodes
         ),
     )

@@ -213,8 +213,8 @@ async def test_audit_keeps_only_viewer_authored_bodies_and_null_resolver() -> No
     assert audit.threads[0].viewer_comment_bodies == ("awf reply",)
 
 
-async def test_audit_flags_threads_carrying_a_comment_from_outside_awfs_identity() -> None:
-    """``fetch_pr_status`` lists an unresolved thread only when it carries such a comment."""
+async def test_audit_counts_comments_from_outside_awfs_identity() -> None:
+    """``fetch_pr_status`` lists exactly these comments (and only a thread with any)."""
     fake = FakeCommandRunner()
     own = _audit_thread("PRRT_test_own", comments=[{"body": "note", "viewerDidAuthor": True}])
     outside = _audit_thread(
@@ -222,13 +222,14 @@ async def test_audit_flags_threads_carrying_a_comment_from_outside_awfs_identity
         comments=[
             {"body": "note", "viewerDidAuthor": True},
             {"body": "P1: crash on None", "viewerDidAuthor": None},
+            {"body": "still crashes", "viewerDidAuthor": False},
         ],
     )
     fake.queue_result(stdout=_audit_page([own, outside], cursor=None))
 
     audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
 
-    assert [thread.has_external_comment for thread in audited] == [False, True]
+    assert [thread.external_comment_count for thread in audited] == [0, 2]
 
 
 async def test_audit_reports_missing_viewer_login_as_none() -> None:

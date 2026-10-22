@@ -19,7 +19,8 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   the thread keeps the conversation that was flagged, and the marker counts only
   while that conversation is what the reply followed.
 * An unresolved thread is ``decide()``'s to handle, so one the status it acted on
-  never listed (opened or reopened since) re-polls instead of passing.
+  never listed (opened or reopened since), or listed with fewer comments (replied
+  to since), re-polls instead of passing.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -150,13 +151,9 @@ async def review_thread_disposition_gate(
     counts: Counter[str] = Counter()
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
-    decided = {
-        thread.thread_id
-        for thread in (
-            *status.unresolved_inline_threads,
-            *status.outdated_unresolved_inline_threads,
-        )
-    }
+    decided: dict[str, int] = {}  # outside comments ``decide()`` saw per listed thread
+    for listed in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
+        decided[listed.thread_id] = max(decided.get(listed.thread_id, 0), len(listed.comments))
     undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
     # The conversation each unverified flag binds to (an acknowledgement's re-audit
     # can move it on).
@@ -181,7 +178,9 @@ async def review_thread_disposition_gate(
                 and not pending.reply_comment_id
             ):
                 _supersede_acknowledgement(state, thread.thread_id, workspace_id=workspace_id)
-            if thread.has_external_comment and thread.thread_id not in decided:
+            if thread.external_comment_count > decided.get(thread.thread_id, 0):
+                # A fix_committed / false_positive thread stays listed unresolved
+                # and still merges, so a reply to it is unseen feedback too.
                 undecided.append(thread.thread_id)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
@@ -252,8 +251,9 @@ async def review_thread_disposition_gate(
         unverified = [tid for tid in unverified if tid not in legacy]
     if not unverified:
         if undecided:
-            # Opened or reopened after ``status`` was fetched: re-poll so ``decide()``
-            # handles it rather than certify or merge past it (PRRT_kwDOSJAM6s6vVxR0).
+            # Opened, reopened, or replied to after ``status`` was fetched: re-poll so
+            # ``decide()`` handles it rather than certify or merge past it
+            # (PRRT_kwDOSJAM6s6vVxR0).
             _log.info(
                 "monitor.review_thread_audit_found_undecided_feedback",
                 workspace_id=workspace_id,

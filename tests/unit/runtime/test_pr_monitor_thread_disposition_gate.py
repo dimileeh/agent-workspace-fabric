@@ -39,6 +39,7 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReviewThread,
+    ReviewThreadComment,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
@@ -145,7 +146,7 @@ def _thread(
     bodies: tuple[str, ...] = (),
     resolved: bool = True,
     superseded: int = 0,
-    external: bool = False,
+    external: int = 0,
 ) -> AuditedReviewThread:
     return AuditedReviewThread(
         thread_id=tid,
@@ -154,7 +155,7 @@ def _thread(
         resolved_by=resolved_by,
         viewer_comment_bodies=bodies,
         superseded_viewer_comments=superseded,
-        has_external_comment=external,
+        external_comment_count=external,
     )
 
 
@@ -539,23 +540,26 @@ async def test_gate_records_one_audit_event_per_newly_flagged_set(
 
 
 @pytest.mark.parametrize(
-    ("external", "listed_in", "retry"),
+    ("external", "listed_in", "listed_comments", "retry"),
     [
-        (True, None, True),
-        (True, "unresolved_inline_threads", False),
-        (True, "outdated_unresolved_inline_threads", False),
-        (False, None, False),  # only AWF's identity commented: no status lists it
+        (1, None, 0, True),
+        (1, "unresolved_inline_threads", 1, False),
+        (1, "outdated_unresolved_inline_threads", 1, False),
+        (2, "unresolved_inline_threads", 1, True),  # replied to since: a fix_committed
+        (2, "outdated_unresolved_inline_threads", 1, True),  # thread stays listed
+        (0, None, 0, False),  # only AWF's identity commented: no status lists it
     ],
 )
 async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_listed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    external: bool,
+    external: int,
     listed_in: str | None,
+    listed_comments: int,
     retry: bool,
 ) -> None:
-    """PRRT_kwDOSJAM6s6vVxR0: a thread opened (or reopened) after the status ``decide``
-    acted on is unresolved in the audit; passing would certify or merge over it."""
+    """PRRT_kwDOSJAM6s6vVxR0: a thread opened, reopened, or replied to after the status
+    ``decide`` acted on is unresolved in the audit; passing would certify or merge over it."""
     gh = _AuditForge(
         FakeCommandRunner(),
         audit=ReviewThreadAudit(
@@ -570,7 +574,14 @@ async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_list
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
     status = _green_status()
     if listed_in is not None:
-        listed = (ReviewThread(thread_id=_FRESH, path="a.py", line=1, body_excerpt="P1"),)
+        comments = tuple(
+            ReviewThreadComment(comment_id=str(n), body="P1") for n in range(listed_comments)
+        )
+        listed = (
+            ReviewThread(
+                thread_id=_FRESH, path="a.py", line=1, body_excerpt="P1", comments=comments
+            ),
+        )
         status = replace(status, **{listed_in: listed})
 
     result = await _gate(runner, workspace_id, settled_baseline_state(), status)
@@ -590,7 +601,7 @@ async def test_cert_waits_for_a_poll_that_lists_feedback_opened_after_its_snapsh
         audit=ReviewThreadAudit(
             supported=True,
             viewer_login=_VIEWER,
-            threads=(_thread(_FRESH, resolved=False, external=True),),
+            threads=(_thread(_FRESH, resolved=False, external=1),),
         ),
     )
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
@@ -928,7 +939,7 @@ async def test_feature_merge_waits_for_a_poll_that_lists_feedback_opened_after_i
     fresh = ReviewThreadAudit(
         supported=True,
         viewer_login=_VIEWER,
-        threads=(_thread(_FRESH, resolved=False, external=True),),
+        threads=(_thread(_FRESH, resolved=False, external=1),),
     )
     gh = _SequencedAuditMergeClient(*[clean] * fresh_audit, fresh)
 
