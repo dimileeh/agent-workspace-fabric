@@ -466,7 +466,9 @@ def _tsx_generic_arrow_type_params_at(text: str, index: int) -> bool:
     Beyond the ``_TSX_GENERIC_ARROW_RE`` lookahead, the list must close with a
     ``>`` followed by the arrow's ``(``. Otherwise a JSX-first parser (Babel)
     reads ``<T extends U>helper()</T>`` as an element whose text must stay
-    masked, so the ``<`` fails closed to a tag (PRRT_kwDOSJAM6s6vTvFZ).
+    masked, so the ``<`` fails closed to a tag (PRRT_kwDOSJAM6s6vTvFZ). The
+    parameter list must then reach ``=>`` too: ``<T extends U>(helper())</T>``
+    is an element whose text merely starts with ``(`` (PRRT_kwDOSJAM6s6vUbix).
     """
     if not _TSX_GENERIC_ARROW_RE.match(text, index):
         return False
@@ -479,5 +481,27 @@ def _tsx_generic_arrow_type_params_at(text: str, index: int) -> bool:
             depth -= 1
             if depth == 0:
                 rest = text[pos + 1 :].lstrip()
-                return rest.startswith("(")
+                return rest.startswith("(") and _tsx_arrow_params_reach_arrow(rest)
+    return False
+
+
+def _tsx_arrow_params_reach_arrow(rest: str) -> bool:
+    """True when the ``(...)`` group opening ``rest`` is followed by ``=>``.
+
+    A ``:`` return-type annotation may sit between them; it only counts when a
+    later ``=>`` is reached before any ``</`` closing tag. An unbalanced group
+    fails closed (False).
+    """
+    depth = 0
+    for pos, ch in enumerate(rest):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                after = rest[pos + 1 :].lstrip()
+                if after.startswith("=>"):
+                    return True
+                arrow = after.find("=>")
+                return after.startswith(":") and arrow > 0 and "</" not in after[:arrow]
     return False

@@ -284,6 +284,7 @@ def test_tsx_generic_arrow_heads_are_not_jsx(head: str) -> None:
         "x = <T extends/>",
         "x = <a extends='b'/>",
         "x = <T extends U>helper()</T>",
+        "x = <T extends U>(helper())</T>",
     ],
 )
 def test_tsx_jsx_that_resembles_a_generic_head_stays_jsx(text: str) -> None:

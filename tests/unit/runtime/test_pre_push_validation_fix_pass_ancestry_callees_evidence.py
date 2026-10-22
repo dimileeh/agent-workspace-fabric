@@ -101,6 +101,11 @@ def test_callee_refs_keep_tsx_extends_generic_arrow_heads_unmasked() -> None:
         "    return <T extends U>helper()</T>;",
         "  const view = <T extends U>see helper()</T>;",
         "  const view = <T = U>helper()</T>;",
+        # Text that merely starts with ``(`` never reaches ``=>`` (PRRT_kwDOSJAM6s6vUbix).
+        "    return <T extends U>(helper())</T>;",
+        "  const view = <T extends U>(see) helper()</T>;",
+        "  const view = <T extends U>(a): helper()</T>;",
+        "  const view = <T extends U>(a): helper()</T> => 1;",
     ],
 )
 def test_callee_refs_mask_tsx_extends_tags_not_followed_by_arrow_params(line: str) -> None:
@@ -116,6 +121,9 @@ def test_callee_refs_mask_tsx_extends_tags_not_followed_by_arrow_params(line: st
         ("x = <T extends () => void>\n(v: T) => v", True),
         ("x = <T extends Box<U>>helper()</T>", False),
         ("x = <T extends Box<U", False),
+        ("x = <T extends U>(v: T): Box<T> => v", True),
+        ("x = <T extends U>(helper())</T>", False),
+        ("x = <T extends U>(v: (T", False),
     ],
 )
 def test_tsx_generic_arrow_type_params_close_before_arrow_params(text: str, expected: bool) -> None:
