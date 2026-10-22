@@ -96,6 +96,12 @@ def test_regex_literals_are_told_apart_from_division() -> None:
     assert _values("x = a++ / 2")[3:5] == ["++", "/"]
     assert _values("x = 'a' / 2")[3] == "/"
     assert _values("/'/.test(s)")[:2] == ["", "."]
+    # A regex statement after a block or a condition is a regex, not division.
+    assert _values("if (ok) {}\n/`/.test(s);")[6:8] == ["", "."]
+    assert _values("if (ok) /`/.test(s);")[4:6] == ["", "."]
+    assert _values("while (a) /x/g.exec(s)")[4] == ""
+    assert _values("x = `a` / 2")[2:4] == ["", "/"]
+    assert _values("x = `a${b}` / 2")[-2:] == ["/", "2"]
 
 
 @pytest.mark.unit
@@ -463,6 +469,8 @@ def test_malformed_exports_make_the_table_unreadable(text: str) -> None:
         "for (const record of items) {}",
         "class A { method(record) {} }",
         "using record = open();",
+        "namespace Legacy { import record = Other.record; }",
+        "namespace Legacy { export import record = Other.record; }",
         "let first, record",
     ],
 )
@@ -492,6 +500,48 @@ def test_binding_positions_rebind_the_name(text: str) -> None:
 )
 def test_references_are_not_bindings(text: str) -> None:
     assert _rebound(text) == frozenset()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text",
+    [
+        "record = other;",
+        "record += 1;",
+        "record ??= other;",
+        "record++;",
+        "--record;",
+        "[record] = [other];",
+        "[first, ...record] = list;",
+        "({ record } = overrides);",
+        "({ a: { record } } = overrides);",
+        "for (record of [other]) {}",
+        "for (record in table) {}",
+        "export function setup() { record = other; }",
+    ],
+)
+def test_assignment_targets_reassign_the_name(text: str) -> None:
+    assert es._es_assigned_names(_tokens(text), frozenset({"record"})) == frozenset({"record"})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text",
+    [
+        "export function record() {\n  return record.count === 1;\n}",
+        "const total = record(1) + record.size;",
+        "if (record == null || record != other) {}",
+        "const f = () => record;",
+        "export { record };\nexport default record;",
+        "client.record = other;",
+        "const a = [record];\nconst b = { record };",
+        "function f() { const { record } = handlers; }",
+        "for (const [record] of pairs) {}",
+    ],
+)
+def test_references_are_not_assignments(text: str) -> None:
+    assert es._es_assigned_names(_tokens(text), frozenset({"record"})) == frozenset()
+    assert es._es_assigned_names(_tokens(text), frozenset()) == frozenset()
 
 
 @pytest.mark.unit
@@ -605,17 +655,27 @@ def test_refs_resolve_to_a_specifier_and_export_name_or_fail_closed() -> None:
         "required": es._EsBinding(None, "default"),
     }
     rebound = frozenset({"shadowed"})
+    chained = frozenset({("ns", "deep")})
     imports["shadowed"] = es._EsBinding("./a", "shadowed")
 
-    assert es._es_ref_target(imports, rebound, None, "record") == ("./a", "record")
-    assert es._es_ref_target(imports, rebound, None, "alias") == ("./a", "impl")
-    assert es._es_ref_target(imports, rebound, None, "dflt") == ("./b", "default")
-    assert es._es_ref_target(imports, rebound, "ns", "record") == ("./c", "record")
+    assert es._es_ref_target(imports, rebound, chained, None, "record") == ("./a", "record")
+    assert es._es_ref_target(imports, rebound, chained, None, "alias") == ("./a", "impl")
+    assert es._es_ref_target(imports, rebound, chained, None, "dflt") == ("./b", "default")
+    assert es._es_ref_target(imports, rebound, chained, "ns", "record") == ("./c", "record")
     # Fail closed: a namespace called bare, a named import used as a receiver,
     # an unfollowable binding, a rebound name and an unbound one.
-    assert es._es_ref_target(imports, rebound, None, "ns") is None
-    assert es._es_ref_target(imports, rebound, "record", "inner") is None
-    assert es._es_ref_target(imports, rebound, None, "required") is None
-    assert es._es_ref_target(imports, rebound, None, "shadowed") is None
-    assert es._es_ref_target(imports, rebound, None, "missing") is None
-    assert es._es_ref_target(imports, rebound, "this", "record") is None
+    assert es._es_ref_target(imports, rebound, chained, None, "ns") is None
+    assert es._es_ref_target(imports, rebound, chained, "record", "inner") is None
+    assert es._es_ref_target(imports, rebound, chained, None, "required") is None
+    assert es._es_ref_target(imports, rebound, chained, None, "shadowed") is None
+    assert es._es_ref_target(imports, rebound, chained, None, "missing") is None
+    assert es._es_ref_target(imports, rebound, chained, "this", "record") is None
+    assert es._es_ref_target(imports, rebound, chained, "ns", "deep") is None
+
+
+@pytest.mark.unit
+def test_receivers_reached_as_properties_are_reported() -> None:
+    text = "a = other.\n  tel.record(1) + tel.flush() + x?.ns?.go()"
+
+    assert es._es_chained_member_refs(_tokens(text)) == frozenset({("tel", "record"), ("ns", "go")})
+    assert es._es_chained_member_refs(_tokens("a.b")) == frozenset()

@@ -778,19 +778,30 @@ def test_class_body_ordering_keeps_its_conservative_edges() -> None:
 
     A same-line binding may run before the call, and a loop or ``if`` that
     starts before the anchor may rebind the name on a later pass, so both stay
-    shadows rather than being read as ordered after the call. Decorators run
-    before the name they decorate binds, so a method defined after an anchored
-    decorator call does not shadow it.
+    shadows rather than being read as ordered after the call. A decorated
+    definition starts at its first decorator, so an anchor inside its decorator
+    stack still sees what that stack binds (a ``:=`` in an earlier decorator),
+    while a decorated definition entirely below the anchor does not shadow it.
     """
     same_line = "class C:\n    validate = local; result = validate()\n"
     loop = (
         "class C:\n    for item in items:\n        result = validate()\n        validate = item\n"
     )
-    decorated = "class C:\n    @validate()\n    def validate(self):\n        return 1\n"
+    walrus = (
+        "class C:\n"
+        "    @register(validate := local)\n"
+        "    @wrap(validate())\n"
+        "    def method(self):\n"
+        "        return 1\n"
+    )
+    later = "class C:\n    result = validate()\n\n    @wrap\n    def validate(self):\n        return 1\n"
 
     assert "validate" in cross_file._locally_rebound_names_at_line(same_line, 2, path=_CALLER)
     assert "validate" in cross_file._locally_rebound_names_at_line(loop, 3, path=_CALLER)
-    assert cross_file._locally_rebound_names_at_line(decorated, 2, path=_CALLER) == frozenset()
+    assert "validate" in cross_file._locally_rebound_names_at_line(walrus, 3, path=_CALLER)
+    assert cross_file._locally_rebound_names_at_line(later, 2, path=_CALLER) == frozenset(
+        {"result"}
+    )
 
 
 @pytest.mark.unit

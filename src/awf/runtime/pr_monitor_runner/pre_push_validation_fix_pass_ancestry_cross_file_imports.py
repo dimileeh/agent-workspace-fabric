@@ -573,12 +573,23 @@ def _class_body_through_line(node: ast.ClassDef, line: int) -> ast.ClassDef:
     same-line binding may run first, and so is a compound statement that opens
     before the anchor and holds it, because a loop may rebind the name on a
     later pass. Decorators, bases and keywords run before the body and are
-    kept. A decorated definition starts at its ``def`` line, which runs after
-    its decorators, so an anchored decorator call does not see the name it
-    decorates. The copy is shallow; ``node`` is left as it was.
+    kept. A decorated definition starts at its first decorator: an anchor
+    inside the stack may follow a decorator that binds the name with ``:=``,
+    so the whole definition is kept, which only over-reports. The copy is
+    shallow; ``node`` is left as it was.
     """
     trimmed = copy.copy(node)
-    trimmed.body = [statement for statement in node.body if statement.lineno <= line]
+    trimmed.body = [
+        statement
+        for statement in node.body
+        if min(
+            [
+                statement.lineno,
+                *(decorator.lineno for decorator in getattr(statement, "decorator_list", ())),
+            ]
+        )
+        <= line
+    ]
     return trimmed
 
 

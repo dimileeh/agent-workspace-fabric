@@ -310,6 +310,74 @@ async def test_unresolvable_callees_fail_closed(import_line: str, call: str) -> 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "tail",
+    [
+        "[record] = [other];\n",
+        "({ record } = overrides);\n",
+        "for (record of [other]) {\n}\n",
+        "export function setup() {\n  record = other;\n}\n",
+    ],
+)
+async def test_a_module_that_reassigns_the_export_fails_closed(tail: str) -> None:
+    """The edited ``function record`` is not what callers reach once the module reassigns it."""
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    probe.files[_TELEMETRY] = _RECORD_DEFINITION + tail
+
+    assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("caller", "anchor"),
+    [
+        # A receiver chain whose ``.`` ends the previous line.
+        (
+            "import * as tel from './telemetry';\n"
+            "export function ingest(value: number) {\n"
+            "  return other.\n"
+            "    tel.record(value);\n"
+            "}\n",
+            4,
+        ),
+        # A nested TS import alias shadows the module's import.
+        (
+            "import { record } from './telemetry';\n"
+            "namespace Legacy {\n"
+            "  import record = Other.record;\n"
+            "  export function ingest(value: number) {\n"
+            "    return record(value);\n"
+            "  }\n"
+            "}\n",
+            5,
+        ),
+        # A regex statement after a block must not hide the parameter below.
+        (
+            "import { record } from './telemetry';\n"
+            "if (ok) {}\n"
+            "/`/.test(s);\n"
+            "export function ingest(record) {\n"
+            "  return record(value);\n"
+            "}\n"
+            "const t = `;\n",
+            5,
+        ),
+        (
+            "import { record } from './telemetry';\n"
+            "if (ok) /`/.test(s);\n"
+            "export function ingest(record) {\n"
+            "  return record(value);\n"
+            "}\n"
+            "const t = `;\n",
+            4,
+        ),
+    ],
+)
+async def test_call_sites_reaching_something_else_fail_closed(caller: str, anchor: int) -> None:
+    assert not await _accepted(_telemetry_probe(caller), item_line=anchor)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "body",
     [
         "function ingest(record) {\n  return record(1);\n}\n",

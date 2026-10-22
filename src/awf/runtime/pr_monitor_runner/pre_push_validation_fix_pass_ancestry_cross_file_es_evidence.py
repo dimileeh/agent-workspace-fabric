@@ -30,6 +30,9 @@ from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 # reader cannot tell (unresolvable, unreadable, or deeper than one hop).
 _Lookup = tuple[str, str] | bool | None
 
+# A module's export table, import table and tokens.
+_ParsedModule = tuple[_es._EsExports, dict[str, _es._EsBinding], tuple[_es._EsToken, ...]]
+
 
 async def _paths_existing_at_ref(
     self: Any, *, worktree_path: Path, ref: str, paths: tuple[str, ...]
@@ -64,7 +67,7 @@ class _EsModuleReader:
         self.ref = ref
         self._texts: dict[str, str | None] = {}
         self._resolved: dict[tuple[str, str], str | None] = {}
-        self._parsed: dict[str, tuple[_es._EsExports, dict[str, _es._EsBinding]] | None] = {}
+        self._parsed: dict[str, _ParsedModule | None] = {}
 
     async def text(self, path: str) -> str | None:
         from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
@@ -96,14 +99,18 @@ class _EsModuleReader:
             )
         return self._resolved[key]
 
-    async def parsed(self, path: str) -> tuple[_es._EsExports, dict[str, _es._EsBinding]] | None:
-        """``path``'s export and import tables, or None when unreadable."""
+    async def parsed(self, path: str) -> _ParsedModule | None:
+        """``path``'s export and import tables and tokens, or None when unreadable."""
         if path not in self._parsed:
             text = await self.text(path)
             tokens = None if text is None else _es._es_module_tokens(text, path=path)
             exports = None if tokens is None else _es._es_module_exports(tokens)
             imports = None if tokens is None else _es._es_import_bindings(tokens)
-            self._parsed[path] = None if exports is None or imports is None else (exports, imports)
+            self._parsed[path] = (
+                None
+                if tokens is None or exports is None or imports is None
+                else (exports, imports, tokens)
+            )
         return self._parsed[path]
 
     async def lookup(self, module: str, name: str, *, hops: int) -> _Lookup:
@@ -114,17 +121,21 @@ class _EsModuleReader:
         sources cost a hop too: each must be readable, and exactly one may
         define the name locally — an unreadable source, a source that is
         itself a barrel, or two defining sources fail closed. A star never
-        carries ``default``. A namespace re-export is not callable.
+        carries ``default``. A namespace re-export is not callable. A local
+        name the module also assigns to fails closed: an export is a live
+        binding, so importers reach whatever was assigned last.
         """
         parsed = await self.parsed(module)
         if parsed is None:
             return None
-        exports, imports = parsed
+        exports, imports, tokens = parsed
         forwarded: _es._EsBinding | None
         if name in exports.local:
             local_name = exports.local[name]
             forwarded = imports.get(local_name)
             if forwarded is None:
+                if _es._es_assigned_names(tokens, frozenset({local_name})):
+                    return None
                 return module, local_name
         elif name in exports.reexport:
             forwarded = exports.reexport[name]
@@ -172,13 +183,17 @@ class _EsModuleReader:
 
 def _es_call_site_bindings(
     text: str, *, path: str
-) -> tuple[dict[str, _es._EsBinding], frozenset[str]] | None:
-    """``(imports, rebound)`` of one call-site text, or None when unreadable."""
+) -> tuple[dict[str, _es._EsBinding], frozenset[str], frozenset[tuple[str, str]]] | None:
+    """``(imports, rebound, chained)`` of one call-site text, or None when unreadable."""
     tokens = _es._es_module_tokens(text, path=path)
     imports = None if tokens is None else _es._es_import_bindings(tokens)
     if tokens is None or imports is None:
         return None
-    return imports, _es._es_rebound_names(tokens, frozenset(imports))
+    return (
+        imports,
+        _es._es_rebound_names(tokens, frozenset(imports)),
+        _es._es_chained_member_refs(tokens),
+    )
 
 
 async def _es_module_commit_range_changes_callee_definition(
@@ -226,7 +241,7 @@ async def _es_module_commit_range_changes_callee_definition(
     call_site = _es_call_site_bindings(item_text, path=item_path)
     if call_site is None:
         return False
-    imports, rebound = call_site
+    imports, rebound, chained = call_site
     # A chained receiver (``tel.sub.record()``) is an attribute no import binds,
     # and every other unresolvable ref drops out here, so it fails closed.
     chains = _receiver_chain_segments_from_file_line(item_text, item_line, path=item_path)
@@ -237,7 +252,7 @@ async def _es_module_commit_range_changes_callee_definition(
             key=lambda ref: (ref[0] or "", ref[1]),
         )
         if qualifier not in chains
-        and (reached := _es._es_ref_target(imports, rebound, qualifier, name)) is not None
+        and (reached := _es._es_ref_target(imports, rebound, chained, qualifier, name)) is not None
     ]
     if not refs:
         return False
@@ -311,6 +326,6 @@ async def _es_caller_still_reaches(
     call_site = None if text is None else _es_call_site_bindings(text, path=caller)
     if call_site is None:
         return None
-    imports, rebound = call_site
-    reached = _es._es_ref_target(imports, rebound, qualifier, name)
+    imports, rebound, chained = call_site
+    reached = _es._es_ref_target(imports, rebound, chained, qualifier, name)
     return None if reached is None else await reader.target(caller, *reached)
