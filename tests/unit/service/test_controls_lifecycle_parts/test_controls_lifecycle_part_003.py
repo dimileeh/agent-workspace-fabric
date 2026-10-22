@@ -158,6 +158,7 @@ async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     )
     workspace.failure_reason = "infrastructure_failure"
     workspace.failure_message = "monitor crashed during repair"
+    workspace.filesystem_reclaimed_at = datetime.now(UTC)
     workspace.monitor_iter_count = 5
     candidate.status = "closed"
     candidate.close_reason = "STALE_MONITOR_FAILED"
@@ -176,6 +177,7 @@ async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id, limit=20)
 
     assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.filesystem_reclaimed_at is None
     assert attempt is not None
     assert attempt.status == WorkspaceStatus.monitoring_pr.value
     assert candidate.status == "open"

@@ -129,7 +129,8 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
         }
     ),
     WorkspaceStatus.completed: frozenset({WorkspaceStatus.destroying}),
-    WorkspaceStatus.failed: frozenset({WorkspaceStatus.destroying}),
+    # Operators may reattach the existing PR monitor after a failure.
+    WorkspaceStatus.failed: frozenset({WorkspaceStatus.destroying, WorkspaceStatus.monitoring_pr}),
     WorkspaceStatus.cancelled: frozenset({WorkspaceStatus.destroying}),
     WorkspaceStatus.destroying: frozenset({WorkspaceStatus.destroyed, WorkspaceStatus.failed}),
     WorkspaceStatus.destroyed: frozenset(),

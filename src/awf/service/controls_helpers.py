@@ -237,31 +237,34 @@ async def _reset_failed_workspace_for_remonitor(
 
     old_status = workspace.status
     old_iter_count = workspace.monitor_iter_count
-    workspace.status = WorkspaceStatus.monitoring_pr.value
     workspace.failure_reason = None
     workspace.failure_message = None
     workspace.monitor_iter_count = 0
 
     attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
     candidate_reopened = False
-    if attempt is not None:
-        attempt.status = workspace.status
-        candidate_repo = MergeCandidateRepository(session)
-        candidate = await candidate_repo.get_by_attempt_id(attempt.id)
-        if candidate is not None:
-            reopen_head_sha = (
-                candidate_head_sha or candidate.head_sha or workspace.monitor_last_commit_sha
-            )
-            await candidate_repo.create_or_update_open_for_attempt(
-                task=candidate.task,
-                attempt=candidate.attempt,
-                workspace=workspace,
-                head_sha=reopen_head_sha,
-                base_sha=workspace.base_commit,
-            )
-            candidate_reopened = True
+    candidate_repo = MergeCandidateRepository(session)
+    candidate = await candidate_repo.get_by_attempt_id(attempt.id) if attempt is not None else None
+    reopen_head_sha = (
+        candidate_head_sha
+        or (candidate.head_sha if candidate is not None else None)
+        or workspace.monitor_last_commit_sha
+    )
+    await WorkspaceRepository(session).transition(
+        workspace,
+        to=WorkspaceStatus.monitoring_pr,
+        reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+    )
+    if candidate is not None:
+        await candidate_repo.create_or_update_open_for_attempt(
+            task=candidate.task,
+            attempt=candidate.attempt,
+            workspace=workspace,
+            head_sha=reopen_head_sha,
+            base_sha=workspace.base_commit,
+        )
+        candidate_reopened = True
 
-    await WorkspaceRepository(session).advance_workspace_version(workspace)
     return {
         "from": old_status,
         "to": WorkspaceStatus.monitoring_pr.value,
