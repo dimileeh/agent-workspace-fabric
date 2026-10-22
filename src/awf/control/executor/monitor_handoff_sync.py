@@ -50,6 +50,7 @@ from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
 from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
@@ -395,6 +396,10 @@ async def _handoff_sync_release_pr_monitor(
             metadata=metadata,
             created=created,
         )
+        if created:
+            persisted.monitor_threads_addressed = _with_settled_disposition_baseline(
+                persisted.monitor_threads_addressed
+            )
         await repo_db.add_event(
             persisted,
             event_type=_PR_MONITOR_ADOPTED_EVENT,

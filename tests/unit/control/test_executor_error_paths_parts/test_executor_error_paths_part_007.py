@@ -50,6 +50,9 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
+from awf.runtime.monitor_state_keys import (
+    _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY as _DISPOSITION_BASELINE,
+)
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -899,6 +902,8 @@ class TestSyncReleasePrHandoff:
             assert ws.base_commit == "b" * 40
             assert ws.task_policy["release_sync"]["pr"]["number"] == 321
             assert ws.task_policy["release_sync"]["pr"]["created"] is True
+            # A release PR AWF created has no pre-rollout history to grandfather (#1018).
+            assert ws.monitor_threads_addressed == {_DISPOSITION_BASELINE: "[]"}
             candidate = (
                 await s.execute(select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id))
             ).scalar_one()
@@ -1103,6 +1108,7 @@ class TestSyncReleasePrHandoff:
             assert ws.status == WorkspaceStatus.monitoring_pr.value
             assert ws.pr_number == 88
             assert ws.task_policy["release_sync"]["pr"]["created"] is False
+            assert _DISPOSITION_BASELINE not in (ws.monitor_threads_addressed or {})
 
     @pytest.mark.unit
     async def test_invalid_repo_url_fails_before_git(

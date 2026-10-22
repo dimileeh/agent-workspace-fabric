@@ -461,7 +461,9 @@ by AWF's identity without a marker as a legacy baseline — they predate
 reply-before-resolve — in state and in one audit event with their ids
 (`REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE`). Baseline threads never block and
 the certificate lists their count separately; every unmarked resolution after
-that first run still blocks.
+that first run still blocks. A PR AWF opens itself (a feature PR, or a release
+PR it creates) has no pre-rollout history, so its handoff settles the baseline
+empty: no first-run exemption, and every unmarked resolution blocks.
 
 An operator acknowledges flagged threads with the ordinary guide path and an
 explicit token per thread (`awf workspace guide <id> --directive 'ACK-THREAD

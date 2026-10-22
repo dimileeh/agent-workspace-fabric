@@ -26,6 +26,7 @@ from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
     _disposition_unverified_key,
+    _with_settled_disposition_baseline,
 )
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -290,3 +291,29 @@ async def test_re_adopted_successor_keeps_the_predecessor_baseline(
     assert result.blocker is not None
     assert _LATER in result.blocker and _LEGACY not in result.blocker
     assert await _baseline_events(factory, successor_id) == []
+
+
+async def test_pr_awf_opened_starts_settled_and_blocks_a_silent_first_audit_resolution(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A PR AWF opened itself has no pre-rollout history: its handoff settles the
+    # baseline empty, so the very first audit grandfathers nothing.
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LATER),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    for key, value in _with_settled_disposition_baseline(None).items():
+        state.mark_addressed(key, value)
+
+    result = await _gate(runner, workspace_id, state)
+
+    assert result.blocker is not None and _LATER in result.blocker
+    assert state.threads_addressed_ids[_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY] == "[]"
+    assert await _baseline_events(factory, workspace_id) == []
+
+
+def test_settled_baseline_never_replaces_an_existing_record() -> None:
+    record = json.dumps([_LEGACY])
+    existing = {_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY: record, "PRRT_test_x": "fixed"}
+
+    assert _with_settled_disposition_baseline(existing) == existing

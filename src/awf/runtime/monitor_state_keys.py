@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 # Reserved ``MonitorState.threads_addressed_ids`` key holding the commit-time
@@ -171,4 +172,18 @@ _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY = "__awf_review_thread_audit_unavaila
 # AWF's identity without a marker (#1018 rollout). Those predate reply-before-
 # resolve: they are counted as a legacy baseline and never block. Its presence
 # also marks the first run as done, so every later unmarked resolution blocks.
+# A PR AWF opens itself has no such history: its handoff seeds the key empty.
 _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY = "__awf_review_thread_disposition_baseline__"
+
+
+def _with_settled_disposition_baseline(
+    threads_addressed: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Persisted monitor state for a PR AWF just opened, its baseline settled empty.
+
+    Only a PR that predates reply-before-resolve can hold unmarked AWF
+    resolutions worth grandfathering. A PR opened now has none, so its first
+    disposition-gate run must not take a legacy baseline: every unmarked AWF
+    resolution blocks from the first audit on. An existing record is kept.
+    """
+    return {_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY: "[]", **(threads_addressed or {})}
