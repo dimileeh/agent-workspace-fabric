@@ -871,6 +871,51 @@ class TestReplayGitBracket:
         assert outcome.details["head_recovered"] is recovered
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "callback_error",
+        [
+            OperationalError("SELECT 1", {}, Exception("database unavailable")),
+            OSError("git spawn failed"),
+        ],
+    )
+    async def test_cleanup_failure_head_recovery_error_still_fails_replay(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        mirror_hooks: Any,
+        callback_error: Exception,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(
+            FakeAgentContainer(),
+            setup_error=ComposeExecCleanupError(
+                invocation_id="inv", source="validation", label="setup", message="stuck"
+            ),
+        )
+        mirror_hooks(validation.trace)
+
+        async def _recover_missing_head(_exc: ComposeExecCleanupError) -> bool:
+            raise callback_error
+
+        outcome = await _replay(
+            factory,
+            validation,
+            ws_id,
+            tmp_path,
+            before=_OLD,
+            after=_NEW,
+            recover_missing_head=_recover_missing_head,
+        )
+
+        assert not outcome.ok
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.failure_reason == FailureReason.infrastructure_failure
+        assert outcome.details is not None
+        assert outcome.details["cause_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert outcome.details["head_recovered"] is False
+        assert type(callback_error).__name__ in outcome.details["head_recovery_error"]
+
+    @pytest.mark.unit
     async def test_cleanup_failure_skips_head_recovery_when_hooks_repair_fails(
         self, factory: async_sessionmaker[AsyncSession], tmp_path: Path, mirror_hooks: Any
     ) -> None:

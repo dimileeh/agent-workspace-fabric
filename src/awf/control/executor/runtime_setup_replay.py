@@ -281,7 +281,19 @@ async def replay_setup_if_recreated(
             )
         details: dict[str, Any] = {**context, "cause_reason_code": exc.reason_code}
         if recover_missing_head is not None:
-            details["head_recovered"] = await recover_missing_head(exc)
+            try:
+                details["head_recovered"] = await recover_missing_head(exc)
+            except (SQLAlchemyError, OSError, RuntimeError, ValueError) as recovery_exc:
+                # A failing recovery callback must not replace the cleanup
+                # failure; report it alongside the original reason code.
+                details["head_recovered"] = False
+                details["head_recovery_error"] = redact_audit_text(repr(recovery_exc), limit=1900)
+                _log.warning(
+                    "executor.runtime_setup_replay_head_recovery_failed",
+                    workspace_id=workspace_id,
+                    cleanup_reason_code=exc.reason_code,
+                    error=details["head_recovery_error"],
+                )
         return _failed(
             details,
             workspace_id=workspace_id,
