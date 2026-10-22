@@ -9,6 +9,7 @@ with ``MONITOR_RUNTIME_RESTART_EXHAUSTED``. The workspace is never failed.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from awf.control.executor.constants import (
     MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_FAILURE_LIMIT,
     MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE,
+    MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
 )
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.control.worker import claims as worker_claims
@@ -637,3 +639,35 @@ async def test_next_usable_restart_persists_an_unrecorded_recovery(
     for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
         assert await restarted.resume_pr_monitor_handoff(ws_id) is None
     assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_streak_follows_event_order_not_a_skewed_clock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A ``recovered`` boundary appended after a failure closes it despite clock skew."""
+    ws_id = await _seed(factory, tmp_path)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        failed = await repo.add_event(
+            ws,
+            event_type=MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+            reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            payload={MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True},
+        )
+        recovered = await repo.add_event(
+            ws,
+            event_type=MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE,
+            payload={"previous_consecutive_failures": 1},
+        )
+        # The worker that wrote the boundary had a clock running behind.
+        recovered.occurred_at = failed.occurred_at - timedelta(minutes=5)
+        await session.commit()
+    assert recovered.event_order is not None
+    assert failed.event_order is not None
+    assert recovered.event_order > failed.event_order
+
+    assert await _streak(factory, ws_id) == 0

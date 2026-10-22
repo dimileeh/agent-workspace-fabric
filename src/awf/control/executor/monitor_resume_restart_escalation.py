@@ -79,8 +79,8 @@ async def consecutive_restart_failures(
         query = query.where(WorkspaceEvent.occurred_at > since)
     rows = await session.execute(
         query.order_by(
-            WorkspaceEvent.occurred_at.desc(),
             WorkspaceEvent.event_order.desc().nulls_last(),
+            WorkspaceEvent.occurred_at.desc(),
         ).limit(_STREAK_QUERY_LIMIT)
     )
     count = 0
