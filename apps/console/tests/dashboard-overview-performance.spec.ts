@@ -1975,10 +1975,15 @@ test("stalled retained history does not block first-page publication or the next
   await waitForConsoleReady(page);
   const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   await expect(loadMore).toBeVisible();
-  await loadMore.click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await loadMore.evaluate((button: HTMLButtonElement) => button.click());
   // Wait for the continuation request before asserting the loaded summary so
   // shared CI CPUs do not flake on paint alone after a heavy sibling file.
-  await expect.poll(() => overviewCursors).toEqual([null, String(PAGE_SIZE)]);
+  // Routine first-page polls may interleave; only one continuation is allowed.
+  await expect
+    .poll(() => overviewCursors.filter((cursor) => cursor !== null))
+    .toEqual([String(PAGE_SIZE)]);
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
   ).toBeVisible();
