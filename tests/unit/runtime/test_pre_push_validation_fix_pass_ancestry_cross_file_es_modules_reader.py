@@ -707,6 +707,10 @@ def test_references_are_not_bindings(text: str) -> None:
         "--(record satisfies Counter)!;",
         "for ((record as any) of [other]) {}",
         "for (record! in table) {}",
+        # A direct eval can assign any binding in scope (PRRT_kwDOSJAM6s6vUmEu).
+        'export let record = () => {};\neval("record = replacement");',
+        "function f(code) { eval(code); }",
+        "eval?.(code);",
     ],
 )
 def test_assignment_targets_reassign_the_name(text: str) -> None:
@@ -734,6 +738,7 @@ def test_assignment_targets_reassign_the_name(text: str) -> None:
         "const c = (record as Recorder)(1);",
         "other > record;\nif (a > record) {}\na;\nb > record;",
         "const d = record as Recorder",
+        "sandbox.eval('record = other');",
     ],
 )
 def test_references_are_not_assignments(text: str) -> None:

@@ -286,11 +286,15 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
     ``_es_rebound_names``: an inner variable of the same name that is assigned
     also counts, which only fails the callee closed. A declaration initializer
     (``const record = ...``) and a declaration pattern are not assignments.
+    A bare ``eval`` may be a direct eval, whose string can assign any binding
+    in scope (``eval("record = other")``), so it reports every name.
     """
     if not names:
         return frozenset()
     assigned: set[str] = set()
     for index, token in enumerate(tokens):
+        if _is(token, "ident", "eval") and not _is_reference_position(tokens, index):
+            return names
         if token.kind == "ident" and not _is_reference_position(tokens, index):
             start, end, split = _es_target_extent(tokens, index)
             before = _token_at(tokens, start - 1)
