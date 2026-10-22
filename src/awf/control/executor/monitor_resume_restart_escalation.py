@@ -12,7 +12,7 @@ redacted compose error. It is never failed. A usable restart writes a
 ``recovered`` boundary, and the ``exhausted`` event is a boundary too, so a
 guided resume starts a fresh streak. When the ``recovered`` write fails, the
 executor remembers the restart time, counts only later failures, and retries the
-write on the next usable restart.
+write before the next restart attempt, so a replacement executor sees the boundary.
 """
 
 from __future__ import annotations
@@ -151,6 +151,7 @@ async def pace_monitor_resume_restart(self: Any, *, workspace_id: str) -> None:
     The gap is measured from the failure event, so a worker restart in between
     neither resets nor repeats it. An unreadable event log never blocks a resume.
     """
+    await _persist_unrecorded_recovery(self, workspace_id=workspace_id)
     since = _unpersisted_recoveries(self).get(workspace_id)
     try:
         async with self._session_factory() as session:
@@ -174,6 +175,29 @@ async def pace_monitor_resume_restart(self: Any, *, workspace_id: str) -> None:
         remaining_seconds=round(remaining, 1),
     )
     await _sleep(remaining)
+
+
+async def _persist_unrecorded_recovery(self: Any, *, workspace_id: str) -> None:
+    """Retry a ``recovered`` write a usable restart could not store.
+
+    Runs before the next restart, so the boundary is durable before that
+    attempt's failure is recorded. A failure already stored after the restart
+    would sort before a boundary written now, so memory keeps counting then.
+    """
+    recoveries = _unpersisted_recoveries(self)
+    since = recoveries.get(workspace_id)
+    if since is None:
+        return
+    try:
+        async with self._session_factory() as session:
+            if await consecutive_restart_failures(session, workspace_id, since):
+                return
+    except SQLAlchemyError:
+        _log.exception("executor.resume_restart_recovery_retry_failed", workspace_id=workspace_id)
+        return
+    await reset_monitor_resume_restart_streak(self, workspace_id=workspace_id)
+    if workspace_id in recoveries:
+        recoveries[workspace_id] = since
 
 
 async def _parked_streak_open(session: AsyncSession, workspace_id: str) -> bool:
