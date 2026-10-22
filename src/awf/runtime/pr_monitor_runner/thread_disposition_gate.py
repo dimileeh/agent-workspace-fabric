@@ -33,6 +33,7 @@ from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
     _disposition_unverified_key,
+    _item_disposition_key,
 )
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
@@ -156,18 +157,25 @@ async def review_thread_disposition_gate(
         counts[disposition_class] += 1
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
     if baseline_record is None:
+        # A thread this monitor recorded a disposition for was handled after
+        # the rollout, so its unmarked resolution is no legacy: it still blocks.
+        legacy = [
+            tid
+            for tid in unverified
+            if _item_disposition_key(tid) not in state.threads_addressed_ids
+        ]
         await _record_legacy_baseline(
             self,
             workspace_id=workspace_id,
             pr_number=pr_number,
             state=state,
-            thread_ids=unverified,
+            thread_ids=legacy,
             base_branch=base_branch,
             remote_branch=remote_branch,
             monitor_log=monitor_log,
         )
-        counts[LEGACY_BASELINE] += len(unverified)
-        unverified = []
+        counts[LEGACY_BASELINE] += len(legacy)
+        unverified = [tid for tid in unverified if tid not in legacy]
     if not unverified:
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
     newly_flagged = [
@@ -228,9 +236,10 @@ async def _record_legacy_baseline(
 ) -> None:
     """First gate run of the workspace: baseline its unmarked AWF resolutions.
 
-    Those predate reply-before-resolve (the #1018 rollout), so they are recorded
-    — in state and, with their ids, in one audit event — and never block. The
-    record also closes the first run: every later unmarked resolution blocks.
+    Those the monitor holds no disposition record for predate reply-before-
+    resolve (the #1018 rollout), so they are recorded — in state and, with their
+    ids, in one audit event — and never block. The record also closes the first
+    run: every later unmarked resolution blocks.
     """
     state.mark_addressed(
         _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, json.dumps(sorted(thread_ids))

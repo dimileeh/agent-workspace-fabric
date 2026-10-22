@@ -36,6 +36,10 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    ThreadDisposition,
+    record_item_disposition,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
 )
@@ -317,3 +321,28 @@ def test_settled_baseline_never_replaces_an_existing_record() -> None:
     existing = {_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY: record, "PRRT_test_x": "fixed"}
 
     assert _with_settled_disposition_baseline(existing) == existing
+
+
+async def test_first_gate_run_never_grandfathers_a_thread_this_monitor_dispositioned(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A reused / adopted PR keeps the one-time baseline, but a thread this
+    # monitor already recorded a disposition for was handled after the rollout:
+    # its unmarked resolution is not legacy and blocks on the very first audit.
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LEGACY), _thread(_LATER)))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    record_item_disposition(
+        state, ThreadDisposition(item_id=_LATER, disposition_class="fixed", verdict="fixed")
+    )
+
+    result = await _gate(runner, workspace_id, state)
+
+    assert result.blocker is not None
+    assert _LATER in result.blocker and _LEGACY not in result.blocker
+    assert json.loads(
+        state.threads_addressed_ids[_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY]
+    ) == [_LEGACY]
+    events = await _baseline_events(factory, workspace_id)
+    assert [event["evidence"]["thread_ids"] for event in events] == [[_LEGACY]]

@@ -463,7 +463,9 @@ reply-before-resolve — in state and in one audit event with their ids
 the certificate lists their count separately; every unmarked resolution after
 that first run still blocks. A PR AWF opens itself (a feature PR, or a release
 PR it creates) has no pre-rollout history, so its handoff settles the baseline
-empty: no first-run exemption, and every unmarked resolution blocks.
+empty: no first-run exemption, and every unmarked resolution blocks. On a
+reused or adopted PR, a thread the monitor already recorded a disposition for
+was handled after the rollout, so the first run never baselines it either.
 
 An operator acknowledges flagged threads with the ordinary guide path and an
 explicit token per thread (`awf workspace guide <id> --directive 'ACK-THREAD
