@@ -148,7 +148,9 @@ def runtime_recreation_decision(
     if before is None:
         return RecreationVerdict(RecreationDecision.recreated, "agent_container_created")
     if before is IDENTITY_UNAVAILABLE:
-        return RecreationVerdict(RecreationDecision.recreated, "previous_identity_unavailable")
+        # ``after`` may still be the unchanged, initially provisioned container,
+        # which has no replay event to dedupe against: let the env probe decide.
+        return RecreationVerdict(RecreationDecision.unknown, "previous_identity_unavailable")
     if before == after:
         return RecreationVerdict(RecreationDecision.unchanged, "identity_unchanged")
     return RecreationVerdict(RecreationDecision.recreated, "identity_changed")
@@ -173,6 +175,16 @@ async def replay_setup_if_recreated(
     verdict = runtime_recreation_decision(before, after)
     if verdict.decision is RecreationDecision.unchanged:
         return SetupReplayOutcome(ok=True, replayed=False)
+    if isinstance(after, AgentContainerIdentity) and await _replay_already_recorded(
+        session_factory, workspace_id=workspace_id, identity=after
+    ):
+        _log.info(
+            "executor.runtime_setup_replay_already_done",
+            workspace_id=workspace_id,
+            trigger=trigger,
+            container_id=after.container_id,
+        )
+        return SetupReplayOutcome(ok=True, replayed=False)
     if verdict.decision is RecreationDecision.unknown:
         phase_names = await _blocked_resume_setup_phase_names(
             self,
@@ -185,16 +197,6 @@ async def replay_setup_if_recreated(
         )
         if "setup" not in phase_names:
             return SetupReplayOutcome(ok=True, replayed=False)
-    elif isinstance(after, AgentContainerIdentity) and await _replay_already_recorded(
-        session_factory, workspace_id=workspace_id, identity=after
-    ):
-        _log.info(
-            "executor.runtime_setup_replay_already_done",
-            workspace_id=workspace_id,
-            trigger=trigger,
-            container_id=after.container_id,
-        )
-        return SetupReplayOutcome(ok=True, replayed=False)
 
     context: dict[str, Any] = {"trigger": trigger, "basis": verdict.basis}
     _log.info(

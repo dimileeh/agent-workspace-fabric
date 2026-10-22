@@ -122,7 +122,7 @@ class TestRuntimeRecreationDecision:
             (
                 IDENTITY_UNAVAILABLE,
                 _NEW,
-                RecreationDecision.recreated,
+                RecreationDecision.unknown,
                 "previous_identity_unavailable",
             ),
             (_OLD, _OLD, RecreationDecision.unchanged, "identity_unchanged"),
@@ -273,6 +273,7 @@ class TestReplaySetupIfRecreated:
 
         assert first.replayed and second.ok and not second.replayed
         assert validation.setup_runs() == 1
+        assert validation.probe_calls == 0
         assert len(await _replay_events(factory, ws_id)) == 1
 
     @pytest.mark.unit
@@ -323,6 +324,47 @@ class TestReplaySetupIfRecreated:
         assert events[0].payload is not None
         assert events[0].payload["basis"] == "identity_unavailable"
         assert events[0].payload["container_id"] is None
+
+    @pytest.mark.unit
+    async def test_unknown_previous_identity_with_healthy_env_does_not_replay(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        # Only the pre-up read failed: the post-up identity may be the same,
+        # initially provisioned container, which has no replay event to dedupe on.
+        ws_id = await _seed_monitoring_pr(factory)
+        container = FakeAgentContainer()
+        container.tmp.add(TOOL_PATH)
+        validation = FakeToolValidation(container)
+
+        outcome = await _replay(
+            factory, validation, ws_id, tmp_path, before=IDENTITY_UNAVAILABLE, after=_OLD
+        )
+
+        assert outcome.ok and not outcome.replayed
+        assert validation.probe_calls == 1
+        assert validation.phase_calls == []
+        assert await _replay_events(factory, ws_id) == []
+
+    @pytest.mark.unit
+    async def test_unknown_previous_identity_with_missing_tool_replays(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(FakeAgentContainer())
+
+        outcome = await _replay(
+            factory, validation, ws_id, tmp_path, before=IDENTITY_UNAVAILABLE, after=_NEW
+        )
+
+        assert outcome.ok and outcome.replayed
+        assert validation.probe_calls == 1
+        assert validation.phase_calls == [("setup", "pre_agent")]
+        events = await _replay_events(factory, ws_id)
+        assert len(events) == 1
+        assert events[0].payload is not None
+        assert events[0].payload["basis"] == "previous_identity_unavailable"
+        assert events[0].payload["container_id"] == "c-new"
+        assert events[0].payload["previous_container_id"] is None
 
     @pytest.mark.unit
     async def test_failed_setup_surfaces_reason_code_and_redacted_output(
