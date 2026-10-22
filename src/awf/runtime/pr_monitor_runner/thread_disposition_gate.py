@@ -21,6 +21,7 @@ identity for an AWF disposition marker in a comment that identity authored.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any
@@ -30,6 +31,7 @@ from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
+    _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
     _disposition_unverified_key,
 )
 from awf.runtime.pr_monitor import MonitorState
@@ -37,8 +39,10 @@ from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EV
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.thread_disposition import (
+    LEGACY_BASELINE,
     RESOLVED_BY_OTHERS,
     REVIEW_THREAD_AUDIT_UNAVAILABLE,
+    REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE,
     REVIEW_THREAD_DISPOSITION_UNVERIFIED,
     THREAD_DISPOSITION_REPLY_FAILED,
     DispositionClass,
@@ -126,6 +130,8 @@ async def review_thread_disposition_gate(
             summary=missing_login,
             detail=missing_login,
         )
+    baseline_record = state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY)
+    legacy_baseline = _decode_baseline(baseline_record)
     counts: Counter[str] = Counter()
     unverified: list[str] = []
     for thread in audit.threads:
@@ -141,11 +147,27 @@ async def review_thread_disposition_gate(
             disposition_class = await _post_operator_acknowledgement(
                 self, state=state, thread_id=thread.thread_id, workspace_id=workspace_id
             )
+        if disposition_class is None and thread.thread_id in legacy_baseline:
+            counts[LEGACY_BASELINE] += 1  # resolved before AWF replied before resolving
+            continue
         if disposition_class is None:
             unverified.append(thread.thread_id)
             continue
         counts[disposition_class] += 1
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
+    if baseline_record is None:
+        await _record_legacy_baseline(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            state=state,
+            thread_ids=unverified,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+        )
+        counts[LEGACY_BASELINE] += len(unverified)
+        unverified = []
     if not unverified:
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
     newly_flagged = [
@@ -180,6 +202,63 @@ async def review_thread_disposition_gate(
             evidence={"thread_ids": unverified, "disposition_counts": dict(counts)},
         )
     return DispositionGateResult(blocker=unverified_blocker_message(unverified))
+
+
+def _decode_baseline(record: str | None) -> frozenset[str]:
+    """The legacy-baseline thread ids; anything malformed is an empty baseline."""
+    try:
+        thread_ids = json.loads(record or "[]")
+    except ValueError:
+        return frozenset()
+    if not isinstance(thread_ids, list):
+        return frozenset()
+    return frozenset(tid for tid in thread_ids if isinstance(tid, str))
+
+
+async def _record_legacy_baseline(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    state: MonitorState,
+    thread_ids: list[str],
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+) -> None:
+    """First gate run of the workspace: baseline its unmarked AWF resolutions.
+
+    Those predate reply-before-resolve (the #1018 rollout), so they are recorded
+    — in state and, with their ids, in one audit event — and never block. The
+    record also closes the first run: every later unmarked resolution blocks.
+    """
+    state.mark_addressed(
+        _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, json.dumps(sorted(thread_ids))
+    )
+    for thread_id in thread_ids:
+        state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
+    if not thread_ids:
+        return
+    _log.info(
+        "monitor.review_thread_disposition_legacy_baseline",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        thread_ids=thread_ids,
+        reason_code=REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE,
+    )
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+        action=_AUDIT_ACTION,
+        outcome="legacy_baseline",
+        reason_code=REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE,
+        pr_number=pr_number,
+        status=None,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+        evidence={"thread_ids": sorted(thread_ids)},
+    )
 
 
 async def review_thread_audit_fault(

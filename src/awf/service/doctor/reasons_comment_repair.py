@@ -125,6 +125,25 @@ def get_comment_repair_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("REVIEW_THREAD_AUDIT_UNAVAILABLE"),
         ),
+        "REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE": reason_text_cls(
+            (
+                "AWF's first disposition audit on this workspace found review threads resolved by "
+                "its identity without an AWF disposition reply and recorded them as a legacy "
+                "baseline."
+            ),
+            (
+                "No action is required to merge: baseline threads do not block and the "
+                "READY_TO_MERGE certificate counts them separately. Inspect the thread ids in the "
+                "audit event if any of them should be reopened."
+            ),
+            (
+                "Those threads were resolved before AWF replied in every thread before resolving "
+                "it (the #1018 rollout). Only the workspace's first audit records a baseline; any "
+                "later unmarked resolution blocks as REVIEW_THREAD_DISPOSITION_UNVERIFIED."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE"),
+        ),
         "REVIEW_THREAD_DISPOSITION_UNVERIFIED": reason_text_cls(
             (
                 "AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's "

@@ -54,6 +54,22 @@ def test_ready_to_merge_renders_disposition_counts_on_line_one() -> None:
     assert "2. Outside-diff comments addressed." in body
 
 
+def test_ready_to_merge_lists_the_legacy_baseline_apart_from_awf_dispositions() -> None:
+    body = ready_to_merge_comment(
+        pr_number=1,
+        head_sha="a" * 40,
+        disposition_count_rows=(
+            ("fixed", 2),
+            ("resolved by others", 3),
+            ("legacy baseline (resolved before AWF dispositions)", 4),
+        ),
+    )
+    assert (
+        "1. Inline comments resolved — AWF dispositions: fixed 2; resolved by others 3; "
+        "legacy baseline (resolved before AWF dispositions) 4.\n"
+    ) in body
+
+
 @pytest.mark.parametrize("rows", [None, ()])
 def test_ready_to_merge_without_counts_is_unchanged(
     rows: tuple[tuple[str, int], ...] | None,

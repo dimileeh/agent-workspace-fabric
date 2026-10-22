@@ -858,6 +858,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#review_thread_audit_unavailable](#review_thread_audit_unavailable)
 
+### REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE
+**Problem:** AWF's first disposition audit on this workspace found review threads resolved by its identity without an AWF disposition reply and recorded them as a legacy baseline.
+**Likely Cause:** Those threads were resolved before AWF replied in every thread before resolving it (the #1018 rollout). Only the workspace's first audit records a baseline; any later unmarked resolution blocks as REVIEW_THREAD_DISPOSITION_UNVERIFIED.
+**Operator Fix:** No action is required to merge: baseline threads do not block and the READY_TO_MERGE certificate counts them separately. Inspect the thread ids in the audit event if any of them should be reopened.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_legacy_baseline](#review_thread_disposition_legacy_baseline)
+
 ### REVIEW_THREAD_DISPOSITION_UNVERIFIED
 **Problem:** AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's identity carry no AWF disposition reply.
 **Likely Cause:** A thread resolved by AWF's own forge identity has no in-thread `AWF:thread-disposition` marker — it was resolved silently (for example before AWF replied before every resolve, or by hand under the same account). Threads resolved by other logins do not block.

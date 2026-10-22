@@ -57,6 +57,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
+from tests.unit.runtime._thread_disposition_fixtures import settled_baseline_state
 
 pytestmark = pytest.mark.unit
 
@@ -279,7 +280,7 @@ async def test_cert_refused_when_awf_resolved_thread_lacks_marker_across_paginat
     cmd.respond_when(lambda a: a[:3] == ["gh", "pr", "comment"])
     gh = _RealAudit(cmd)
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     terminal = await _execute(runner, workspace_id, NotifyHuman(), state)
 
@@ -325,7 +326,7 @@ async def test_cert_posts_per_class_counts_when_all_markers_present(
     gh = _AuditForge(FakeCommandRunner(), audit=audit)
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
 
-    terminal = await _execute(runner, workspace_id, NotifyHuman(), MonitorState())
+    terminal = await _execute(runner, workspace_id, NotifyHuman(), settled_baseline_state())
 
     assert terminal is False
     assert len(gh.comments) == 1
@@ -353,7 +354,7 @@ async def test_cert_reposts_at_same_head_when_audited_counts_change(
     )
     gh = _AuditForge(FakeCommandRunner(), audit=audit)
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     await _execute(runner, workspace_id, NotifyHuman(), state)
     await _execute(runner, workspace_id, NotifyHuman(), state)
@@ -397,7 +398,7 @@ async def test_gate_identity_edges(
     )
     gh = _AuditForge(FakeCommandRunner(), audit=audit)
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     result = await _gate(runner, workspace_id, state)
 
@@ -423,7 +424,7 @@ async def test_gate_missing_viewer_login_fails_closed(
     )
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
 
-    result = await _gate(runner, workspace_id, MonitorState())
+    result = await _gate(runner, workspace_id, settled_baseline_state())
 
     assert result.blocker is not None
     assert result.blocker.startswith("REVIEW_THREAD_AUDIT_UNAVAILABLE:")
@@ -442,7 +443,7 @@ async def test_gate_records_one_audit_event_per_newly_flagged_set(
         audit=ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(_thread(_SILENT),)),
     )
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     first = await _gate(runner, workspace_id, state)
     second = await _gate(runner, workspace_id, state)
@@ -474,7 +475,7 @@ async def test_feature_monitor_merge_refused_by_gate(
     )
 
     terminal, state, _, workspace_id = await _execute_merge(
-        factory=factory, tmp_path=tmp_path, gh=gh
+        factory=factory, tmp_path=tmp_path, gh=gh, state=settled_baseline_state()
     )
 
     assert terminal is False
@@ -514,7 +515,7 @@ async def test_gate_transient_audit_fault_waits_and_does_not_notify(
         error=GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502"),
     )
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     terminal = await _execute(runner, workspace_id, NotifyHuman(), state)
 
@@ -538,7 +539,7 @@ async def test_gate_permanent_audit_fault_notifies_unavailable(
     )
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
 
-    terminal = await _execute(runner, workspace_id, NotifyHuman(), MonitorState())
+    terminal = await _execute(runner, workspace_id, NotifyHuman(), settled_baseline_state())
 
     assert terminal is False
     assert len(gh.comments) == 1
@@ -555,7 +556,7 @@ async def test_gate_bitbucket_unsupported_keeps_cert_text(
     gh = _AuditForge(FakeCommandRunner(), audit=ReviewThreadAudit(supported=False))
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
 
-    terminal = await _execute(runner, workspace_id, NotifyHuman(), MonitorState())
+    terminal = await _execute(runner, workspace_id, NotifyHuman(), settled_baseline_state())
 
     assert terminal is False
     assert len(gh.comments) == 1
@@ -576,7 +577,7 @@ async def test_audit_outage_after_ready_cert_at_head_is_log_only(
     """
     gh = _AuditForge(FakeCommandRunner())
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
     await _execute(runner, workspace_id, NotifyHuman(), state)
     assert len(gh.comments) == 1 and "is ready to merge" in gh.comments[0]
     attention = await _attention(factory, workspace_id)
@@ -612,7 +613,7 @@ async def test_audit_unavailable_notifies_once_across_polls_with_varying_errors(
         ),
     )
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     await _execute(runner, workspace_id, NotifyHuman(), state)
     gh.error = GitHubClientError(
@@ -720,7 +721,7 @@ async def _merge_under_lock_log(
         gh=gh,
         merge_coordinator=lock,
     )
-    state = MonitorState()
+    state = settled_baseline_state()
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,

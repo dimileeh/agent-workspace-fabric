@@ -52,6 +52,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
+from tests.unit.runtime._thread_disposition_fixtures import settled_baseline_state
 
 pytestmark = pytest.mark.unit
 
@@ -204,7 +205,7 @@ async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
 ) -> None:
     gh = _SilentAuditForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     blocked = await _gate(runner, workspace_id, state)
     assert blocked.blocker is not None and _SILENT in blocked.blocker
@@ -244,7 +245,7 @@ async def test_deleted_acknowledgement_reply_blocks_until_re_acknowledged(
 ) -> None:
     gh = _SilentAuditForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
     await _gate(runner, workspace_id, state)
     await _consume_guide(runner, workspace_id, state, monkeypatch)
     assert (await _gate(runner, workspace_id, state)).blocker is None
@@ -277,7 +278,7 @@ async def test_acknowledgement_reply_failure_keeps_the_thread_blocked(
         reply_error=GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502"),
     )
     workspace_id, runner = await _runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
     await _gate(runner, workspace_id, state)
     await _consume_guide(runner, workspace_id, state, monkeypatch)
 
@@ -298,7 +299,7 @@ async def test_guide_naming_unflagged_thread_records_nothing(
 ) -> None:
     gh = _SilentAuditForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
 
     await _consume_guide(runner, workspace_id, state, monkeypatch)
     assert read_item_disposition(state, _SILENT) is None
@@ -327,7 +328,7 @@ async def test_guide_mentioning_flagged_thread_without_ack_token_records_nothing
 ) -> None:
     gh = _SilentAuditForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
-    state = MonitorState()
+    state = settled_baseline_state()
     assert (await _gate(runner, workspace_id, state)).blocker is not None
 
     await _consume_guide(runner, workspace_id, state, monkeypatch, directive=directive)

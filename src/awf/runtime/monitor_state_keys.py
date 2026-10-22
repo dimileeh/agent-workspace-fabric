@@ -165,3 +165,10 @@ def _disposition_unverified_key(thread_id: str) -> str:
 # ``REVIEW_THREAD_AUDIT_UNAVAILABLE`` audit event once per outage, not once per
 # poll, and clears the key on the next successful audit.
 _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY = "__awf_review_thread_audit_unavailable__"
+
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON list of
+# review threads the workspace's FIRST disposition-gate run found resolved by
+# AWF's identity without a marker (#1018 rollout). Those predate reply-before-
+# resolve: they are counted as a legacy baseline and never block. Its presence
+# also marks the first run as done, so every later unmarked resolution blocks.
+_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY = "__awf_review_thread_disposition_baseline__"

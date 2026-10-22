@@ -195,6 +195,7 @@ async def _execute_merge(
     gh: _MergeMethodClient,
     base_branch: str = _TEST_DEFAULT_BASE_BRANCH,
     delete_source_branch_on_merge: bool = True,
+    state: MonitorState | None = None,
 ) -> tuple[bool | None, MonitorState, RecordedSleep, str]:
     """Seed a monitored workspace and execute one merge action."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -213,7 +214,7 @@ async def _execute_merge(
         gh=gh,
         delete_source_branch_on_merge=delete_source_branch_on_merge,
     )
-    state = MonitorState()
+    state = state if state is not None else MonitorState()
 
     terminal = await runner._execute(
         action=Merge(),

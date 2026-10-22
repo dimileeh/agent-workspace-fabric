@@ -456,6 +456,13 @@ Once READY_TO_MERGE has been posted for a head, an outage on a later poll at
 that same head is log-only: the cert stands and the monitor waits and re-polls. The certificate's first gate line shows
 counts per disposition class and "resolved by others".
 
+Rollout: a workspace's first gate run records the threads it finds resolved
+by AWF's identity without a marker as a legacy baseline — they predate
+reply-before-resolve — in state and in one audit event with their ids
+(`REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE`). Baseline threads never block and
+the certificate lists their count separately; every unmarked resolution after
+that first run still blocks.
+
 An operator acknowledges flagged threads with the ordinary guide path and an
 explicit token per thread (`awf workspace guide <id> --directive 'ACK-THREAD
 <thread id> …'`); a directive that merely mentions a thread id acknowledges

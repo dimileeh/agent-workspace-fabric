@@ -29,7 +29,11 @@ from dataclasses import dataclass, replace
 from typing import Literal, cast, get_args
 
 from awf.common.redaction import redact_secrets
-from awf.runtime.monitor_prompts import _redact_and_escape_markdown_inline
+from awf.runtime.monitor_prompts import (
+    LEGACY_BASELINE_LABEL,
+    RESOLVED_BY_OTHERS_LABEL,
+    _redact_and_escape_markdown_inline,
+)
 from awf.runtime.monitor_state_keys import _disposition_unverified_key, _item_disposition_key
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
@@ -52,6 +56,8 @@ THREAD_DISPOSITION_REPLY_FAILED = "THREAD_DISPOSITION_REPLY_FAILED"
 REVIEW_THREAD_DISPOSITION_UNVERIFIED = "REVIEW_THREAD_DISPOSITION_UNVERIFIED"
 # The forge could not enumerate the PR's review threads for that verification.
 REVIEW_THREAD_AUDIT_UNAVAILABLE = "REVIEW_THREAD_AUDIT_UNAVAILABLE"
+# Rollout: the first gate run recorded unmarked AWF resolutions as a legacy baseline.
+REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE = "REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE"
 
 DispositionClass = Literal[
     "fixed",
@@ -62,6 +68,7 @@ DispositionClass = Literal[
 ]
 DISPOSITION_CLASSES: tuple[DispositionClass, ...] = get_args(DispositionClass)
 RESOLVED_BY_OTHERS = "resolved_by_others"
+LEGACY_BASELINE = "legacy_baseline"
 
 _VERDICT_CLASS: dict[str, DispositionClass] = {
     "fix_committed": "fixed",
@@ -78,7 +85,8 @@ _LABELS: dict[str, str] = {
     "false_positive": "false positive",
     "deferred": "deferred",
     "operator_acknowledged": "operator acknowledged",
-    RESOLVED_BY_OTHERS: "resolved by others",
+    RESOLVED_BY_OTHERS: RESOLVED_BY_OTHERS_LABEL,
+    LEGACY_BASELINE: LEGACY_BASELINE_LABEL,
 }
 # An operator acknowledges a flagged thread only with this explicit token; a
 # directive that merely mentions the thread id (to re-check it, say) does not.
@@ -360,11 +368,14 @@ def disposition_marker_class(bodies: Sequence[str], *, thread_id: str) -> Dispos
 
 
 def disposition_count_rows(counts: Mapping[str, int]) -> tuple[tuple[str, int], ...]:
-    """Cert line-1 rows: every disposition class in order, then others' resolutions."""
-    return tuple(
-        (_LABELS[key], int(counts.get(key, 0)))
-        for key in (*DISPOSITION_CLASSES, RESOLVED_BY_OTHERS)
-    )
+    """Cert line-1 rows: every disposition class in order, then others' resolutions.
+
+    The rollout's legacy baseline follows as its own row whenever it is non-zero.
+    """
+    keys = (*DISPOSITION_CLASSES, RESOLVED_BY_OTHERS)
+    if counts.get(LEGACY_BASELINE):
+        keys = (*keys, LEGACY_BASELINE)
+    return tuple((_LABELS[key], int(counts.get(key, 0))) for key in keys)
 
 
 def acknowledged_thread_ids(directive: str) -> tuple[str, ...]:

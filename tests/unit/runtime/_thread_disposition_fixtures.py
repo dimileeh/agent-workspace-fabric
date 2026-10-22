@@ -1,6 +1,7 @@
 """Shared helpers for review-thread disposition tests (#1018).
 
-``seed_resolvable_disposition`` builds the complete disposition record a
+``settled_baseline_state`` starts a gate test after the rollout's first-run
+legacy baseline. ``seed_resolvable_disposition`` builds the complete disposition record a
 resolvable verdict needs before AWF may reply and resolve; legacy runner tests
 whose fake ``_address_thread`` returns a bare verdict use it to state that
 contract explicitly. ``OrderedForge`` records replies and resolves in one call
@@ -13,6 +14,7 @@ from typing import Any
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge_errors import ForgeClientError
+from awf.runtime.monitor_state_keys import _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
@@ -23,6 +25,18 @@ from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 _DEFAULT_COMMIT = "c" * 40
 _DEFAULT_ISSUE = "https://github.com/acme/widgets/issues/7"
 _DEFAULT_REASON = "the reviewed code already handles this case"
+
+
+def settled_baseline_state() -> MonitorState:
+    """A monitor state whose first disposition-gate run already happened (#1018).
+
+    That first run baselines unmarked AWF resolutions as legacy and never blocks
+    on them; suites testing the steady-state gate start after it, where every
+    unmarked AWF resolution blocks.
+    """
+    state = MonitorState()
+    state.mark_addressed(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, "[]")
+    return state
 
 
 def seed_resolvable_disposition(

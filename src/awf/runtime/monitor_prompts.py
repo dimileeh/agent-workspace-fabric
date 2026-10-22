@@ -504,6 +504,12 @@ def _workspace_runtime_context_section(workspace_runtime_context: str) -> str:
     return f"\n\n{section}"
 
 
+# Cert line-1 rows that are not AWF dispositions (#1018), listed after them.
+RESOLVED_BY_OTHERS_LABEL = "resolved by others"
+LEGACY_BASELINE_LABEL = "legacy baseline (resolved before AWF dispositions)"
+_NON_AWF_DISPOSITION_LABELS = frozenset({RESOLVED_BY_OTHERS_LABEL, LEGACY_BASELINE_LABEL})
+
+
 def ready_to_merge_comment(
     *,
     pr_number: int,
@@ -521,9 +527,10 @@ def ready_to_merge_comment(
     gates are green.
 
     ``disposition_count_rows`` (label, count) — every AWF disposition class,
-    then "resolved by others" last — comes from the exhaustive review-thread
-    audit (#1018), so "inline comments resolved" says how, not just that the
-    unresolved count is zero. ``None`` (no audit for this forge) keeps line 1.
+    then "resolved by others" and, when non-zero, the rollout's legacy baseline,
+    each listed apart — comes from the exhaustive review-thread audit (#1018),
+    so "inline comments resolved" says how, not just that the unresolved count
+    is zero. ``None`` (no audit for this forge) keeps line 1.
     """
     if blocker_reason:
         reason = redact_secrets(blocker_reason)
@@ -542,10 +549,13 @@ def ready_to_merge_comment(
     inline_gate = "1. Inline comments resolved."
     if disposition_count_rows:
         rows = tuple(disposition_count_rows)
-        head = ", ".join(f"{label} {count}" for label, count in rows[:-1])
-        inline_gate = (
-            f"1. Inline comments resolved — AWF dispositions: {head}; {rows[-1][0]} {rows[-1][1]}."
+        head = ", ".join(
+            f"{label} {count}" for label, count in rows if label not in _NON_AWF_DISPOSITION_LABELS
         )
+        tail = "".join(
+            f"; {label} {count}" for label, count in rows if label in _NON_AWF_DISPOSITION_LABELS
+        )
+        inline_gate = f"1. Inline comments resolved — AWF dispositions: {head}{tail}."
     return (
         f"✅ PR #{pr_number} is ready to merge at commit `{head_sha[:10]}`.\n\n"
         "All 5 AWF gates are green:\n"
