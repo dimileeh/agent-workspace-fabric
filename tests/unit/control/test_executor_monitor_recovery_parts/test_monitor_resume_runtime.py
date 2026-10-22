@@ -635,6 +635,91 @@ async def test_unusable_runtime_after_dependency_up_failure_skips_the_agent_recr
     assert len(compose.calls) == 1
 
 
+def _failing_dependency_start(compose: _RecordingCompose, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _ensure(**kwargs: Any) -> None:
+        compose.calls.append(kwargs)
+        if kwargs.get("no_deps") and not kwargs.get("force_recreate"):
+            raise ComposeOperationError(
+                operation="up", returncode=1, stdout="", stderr="postgres failed to start"
+            )
+
+    monkeypatch.setattr(compose, "ensure_project_up", _ensure)
+
+
+@pytest.mark.unit
+async def test_usable_runtime_after_dependency_start_failure_still_recreates_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed start of a stopped dependency never leaves the stale agent running."""
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(_running(_service("postgres", state="exited"), _service("agent"))),
+    )
+    compose = _RecordingCompose()
+    _failing_dependency_start(compose, monkeypatch)
+    judged: list[int] = []
+
+    async def _usable() -> bool:
+        judged.append(len(compose.calls))
+        return True
+
+    tolerated = await _restart(
+        compose, tmp_path, dependency_services=("agent", "postgres"), runtime_usable=_usable
+    )
+
+    assert tolerated is not None
+    assert tolerated.stderr == "postgres failed to start"
+    assert judged == [1]
+    assert compose.calls[0]["services"] == ("postgres",)
+    assert compose.calls[-1]["force_recreate"] is True
+    assert compose.calls[-1]["services"] == ("agent",)
+
+
+@pytest.mark.unit
+async def test_unusable_runtime_after_dependency_start_failure_skips_the_agent_recreate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(_running(_service("postgres", state="exited"), _service("agent"))),
+    )
+    compose = _RecordingCompose()
+    _failing_dependency_start(compose, monkeypatch)
+
+    async def _unusable() -> bool:
+        return False
+
+    with pytest.raises(ComposeOperationError, match="postgres failed to start"):
+        await _restart(
+            compose, tmp_path, dependency_services=("agent", "postgres"), runtime_usable=_unusable
+        )
+
+    assert len(compose.calls) == 1
+
+
+@pytest.mark.unit
+async def test_dependency_wait_timeout_is_never_tolerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timeout feeds the restart streak's unsettled-dependency escalation."""
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(_running(_service("postgres", health="starting"), _service("agent"))),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+
+    async def _never_judged() -> bool:
+        raise AssertionError("a dependency wait timeout is never judged for tolerance")
+
+    with pytest.raises(monitor_resume_runtime.DependencyWaitTimeoutError):
+        await _restart(compose, tmp_path, budget=5, runtime_usable=_never_judged)
+
+    assert compose.calls == []
+
+
 @pytest.mark.unit
 async def test_clean_restart_tolerates_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

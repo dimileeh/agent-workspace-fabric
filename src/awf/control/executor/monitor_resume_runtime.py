@@ -236,7 +236,7 @@ async def restart_runtime_for_monitor_resume(
     rewritten in compose.yml or backed by a set env secret, or still unsettled
     when the last attempt gave up);
     every other dependency is never recreated.
-    When the dependency up fails, ``runtime_usable`` decides whether the agent is
+    When a dependency start or up fails, ``runtime_usable`` decides whether the agent is
     still recreated (auth overlays, env and #1090's setup replay depend on it);
     the tolerated failure is returned so the caller can record it. A failed
     agent recreate raises ``AgentRecreateError`` and is never tolerated.
@@ -265,16 +265,16 @@ async def restart_runtime_for_monitor_resume(
                 services=(service,),
             )
 
-    await wait_for_recovering_dependencies(
-        compose_project,
-        workspace_id=workspace_id,
-        budget_seconds=budget_seconds,
-        start_stopped=_start_stopped,
-        declared_services=dependency_services,
-        recreate_services=recreate_services,
-    )
     tolerated: ComposeOperationError | None = None
     try:
+        await wait_for_recovering_dependencies(
+            compose_project,
+            workspace_id=workspace_id,
+            budget_seconds=budget_seconds,
+            start_stopped=_start_stopped,
+            declared_services=dependency_services,
+            recreate_services=recreate_services,
+        )
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
         else:
@@ -285,6 +285,9 @@ async def restart_runtime_for_monitor_resume(
             )
             if dependencies:
                 await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
+    except DependencyWaitTimeoutError:
+        # Never tolerated: the restart streak escalates its unsettled dependencies.
+        raise
     except ComposeOperationError as exc:
         if runtime_usable is None or not await runtime_usable():
             raise
