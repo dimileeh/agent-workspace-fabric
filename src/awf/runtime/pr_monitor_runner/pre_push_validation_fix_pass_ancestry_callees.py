@@ -112,10 +112,14 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
 # still record a definition span (body-only repairs stay FIXED-with-evidence).
 # Optional ``export`` before the declaration keyword so a directly exported
 # ``export const helper = () =>`` is a head too (PRRT_kwDOSJAM6s6vLkoD).
+# Optional TS generic type parameters (one nesting level) before the arrow
+# params so ``const helper = <T>(value: T) =>`` / ``async <T,>(...)`` are heads
+# too (PRRT_kwDOSJAM6s6vL9AV).
 _TS_ARROW_RETURN_TYPE = r"(?::(?![ \t]*=>)[^;=\n]*?)?"
+_TS_ARROW_TYPE_PARAMS = r"(?:<[^<>;\n]*(?:<[^<>;\n]*>[^<>;\n]*)*>[ \t]*)?"
 _ASSIGNMENT_DEFINITION_HEAD = (
     rf"(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
-    rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
+    rf"[ \t]*(?:async[ \t]+)?{_TS_ARROW_TYPE_PARAMS}(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
 # A plain assignment binding simple targets: ``validate = replacement``,

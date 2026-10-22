@@ -184,6 +184,12 @@ async def test_a_fix_in_the_bound_module_is_evidence(import_line: str, call: str
         "export const record = (value: number) => {\n  return value + 1;\n};\n",
         "export const record = async (value: number) => {\n  return value + 1;\n};\n",
         "export let record = function (value: number) {\n  return value + 1;\n};\n",
+        # A generic type-parameter list may precede the arrow parameters
+        # (PRRT_kwDOSJAM6s6vL9AV).
+        "export const record = <T>(value: T) => {\n  return value;\n};\n",
+        "export const record = async <T,>(value: T) => {\n  return value;\n};\n",
+        "export const record = <K extends keyof Row, V = Row[K]>(value: V): V => {\n"
+        "  return value;\n};\n",
     ],
 )
 async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> None:
