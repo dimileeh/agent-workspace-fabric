@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from awf.common.forge_errors import ForgeClientError
-from awf.common.forge_thread_audit import AuditedReviewThread
+from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
@@ -120,6 +120,39 @@ async def review_thread_disposition_gate(
         context=_AUDIT_CONTEXT,
     )
     state.threads_addressed_ids.pop(_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY, None)
+    return await _verify_audit(
+        self,
+        audit,
+        workspace_id=workspace_id,
+        repo=repo,
+        pr_number=pr_number,
+        status=status,
+        state=state,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+    )
+
+
+async def _verify_audit(
+    self: Any,
+    audit: ReviewThreadAudit,
+    *,
+    workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
+    status: PRStatus,
+    state: MonitorState,
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+) -> DispositionGateResult:
+    """Check every thread of one complete ``audit``.
+
+    Success needs one audit to pass every thread. An acknowledgement's re-audit
+    checks only its own thread, so after posting any the gate runs again on the
+    last re-audit, the one that followed every reply (PRRT_kwDOSJAM6s6vW9qA).
+    """
     if not audit.supported:
         _log.info(
             "monitor.review_thread_audit_unsupported_forge",
@@ -159,6 +192,7 @@ async def review_thread_disposition_gate(
     # The conversation each unverified flag binds to (an acknowledgement's re-audit
     # can move it on).
     digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
+    reaudits: list[ReviewThreadAudit] = []  # one per acknowledgement posted, in order
     for thread in audit.threads:
         legacy_conversation = legacy_conversations.get(thread.thread_id)
         if legacy_conversation is not None and (
@@ -207,6 +241,7 @@ async def review_thread_disposition_gate(
                 repo=repo,
                 pr_number=pr_number,
                 digests=digests,
+                reaudits=reaudits,
             )
         if (
             disposition_class is None
@@ -263,6 +298,22 @@ async def review_thread_disposition_gate(
                 reason_code="REVIEW_THREAD_FEEDBACK_AFTER_DECISION",
             )
             return DispositionGateResult(retry=True)
+        if reaudits:
+            # This run read the other threads from ``audit``, before the replies:
+            # certify only what the audit after the last one shows. A posted reply
+            # is recorded, so no acknowledgement posts twice and the re-check ends.
+            return await _verify_audit(
+                self,
+                reaudits[-1],
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+            )
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
     newly_flagged = [
         thread_id
@@ -455,6 +506,7 @@ async def _post_operator_acknowledgement(
     repo: RepoRef,
     pr_number: int,
     digests: dict[str, str],
+    reaudits: list[ReviewThreadAudit],
 ) -> DispositionClass | None:
     """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified.
 
@@ -462,7 +514,8 @@ async def _post_operator_acknowledgement(
     re-audit shows the thread still resolved and the reply following the
     acknowledged conversation. A re-audit that refuses it rebinds the thread's
     ``digests`` entry to the conversation it saw, so the unverified flag — and an
-    immediate re-acknowledgement of it — answers the thread as it now reads.
+    immediate re-acknowledgement of it — answers the thread as it now reads. The
+    re-audit is appended to ``reaudits`` for the gate's final check.
     """
     thread_id = thread.thread_id
     disposition = read_item_disposition(state, thread_id)
@@ -505,6 +558,7 @@ async def _post_operator_acknowledgement(
             forge_reason_code=exc.reason_code,
         )
         return None
+    reaudits.append(audit)
     posted = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if posted is not None:
         digests[thread_id] = posted.conversation_digest

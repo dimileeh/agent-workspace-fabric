@@ -60,6 +60,7 @@ pytestmark = pytest.mark.unit
 
 _REPO = RepoRef(owner="acme", name="widgets")
 _SILENT = "PRRT_test_silent_p1"
+_SECOND = "PRRT_test_silent_p2"
 _DIRECTIVE = f"ACK-THREAD {_SILENT} handled in a follow-up issue, ping @maintainer"
 
 
@@ -127,6 +128,53 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
             self.resolved, self.reopen_during_reply = False, False
         self._armed_audit_error, self.reaudit_error = self.reaudit_error, None
         self.visible_replies.append(body)
+        return await super().reply_to_thread(thread_id=thread_id, body=body)
+
+
+class _TwoSilentAuditForge(DefaultMergeMethodGitHubClient):
+    """Two threads resolved by AWF's identity with no AWF marker, audited in order.
+
+    Replies join their thread's conversation as on the forge; ``edit_on_reply``
+    maps a thread to the one whose feedback a reviewer edits while AWF's reply
+    to it is in flight.
+    """
+
+    def __init__(self, runner: FakeCommandRunner):
+        super().__init__(runner)
+        self.conversations = {_SILENT: "conversation-1", _SECOND: "conversation-2"}
+        self.visible_replies: dict[str, list[str]] = {_SILENT: [], _SECOND: []}
+        self.edit_on_reply: dict[str, str] = {}
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int
+    ) -> ReviewThreadAudit:
+        del repo, pr_number
+        return ReviewThreadAudit(
+            supported=True,
+            viewer_login="awf-operator",
+            threads=tuple(self._thread(thread_id) for thread_id in (_SILENT, _SECOND)),
+        )
+
+    def _thread(self, thread_id: str) -> AuditedReviewThread:
+        replies = self.visible_replies[thread_id]
+        conversation = self.conversations[thread_id]
+        return AuditedReviewThread(
+            thread_id=thread_id,
+            is_resolved=True,
+            is_outdated=False,
+            resolved_by="awf-operator",
+            viewer_comment_bodies=tuple(replies),
+            conversation_digest="|".join([conversation, *replies]),
+            conversation_digest_before_reply="|".join([conversation, *replies[:-1]])
+            if replies
+            else "",
+        )
+
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        edited = self.edit_on_reply.pop(thread_id, None)
+        if edited is not None:
+            self.conversations[edited] += "-edited"
+        self.visible_replies[thread_id].append(body)
         return await super().reply_to_thread(thread_id=thread_id, body=body)
 
 
@@ -379,6 +427,48 @@ async def test_acknowledgement_posted_after_an_unseen_edit_is_not_accepted(
     assert passed.count_rows is not None
     assert dict(passed.count_rows)["operator acknowledged"] == 1
     assert len(gh.thread_replies) == 2
+
+
+async def test_acknowledgements_count_only_on_the_audit_after_every_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _TwoSilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    flagged = await _gate(runner, workspace_id, state)
+    assert flagged.blocker is not None
+    assert _SILENT in flagged.blocker and _SECOND in flagged.blocker
+    await _consume_guide(
+        runner,
+        workspace_id,
+        state,
+        monkeypatch,
+        directive=f"ACK-THREAD {_SILENT} ACK-THREAD {_SECOND}",
+    )
+    # The first reply's re-audit passes; the reviewer then edits that thread's
+    # feedback while the second reply is in flight, which only the second
+    # re-audit sees (PRRT_kwDOSJAM6s6vW9qA).
+    gh.edit_on_reply[_SECOND] = _SILENT
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert _SECOND not in blocked.blocker
+    assert blocked.count_rows is None
+    assert [thread_id for thread_id, _ in gh.thread_replies] == [_SILENT, _SECOND]
+
+    # A guide acknowledging the edited conversation certifies both on the audit
+    # after its reply; the second thread's reply is not posted again.
+    await _consume_guide(
+        runner, workspace_id, state, monkeypatch, directive=f"ACK-THREAD {_SILENT}"
+    )
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert passed.count_rows is not None
+    assert dict(passed.count_rows)["operator acknowledged"] == 2
+    assert len(gh.thread_replies) == 3
 
 
 async def test_re_acknowledgement_right_after_a_rejected_reply_binds_the_re_audited_thread(
