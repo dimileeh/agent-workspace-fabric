@@ -377,7 +377,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 )
                 requirements = _compose_runtime_requirements_from_file(compose_file)
                 # Recreate only the agent; recovering dependencies are left alone (#936).
-                await restart_runtime_for_monitor_resume(
+                tolerated_error = await restart_runtime_for_monitor_resume(
                     self._compose,
                     compose_project=compose_project,
                     compose_file=compose_file,
@@ -386,7 +386,17 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     dependency_services=(
                         None if requirements is None else tuple(sorted(requirements.service_names))
                     ),
+                    runtime_usable=lambda: _compose_runtime_usable_after_restart_failure(
+                        compose_project, compose_file
+                    ),
                 )
+                if tolerated_error is not None:
+                    await self._record_monitor_runtime_restart_failed(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file_path=str(compose_file),
+                        error=tolerated_error,
+                    )
             except CompanionEnvSecretPrecheckError as exc:
                 _log.error(
                     "executor.resume_companion_env_secret_precheck_failed",

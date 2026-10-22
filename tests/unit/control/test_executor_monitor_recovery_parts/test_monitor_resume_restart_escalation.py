@@ -313,6 +313,54 @@ async def test_failed_but_usable_restart_resets_the_streak(
     assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
 
 
+class _DependencyUpFails(_ScriptedCompose):
+    """Only the ``--no-recreate`` dependency up fails; the agent recreate succeeds."""
+
+    async def ensure_project_up(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if kwargs.get("no_recreate"):
+            raise ComposeOperationError(
+                operation="up", returncode=1, stdout="", stderr="redis exited (1)"
+            )
+
+
+@pytest.mark.unit
+async def test_usable_runtime_after_dependency_up_failure_recreates_the_agent_and_replays(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed(factory, tmp_path)
+    compose = _DependencyUpFails()
+    executor = _executor(fake, factory, tmp_path, compose)
+
+    async def _usable(*_args: Any) -> bool:
+        return True
+
+    replays: list[str] = []
+
+    async def _replay(_self: Any, *, workspace_id: str, **_kwargs: Any) -> bool:
+        replays.append(workspace_id)
+        return True
+
+    monkeypatch.setattr(monitor_handoff, "_compose_runtime_usable_after_restart_failure", _usable)
+    monkeypatch.setattr(monitor_handoff, "replay_setup_on_monitor_resume", _replay)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert [call.get("services") for call in compose.calls] == [None, ("agent",)]
+    assert compose.calls[1]["force_recreate"] is True
+    assert replays == [ws_id]
+    # The tolerated failure stays on the audit trail and the usable restart closes it.
+    failed = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE)
+    assert len(failed) == 1
+    assert failed[0].payload is not None
+    assert failed[0].payload["stderr"] == "redis exited (1)"
+    assert len(await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE)) == 1
+    assert await _streak(factory, ws_id) == 0
+
+
 @pytest.mark.unit
 async def test_streak_survives_a_worker_restart(
     fake: FakeCommandRunner,

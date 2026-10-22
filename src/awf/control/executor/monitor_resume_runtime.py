@@ -178,11 +178,15 @@ async def restart_runtime_for_monitor_resume(
     workspace_id: str,
     budget_seconds: int,
     dependency_services: tuple[str, ...] | None,
-) -> None:
+    runtime_usable: Callable[[], Awaitable[bool]] | None = None,
+) -> ComposeOperationError | None:
     """Restart the runtime for a monitor resume without recreating any dependency.
 
     ``dependency_services`` lists the compose services that are not the agent;
     ``None`` (unreadable compose file) falls back to bringing up the whole project.
+    When the dependency up fails, ``runtime_usable`` decides whether the agent is
+    still recreated (auth overlays, env and #1090's setup replay depend on it);
+    the tolerated failure is returned so the caller can record it.
     """
     common: dict[str, Any] = {
         "project_name": compose_project,
@@ -215,15 +219,29 @@ async def restart_runtime_for_monitor_resume(
         start_stopped=_start_stopped,
         declared_services=dependency_services,
     )
-    if dependency_services is None:
-        await compose.ensure_project_up(**common, no_recreate=True)
-    else:
-        dependencies = tuple(name for name in dependency_services if name != AGENT_SERVICE_NAME)
-        if dependencies:
-            await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
+    tolerated: ComposeOperationError | None = None
+    try:
+        if dependency_services is None:
+            await compose.ensure_project_up(**common, no_recreate=True)
+        else:
+            dependencies = tuple(name for name in dependency_services if name != AGENT_SERVICE_NAME)
+            if dependencies:
+                await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
+    except ComposeOperationError as exc:
+        if runtime_usable is None or not await runtime_usable():
+            raise
+        _log.warning(
+            "executor.resume_dependency_up_failed_runtime_still_usable",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            reason_code=exc.reason_code,
+            stderr=redact_audit_text(exc.stderr, limit=1000),
+        )
+        tolerated = exc
     await compose.ensure_project_up(
         **common,
         force_recreate=True,
         no_deps=True,
         services=(AGENT_SERVICE_NAME,),
     )
+    return tolerated

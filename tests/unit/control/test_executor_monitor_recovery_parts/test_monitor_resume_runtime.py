@@ -12,6 +12,7 @@ retries baked into an already-rendered compose.yml.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -93,14 +94,16 @@ async def _restart(
     *,
     budget: int = 300,
     dependency_services: tuple[str, ...] | None = None,
-) -> None:
-    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+    runtime_usable: Callable[[], Awaitable[bool]] | None = None,
+) -> ComposeOperationError | None:
+    return await monitor_resume_runtime.restart_runtime_for_monitor_resume(
         compose,
         compose_project="awf_ws",
         compose_file=tmp_path / "compose.yml",
         workspace_id="ws",
         budget_seconds=budget,
         dependency_services=dependency_services,
+        runtime_usable=runtime_usable,
     )
 
 
@@ -464,6 +467,77 @@ async def test_dependency_up_failure_skips_agent_recreate(
 
     assert len(compose.calls) == 1
     assert compose.calls[0]["no_recreate"] is True
+
+
+def _failing_dependency_up(compose: _RecordingCompose, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _ensure(**kwargs: Any) -> None:
+        compose.calls.append(kwargs)
+        if kwargs.get("no_recreate"):
+            raise ComposeOperationError(
+                operation="up", returncode=1, stdout="", stderr="redis is unhealthy"
+            )
+
+    monkeypatch.setattr(compose, "ensure_project_up", _ensure)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dependency_services", [None, ("agent", "postgres")])
+async def test_usable_runtime_after_dependency_up_failure_still_recreates_the_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dependency_services: tuple[str, ...] | None,
+) -> None:
+    """Auth overlays, env and #1090's setup replay all hinge on the agent recreate."""
+    _install_inspector(monkeypatch, _ScriptedInspector(_running(_service("agent"))))
+    compose = _RecordingCompose()
+    _failing_dependency_up(compose, monkeypatch)
+    judged: list[int] = []
+
+    async def _usable() -> bool:
+        judged.append(len(compose.calls))
+        return True
+
+    tolerated = await _restart(
+        compose, tmp_path, dependency_services=dependency_services, runtime_usable=_usable
+    )
+
+    assert tolerated is not None
+    assert tolerated.stderr == "redis is unhealthy"
+    # Usability is judged after the failed dependency up, before the agent recreate.
+    assert judged == [1]
+    assert len(compose.calls) == 2
+    assert compose.calls[1]["force_recreate"] is True
+    assert compose.calls[1]["no_deps"] is True
+    assert compose.calls[1]["services"] == ("agent",)
+
+
+@pytest.mark.unit
+async def test_unusable_runtime_after_dependency_up_failure_skips_the_agent_recreate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_inspector(monkeypatch, _ScriptedInspector(_running(_service("agent"))))
+    compose = _RecordingCompose()
+    _failing_dependency_up(compose, monkeypatch)
+
+    async def _unusable() -> bool:
+        return False
+
+    with pytest.raises(ComposeOperationError, match="redis is unhealthy"):
+        await _restart(compose, tmp_path, runtime_usable=_unusable)
+
+    assert len(compose.calls) == 1
+
+
+@pytest.mark.unit
+async def test_clean_restart_tolerates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_inspector(monkeypatch, _ScriptedInspector(_running(_service("agent"))))
+
+    async def _never_judged() -> bool:
+        raise AssertionError("usability is only judged after a failed dependency up")
+
+    assert await _restart(_RecordingCompose(), tmp_path, runtime_usable=_never_judged) is None
 
 
 @pytest.mark.unit
