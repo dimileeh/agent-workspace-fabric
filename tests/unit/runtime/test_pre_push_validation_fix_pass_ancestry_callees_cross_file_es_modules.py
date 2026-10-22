@@ -201,6 +201,10 @@ async def test_an_unrelated_chain_elsewhere_does_not_block_the_anchored_call(tai
         "other.tel.record(1) + tel.record(value)",
         "tel.record(value) + other?.tel?.record(1)",
         "other.\n    tel.record(1) + tel.record(value)",
+        # TS type arguments may sit between a direct member and its call
+        # (PRRT_kwDOSJAM6s6vSMVp).
+        "other.tel.record(1) + tel.record<Result>(value)",
+        "other.tel.record(1) + tel.record?.<Result>(value)",
     ],
 )
 async def test_a_chained_occurrence_does_not_block_a_direct_one_on_the_line(call: str) -> None:

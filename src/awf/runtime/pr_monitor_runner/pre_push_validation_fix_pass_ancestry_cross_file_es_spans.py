@@ -757,13 +757,17 @@ def _es_chained_member_refs(tokens: tuple[_EsToken, ...], line: int) -> frozense
     )
 
 
-def _es_direct_member_calls(tokens: tuple[_EsToken, ...], line: int) -> frozenset[tuple[str, str]]:
+def _es_direct_member_calls(
+    tokens: tuple[_EsToken, ...], line: int, *, typescript: bool = False
+) -> frozenset[tuple[str, str]]:
     """``(receiver, name)`` pairs ``line`` calls as ``receiver.name(`` on a bare receiver.
 
     The callee scan reports each pair once however often the line repeats it,
     so ``other.tel.record(); tel.record()`` reads as one chained ``tel``.
     A direct occurrence of the pair keeps it bound to the import whatever a
-    chained occurrence beside it reaches (PRRT_kwDOSJAM6s6vOa0O).
+    chained occurrence beside it reaches (PRRT_kwDOSJAM6s6vOa0O). With
+    ``typescript``, type arguments may sit before the ``(``
+    (``tel.record<Result>(``, PRRT_kwDOSJAM6s6vSMVp).
     """
     return frozenset(
         (tokens[index].value, tokens[index + 2].value)
@@ -774,13 +778,7 @@ def _es_direct_member_calls(tokens: tuple[_EsToken, ...], line: int) -> frozense
         and _is(tokens[index + 1], "punct")
         and tokens[index + 1].value in (".", "?.")
         and _is(tokens[index + 2], "ident")
-        and (
-            _is(tokens[index + 3], "punct", "(")
-            or (
-                _is(tokens[index + 3], "punct", "?.")
-                and _is(_token_at(tokens, index + 4), "punct", "(")
-            )
-        )
+        and _es_called_at(tokens, index + 2, typescript=typescript)
     )
 
 
@@ -837,18 +835,26 @@ def _es_calls(
             continue
         if line not in (token.line, tokens[callee].line):
             continue
-        if typescript:
-            # An optional call writes its type arguments after ``?.``.
-            start = callee + 1
-            if _is(_token_at(tokens, start), "punct", "?.") and _is(
-                _token_at(tokens, start + 1), "punct", "<"
-            ):
-                start += 1
-            end = _es_after_type_arguments(tokens, start)
-            callee = callee if end == start else end - 1
-        after = _token_at(tokens, callee + 1)
-        if _is(after, "punct", "(") or (
-            _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "(")
-        ):
+        if _es_called_at(tokens, callee, typescript=typescript):
             return True
     return False
+
+
+def _es_called_at(tokens: tuple[_EsToken, ...], callee: int, *, typescript: bool) -> bool:
+    """True when the name at ``callee`` is followed by ``(`` or ``?.(``.
+
+    With ``typescript``, type arguments may sit before the ``(``, after ``?.``
+    for an optional call (``record?.<Result>(``).
+    """
+    if typescript:
+        start = callee + 1
+        if _is(_token_at(tokens, start), "punct", "?.") and _is(
+            _token_at(tokens, start + 1), "punct", "<"
+        ):
+            start += 1
+        end = _es_after_type_arguments(tokens, start)
+        callee = callee if end == start else end - 1
+    after = _token_at(tokens, callee + 1)
+    return _is(after, "punct", "(") or (
+        _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "(")
+    )

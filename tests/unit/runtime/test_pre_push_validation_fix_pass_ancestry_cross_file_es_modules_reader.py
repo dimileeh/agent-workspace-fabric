@@ -875,6 +875,17 @@ def test_direct_member_calls_are_reported_per_occurrence() -> None:
 
 
 @pytest.mark.unit
+def test_direct_member_calls_read_typescript_type_arguments() -> None:
+    """``tel.record<Result>(1)`` is a direct call in TS only (PRRT_kwDOSJAM6s6vSMVp)."""
+    tokens = _tokens("a = tel.record<Result>(1) + ns.go?.<Result>(2) + x.y < z")
+
+    assert es._es_direct_member_calls(tokens, 1, typescript=True) == frozenset(
+        {("tel", "record"), ("ns", "go")}
+    )
+    assert es._es_direct_member_calls(tokens, 1) == frozenset()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("text", "qualifier", "name", "calls"),
     [

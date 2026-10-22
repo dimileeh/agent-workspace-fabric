@@ -234,6 +234,7 @@ async def _es_module_commit_range_changes_callee_definition(
     )
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_callees import (
         _callee_refs_from_file_line,
+        _path_is_typescript,
         _receiver_chain_segments_from_file_line,
     )
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
@@ -252,7 +253,9 @@ async def _es_module_commit_range_changes_callee_definition(
     # per occurrence: a direct ``tel.record()`` on the line keeps its pair.
     chains = _receiver_chain_segments_from_file_line(item_text, item_line, path=item_path)
     non_calls = _es._es_line_non_call_names(tokens, item_line)
-    direct = _es._es_direct_member_calls(tokens, item_line)
+    direct = _es._es_direct_member_calls(
+        tokens, item_line, typescript=_path_is_typescript(item_path)
+    )
     chained = _es._es_chained_member_refs(tokens, item_line) - direct
     refs = [
         (qualifier, name, reached)
