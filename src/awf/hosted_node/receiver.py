@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.hosted_node.config import HostedSettings
@@ -188,6 +188,19 @@ class Receiver:
                 slot = old.id
             else:
                 self.future(value.expires_at)
+                # Retained grants (including pending intents and tombstones) persist
+                # preparation-wide high-water marks. The owner lock serializes updates.
+                fence, generation = (
+                    await session.execute(
+                        select(
+                            func.max(Grant.fence), func.max(Grant.authorization_generation)
+                        ).where(Grant.preparation == prep.id)
+                    )
+                ).one()
+                if fence is not None and (
+                    value.fence <= fence or value.authorization_generation < generation
+                ):
+                    raise MaterialDeniedError("GRANT_CONFLICT")
                 grant = await self.grant(session, prep, value)
                 if grant:
                     if (

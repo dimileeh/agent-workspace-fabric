@@ -2,6 +2,7 @@ import base64
 import secrets
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import text
 
 
@@ -275,3 +276,84 @@ async def test_exact_node_and_refresh_high_water_marks(hosted):
         "authorization_generation": 1,
     }
     assert (await client.post("/v1/hosted-node/materials/refresh", json=third)).status_code == 409
+
+
+@pytest.mark.parametrize("prior", ["install", "revoke", "tombstone", "pending"])
+async def test_preparation_authority_survives_grant_replacement(hosted, peer, prior, monkeypatch):
+    client, receiver, _ = hosted
+    other, _, _ = peer
+    binding = await prepare(hosted)
+    authority = {**binding, "fence": 9, "authorization_generation": 10}
+    if prior != "tombstone":
+        with monkeypatch.context() as patch:
+            if prior == "pending":
+
+                def fail_install(*args):
+                    raise OSError("interrupted publication")
+
+                patch.setattr(receiver.store, "install", fail_install)
+            initial = await client.post(
+                "/v1/hosted-node/materials/install", json={**authority, "material": "YQ=="}
+            )
+        assert initial.json()["status"] == ("unavailable" if prior == "pending" else "current")
+    if prior in ("revoke", "tombstone"):
+        authority = {**authority, "fence": 10, "idempotency_key": "revoke"}
+        assert (await client.post("/v1/hosted-node/materials/revoke", json=authority)).json()[
+            "status"
+        ] == "revoked"
+    files = set(receiver.store.root.glob("*/*.material"))
+    # Independent handlers must observe durable maxima, not process-local state.
+    for fence, generation in ((1, 1), (authority["fence"], 11), (11, 1)):
+        stale = {
+            **binding,
+            "grant_id": "replacement",
+            "idempotency_key": f"stale-{fence}-{generation}",
+            "fence": fence,
+            "authorization_generation": generation,
+            "material": "Yg==",
+        }
+        response = await other.post("/v1/hosted-node/materials/install", json=stale)
+        assert response.status_code == 409, response.text
+        assert "GRANT_CONFLICT" in response.text
+        assert set(receiver.store.root.glob("*/*.material")) == files
+    replacement = {
+        **binding,
+        "grant_id": "replacement",
+        "idempotency_key": "replacement",
+        "fence": 11,
+        "authorization_generation": 10,
+        "material": "Yg==",
+    }
+    accepted = await other.post("/v1/hosted-node/materials/install", json=replacement)
+    assert accepted.json()["status"] == "current"
+    assert (
+        await client.post("/v1/hosted-node/materials/install", json=replacement)
+    ).json() == accepted.json()
+    if prior == "install":
+        # The old grant also cannot refresh below the replacement's fence.
+        assert (
+            await client.post(
+                "/v1/hosted-node/materials/refresh",
+                json={
+                    **authority,
+                    "fence": 10,
+                    "revision": 2,
+                    "idempotency_key": "delayed-refresh",
+                    "predecessor": initial.json()["receipt_id"],
+                    "material": "Yw==",
+                },
+            )
+        ).status_code == 409
+    # A separate preparation has its own authority sequence.
+    preparation = {
+        key: binding[key]
+        for key in ("namespace", "workspace_id", "purpose", "target", "expires_at")
+    }
+    preparation["preparation_id"] = "independent"
+    assert (await client.post("/v1/hosted-node/preparations", json=preparation)).status_code == 200
+    assert (
+        await client.post(
+            "/v1/hosted-node/materials/install",
+            json={**binding, **preparation, "idempotency_key": "independent", "material": "YQ=="},
+        )
+    ).json()["status"] == "current"
