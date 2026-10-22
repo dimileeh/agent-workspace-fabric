@@ -999,8 +999,9 @@ def _es_definition_heads(tokens: tuple[_EsToken, ...], name: str) -> list[_EsTok
 
     A head follows a declaring keyword (``function`` / ``function*``,
     ``class``, ``const``, ...) or heads a parameter list (a method, accessor
-    or signature). The callee's file must hold exactly one, at depth 0, for
-    the line-based span scan to have found the definition importers reach.
+    or signature). The callee's file must hold exactly one at depth 0, the
+    only head inside the line-based span, for that span to be the definition
+    importers reach.
     """
     heads: list[_EsToken] = []
     for index, token in enumerate(tokens):

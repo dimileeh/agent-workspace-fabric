@@ -827,6 +827,13 @@ async def test_a_non_null_division_cannot_hide_a_shadow_from_the_tokenizer() -> 
             "export { record };\n",
             3,
         ),
+        # A nested head the module-scope span swallows: one line ends the arrow
+        # and opens a class, so the indented method reads as the arrow's body.
+        (
+            "export const record = (value: number) => value; class Box {\n"
+            "  record(value: number) {\n  return value + 1;\n  }\n}\n",
+            3,
+        ),
     ],
 )
 async def test_a_target_without_one_module_scope_head_fails_closed(
@@ -837,6 +844,17 @@ async def test_a_target_without_one_module_scope_head_fails_closed(
     probe.diffs[_TELEMETRY] = _body_edit(_TELEMETRY, line=edited_line)
 
     assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_an_unrelated_nested_head_outside_the_span_still_accepts() -> None:
+    """A same-named method elsewhere does not hide the sole module-scope head."""
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    probe.files[_TELEMETRY] = (
+        _RECORD_DEFINITION + "class Box {\n  record(value: number) {\n    return value;\n  }\n}\n"
+    )
+
+    assert await _accepted(probe)
 
 
 @pytest.mark.unit

@@ -306,13 +306,15 @@ async def _es_module_commit_range_changes_callee_definition(
             text or "", frozenset(), path=path, bare_names=bare_names
         )
         # The line-based span scan cannot see brackets, so the file must hold
-        # exactly one head for the name, at depth 0, inside the one span found.
+        # exactly one head for the name at depth 0, and it must be the only
+        # head inside the one span found. A nested head outside that span (an
+        # unrelated ``Box.record``) cannot be what the overlapping edit changed.
         heads = await at_left.definition_heads(path, local_name)
+        module_heads = [head for head in heads if head.depth == 0]
         if not (
             len(spans) == 1
-            and len(heads) == 1
-            and heads[0].depth == 0
-            and spans[0][0] <= heads[0].line <= spans[0][1]
+            and len(module_heads) == 1
+            and [head for head in heads if spans[0][0] <= head.line <= spans[0][1]] == module_heads
         ):
             continue
         diff_text = await _path_diff_text_in_commit_range(
