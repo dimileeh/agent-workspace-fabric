@@ -17,7 +17,10 @@ from typing import Any
 
 from awf.control.executor import runtime_setup_replay as _replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+from awf.control.executor.helpers import _profile_for_workspace
+from awf.control.executor.quality_gates import _log
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.ownership import EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME
 
@@ -27,6 +30,7 @@ MONITOR_RESUME_TRIGGER = "monitor_resume"
 async def replay_setup_on_monitor_resume(
     self: Any,
     *,
+    ws: Workspace,
     workspace_id: str,
     compose_project: str,
     compose_file: Path,
@@ -47,8 +51,19 @@ async def replay_setup_on_monitor_resume(
     ):
         return False
     if profile is None:
-        # Profile resolution already failed (and was logged) earlier in the
-        # resume; setup cannot be replayed without it.
+        # The earlier resolve+sync failed (and was logged); resolve once more the
+        # way the monitor build does before giving up on the replay.
+        try:
+            profile = _profile_for_workspace(
+                ws,
+                worktree_path=self._config.worktrees_root / workspace_id,
+                planning_max_iterations_default=self._config.planning_max_iterations_default,
+            )
+        except (OSError, ValueError):
+            _log.exception(
+                "executor.resume_setup_replay_profile_unavailable", workspace_id=workspace_id
+            )
+    if profile is None:
         outcome = _replay.SetupReplayOutcome(
             ok=False,
             replayed=False,

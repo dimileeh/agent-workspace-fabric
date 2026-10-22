@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
@@ -389,10 +390,11 @@ class TestReplaySetupIfRecreated:
         outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
 
         assert not outcome.ok
-        assert outcome.reason_code == EXEC_PROCESS_CLEANUP_FAILED
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
         assert outcome.failure_reason == FailureReason.infrastructure_failure
         assert outcome.details is not None
         assert outcome.details["trigger"] == "monitor_resume"
+        assert outcome.details["cause_reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
 
     @pytest.mark.unit
     async def test_ownership_repair_failure_skips_setup(
@@ -411,7 +413,12 @@ class TestReplaySetupIfRecreated:
         outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
 
         assert not outcome.ok
-        assert outcome.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert outcome.details is not None
+        assert (
+            outcome.details["cause_reason_code"]
+            == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
         assert validation.phase_calls == []
 
     @pytest.mark.unit
@@ -497,3 +504,48 @@ class TestReplayFailureDetails:
         assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
         assert outcome.message == "runtime setup replay failed: profile setup failed"
         assert outcome.details == {"trigger": "monitor_resume", "basis": "identity_changed"}
+
+    @pytest.mark.unit
+    async def test_redaction_never_truncates_the_output_tail(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = FakeToolValidation(
+            FakeAgentContainer(),
+            setup_returncode=1,
+            setup_stdout="line1\nexport GITHUB_TOKEN=ab\nERROR: final failure line",
+        )
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert outcome.details is not None
+        tail = outcome.details["stdout_tail"]
+        assert tail.endswith("ERROR: final failure line")
+        assert "GITHUB_TOKEN=ab" not in tail
+
+
+class _BrokenSession:
+    async def __aenter__(self) -> Any:
+        raise OperationalError("SELECT 1", {}, Exception("database unavailable"))
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class TestReplayAuditPersistenceFailures:
+    @pytest.mark.unit
+    async def test_db_errors_do_not_fail_a_successful_replay(self, tmp_path: Path) -> None:
+        validation = FakeToolValidation(FakeAgentContainer())
+
+        outcome = await _replay(
+            lambda: _BrokenSession(),
+            validation,
+            "ws_db_down",
+            tmp_path,
+            before=_OLD,
+            after=_NEW,
+        )
+
+        # The dedup lookup failed, so setup ran; the lost event is only logged.
+        assert outcome.ok and outcome.replayed
+        assert validation.setup_runs() == 1

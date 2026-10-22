@@ -426,6 +426,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             )
         if not await replay_setup_on_monitor_resume(
             self,
+            ws=ws,
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,

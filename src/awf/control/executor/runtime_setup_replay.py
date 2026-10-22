@@ -20,12 +20,14 @@ convention to an unsuccessful ``SetupReplayOutcome``.
 from __future__ import annotations
 
 import enum
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
@@ -208,13 +210,11 @@ async def replay_setup_if_recreated(
         event_name=ownership_event_name,
         reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     ):
-        return SetupReplayOutcome(
-            ok=False,
-            replayed=False,
-            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        return _failed(
+            {**context, "cause_reason_code": AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE},
+            workspace_id=workspace_id,
             failure_reason=FailureReason.infrastructure_failure,
-            message="agent runtime ownership repair failed before runtime setup replay",
-            details=context,
+            message="runtime setup replay failed: agent runtime ownership repair failed",
         )
     try:
         result = await validation.run_profile_phases(
@@ -227,11 +227,10 @@ async def replay_setup_if_recreated(
         )
     except ComposeExecCleanupError as exc:
         return _failed(
-            context,
+            {**context, "cause_reason_code": exc.reason_code},
             workspace_id=workspace_id,
-            reason_code=exc.reason_code,
             failure_reason=FailureReason.infrastructure_failure,
-            message=cleanup_failure_message(exc),
+            message=f"runtime setup replay failed: {cleanup_failure_message(exc)}",
         )
     except (ComposeOperationError, OSError, RuntimeError, ValueError) as exc:
         # Runner errors (compose exec, OS, timeout) surface as the replay's own
@@ -241,7 +240,6 @@ async def replay_setup_if_recreated(
         return _failed(
             {**context, "error": safe_error},
             workspace_id=workspace_id,
-            reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"runtime setup replay failed: {safe_error}",
         )
@@ -255,7 +253,6 @@ async def replay_setup_if_recreated(
         return _failed(
             details,
             workspace_id=workspace_id,
-            reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
             failure_reason=_failure_reason_for_phase(first_fail),
             message=f"runtime setup replay failed: {command or 'profile setup failed'}",
         )
@@ -282,14 +279,20 @@ def _failed(
     details: dict[str, Any],
     *,
     workspace_id: str,
-    reason_code: str,
     failure_reason: FailureReason,
     message: str,
 ) -> SetupReplayOutcome:
+    """Every replay failure carries ``RUNTIME_SETUP_REPLAY_FAILED``.
+
+    A more specific underlying code (ownership repair, exec cleanup) is kept in
+    ``details["cause_reason_code"]`` so the replay stays recognisable end to end.
+    """
+    reason_code = RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
     _log.error(
         "executor.runtime_setup_replay_failed",
         workspace_id=workspace_id,
         reason_code=reason_code,
+        cause_reason_code=details.get("cause_reason_code"),
         trigger=details.get("trigger"),
         basis=details.get("basis"),
         phase=details.get("phase"),
@@ -328,7 +331,8 @@ def _redacted_tail(captured: str | None, path: Path) -> str:
             text = ""
     # Redact the whole output before tailing so a token straddling the cut
     # cannot leak half-redacted.
-    redacted = redact_audit_text(text, limit=len(text) + 1)
+    # Redaction markers can lengthen the text, so never let it truncate here.
+    redacted = redact_audit_text(text, limit=sys.maxsize)
     return redacted[-_OUTPUT_TAIL_CHARS:]
 
 
@@ -338,18 +342,27 @@ async def _replay_already_recorded(
     workspace_id: str,
     identity: AgentContainerIdentity,
 ) -> bool:
-    async with session_factory() as session:
-        payload = (
-            await session.execute(
-                select(WorkspaceEvent.payload)
-                .where(
-                    WorkspaceEvent.workspace_id == workspace_id,
-                    WorkspaceEvent.event_type == RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
+    try:
+        async with session_factory() as session:
+            payload = (
+                await session.execute(
+                    select(WorkspaceEvent.payload)
+                    .where(
+                        WorkspaceEvent.workspace_id == workspace_id,
+                        WorkspaceEvent.event_type == RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
+                    )
+                    .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.event_order.desc())
+                    .limit(1)
                 )
-                .order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.event_order.desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+            ).scalar_one_or_none()
+    except SQLAlchemyError:
+        # Without the dedup record, replaying again is the safe choice.
+        _log.exception(
+            "executor.runtime_setup_replay_lookup_failed",
+            workspace_id=workspace_id,
+            reason_code=RUNTIME_SETUP_REPLAYED_REASON_CODE,
+        )
+        return False
     return (
         isinstance(payload, Mapping)
         and payload.get("container_id") == identity.container_id
@@ -363,15 +376,24 @@ async def _record_replayed_event(
     workspace_id: str,
     payload: dict[str, Any],
 ) -> None:
-    async with session_factory() as session:
-        repo = WorkspaceRepository(session)
-        workspace = await repo.get(workspace_id)
-        if workspace is None:
-            return
-        await repo.add_event(
-            workspace,
-            event_type=RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
+    try:
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                return
+            await repo.add_event(
+                workspace,
+                event_type=RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
+                reason_code=RUNTIME_SETUP_REPLAYED_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+    except SQLAlchemyError:
+        # Setup already succeeded; a lost audit record only risks one extra
+        # replay on a later observation of the same container.
+        _log.exception(
+            "executor.runtime_setup_replayed_event_record_failed",
+            workspace_id=workspace_id,
             reason_code=RUNTIME_SETUP_REPLAYED_REASON_CODE,
-            payload=payload,
         )
-        await session.commit()

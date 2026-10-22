@@ -899,8 +899,9 @@ identity cannot be read, the blocked-resume env-health probe decides and re-runs
 setup on any doubt. Each recreation gets at most one replay and one
 `workspace.runtime_setup_replayed` event (`RUNTIME_SETUP_REPLAYED`). A failed
 replay fails the workspace with `RUNTIME_SETUP_REPLAY_FAILED`. The failure
-details carry the failing command and its redacted output tail, and the replay
-is not retried. Hosted workspaces have no local `compose up` and are unchanged.
+details carry the failing command, its redacted output tail and, for an
+ownership-repair or exec-cleanup failure, the underlying `cause_reason_code`.
+The replay is not retried. Hosted workspaces have no local `compose up` and are unchanged.
 
 ### Operator guidance (`guide`/`instruct`)
 

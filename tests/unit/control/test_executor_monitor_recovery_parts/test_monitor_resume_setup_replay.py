@@ -9,6 +9,7 @@ Restart recovery, remonitor and guide-unblock all resume through
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,14 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import runtime_setup_replay
+from awf.control.executor import monitor_handoff, runtime_setup_replay
 from awf.control.executor.constants import (
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
 )
+from awf.control.worker.dispatch_methods import _monitor_recovery_handoff_failure_error
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
+from awf.node.compose_manager import ComposeOperationError
 from tests.unit.control.runtime_setup_replay_fakes import (
     TOOL_PATH,
     FakeAgentContainer,
@@ -366,12 +369,88 @@ async def test_replay_without_resolved_profile_fails_with_reason_code(
     def _profile_unavailable(*_args: Any, **_kwargs: Any) -> Any:
         raise ValueError("profile unavailable")
 
-    monkeypatch.setattr(
-        "awf.control.executor.monitor_handoff._profile_for_workspace", _profile_unavailable
-    )
+    for module in ("monitor_handoff", "monitor_resume_setup_replay"):
+        monkeypatch.setattr(
+            f"awf.control.executor.{module}._profile_for_workspace", _profile_unavailable
+        )
 
     assert await executor.resume_pr_monitor_handoff(ws_id) is None
 
     assert validation.setup_runs() == 0
     transitions = await _failed_transitions(factory, ws_id)
     assert [event.reason_code for event in transitions] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
+
+
+@pytest.mark.unit
+async def test_replay_re_resolves_profile_when_resume_sync_failed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient profile-sync failure earlier in the resume must not block the replay."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    executor, _compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    original_sync = monitor_handoff._sync_resolved_profile
+    calls = {"n": 0}
+
+    async def _sync_fails_once(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient sync failure")
+        return await original_sync(*args, **kwargs)
+
+    monkeypatch.setattr(monitor_handoff, "_sync_resolved_profile", _sync_fails_once)
+
+    await executor.resume_pr_monitor(ws_id)
+
+    assert validation.setup_runs() == 1
+    assert monitor.validate_returncodes == [0]
+    assert await _failed_transitions(factory, ws_id) == []
+
+
+@pytest.mark.unit
+async def test_recovery_operation_reports_replay_failure_after_usable_compose_failure(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker must attribute the recovery failure to the replay, not to compose."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container, setup_returncode=1)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    executor, compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+
+    async def _up_partially_fails(**kwargs: Any) -> None:
+        compose.calls.append(kwargs)
+        container.recreate()
+        raise ComposeOperationError(
+            operation="up", returncode=1, stdout="", stderr="companion unhealthy"
+        )
+
+    async def _runtime_usable(*_args: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(compose, "ensure_project_up", _up_partially_fails)
+    monkeypatch.setattr(
+        monitor_handoff, "_compose_runtime_usable_after_restart_failure", _runtime_usable
+    )
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    error_code, message = await _monitor_recovery_handoff_failure_error(
+        SimpleNamespace(_session_factory=factory), ws_id
+    )
+    assert error_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    assert "runtime setup replay failed" in message
