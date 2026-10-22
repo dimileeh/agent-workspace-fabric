@@ -443,6 +443,10 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
         "@@ -1,1 +1,1 @@\n-export async function helper() {\n+export async function helper() {\n"
     )
     assert callees._diff_text_changes_definition_names(export_async, frozenset({"helper"})) is True
+    export_default = "@@ -1,1 +1,1 @@\n-export default function helper() {\n+export default function helper() {\n"
+    assert (
+        callees._diff_text_changes_definition_names(export_default, frozenset({"helper"})) is True
+    )
 
 
 @pytest.mark.unit
@@ -651,6 +655,10 @@ def test_definition_head_has_js_dynamic_this_guards_and_forms() -> None:
         is True
     )
     assert callees._definition_head_has_js_dynamic_this("  const inner = () => {\n", 1) is False
+    assert (
+        callees._definition_head_has_js_dynamic_this("export default function record() {\n", 1)
+        is True
+    )
     # Same-line comments must not hide dynamic ``this`` (discovery uses masked lines).
     assert (
         callees._definition_head_has_js_dynamic_this(

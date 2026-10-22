@@ -208,6 +208,9 @@ async def test_an_aliased_import_is_looked_up_under_its_imported_name() -> None:
     [
         "function record(value: number) {\n  return value + 1;\n}\nexport default record;\n",
         "function record(value: number) {\n  return value + 1;\n}\nexport { record as default };\n",
+        # A named default declaration is its own definition head (PRRT_kwDOSJAM6s6vLRfG).
+        "export default function record(value: number) {\n  return value + 1;\n}\n",
+        "export default async function record(value: number) {\n  return value + 1;\n}\n",
     ],
 )
 async def test_a_default_import_reaches_the_default_export(module: str) -> None:
