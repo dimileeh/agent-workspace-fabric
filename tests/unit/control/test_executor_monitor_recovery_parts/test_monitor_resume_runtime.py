@@ -49,13 +49,19 @@ class _FakeClock:
 
 
 def _service(
-    name: str, *, state: str = "running", health: str | None = None, one_off: bool = False
+    name: str,
+    *,
+    state: str = "running",
+    health: str | None = None,
+    one_off: bool = False,
+    status: str | None = None,
 ) -> RuntimeService:
     return RuntimeService(
         name=name,
         container_id=f"{name}-id",
         image=None,
         state=state,
+        status=status,
         health=health,
         one_off=one_off,
     )
@@ -599,6 +605,75 @@ async def test_failed_companion_recreate_is_never_tolerated(
     assert not isinstance(raised.value, monitor_resume_runtime.AgentRecreateError)
     assert inspector.calls == 0
     assert [call.get("services") for call in compose.calls] == [("api",)]
+
+
+@pytest.mark.unit
+async def test_one_shot_dependencies_the_resume_ran_to_completion_are_not_started_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6vZ5eb: a migration job must not run twice in one resume.
+
+    ``up --no-recreate`` starts every exited container, so a one-shot dependency
+    started (or recreated) by the resume that already exited 0 is left out of the
+    dependency ``up``; one that failed, or that the resume never started, is not.
+    """
+    stopped = _running(
+        _service("postgres", health="healthy"),
+        _service("cleanup"),
+        _service("migrate", state="exited", status="Exited (0) 2 hours ago"),
+        _service("seed", state="exited", status="Exited (0) 2 hours ago"),
+        _service("worker", state="exited", status="Exited (1) 2 hours ago"),
+        _service("agent"),
+    )
+    settled = _running(
+        _service("postgres", health="healthy"),
+        _service("migrate", state="exited", status="Exited (0) 1 second ago"),
+        _service("seed", state="exited", status="Exited (0) 2 seconds ago"),
+        _service("worker", state="exited", status="Exited (1) 1 second ago"),
+        _service("cleanup", state="exited", status="Exited (0) 1 second ago"),
+        _service("agent"),
+    )
+    _install_inspector(monkeypatch, _ScriptedInspector(stopped, settled))
+    compose = _RecordingCompose()
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=300,
+        dependency_services=("agent", "cleanup", "migrate", "postgres", "seed", "worker"),
+        recreate_services=("seed",),
+    )
+
+    assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
+        (("seed",), True),
+        (("migrate",), None),
+        (("worker",), None),
+        (("cleanup", "postgres", "worker"), None),
+        (("agent",), True),
+    ]
+
+
+@pytest.mark.unit
+async def test_unreadable_runtime_after_the_start_keeps_every_dependency_in_the_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a settled snapshot nothing is known to have completed, so nothing is skipped."""
+    stopped = _running(
+        _service("migrate", state="exited", status="Exited (0) 2 hours ago"),
+        _service("agent"),
+    )
+    _install_inspector(monkeypatch, _ScriptedInspector(stopped, OSError("docker missing")))
+    compose = _RecordingCompose()
+
+    await _restart(compose, tmp_path, dependency_services=("agent", "migrate"))
+
+    assert [call.get("services") for call in compose.calls] == [
+        ("migrate",),
+        ("migrate",),
+        ("agent",),
+    ]
 
 
 @pytest.mark.unit

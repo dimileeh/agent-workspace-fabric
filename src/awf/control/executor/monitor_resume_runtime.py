@@ -19,7 +19,9 @@ stop, so the resume could fail and be retried forever. The restart now:
    container and flips it back on success);
 3. brings the dependencies up with ``--no-recreate``, which starts exited or
    absent containers and never recreates an existing one; the agent is left out
-   so its stale container is neither started nor waited on before step 4;
+   so its stale container is neither started nor waited on before step 4, and so
+   is every one-shot dependency step 1 already ran to a zero exit, which this
+   ``up`` would otherwise start a second time;
 4. recreates only the agent with ``--force-recreate --no-deps agent``: auth
    overlay bind mounts are bound at container creation, and #1090's setup
    replay keys off the agent's new identity. A failure here raises
@@ -33,6 +35,7 @@ raises, and the caller counts every raised error as a failed restart.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -51,6 +54,7 @@ DEPENDENCY_INSPECT_TIMEOUT_SECONDS: Final[float] = 30.0
 _RECOVERING_HEALTH: Final = frozenset({"starting", "unhealthy"})
 _STOPPED_STATES: Final = frozenset({"exited", "created"})
 _UNREADABLE_STACK_STATES: Final = frozenset({"unknown", "unavailable"})
+_EXITED_SUCCESSFULLY: Final = re.compile(r"^exited\s*\(\s*0\s*\)(?:\s|$)")
 _sleep = asyncio.sleep
 _monotonic = time.monotonic
 
@@ -156,6 +160,27 @@ def _stopped_dependencies(
     return tuple(sorted(stopped - set(recreated_services)))
 
 
+def _completed_dependencies(
+    snapshot: RuntimeSnapshot | None,
+    declared_services: tuple[str, ...] | None,
+    started_services: set[str],
+) -> set[str]:
+    """Return the dependencies this resume started that have since exited with code 0.
+
+    A one-shot job (``service_completed_successfully``) started or recreated by
+    the resume has already run; another ``up`` would start its container again.
+    """
+    if snapshot is None:
+        return set()
+    return {
+        service.name
+        for service in _dependency_containers(snapshot, declared_services)
+        if service.name in started_services
+        and service.state.strip().lower() == "exited"
+        and _EXITED_SUCCESSFULLY.match((service.status or "").strip().lower()) is not None
+    }
+
+
 async def wait_for_recovering_dependencies(
     compose_project: str,
     *,
@@ -164,7 +189,7 @@ async def wait_for_recovering_dependencies(
     start_stopped: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     declared_services: tuple[str, ...] | None = None,
     recreated_services: tuple[str, ...] = (),
-) -> None:
+) -> RuntimeSnapshot | None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
     ``start_stopped`` receives the dependencies stopped in the first snapshot,
@@ -174,6 +199,7 @@ async def wait_for_recovering_dependencies(
     Raises ``DependencyWaitTimeoutError`` (``MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT``)
     naming each unsettled service when the budget runs out. An unreadable runtime
     is logged and skipped: the compose call that follows surfaces the real error.
+    Returns the settled snapshot, or ``None`` when the runtime was unreadable.
     """
     deadline = _monotonic() + budget_seconds
     start_pending = start_stopped
@@ -187,7 +213,7 @@ async def wait_for_recovering_dependencies(
                 compose_project_name=compose_project,
                 error=redact_audit_text(repr(exc), limit=500),
             )
-            return
+            return None
         if snapshot.stack_state in _UNREADABLE_STACK_STATES:
             _log.warning(
                 "executor.resume_dependency_wait_runtime_unreadable",
@@ -195,7 +221,7 @@ async def wait_for_recovering_dependencies(
                 compose_project_name=compose_project,
                 stack_state=snapshot.stack_state,
             )
-            return
+            return None
         if start_pending is not None:
             start, start_pending = start_pending, None
             stopped = _stopped_dependencies(snapshot, declared_services, recreated_services)
@@ -204,7 +230,7 @@ async def wait_for_recovering_dependencies(
                 continue
         recovering = _recovering_dependencies(snapshot, declared_services)
         if not recovering:
-            return
+            return snapshot
         remaining = deadline - _monotonic()
         if remaining <= 0:
             raise DependencyWaitTimeoutError(budget_seconds=budget_seconds, recovering=recovering)
@@ -265,7 +291,10 @@ async def restart_runtime_for_monitor_resume(
         if on_recreated is not None:
             on_recreated()
 
+    started = set(recreated)
+
     async def _start_stopped(services: tuple[str, ...]) -> None:
+        started.update(services)
         _log.info(
             "executor.resume_dependency_start",
             workspace_id=workspace_id,
@@ -283,7 +312,7 @@ async def restart_runtime_for_monitor_resume(
 
     tolerated: ComposeOperationError | None = None
     try:
-        await wait_for_recovering_dependencies(
+        settled = await wait_for_recovering_dependencies(
             compose_project,
             workspace_id=workspace_id,
             budget_seconds=budget_seconds,
@@ -294,7 +323,13 @@ async def restart_runtime_for_monitor_resume(
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
         else:
-            dependencies = tuple(name for name in dependency_services if name != AGENT_SERVICE_NAME)
+            # A one-shot dependency the resume already ran to completion is not started again.
+            completed = _completed_dependencies(settled, dependency_services, started)
+            dependencies = tuple(
+                name
+                for name in dependency_services
+                if name != AGENT_SERVICE_NAME and name not in completed
+            )
             if dependencies:
                 await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
     except DependencyWaitTimeoutError:
