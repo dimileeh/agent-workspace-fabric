@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from typing import Any
 
 import pytest
 
@@ -20,6 +22,53 @@ async def test_run_captures_successful_subprocess_output() -> None:
     assert result.returncode == 0
     assert result.stdout == "out\n"
     assert result.stderr == "err\n"
+
+
+@pytest.mark.unit
+async def test_run_kills_subprocess_when_caller_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-imposed timeout must not orphan the Docker CLI process."""
+    spawned: list[asyncio.subprocess.Process] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _recording_exec(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        proc = await real_exec(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(inspection.asyncio, "create_subprocess_exec", _recording_exec)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            inspection._run([sys.executable, "-c", "import time; time.sleep(30)"]),
+            timeout=0.5,
+        )
+
+    assert len(spawned) == 1
+    assert await asyncio.wait_for(spawned[0].wait(), timeout=5) != 0
+
+
+@pytest.mark.unit
+async def test_run_cancellation_tolerates_already_exited_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExitedProcess:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise asyncio.CancelledError
+
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+    async def _exec(*_args: object, **_kwargs: object) -> _ExitedProcess:
+        return _ExitedProcess()
+
+    monkeypatch.setattr(inspection.asyncio, "create_subprocess_exec", _exec)
+
+    with pytest.raises(asyncio.CancelledError):
+        await inspection._run(["docker", "ps"])
 
 
 @pytest.mark.unit

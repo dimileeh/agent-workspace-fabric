@@ -28,6 +28,11 @@ from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.blocked_transition import (
     enter_blocked_for_protected_violation_in_session,
 )
+from awf.control.executor.constants import (
+    MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE,
+    RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE,
+    RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+)
 from awf.control.executor.helpers import (
     _profile_snapshot_requires_credential_rehydration,
     _realign_profile_from_resolved_profile_snapshot,
@@ -638,6 +643,72 @@ async def enter_blocked_for_resume_setup_failure(
         recovery_finalize_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
         recovery_finalize_message=("Profile setup failed on blocked-resume; paused for operator."),
     )
+
+
+async def enter_blocked_for_monitor_setup_replay_failure(
+    session_factory: Any,
+    *,
+    workspace_id: str,
+    message: str,
+    failure_reason: FailureReason,
+    details: Mapping[str, Any] | None,
+    monitor_owner_id: str | None,
+) -> bool:
+    """Park a PR-monitor workspace in ``blocked`` when the runtime setup replay fails.
+
+    The #743 resume-setup-failure convention applied post-PR. Every monitor resume
+    force-recreates the runtime, so terminally failing here would let one transient
+    setup failure (registry 429, conflicted lockfile) kill a healthy monitor. The
+    worktree, its commits and the warm stack are kept, and the ``monitor_`` resume
+    phase makes a later ``guide`` resume ``blocked -> monitoring_pr``, whose resume
+    replays setup again. ``RUNTIME_SETUP_REPLAY_FAILED`` is the block reason and the
+    reason of the ``workspace.runtime_setup_replay_failed`` evidence event.
+
+    Fenced like the monitor protected-scope pause: on ``monitor_owner_id``, or on a
+    still-unclaimed row when it is ``None``. Returns ``False`` when the CAS lost to
+    a newer claimant or the row already left ``monitoring_pr``.
+    """
+    payload = {
+        "reason_code": RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+        "failure_reason": failure_reason.value,
+        "message": redact_audit_text(message, limit=2000),
+        "details": redact_audit_value(dict(details or {})),
+    }
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await enter_blocked_for_protected_violation_in_session(
+            session,
+            repo,
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            violations=(),
+            resume_phase=MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE,
+            block_type=RESUME_SETUP_FAILURE_BLOCK_TYPE,
+            block_reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+            monitor_owner_id=monitor_owner_id,
+            fence_unclaimed_monitor=True,
+        )
+        if ws is None:
+            _log.warning(
+                "executor.monitor_setup_replay_park_skipped",
+                workspace_id=workspace_id,
+                monitor_owner_id=monitor_owner_id,
+                reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+            )
+            return False
+        await repo.add_event(
+            ws,
+            event_type=RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE,
+            reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+            payload=payload,
+        )
+        await session.commit()
+    _log.warning(
+        "executor.monitor_setup_replay_failed_parked",
+        workspace_id=workspace_id,
+        reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+    )
+    return True
 
 
 async def _blocked_resume_setup_phase_names(

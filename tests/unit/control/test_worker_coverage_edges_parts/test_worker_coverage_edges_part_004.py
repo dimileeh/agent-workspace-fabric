@@ -45,6 +45,7 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         ("BITBUCKET_AUTH_NOT_CONFIGURED", True),
         ("DEPRECATED_TASK_KIND", True),
         ("UNSUPPORTED_TASK_KIND", True),
+        ("RUNTIME_SETUP_REPLAY_FAILED", True),
         ("MONITOR_RECOVERY_COMPOSE_FAILED", True),
         ("MONITOR_RECOVERY_METADATA_MISSING", True),
         ("MONITOR_RECOVERY_FAILED", True),
