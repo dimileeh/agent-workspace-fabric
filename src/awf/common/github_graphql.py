@@ -291,6 +291,7 @@ mutation AddReviewThreadReply($threadId: ID!, $body: String!) {
 # GraphQL: enumerate EVERY review thread (resolved ones included) for the
 # READY_TO_MERGE disposition audit (#1018). Raw ``body`` — not ``bodyText`` — is
 # required: ``bodyText`` strips HTML comments, so the AWF marker would vanish.
+# ``bodyText`` is read too, to match outside feedback to what ``fetch_pr_status`` lists.
 _GQL_REVIEW_THREAD_AUDIT = """
 query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   viewer { login }
@@ -303,7 +304,7 @@ query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int
           isOutdated
           resolvedBy { login }
           comments(first: 100) {
-            nodes { body viewerDidAuthor createdAt lastEditedAt }
+            nodes { body bodyText viewerDidAuthor createdAt lastEditedAt }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -320,7 +321,7 @@ query ReviewThreadDispositionAuditComments($threadId: ID!, $cursor: String!) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $cursor) {
-        nodes { body viewerDidAuthor createdAt lastEditedAt }
+        nodes { body bodyText viewerDidAuthor createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
       }
     }
