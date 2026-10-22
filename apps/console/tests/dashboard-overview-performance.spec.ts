@@ -1824,8 +1824,16 @@ test("fullscreen logs cap retained selections across overview windows", async ({
     await page.getByLabel(`Select Performance workspace ${index} for fullscreen logs`).check();
   }
 
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history or move the virtual page, so Next would
+  // skip past rows 101-103 under shared CI CPUs.
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
   await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByText(`101–${PAGE_SIZE * 2} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
   for (const index of [101, 102, 103]) {
     await page.getByLabel(`Select Performance workspace ${index} for fullscreen logs`).check();
   }
