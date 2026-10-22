@@ -25,6 +25,7 @@ from awf.common.forge import ForgeNotSupportedError
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
+from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
     _MONITOR_ONLY_TASK_KINDS,
@@ -46,6 +47,7 @@ from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
     _run_hosted_monitor_handoff_profile_setup,
 )
+from awf.control.executor.monitor_resume_setup_replay import replay_setup_on_monitor_resume
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
@@ -79,6 +81,9 @@ _record_setup_dependency_network_events = (
     _monitor_handoff_audit._record_setup_dependency_network_events
 )
 _record_runtime_toolchain_findings = _monitor_handoff_audit._record_runtime_toolchain_findings
+_record_monitor_runtime_restart_failed = (
+    _monitor_handoff_audit._record_monitor_runtime_restart_failed
+)
 _record_runtime_toolchain_findings_safe = (
     _monitor_handoff_audit._record_runtime_toolchain_findings_safe
 )
@@ -349,7 +354,11 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
+    identity_before: _runtime_setup_replay.AgentIdentityObservation = None
     if not workspace_is_hosted:
+        identity_before = await _runtime_setup_replay.capture_agent_container_identity(
+            compose_project
+        )
         try:
             _precheck_required_companion_env_secrets_for_resume(
                 companion_specs=companion_specs,
@@ -415,6 +424,16 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 compose_project_name=compose_project,
                 reason_code=exc.reason_code,
             )
+        if not await replay_setup_on_monitor_resume(
+            self,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            identity_before=identity_before,
+            monitor_owner_id=monitor_owner_id,
+        ):
+            return None
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -1456,43 +1475,3 @@ async def _build_handoff_pr_monitor(
     ):
         return None
     return monitor
-
-
-async def _record_monitor_runtime_restart_failed(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file_path: str,
-    error: ComposeOperationError,
-    event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
-) -> None:
-    """Persist an audit event when compose restart fails during monitor resume handoff."""
-    try:
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
-                return
-            await repo.add_event(
-                ws,
-                event_type="workspace.monitor_runtime_restart_failed",
-                reason_code=event_reason_code,
-                payload={
-                    "compose_project_name": compose_project,
-                    "compose_file_path": compose_file_path,
-                    "operation": error.operation,
-                    "returncode": error.returncode,
-                    "stderr": error.stderr[:1000],
-                    "reason_code": error.reason_code,
-                },
-            )
-            await session.commit()
-    except Exception:
-        _log.exception(
-            "executor.monitor_runtime_restart_failed_record_failed",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            compose_file_path=compose_file_path,
-            reason_code=error.reason_code,
-        )
