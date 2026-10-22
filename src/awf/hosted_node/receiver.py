@@ -142,6 +142,17 @@ class Receiver:
             )
         ).one_or_none()
 
+    async def superseded(self, session: AsyncSession, grant: Grant) -> bool:
+        fence, generation = (
+            await session.execute(
+                select(func.max(Grant.fence), func.max(Grant.authorization_generation)).where(
+                    Grant.preparation == grant.preparation
+                )
+            )
+        ).one()
+        # Use the grant's authority so its pending refresh keeps the current slot usable.
+        return bool(grant.fence < fence or grant.authorization_generation < generation)
+
     async def receipt(self, session: AsyncSession, value: Binding) -> Receipt | None:
         row = (
             await session.scalars(
@@ -326,7 +337,7 @@ class Receiver:
                 return MaterialStatus(
                     **result, status="unavailable", reason="INSTALLATION_UNCERTAIN"
                 )
-            if grant is None or grant.current != slot:
+            if grant is None or grant.current != slot or await self.superseded(session, grant):
                 return MaterialStatus(**result, status="not_accepted", reason="SUPERSEDED")
             directory = prep.id
         assert slot is not None
@@ -343,7 +354,7 @@ class Receiver:
             if value.expires_at <= datetime.now(UTC) or current_receipt.state == "expired":
                 current_receipt.state = "expired"
                 return MaterialStatus(**result, status="expired", reason="EXPIRY")
-            if grant.current != slot:
+            if grant.current != slot or await self.superseded(session, grant):
                 return MaterialStatus(**result, status="not_accepted", reason="SUPERSEDED")
         return MaterialStatus(
             **result,

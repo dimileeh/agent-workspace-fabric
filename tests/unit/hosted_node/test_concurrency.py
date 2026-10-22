@@ -243,3 +243,68 @@ async def test_delayed_install_rechecks_preparation_authority(
         assert not receiver.store.exists(grant.preparation, receipt.id)
     if successor == "installed":
         assert Path((await protected_resolver(newer)).mounts[0].source).read_bytes() == b"b"
+
+
+@pytest.mark.parametrize("successor", ["installed", "pending", "fence", "generation"])
+@pytest.mark.parametrize("during_status", [False, True])
+async def test_installed_grant_loses_preparation_authority(
+    hosted, peer, monkeypatch, protected_resolver, successor, during_status
+):
+    client, receiver, _ = hosted
+    other, independent, _ = peer
+    binding = await prepare(hosted)
+    initial = await client.post(
+        "/v1/hosted-node/materials/install", json={**binding, "material": "YQ=="}
+    )
+    assert initial.json()["status"] == "current"
+    entered, release = threading.Event(), threading.Event()
+    exists = receiver.store.exists
+
+    def stalled(*args):
+        entered.set()
+        assert release.wait(10)
+        return exists(*args)
+
+    task = None
+    if during_status:
+        monkeypatch.setattr(receiver.store, "exists", stalled)
+        task = asyncio.create_task(client.post("/v1/hosted-node/materials/status", json=binding))
+    newer = {
+        **binding,
+        "grant_id": "successor",
+        "idempotency_key": "successor",
+        "fence": binding["fence"] + (successor != "generation"),
+        "authorization_generation": binding["authorization_generation"]
+        + (successor == "generation"),
+    }
+    try:
+        if during_status:
+            assert await asyncio.to_thread(entered.wait, 5)
+        if successor in {"fence", "generation"}:
+            result = await other.post("/v1/hosted-node/materials/revoke", json=newer)
+            assert result.json()["status"] == "revoked"
+        else:
+            if successor == "pending":
+
+                def fail_install(*args):
+                    raise OSError("publication interrupted")
+
+                monkeypatch.setattr(independent.store, "install", fail_install)
+            result = await other.post(
+                "/v1/hosted-node/materials/install", json={**newer, "material": "Yg=="}
+            )
+            assert result.json()["status"] == (
+                "current" if successor == "installed" else "unavailable"
+            )
+    finally:
+        release.set()
+        if task is not None:
+            status = await task
+    if task is None:
+        status = await client.post("/v1/hosted-node/materials/status", json=binding)
+    assert status.json()["status"] == "not_accepted"
+    assert status.json()["reason"] == "SUPERSEDED"
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
+        await protected_resolver(binding)
+    if successor == "installed":
+        assert Path((await protected_resolver(newer)).mounts[0].source).read_bytes() == b"b"
