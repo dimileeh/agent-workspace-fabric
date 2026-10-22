@@ -220,6 +220,7 @@ async def test_completed_monitor_reclaims_recent_workspace_pressure_dirs_immedia
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
         assert ws.pr_merge_sha == "mergecommit1234567890"
+        assert ws.filesystem_reclaimed_at is not None
 
 
 @pytest.mark.unit

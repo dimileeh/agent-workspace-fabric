@@ -350,6 +350,7 @@ class Workspace(Base):
     indefinitely defer cleanup of persistently-failing workspaces."""
 
     # Timestamps
+    filesystem_reclaimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

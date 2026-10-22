@@ -238,6 +238,7 @@ async def _reset_failed_workspace_for_remonitor(
     old_status = workspace.status
     old_iter_count = workspace.monitor_iter_count
     workspace.status = WorkspaceStatus.monitoring_pr.value
+    workspace.filesystem_reclaimed_at = None
     workspace.failure_reason = None
     workspace.failure_message = None
     workspace.monitor_iter_count = 0

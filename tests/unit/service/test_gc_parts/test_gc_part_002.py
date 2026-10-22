@@ -249,16 +249,12 @@ async def test_single_workspace_cleanup_is_idempotent_after_partial_compose_fail
         compose_teardown=_compose_teardown,
     )
     third_payload = third.to_dict()
-    third_candidate = third_payload["candidates"][0]
 
     assert third.status == "succeeded"
     assert third.deleted_paths == []
     assert third.delete_errors == []
-    assert {data["status"] for data in third_candidate["paths"].values()} == {"already_removed"}
-    assert {data["reason_code"] for data in third_candidate["paths"].values()} == {
-        "PATH_ALREADY_REMOVED"
-    }
-    assert all("error" not in data for data in third_candidate["paths"].values())
+    assert third_payload["candidates"] == []
+    assert third.path_outcomes == []
 
 
 @pytest.mark.unit

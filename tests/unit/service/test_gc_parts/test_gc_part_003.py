@@ -268,10 +268,8 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
     assert third.status == "succeeded"
     assert third.deleted_paths == []
     assert third.delete_errors == []
-    assert {data["status"] for data in third_payload["candidates"][0]["paths"].values()} == {
-        "already_removed"
-    }
-    assert third.path_outcomes[0].to_dict()["reason_code"] == "PATH_ALREADY_REMOVED"
+    assert third_payload["candidates"] == []
+    assert third.path_outcomes == []
 
 
 @pytest.mark.unit

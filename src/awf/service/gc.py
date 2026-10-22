@@ -15,7 +15,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
@@ -442,6 +442,14 @@ async def run_terminal_workspace_gc(
         session_factory,
         workspace_ids=side_effect_workspace_ids,
     )
+    await _record_filesystem_reclaimed(
+        session_factory,
+        plan,
+        path_outcomes,
+        delete_errors,
+        reservation_releases=reservation_releases,
+        now=current_time,
+    )
     companion_image_prune_result = (
         await companion_image_prune() if companion_image_prune is not None else None
     )
@@ -758,6 +766,14 @@ async def run_workspace_filesystem_gc(
         session_factory,
         workspace_ids=side_effect_workspace_ids,
     )
+    await _record_filesystem_reclaimed(
+        session_factory,
+        plan,
+        path_outcomes,
+        delete_errors,
+        reservation_releases=reservation_releases,
+        now=current_time,
+    )
     return _gc_result(
         plan=plan,
         dry_run=False,
@@ -769,6 +785,52 @@ async def run_workspace_filesystem_gc(
         worktree_removes=worktree_removes,
         reservation_releases=reservation_releases,
     )
+
+
+async def _record_filesystem_reclaimed(
+    session_factory: async_sessionmaker[AsyncSession],
+    plan: WorkspaceGCPlan,
+    outcomes: list[WorkspaceGCPathOutcome],
+    errors: list[WorkspaceGCDeleteError],
+    *,
+    reservation_releases: dict[str, dict[str, object]],
+    now: datetime,
+) -> None:
+    """Record complete path outcomes without changing retention age or live rows."""
+    failed_ids = {error.workspace_id for error in errors}
+    # Marked rows leave the GC backlog, so failed releases must remain retryable.
+    failed_ids.update(
+        workspace_id for workspace_id, result in reservation_releases.items() if "error" in result
+    )
+    successful_paths = {
+        (outcome.workspace_id, outcome.kind, outcome.path)
+        for outcome in outcomes
+        if outcome.status in {"deleted", "already_removed"}
+    }
+    completed = [
+        candidate
+        for candidate in plan.candidates
+        if candidate.workspace_id not in failed_ids
+        and all(
+            (candidate.workspace_id, target.kind, target.path) in successful_paths
+            for target in candidate.paths()
+        )
+    ]
+    if not completed:
+        return
+    async with session_factory() as session:
+        for candidate in completed:
+            await session.execute(
+                update(Workspace)
+                .where(
+                    Workspace.id == candidate.workspace_id,
+                    Workspace.status == candidate.status,
+                    Workspace.updated_at == candidate.updated_at,
+                    Workspace.filesystem_reclaimed_at.is_(None),
+                )
+                .values(filesystem_reclaimed_at=now, updated_at=Workspace.updated_at)
+            )
+        await session.commit()
 
 
 async def _revoke_gc_secret_leases(
@@ -1300,6 +1362,8 @@ def _classify_workspace_for_gc(
     """
     if ignore_retention and not default_policy:
         raise ValueError("ignore_retention=True requires default_policy=True")
+    if workspace.filesystem_reclaimed_at is not None:
+        return None
     if workspace.status in PROTECTED_WORKSPACE_GC_STATUSES:
         return None
     if workspace.status not in TERMINAL_WORKSPACE_GC_STATUSES:
