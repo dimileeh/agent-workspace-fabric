@@ -33,6 +33,7 @@ fresh monitor must re-derive them from the live PR.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -142,6 +143,21 @@ _VERDICT_KEY_RE = re.compile(
 _OPERATOR_DECISION_PREFIX = "__operator_decision__:"
 _OPERATOR_DECISION_ISSUED_AT_PREFIX = "__operator_decision_at__:"
 _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
+
+# ``__awf_item_disposition__:<item id>`` (``awf.runtime.monitor_state_keys``) is
+# what AWF publishes in a review thread before resolving it, plus the id of the
+# reply once posted (#1018). It follows the verdict it answers, under the same
+# head-continuity rule: without it a seeded resolvable verdict parks for missing
+# evidence, or re-posts a reply the thread already carries. ``fixed`` /
+# ``fixed_branch_evidence`` / ``false_positive`` describe the code at the
+# predecessor's head and cross only with continuity; ``deferred`` and an
+# operator acknowledgement judge the feedback and cross either way. A record
+# that does not decode to a known class, or names no thread/comment id, stays.
+_ITEM_DISPOSITION_PREFIX = "__awf_item_disposition__:"
+_HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
+    {"fixed", "fixed_branch_evidence", "false_positive"}
+)
+_HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred", "operator_acknowledged"})
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
@@ -218,6 +234,7 @@ def seedable_monitor_state(
         and (
             _is_verdict_entry(key, value, head_continuity=head_continuity)
             or _is_copied_marker(key, value)
+            or _is_seedable_disposition(key, value, head_continuity=head_continuity)
         )
     }
     return dict(
@@ -278,6 +295,21 @@ def _restore_orphaned_operator_decisions(
 def _is_verdict_entry(key: str, value: str, *, head_continuity: bool) -> bool:
     seedable = _SEEDABLE_VERDICTS if head_continuity else _HEAD_INDEPENDENT_VERDICTS
     return value in seedable and _VERDICT_KEY_RE.match(key) is not None
+
+
+def _is_seedable_disposition(key: str, value: str, *, head_continuity: bool) -> bool:
+    if not key.startswith(_ITEM_DISPOSITION_PREFIX):
+        return False
+    if _VERDICT_KEY_RE.match(key[len(_ITEM_DISPOSITION_PREFIX) :]) is None:
+        return False
+    try:
+        record = json.loads(value)
+    except ValueError:
+        return False
+    disposition_class = record.get("class") if isinstance(record, dict) else None
+    if disposition_class in _HEAD_INDEPENDENT_DISPOSITION_CLASSES:
+        return True
+    return head_continuity and disposition_class in _HEAD_DEPENDENT_DISPOSITION_CLASSES
 
 
 def _is_copied_marker(key: str, value: str) -> bool:
