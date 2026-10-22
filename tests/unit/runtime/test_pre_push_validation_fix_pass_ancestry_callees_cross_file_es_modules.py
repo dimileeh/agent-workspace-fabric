@@ -178,6 +178,21 @@ async def test_a_fix_in_the_bound_module_is_evidence(import_line: str, call: str
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "tail",
+    [
+        "export function flush() {\n  return other.tel.record(1);\n}\n",
+        "export function flush() {\n  return other.\n    tel.record(1);\n}\n",
+    ],
+)
+async def test_an_unrelated_chain_elsewhere_does_not_block_the_anchored_call(tail: str) -> None:
+    """Only the anchored occurrence decides whether ``tel`` is a property (PRRT_kwDOSJAM6s6vOM0D)."""
+    caller = _caller("import * as tel from './telemetry';", "tel.record(value)") + tail
+
+    assert await _accepted(_telemetry_probe(caller))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "module",
     [
         # A directly exported arrow is its own definition head (PRRT_kwDOSJAM6s6vLkoD).

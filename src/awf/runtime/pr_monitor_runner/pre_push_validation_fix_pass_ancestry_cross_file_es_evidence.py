@@ -191,26 +191,13 @@ class _EsModuleReader:
 
 def _es_call_site_bindings(
     text: str, *, path: str
-) -> (
-    tuple[
-        dict[str, _es._EsBinding],
-        frozenset[str],
-        frozenset[tuple[str, str]],
-        tuple[_es._EsToken, ...],
-    ]
-    | None
-):
-    """``(imports, rebound, chained, tokens)`` of one call-site text, or None when unreadable."""
+) -> tuple[dict[str, _es._EsBinding], frozenset[str], tuple[_es._EsToken, ...]] | None:
+    """``(imports, rebound, tokens)`` of one call-site text, or None when unreadable."""
     tokens = _es._es_module_tokens(text, path=path)
     imports = None if tokens is None else _es._es_import_bindings(tokens)
     if tokens is None or imports is None:
         return None
-    return (
-        imports,
-        _es._es_rebound_names(tokens, frozenset(imports)),
-        _es._es_chained_member_refs(tokens),
-        tokens,
-    )
+    return imports, _es._es_rebound_names(tokens, frozenset(imports)), tokens
 
 
 async def _es_module_commit_range_changes_callee_definition(
@@ -258,13 +245,14 @@ async def _es_module_commit_range_changes_callee_definition(
     call_site = _es_call_site_bindings(item_text, path=item_path)
     if call_site is None:
         return False
-    imports, rebound, chained, tokens = call_site
+    imports, rebound, tokens = call_site
     # A chained receiver (``tel.sub.record()``) is an attribute no import binds,
     # and every other unresolvable ref drops out here, so it fails closed. So
     # does a bare ref the anchored line also defines or reaches as a member
     # (``record(v) {``, or ``getClient().`` ending the line above).
     chains = _receiver_chain_segments_from_file_line(item_text, item_line, path=item_path)
     non_calls = _es._es_line_non_call_names(tokens, item_line)
+    chained = _es._es_chained_member_refs(tokens, item_line)
     refs = [
         (qualifier, name, reached)
         for qualifier, name in sorted(
@@ -352,11 +340,16 @@ async def _es_module_commit_range_changes_callee_definition(
 async def _es_caller_still_reaches(
     reader: _EsModuleReader, *, caller: str, qualifier: str | None, name: str
 ) -> tuple[str, str] | None:
-    """The definition the corrected caller's same ref reaches at ``reader``'s ref."""
+    """The definition the corrected caller's same ref reaches at ``reader``'s ref.
+
+    The anchored occurrence was already held to a non-chained receiver at
+    ``left``; here only the corrected file's bindings matter, since its
+    anchor line is unknown and a chain elsewhere says nothing about it.
+    """
     text = await reader.text(caller)
     call_site = None if text is None else _es_call_site_bindings(text, path=caller)
     if call_site is None:
         return None
-    imports, rebound, chained, _tokens = call_site
-    reached = _es._es_ref_target(imports, rebound, chained, qualifier, name)
+    imports, rebound, _tokens = call_site
+    reached = _es._es_ref_target(imports, rebound, frozenset(), qualifier, name)
     return None if reached is None else await reader.target(caller, *reached)

@@ -1036,18 +1036,20 @@ def _es_overload_signature(tokens: tuple[_EsToken, ...], index: int) -> bool:
     return False
 
 
-def _es_chained_member_refs(tokens: tuple[_EsToken, ...]) -> frozenset[tuple[str, str]]:
-    """``(receiver, name)`` pairs the file reaches as ``... .receiver.name``.
+def _es_chained_member_refs(tokens: tuple[_EsToken, ...], line: int) -> frozenset[tuple[str, str]]:
+    """``(receiver, name)`` pairs ``line`` reaches as ``... .receiver.name``.
 
     A receiver that is itself a property (``other.tel.record``) is no import
     binding. The callee scan can miss that when the ``.`` ending one line
     continues the chain on the next, so a qualified ref whose pair appears in
-    such a chain anywhere in the file fails closed.
+    such a chain on the anchored line fails closed. A chain elsewhere in the
+    file says nothing about the anchored occurrence.
     """
     return frozenset(
         (tokens[index + 1].value, tokens[index + 3].value)
         for index in range(len(tokens) - 3)
-        if _is(tokens[index], "punct")
+        if line in (tokens[index + 1].line, tokens[index + 3].line)
+        and _is(tokens[index], "punct")
         and tokens[index].value in (".", "?.")
         and _is(tokens[index + 1], "ident")
         and _is(tokens[index + 2], "punct")
@@ -1141,7 +1143,8 @@ def _es_ref_target(
     on a namespace import reaches the namespace's export of that name. A
     namespace called bare, a named import used as a receiver (a member of an
     object is out of scope), an unbound or rebound key, a receiver the file
-    also reaches as a property (``chained``, see ``_es_chained_member_refs``)
+    reaches as a property on the anchored line (``chained``, see
+    ``_es_chained_member_refs``)
     and an unfollowable binding all fail closed.
     """
     key = name if qualifier is None else qualifier

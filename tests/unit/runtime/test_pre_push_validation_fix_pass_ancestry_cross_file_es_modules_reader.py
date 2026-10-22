@@ -747,10 +747,15 @@ def test_refs_resolve_to_a_specifier_and_export_name_or_fail_closed() -> None:
 
 @pytest.mark.unit
 def test_receivers_reached_as_properties_are_reported() -> None:
-    text = "a = other.\n  tel.record(1) + tel.flush() + x?.ns?.go()"
+    text = "a = other.\n  tel.record(1) + tel.flush() + x?.ns?.go()\nb = y.ns.stop()"
 
-    assert es._es_chained_member_refs(_tokens(text)) == frozenset({("tel", "record"), ("ns", "go")})
-    assert es._es_chained_member_refs(_tokens("a.b")) == frozenset()
+    assert es._es_chained_member_refs(_tokens(text), 2) == frozenset(
+        {("tel", "record"), ("ns", "go")}
+    )
+    # Only chains on the anchored line count; ``y.ns.stop`` sits on line 3.
+    assert es._es_chained_member_refs(_tokens(text), 3) == frozenset({("ns", "stop")})
+    assert es._es_chained_member_refs(_tokens(text), 1) == frozenset()
+    assert es._es_chained_member_refs(_tokens("a.b"), 1) == frozenset()
 
 
 # --- anchor lines and definition heads -------------------------------------------
