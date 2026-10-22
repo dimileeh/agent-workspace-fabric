@@ -177,6 +177,26 @@ async def test_a_fix_in_the_bound_module_is_evidence(import_line: str, call: str
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "module",
+    [
+        # A directly exported arrow is its own definition head (PRRT_kwDOSJAM6s6vLkoD).
+        "export const record = (value: number) => {\n  return value + 1;\n};\n",
+        "export const record = async (value: number) => {\n  return value + 1;\n};\n",
+        "export let record = function (value: number) {\n  return value + 1;\n};\n",
+    ],
+)
+async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> None:
+    caller = _caller("import { record } from './telemetry';")
+    probe = _EsProbe(
+        files={_CALLER: caller, _TELEMETRY: module},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY)},
+    )
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
 async def test_each_callee_on_the_line_is_held_to_its_own_definition() -> None:
     """Two callees from one module: the edited one carries the evidence."""
     caller = _caller("import { flush, record } from './telemetry';", "flush(value) + record(value)")

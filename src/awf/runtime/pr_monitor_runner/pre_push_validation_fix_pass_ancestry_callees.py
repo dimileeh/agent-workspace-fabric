@@ -110,9 +110,11 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
 # Optional TS return type between params and ``=>`` so
 # ``const helper = (value: number): number =>`` / ``async (...): Promise<T> =>``
 # still record a definition span (body-only repairs stay FIXED-with-evidence).
+# Optional ``export`` before the declaration keyword so a directly exported
+# ``export const helper = () =>`` is a head too (PRRT_kwDOSJAM6s6vLkoD).
 _TS_ARROW_RETURN_TYPE = r"(?::(?![ \t]*=>)[^;=\n]*?)?"
 _ASSIGNMENT_DEFINITION_HEAD = (
-    rf"(?:(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
+    rf"(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
     rf"[ \t]*(?:async[ \t]+)?(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )
