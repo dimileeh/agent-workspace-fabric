@@ -145,6 +145,13 @@ _DEFINITION_NAME_LINE_RE = re.compile(
     rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
+# Class heads only — the class alternative of ``_ENCLOSING_DEFINITION_RE`` —
+# so class-span lookups and class/function scope classification accept the
+# same ``export [default] [abstract]`` prefixes as definition discovery
+# (PRRT_kwDOSJAM6s6vMtvk).
+_CLASS_HEAD_RE = re.compile(
+    rf"^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:abstract[ \t]+)?class[ \t]+({_JS_IDENT}){_IDENT_END}"
+)
 _ENCLOSING_DEFINITION_RE = re.compile(
     rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
     rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
@@ -435,8 +442,7 @@ def _enclosing_class_span(
     scan_lines = _definition_head_scan_lines(file_text, path=path)
     idx = min(line, len(lines)) - 1
     while idx >= 0:
-        class_match = re.match(r"^[ \t]*class[ \t]+(\w+)\b", scan_lines[idx])
-        if class_match is not None:
+        if _CLASS_HEAD_RE.match(scan_lines[idx]) is not None:
             class_indent = _leading_indent(lines[idx])
             start = idx + 1
             # Any nonblank equal-or-lower indent ends the class (not only the
@@ -503,7 +509,7 @@ def _containing_definition_identity(
 
 def _definition_span_is_class(file_text: str, start_line: int) -> bool:
     """Return True when the definition head at ``start_line`` is a class."""
-    return re.match(r"^[ \t]*class[ \t]+\w+\b", file_text.splitlines()[start_line - 1]) is not None
+    return _CLASS_HEAD_RE.match(file_text.splitlines()[start_line - 1]) is not None
 
 
 def _definition_is_nested_in_other(

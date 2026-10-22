@@ -897,6 +897,40 @@ def test_resolve_callee_definition_span_bare_call_skips_class_method() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "head",
+    ["export class Foo {", "export default class Foo {", "export abstract class Foo {"],
+)
+def test_resolve_callee_definition_span_bare_call_skips_exported_class_method(head: str) -> None:
+    """Exported class heads are classes, not function scopes (PRRT_kwDOSJAM6s6vMtvk).
+
+    A bare ``helper()`` inside a method of ``export [default] [abstract] class``
+    must not link the class-body ``helper`` member as its callee.
+    """
+    text = (
+        "function helper() {\n"
+        "  return 99;\n"
+        "}\n"
+        "\n"
+        f"{head}\n"
+        "  helper = () => {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  reviewed = () => {\n"
+        "    return helper();\n"
+        "  }\n"
+        "}\n"
+    )
+    assert callees._resolve_callee_definition_span(
+        text, call_line=10, qualifier=None, name="helper", path="src/mod.ts"
+    ) == (1, 4)
+    assert callees._enclosing_class_span(text, 10, path="src/mod.ts") == (5, 12)
+    assert callees._resolve_callee_definition_span(
+        text, call_line=10, qualifier="this", name="helper", path="src/mod.ts"
+    ) == (6, 8)
+
+
+@pytest.mark.unit
 def test_resolve_callee_definition_span_method_default_uses_class_namespace() -> None:
     """Default exprs on a class method ``def`` line resolve in the class namespace.
 
