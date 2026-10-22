@@ -287,6 +287,7 @@ async def handle_merge_action(
             workspace_id=workspace_id,
             repo=repo,
             pr_number=pr_number,
+            status=status,
             state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,
@@ -726,6 +727,7 @@ async def handle_merge_action(
                                 workspace_id=workspace_id,
                                 repo=repo,
                                 pr_number=pr_number,
+                                status=merge_status,
                                 state=state,
                                 base_branch=base_branch,
                                 remote_branch=remote_branch,
@@ -736,6 +738,7 @@ async def handle_merge_action(
                             disposition_audit_error_after_lock = exc
                     if (
                         disposition_gate_after_lock is not None
+                        and not disposition_gate_after_lock.retry
                         and disposition_gate_after_lock.blocker is None
                     ):
                         try:

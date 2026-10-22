@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     NotifyHuman,
     PRStatus,
+    ReviewThread,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
@@ -65,6 +67,7 @@ _REPO = RepoRef(owner="acme", name="widgets")
 _REPO_URL = "git@github.com:acme/widgets.git"
 _VIEWER = "awf-operator"
 _SILENT = "PRRT_test_silent_p1"
+_FRESH = "PRRT_test_fresh_p1"
 _AUDIT = "workspace.audit.comment_resolution"
 
 
@@ -142,6 +145,7 @@ def _thread(
     bodies: tuple[str, ...] = (),
     resolved: bool = True,
     superseded: int = 0,
+    external: bool = False,
 ) -> AuditedReviewThread:
     return AuditedReviewThread(
         thread_id=tid,
@@ -150,6 +154,7 @@ def _thread(
         resolved_by=resolved_by,
         viewer_comment_bodies=bodies,
         superseded_viewer_comments=superseded,
+        has_external_comment=external,
     )
 
 
@@ -187,12 +192,15 @@ async def _execute(runner: Any, workspace_id: str, action: Any, state: MonitorSt
     )
 
 
-async def _gate(runner: Any, workspace_id: str, state: MonitorState) -> Any:
+async def _gate(
+    runner: Any, workspace_id: str, state: MonitorState, status: PRStatus | None = None
+) -> Any:
     return await review_thread_disposition_gate(
         runner,
         workspace_id=workspace_id,
         repo=_REPO,
         pr_number=42,
+        status=status or _green_status(),
         state=state,
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",
@@ -530,6 +538,69 @@ async def test_gate_records_one_audit_event_per_newly_flagged_set(
     assert len(await _audit_events(factory, workspace_id)) == 1
 
 
+@pytest.mark.parametrize(
+    ("external", "listed_in", "retry"),
+    [
+        (True, None, True),
+        (True, "unresolved_inline_threads", False),
+        (True, "outdated_unresolved_inline_threads", False),
+        (False, None, False),  # only AWF's identity commented: no status lists it
+    ],
+)
+async def test_gate_retries_on_unresolved_feedback_the_decided_status_never_listed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    external: bool,
+    listed_in: str | None,
+    retry: bool,
+) -> None:
+    """PRRT_kwDOSJAM6s6vVxR0: a thread opened (or reopened) after the status ``decide``
+    acted on is unresolved in the audit; passing would certify or merge over it."""
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(
+                _thread("PRRT_test_ok", bodies=(_marker("fixed", "PRRT_test_ok"),)),
+                _thread(_FRESH, resolved=False, external=external),
+            ),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    status = _green_status()
+    if listed_in is not None:
+        listed = (ReviewThread(thread_id=_FRESH, path="a.py", line=1, body_excerpt="P1"),)
+        status = replace(status, **{listed_in: listed})
+
+    result = await _gate(runner, workspace_id, settled_baseline_state(), status)
+
+    assert result.retry is retry
+    assert result.blocker is None
+    assert (result.count_rows is None) is retry
+    assert await _audit_events(factory, workspace_id) == []
+
+
+async def test_cert_waits_for_a_poll_that_lists_feedback_opened_after_its_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(_thread(_FRESH, resolved=False, external=True),),
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    terminal = await _execute(runner, workspace_id, NotifyHuman(), settled_baseline_state())
+
+    assert terminal is False
+    assert gh.comments == []  # no READY_TO_MERGE cert over the unseen feedback
+
+
 class _AuditMergeClient(_MergeMethodClient):
     """The merge-method double, serving a canned review-thread audit."""
 
@@ -843,6 +914,30 @@ async def test_feature_merge_reaudits_after_in_lock_status_refresh(
     assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
     _, _, status = await _attention(factory, workspace_id)
     assert status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.parametrize("fresh_audit", [0, 1])
+async def test_feature_merge_waits_for_a_poll_that_lists_feedback_opened_after_its_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    fresh_audit: int,
+) -> None:
+    """PRRT_kwDOSJAM6s6vVxR0: neither the pre-lock audit nor the in-lock re-audit merges
+    over a thread opened after the status ``decide`` merged on."""
+    clean = ReviewThreadAudit(supported=True, viewer_login=_VIEWER)
+    fresh = ReviewThreadAudit(
+        supported=True,
+        viewer_login=_VIEWER,
+        threads=(_thread(_FRESH, resolved=False, external=True),),
+    )
+    gh = _SequencedAuditMergeClient(*[clean] * fresh_audit, fresh)
+
+    terminal, _, _, _ = await _execute_merge(factory=factory, tmp_path=tmp_path, gh=gh)
+
+    assert terminal is False
+    assert gh.status_refreshes_at_audit == [0, 1][: fresh_audit + 1]
+    assert gh.merge_calls == []
+    assert gh.comments == []
 
 
 async def test_feature_merge_in_lock_transient_audit_fault_backs_off_after_release(

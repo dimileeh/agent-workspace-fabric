@@ -152,6 +152,7 @@ async def _gate(runner: Any, workspace_id: str, state: MonitorState) -> Any:
         workspace_id=workspace_id,
         repo=_REPO,
         pr_number=42,
+        status=_green_status(),
         state=state,
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",

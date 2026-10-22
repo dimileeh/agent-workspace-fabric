@@ -227,6 +227,7 @@ async def handle_notify_human_action(
             workspace_id=workspace_id,
             repo=repo,
             pr_number=pr_number,
+            status=status,
             state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,

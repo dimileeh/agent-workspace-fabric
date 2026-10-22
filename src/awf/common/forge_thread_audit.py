@@ -23,6 +23,8 @@ class AuditedReviewThread:
     ``conversation_digest_before_reply`` is that digest without the thread's newest
     comment when the token's identity authored it (``""`` otherwise): the
     conversation that reply followed, as the thread reads now.
+    ``has_external_comment`` is true when anyone but the token's identity commented:
+    only such an unresolved thread is listed by ``fetch_pr_status``.
     """
 
     thread_id: str
@@ -33,6 +35,7 @@ class AuditedReviewThread:
     superseded_viewer_comments: int = 0
     conversation_digest: str = ""
     conversation_digest_before_reply: str = ""
+    has_external_comment: bool = False
 
     @property
     def current_viewer_comment_bodies(self) -> tuple[str, ...]:

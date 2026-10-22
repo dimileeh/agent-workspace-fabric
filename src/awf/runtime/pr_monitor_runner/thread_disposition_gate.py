@@ -18,6 +18,8 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   posts the acknowledgement (with its marker) into the thread itself, only while
   the thread keeps the conversation that was flagged, and the marker counts only
   while that conversation is what the reply followed.
+* An unresolved thread is ``decide()``'s to handle, so one the status it acted on
+  never listed (opened or reopened since) re-polls instead of passing.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -40,7 +42,7 @@ from awf.runtime.monitor_state_keys import (
     _disposition_unverified_key,
     _item_disposition_key,
 )
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import MonitorState, PRStatus
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
@@ -69,7 +71,7 @@ _AUDIT_ACTION = "review_thread_disposition_audit"
 class DispositionGateResult:
     """Outcome of one gate run."""
 
-    retry: bool = False  # transient audit fault: re-poll
+    retry: bool = False  # transient audit fault, or feedback ``status`` predates: re-poll
     blocker: str | None = None  # NotifyHuman message (reason-coded)
     count_rows: tuple[tuple[str, int], ...] | None = None  # cert line 1; None = unsupported
     audit_unavailable: bool = False  # ``blocker`` is REVIEW_THREAD_AUDIT_UNAVAILABLE
@@ -81,6 +83,7 @@ async def review_thread_disposition_gate(
     workspace_id: str,
     repo: RepoRef,
     pr_number: int,
+    status: PRStatus,
     state: MonitorState,
     base_branch: str,
     remote_branch: str,
@@ -89,6 +92,7 @@ async def review_thread_disposition_gate(
 ) -> DispositionGateResult:
     """Verify every AWF-resolved thread carries a disposition marker.
 
+    ``status`` is the snapshot ``decide()`` chose this cert or merge on.
     ``defer_forge_errors`` re-raises an audit fetch fault instead of backing off:
     the merge loop re-audits under ``serialized_merge`` and must not sleep while
     holding the lock, so it passes the fault to :func:`review_thread_audit_fault`
@@ -146,6 +150,14 @@ async def review_thread_disposition_gate(
     counts: Counter[str] = Counter()
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
+    decided = {
+        thread.thread_id
+        for thread in (
+            *status.unresolved_inline_threads,
+            *status.outdated_unresolved_inline_threads,
+        )
+    }
+    undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
     # The conversation each unverified flag binds to (an acknowledgement's re-audit
     # can move it on).
     digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
@@ -169,6 +181,8 @@ async def review_thread_disposition_gate(
                 and not pending.reply_comment_id
             ):
                 _supersede_acknowledgement(state, thread.thread_id, workspace_id=workspace_id)
+            if thread.has_external_comment and thread.thread_id not in decided:
+                undecided.append(thread.thread_id)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
             counts[RESOLVED_BY_OTHERS] += 1  # that person's or bot's own disposition
@@ -237,6 +251,17 @@ async def review_thread_disposition_gate(
         counts[LEGACY_BASELINE] += len(legacy)
         unverified = [tid for tid in unverified if tid not in legacy]
     if not unverified:
+        if undecided:
+            # Opened or reopened after ``status`` was fetched: re-poll so ``decide()``
+            # handles it rather than certify or merge past it (PRRT_kwDOSJAM6s6vVxR0).
+            _log.info(
+                "monitor.review_thread_audit_found_undecided_feedback",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                thread_ids=undecided,
+                reason_code="REVIEW_THREAD_FEEDBACK_AFTER_DECISION",
+            )
+            return DispositionGateResult(retry=True)
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
     newly_flagged = [
         thread_id
