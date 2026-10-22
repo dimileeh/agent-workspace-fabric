@@ -301,3 +301,57 @@ def test_failed_initialization_cleans_up_on_bridge_thread(monkeypatch, failure):
         store.close.assert_called_once()
     else:
         store.close.assert_not_called()
+
+
+def test_timeout_keeps_resolutions_serial_until_cancellation_finishes(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from awf.hosted_node import resolver as module
+    from awf.node.secret_mounts import LocalSecretLeaseResolution
+
+    engine = SimpleNamespace(dispose=AsyncMock())
+    receiver = SimpleNamespace(store=SimpleNamespace(close=Mock()), closed=False)
+    monkeypatch.setattr(module, "make_engine", lambda _url: engine)
+    monkeypatch.setattr(module, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(module, "MaterialStore", lambda _root: receiver.store)
+    monkeypatch.setattr(module, "Receiver", lambda *_args: receiver)
+    resolver = ProtectedResolver(
+        "unused", SimpleNamespace(material_root=None), object(), {}, timeout=0.1
+    )
+    profile = WorkspaceProfile.model_validate({"name": "test"})
+    cancelling = threading.Event()
+    finished = threading.Event()
+    release = asyncio.Event()
+    calls = []
+    expected = LocalSecretLeaseResolution(mounts=(), metadata={})
+
+    async def resolve_with_cleanup(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            try:
+                await asyncio.Future()
+            finally:
+                cancelling.set()
+                await release.wait()
+                finished.set()
+        return expected
+
+    monkeypatch.setattr(resolver, "_resolve", resolve_with_cleanup)
+    try:
+        with pytest.raises(MaterialDeniedError, match="^RESOLVER_UNAVAILABLE$"):
+            resolver.resolve(profile, workspace_id="ws")
+        assert cancelling.wait(5)
+        with pytest.raises(MaterialDeniedError, match="^RESOLVER_UNAVAILABLE$"):
+            resolver.resolve(profile, workspace_id="ws")
+        assert len(calls) == 1
+        assert not finished.is_set()
+        resolver._loop.call_soon_threadsafe(release.set)
+        assert finished.wait(5)
+        assert resolver.resolve(profile, workspace_id="ws") == expected
+        assert len(calls) == 2
+    finally:
+        resolver._loop.call_soon_threadsafe(release.set)
+        assert finished.wait(5)
+        resolver.close()

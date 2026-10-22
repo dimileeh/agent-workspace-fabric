@@ -42,6 +42,7 @@ class ProtectedResolver:
         self.timeout = timeout
         self._closed = False
         self._gate = threading.Lock()
+        self._resolve_gate = asyncio.Lock()
         self._loop = asyncio.new_event_loop()
 
         def run_bridge() -> None:
@@ -134,9 +135,14 @@ class ProtectedResolver:
         try:
             if self._closed:
                 raise MaterialDeniedError("RESOLVER_CLOSED", 503)
-            future = asyncio.run_coroutine_threadsafe(
-                self._resolve(profile, workspace_id), self._loop
-            )
+
+            async def resolve_serially() -> LocalSecretLeaseResolution:
+                # Future cancellation can precede coroutine cleanup. Keep the
+                # bridge serialized until the previous resolution actually exits.
+                async with self._resolve_gate:
+                    return await self._resolve(profile, workspace_id)
+
+            future = asyncio.run_coroutine_threadsafe(resolve_serially(), self._loop)
             try:
                 return future.result(self.timeout)
             except (FutureTimeout, SQLAlchemyError, OSError):
