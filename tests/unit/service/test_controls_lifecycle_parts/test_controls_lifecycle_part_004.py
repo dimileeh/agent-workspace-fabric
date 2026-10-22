@@ -89,14 +89,10 @@ async def test_remonitor_failed_workspace_reserves_state_reset_event_order(
         )
     ]
     assert workspace.version == 2
-    assert events[0].event_order == 3
+    assert events[0].event_order == 2
     assert events[0].old_state == WorkspaceStatus.failed.value
     assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
-    assert events[1].event_type == "workspace.state_changed"
-    assert events[1].event_order == 2
-    assert events[1].old_state == WorkspaceStatus.failed.value
-    assert events[1].new_state == WorkspaceStatus.monitoring_pr.value
-    assert events[1].reason_code == events[0].reason_code
+    assert events[0].reason_code == "OPERATOR_REMONITOR"
 
 
 @pytest.mark.unit

@@ -18,7 +18,6 @@ MARKER = datetime(2026, 1, 1, tzinfo=UTC)
 @pytest.mark.parametrize(
     ("src", "dst", "clear"),
     [
-        (S.failed, S.monitoring_pr, True),
         (S.completed, S.destroying, True),
         (S.failed, S.destroying, True),
         (S.cancelled, S.destroying, True),
@@ -59,7 +58,8 @@ async def test_transition_marker_semantics(engine: AsyncEngine, method, src, dst
 
 
 @pytest.mark.parametrize("method", ["orm", "postgresql", "atomic"])
-async def test_rejected_or_unmatched_transition_preserves_marker(engine: AsyncEngine, method):
+@pytest.mark.parametrize("dst", [S.running, S.monitoring_pr])
+async def test_rejected_or_unmatched_transition_preserves_marker(engine: AsyncEngine, method, dst):
     async with make_session_factory(engine)() as session:
         repo = WorkspaceRepository(
             session, dialect_name="sqlite" if method == "atomic" else "postgresql"
@@ -77,17 +77,17 @@ async def test_rejected_or_unmatched_transition_preserves_marker(engine: AsyncEn
         await session.commit()
         with pytest.raises(InvalidWorkspaceTransitionError):
             if method == "orm":
-                await repo.transition(ws, to=S.running, reason_code="REJECTED")
+                await repo.transition(ws, to=dst, reason_code="REJECTED")
             else:
                 await repo.transition_if_current(
-                    ws.id, from_status=S.failed, to=S.running, reason_code="REJECTED"
+                    ws.id, from_status=S.failed, to=dst, reason_code="REJECTED"
                 )
         if method != "orm":
             assert (
                 await repo.transition_if_current(
                     ws.id,
                     from_status=S.failed,
-                    to=S.monitoring_pr,
+                    to=S.destroying,
                     reason_code="NO_MATCH",
                     extra_conditions=(false(),),
                 )

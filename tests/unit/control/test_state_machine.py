@@ -85,7 +85,6 @@ class TestValidTransitions:
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.cancelled),
             (WorkspaceStatus.completed, WorkspaceStatus.destroying),
             (WorkspaceStatus.failed, WorkspaceStatus.destroying),
-            (WorkspaceStatus.failed, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.cancelled, WorkspaceStatus.destroying),
             (WorkspaceStatus.destroying, WorkspaceStatus.destroyed),
             (WorkspaceStatus.destroying, WorkspaceStatus.failed),
@@ -120,6 +119,7 @@ class TestInvalidTransitions:
             (WorkspaceStatus.running, WorkspaceStatus.ready),
             (WorkspaceStatus.completed, WorkspaceStatus.running),
             (WorkspaceStatus.failed, WorkspaceStatus.running),
+            (WorkspaceStatus.failed, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.completed, WorkspaceStatus.monitoring_pr),
             # blocked is non-terminal but cannot jump straight to completed /
             # destroying — only resume or terminate. (blocked → monitoring_pr is
