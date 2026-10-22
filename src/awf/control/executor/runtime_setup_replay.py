@@ -43,6 +43,7 @@ from awf.control.executor.constants import (
 )
 from awf.control.executor.helpers import _failure_reason_for_phase
 from awf.control.executor.logging_ops import _setup_dependency_network_failure_details
+from awf.control.executor.monitor_handoff_audit import record_setup_dependency_network_events
 from awf.control.executor.state_ops import _blocked_resume_setup_phase_names
 from awf.db.enums import FailureReason
 from awf.db.models import WorkspaceEvent
@@ -297,6 +298,18 @@ async def replay_setup_if_recreated(
             workspace_id=workspace_id,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"runtime setup replay failed: {safe_error}",
+        )
+    try:
+        await record_setup_dependency_network_events(
+            session_factory, workspace_id=workspace_id, result=result
+        )
+    except SQLAlchemyError:
+        # Like the initial setup paths, a lost retry audit never changes the
+        # replay result.
+        _log.exception(
+            "executor.runtime_setup_replay_dependency_network_event_record_failed",
+            workspace_id=workspace_id,
+            setup_all_passed=result.all_passed,
         )
     hooks_failure = await _repair_mirror_hooks(
         mirror_path, workspace_id=workspace_id, stage="after_setup_replay"

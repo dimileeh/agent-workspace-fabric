@@ -132,6 +132,18 @@ async def _record_setup_dependency_network_events(
     workspace_id: str,
     result: ValidationResult,
 ) -> None:
+    await record_setup_dependency_network_events(
+        self._session_factory, workspace_id=workspace_id, result=result
+    )
+
+
+async def record_setup_dependency_network_events(
+    session_factory: Any,
+    *,
+    workspace_id: str,
+    result: ValidationResult,
+) -> None:
+    """Persist dependency-network retry/exhausted events carried by setup ``result``."""
     event_specs: list[tuple[str, str, dict[str, Any]]] = []
     commands = getattr(result, "commands", None)
     if not commands:
@@ -168,7 +180,7 @@ async def _record_setup_dependency_network_events(
     if not event_specs:
         return
 
-    async with self._session_factory() as session:
+    async with session_factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
         if workspace is None:  # pragma: no cover - destroyed mid-flight

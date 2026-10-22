@@ -21,6 +21,8 @@ from awf.control.executor.constants import (
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
     RUNTIME_SETUP_REPLAYED_REASON_CODE,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
 )
 from awf.control.executor.runtime_setup_replay import (
     IDENTITY_UNAVAILABLE,
@@ -42,6 +44,8 @@ from awf.runtime.ownership import (
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     SETUP_DEPENDENCY_NETWORK_METADATA_KEY,
+    SETUP_DEPENDENCY_NETWORK_RETRY,
+    SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationCommandResult,
     ValidationResult,
 )
@@ -595,6 +599,106 @@ class TestReplayFailureDetails:
         tail = outcome.details["stdout_tail"]
         assert tail.endswith("ERROR: final failure line")
         assert "GITHUB_TOKEN=ab" not in tail
+
+
+def _dependency_retry_command(tmp_path: Path, *, exhausted: bool) -> ValidationCommandResult:
+    return ValidationCommandResult(
+        command="uv sync --extra dev",
+        returncode=1 if exhausted else 0,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "setup.stdout",
+        stderr_path=tmp_path / "setup.stderr",
+        phase="setup",
+        reason_code=SETUP_DEPENDENCY_NETWORK_FAILURE if exhausted else "VALIDATION_OK",
+        retry_count=2 if exhausted else 1,
+        metadata={
+            SETUP_DEPENDENCY_NETWORK_METADATA_KEY: {
+                "reason_code": SETUP_DEPENDENCY_NETWORK_FAILURE,
+                "host": "files.pythonhosted.org",
+                "retry_count": 2 if exhausted else 1,
+                "retry_budget": 2,
+                "retry_exhausted": exhausted,
+                "diagnostic": f"lookup failed; Authorization: Bearer {_SECRET}",
+            }
+        },
+    )
+
+
+async def _events_of(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str, event_type: str
+) -> list[WorkspaceEvent]:
+    async with factory() as session:
+        rows = await session.execute(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == event_type,
+            )
+        )
+        return list(rows.scalars())
+
+
+class TestReplayDependencyNetworkEvents:
+    @pytest.mark.unit
+    async def test_replay_recovered_by_retry_records_the_retry_event(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = _FixedResultValidation(
+            ValidationResult(commands=[_dependency_retry_command(tmp_path, exhausted=False)])
+        )
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert outcome.ok and outcome.replayed
+        retries = await _events_of(factory, ws_id, SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE)
+        assert [event.reason_code for event in retries] == [SETUP_DEPENDENCY_NETWORK_RETRY]
+        assert _SECRET not in str(retries[0].payload)
+        assert not await _events_of(
+            factory, ws_id, SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE
+        )
+
+    @pytest.mark.unit
+    async def test_replay_exhausting_retries_records_both_events_before_failing(
+        self, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        validation = _FixedResultValidation(
+            ValidationResult(commands=[_dependency_retry_command(tmp_path, exhausted=True)])
+        )
+
+        outcome = await _replay(factory, validation, ws_id, tmp_path, before=_OLD, after=_NEW)
+
+        assert not outcome.ok
+        assert outcome.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert await _events_of(factory, ws_id, SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE)
+        exhausted = await _events_of(
+            factory, ws_id, SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE
+        )
+        assert [event.reason_code for event in exhausted] == [
+            SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED
+        ]
+
+    @pytest.mark.unit
+    async def test_retry_event_db_error_does_not_fail_the_replay(self, tmp_path: Path) -> None:
+        validation = _FixedResultValidation(
+            ValidationResult(commands=[_dependency_retry_command(tmp_path, exhausted=False)])
+        )
+
+        with capture_logs() as logs:
+            outcome = await _replay(
+                lambda: _BrokenSession(),
+                validation,
+                "ws_db_down",
+                tmp_path,
+                before=_OLD,
+                after=_NEW,
+            )
+
+        assert outcome.ok and outcome.replayed
+        assert any(
+            log["event"] == "executor.runtime_setup_replay_dependency_network_event_record_failed"
+            for log in logs
+        )
 
 
 class _MirrorHooks:
