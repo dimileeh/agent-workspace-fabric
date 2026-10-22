@@ -1273,6 +1273,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart002HostedAdoption:
             ),
         )
 
-        await worker.run_once()
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
 
         assert executor.resume_calls == [workspace_id]
