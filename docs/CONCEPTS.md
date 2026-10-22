@@ -435,8 +435,11 @@ resolved only after the reply succeeded; otherwise it stays open and is parked
   blindly, since a retry could post twice).
 
 DEFER no longer posts a separate top-level PR comment: the in-thread reply is
-the explanation. Outdated hygiene persists a newly posted reply id before
-resolving, so a transient resolve retry never posts twice.
+the explanation. A newly posted reply id is saved durably right after the reply
+(the fix cycle writes only that record, never its unconfirmed verdicts), and a
+record whose reply landed survives every rollback and re-triage of the item, so
+a failed resolve never posts a second reply. Only fresh reviewer feedback in the
+thread drops it, because that feedback is owed its own reply.
 
 Before READY_TO_MERGE (release monitors) and before merging (feature
 monitors), AWF re-enumerates every review thread with exhaustive pagination,

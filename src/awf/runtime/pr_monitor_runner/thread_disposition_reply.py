@@ -17,9 +17,15 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from awf.common.forge_errors import ForgeClientError
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
+from awf.runtime.monitor_state_keys import (
+    _item_disposition_key,
+    _outdated_resolve_requeued_key,
+)
 from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.fix_cycle_deferred import _deferred_issue_url
@@ -91,13 +97,14 @@ async def reply_before_resolve(
             forge_reason_code=forge_reason_code,
         )
 
+    if disposition is not None and disposition.reply_comment_id:
+        # Replied on an earlier attempt whose resolve did not land: that reply is
+        # the thread's disposition, so resolve on it and never double-post.
+        return disposition
     if disposition is None or problem is not None:
         reason_code = problem or THREAD_DISPOSITION_REASON_MISSING
         await _park(reason_code, _PROBLEM_DETAIL[reason_code])
         return None
-    if disposition.reply_comment_id:
-        # Replied on an earlier attempt whose resolve did not land: never double-post.
-        return disposition
     try:
         reply_id = await self._deps.gh.reply_to_thread(
             thread_id=thread_id,
@@ -116,6 +123,9 @@ async def reply_before_resolve(
         return None
     replied = replace(disposition, reply_comment_id=reply_id)
     record_item_disposition(state, replied)
+    await _persist_posted_disposition(
+        self, workspace_id=workspace_id, state=state, item_id=thread_id
+    )
     _log.info(
         "monitor.thread_disposition_replied",
         workspace_id=workspace_id,
@@ -125,6 +135,42 @@ async def reply_before_resolve(
         reply_comment_id=reply_id,
     )
     return replied
+
+
+async def _persist_posted_disposition(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    item_id: str,
+) -> None:
+    """Save ONLY ``item_id``'s posted disposition record, merged onto the row.
+
+    Runs right after the reply lands, so a resolve that then fails — or a
+    restart before the loop's ``_persist_state`` — still finds the reply id and
+    never posts a second reply. It must not flush the rest of the in-memory
+    state: inside a fix cycle that still carries unconfirmed verdicts whose
+    resolves have not run yet (#305). Best-effort: the reply already landed and
+    the in-memory record still reaches the DB with the loop's own flush.
+    """
+    key = _item_disposition_key(item_id)
+    record = state.threads_addressed_ids[key]
+    try:
+        async with self._deps.session_factory() as session:
+            ws = await WorkspaceRepository(session).get_for_update(workspace_id)
+            if ws is None:
+                return
+            threads_addressed = dict(ws.monitor_threads_addressed or {})
+            threads_addressed[key] = record
+            ws.monitor_threads_addressed = threads_addressed
+            await session.commit()
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.thread_disposition_persist_failed",
+            workspace_id=workspace_id,
+            thread_id=item_id,
+            error=repr(exc)[:400],
+        )
 
 
 def _disposition_for_resolve(

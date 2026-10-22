@@ -346,7 +346,7 @@ def _clear_addressed_state_by_id(
     item_id: str,
     *,
     restore_operator_decision: bool = True,
-    keep_posted_reply: bool = False,
+    keep_posted_reply: bool = True,
 ) -> None:
     """Clear verdict, body, and reason markers for ``item_id``.
 
@@ -360,10 +360,10 @@ def _clear_addressed_state_by_id(
     "rolled back": that feedback is not what the operator ruled on. A ruling the
     operator has since re-issued likewise wins over the parked copy.
 
-    Pass ``keep_posted_reply=True`` when the rollback follows a failed resolve:
-    the disposition reply already landed in the thread (#1018), so its record is
-    kept and an unchanged re-addressed disposition reuses that reply instead of
-    posting a second one.
+    A disposition whose reply already landed in the thread (#1018) is kept: a
+    rollback re-queues the item, and the retried resolve must reuse that reply,
+    never post a second one. Pass ``keep_posted_reply=False`` only where fresh
+    reviewer feedback supersedes it — that feedback is owed its own reply.
     """
     from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 
@@ -413,8 +413,14 @@ def _drop_stale_review_thread_addressed_state(
         if recorded_review_thread_body_matches(recorded, thread):
             continue
         # Fresh reviewer feedback supersedes the answered operator ruling rather
-        # than rolling its verdict back, so the parked ruling retires for good.
-        _clear_addressed_state_by_id(state, thread.thread_id, restore_operator_decision=False)
+        # than rolling its verdict back, so the parked ruling retires for good,
+        # and the new feedback gets its own disposition reply (#1018).
+        _clear_addressed_state_by_id(
+            state,
+            thread.thread_id,
+            restore_operator_decision=False,
+            keep_posted_reply=False,
+        )
         changed = True
     return changed
 

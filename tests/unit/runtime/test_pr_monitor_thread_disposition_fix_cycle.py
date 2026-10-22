@@ -9,11 +9,14 @@ the workspace keeps monitoring and the pushed commits stay pushed.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -22,6 +25,10 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_state_keys import (
+    _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
+    _item_disposition_key,
+)
 from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
@@ -34,6 +41,10 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 from awf.runtime.pr_monitor_runner import fix_cycle as fix_cycle_module
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    ItemCommitProvenance,
+    encode_item_commit_provenance_chain,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
@@ -43,6 +54,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     record_item_disposition,
     sync_item_disposition,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_resolve
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -369,6 +381,79 @@ async def test_active_thread_resolve_retry_reuses_recorded_reply_without_reposti
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
 
 
+async def test_fixed_resolve_retry_reuses_reply_after_the_chain_was_cleared(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = OrderedForge(
+        FakeCommandRunner(),
+        resolve_error=GitHubClientError(
+            operation="gh api graphql", returncode=1, stderr="HTTP 502"
+        ),
+    )
+    tid = "PRRT_test_fixed_retry"
+    thread = _thread(tid)
+
+    def _fixed_with_chain(state: MonitorState, addressed: ReviewThread) -> None:
+        # What ``comments._address_thread`` records: the item's #935 commit, then
+        # the FIXED disposition citing it.
+        state.mark_addressed(
+            _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
+            encode_item_commit_provenance_chain(
+                (
+                    ItemCommitProvenance(
+                        item_id=addressed.thread_id, item_start_head=_START, head_sha=_FIX
+                    ),
+                )
+            ),
+        )
+        sync_item_disposition(state, addressed.thread_id, VerdictResult(verdict="fix_committed"))
+
+    def _fixed_after_publish(state: MonitorState, addressed: ReviewThread) -> None:
+        # The push that published the fix cleared the chain: the re-run cites nothing.
+        sync_item_disposition(state, addressed.thread_id, VerdictResult(verdict="fix_committed"))
+
+    workspace_id, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="fix_committed",
+        on_address=_fixed_with_chain,
+        thread=thread,
+    )
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed"]
+    # Saved durably right after the reply, without flushing the unconfirmed verdict.
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    persisted = ThreadDisposition.from_payload(
+        (ws.monitor_threads_addressed or {}).get(_item_disposition_key(tid))
+    )
+    assert persisted is not None and persisted.reply_comment_id == "reply-1"
+    assert tid not in (ws.monitor_threads_addressed or {})
+
+    gh.resolve_error = None
+    await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="fix_committed",
+        on_address=_fixed_after_publish,
+        thread=thread,
+        state=state,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed", "resolve"]
+    assert len(gh.replies()) == 1
+    assert state.threads_addressed_ids[tid] == "fix_committed"
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and recorded.reply_comment_id == "reply-1"
+    assert recorded.commits == (_FIX,)
+
+
 async def test_fix_cycle_false_positive_without_reason_parks(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -555,3 +640,40 @@ async def test_fix_cycle_reply_reason_never_mentions(
     assert len(replies) == 1
     assert "@" not in replies[0][1]
     assert "alice" in replies[0][1]
+
+
+@pytest.mark.parametrize("db_fault", [True, False], ids=["db-fault", "row-gone"])
+async def test_posted_reply_persist_is_best_effort(
+    factory: async_sessionmaker[AsyncSession], db_fault: bool
+) -> None:
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_persist_blip"
+    state = MonitorState()
+    state.mark_addressed(tid, "false_positive")
+    seed_resolvable_disposition(state, tid, "false_positive")
+
+    @asynccontextmanager
+    async def _down() -> AsyncIterator[AsyncSession]:
+        raise SQLAlchemyError("database unavailable")
+        yield  # pragma: no cover - generator shape only
+
+    runner = SimpleNamespace(
+        _deps=SimpleNamespace(gh=gh, session_factory=_down if db_fault else factory)
+    )
+
+    replied = await reply_before_resolve(
+        runner,
+        workspace_id="ws_missing",
+        pr_number=42,
+        thread_id=tid,
+        state=state,
+        action="resolve_thread",
+        base_branch="development",
+        remote_branch="awf/ws_missing",
+    )
+
+    # The reply landed: a failed narrow save never turns into "not replied".
+    assert replied is not None and replied.reply_comment_id == "reply-1"
+    assert len(gh.replies()) == 1
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and recorded.reply_comment_id == "reply-1"

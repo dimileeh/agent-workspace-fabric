@@ -13,12 +13,20 @@ from dataclasses import replace
 
 import pytest
 
+from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.monitor_state_keys import (
     _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
     _disposition_unverified_key,
     _item_disposition_key,
 )
-from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    ReviewThread,
+)
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     ItemCommitProvenance,
     encode_item_commit_provenance_chain,
@@ -27,7 +35,10 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
     MonitorVerdictResult,
     VerdictResult,
 )
-from awf.runtime.pr_monitor_runner.helpers import _clear_addressed_state_by_id
+from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
+    _drop_stale_review_thread_addressed_state,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     REVIEW_THREAD_DISPOSITION_UNVERIFIED,
     THREAD_DISPOSITION_EVIDENCE_MISSING,
@@ -515,41 +526,90 @@ def test_clear_addressed_state_by_id_drops_item_disposition() -> None:
     assert "PRRT_test_a" not in state.threads_addressed_ids
 
 
-def test_clear_addressed_state_by_id_keeps_posted_reply_only_when_asked() -> None:
+def test_clear_addressed_state_by_id_keeps_posted_reply_unless_superseded() -> None:
     state = MonitorState()
     posted = replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
     record_item_disposition(state, posted)
     record_item_disposition(state, replace(_fp(), item_id="PRRT_test_b"))
-    _clear_addressed_state_by_id(state, "PRRT_test_a", keep_posted_reply=True)
-    _clear_addressed_state_by_id(state, "PRRT_test_b", keep_posted_reply=True)
+    # A rollback (failed resolve, failed push, re-queue) keeps the reply id: the
+    # reply is already in the thread, so a retry must reuse it, never re-post.
+    _clear_addressed_state_by_id(state, "PRRT_test_a")
+    _clear_addressed_state_by_id(state, "PRRT_test_b")
     assert read_item_disposition(state, "PRRT_test_a") == posted
     # Nothing was posted for b, so there is no reply to keep.
     assert _item_disposition_key("PRRT_test_b") not in state.threads_addressed_ids
-    _clear_addressed_state_by_id(state, "PRRT_test_a")
+    # Fresh reviewer feedback supersedes it: the new feedback gets its own reply.
+    _clear_addressed_state_by_id(state, "PRRT_test_a", keep_posted_reply=False)
     assert _item_disposition_key("PRRT_test_a") not in state.threads_addressed_ids
 
 
-def test_sync_item_disposition_keeps_posted_reply_only_for_unchanged_disposition() -> None:
-    state = MonitorState()
-    posted = replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
-    record_item_disposition(state, posted)
-    sync_item_disposition(
-        state, "PRRT_test_a", VerdictResult(verdict="false_positive", reason="re-run wording")
+def _status_with(thread: ReviewThread) -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha="a" * 40,
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(thread,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
     )
+
+
+def test_stale_thread_body_drops_the_posted_reply_for_fresh_feedback() -> None:
+    state = MonitorState()
+    thread = ReviewThread(
+        thread_id="PRRT_test_a",
+        path="widgets/core.py",
+        line=12,
+        body_excerpt="please guard None payloads -- and the empty list too",
+        author="review-bot",
+    )
+    state.mark_addressed("PRRT_test_a", "false_positive")
+    state.mark_addressed(review_thread_body_state_key("PRRT_test_a"), "0" * 64)
+    record_item_disposition(state, replace(_fp(), item_id="PRRT_test_a", reply_comment_id="r-1"))
+
+    assert _drop_stale_review_thread_addressed_state(_status_with(thread), state) is True
+
+    assert read_item_disposition(state, "PRRT_test_a") is None
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        VerdictResult(verdict="false_positive", reason="re-run wording"),
+        # The #935 chain was cleared by the push that published the cited commit.
+        VerdictResult(verdict="fix_committed", reason="guarded"),
+        VerdictResult(verdict="defer", reason="later"),
+        VerdictResult(verdict="needs_human", reason="ask a human"),
+    ],
+    ids=["same-class", "fixed-without-chain", "class-change", "non-resolvable"],
+)
+def test_sync_item_disposition_never_replaces_a_posted_reply(
+    result: VerdictResult,
+) -> None:
+    state = MonitorState()
+    posted = replace(
+        _fixed(("1" * 40,)) if result.verdict == "fix_committed" else _fp(),
+        item_id="PRRT_test_a",
+        reply_comment_id="reply-1",
+    )
+    record_item_disposition(state, posted)
+
+    sync_item_disposition(state, "PRRT_test_a", result)
+
+    # The published record stays the disposition, so a re-queued resolve reuses the
+    # reply already in the thread and never posts a second one.
     assert read_item_disposition(state, "PRRT_test_a") == posted
 
-    # A different class, or a FIXED citing a new commit, is a new disposition to post.
-    sync_item_disposition(state, "PRRT_test_a", VerdictResult(verdict="defer", reason="later"))
-    deferred = read_item_disposition(state, "PRRT_test_a")
-    assert deferred is not None
-    assert deferred.disposition_class == "deferred" and deferred.reply_comment_id is None
+
+def test_sync_item_disposition_replaces_an_unposted_record() -> None:
+    state = MonitorState()
     _seed_chain(
         state,
         ItemCommitProvenance(item_id="PRRT_test_f", item_start_head="0" * 40, head_sha="2" * 40),
     )
-    record_item_disposition(
-        state, replace(_fixed(("1" * 40,)), item_id="PRRT_test_f", reply_comment_id="reply-2")
-    )
+    record_item_disposition(state, replace(_fixed(("1" * 40,)), item_id="PRRT_test_f"))
     sync_item_disposition(
         state, "PRRT_test_f", VerdictResult(verdict="fix_committed", reason="guarded")
     )
