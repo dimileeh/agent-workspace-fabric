@@ -14,6 +14,7 @@ same-named definition the call site cannot reach is not FIXED evidence.
 from __future__ import annotations
 
 import ast
+import copy
 import re
 from collections.abc import Iterator
 
@@ -33,11 +34,18 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_import_
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_rebinding import (
     _import_lines_hidden_from,
+    _scope_own_import_names,
 )
 
 # Suffixes whose bare-name bindings the import reader below understands. A bare
-# callee in any other language keeps the name-only rule.
+# callee in any other language keeps the name-only rule, except JS/TS.
 _PYTHON_CALL_SITE_SUFFIXES = frozenset({".py", ".pyi"})
+# JS/TS call sites have no binding reader, and the name-only rule lets an edit
+# to an unrelated same-named export count as a fix (issue #1047), so they never
+# accept cross-file evidence.
+_JS_TS_CALL_SITE_SUFFIXES = frozenset(
+    {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+)
 
 # A Python identifier's first character: a word character that is not a digit,
 # which is the ASCII ``[A-Za-z_]`` plus every Unicode letter Python admits.
@@ -529,7 +537,17 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     calls inside its methods, but a line executing *directly* in the class body
     resolves through the class namespace — ``class C: validate = local;
     result = validate()`` calls the attribute — so the class body the anchor
-    sits in directly is read as well (PRRT_kwDOSJAM6s6q_ywe). A comprehension is
+    sits in directly is read as well (PRRT_kwDOSJAM6s6q_ywe) — but only through
+    the anchored line, because a class body runs top to bottom and a binding
+    below the call has not happened yet when it runs (issue #1045 item 2, see
+    ``_class_body_through_line``). For the same reason a class-body import
+    below the anchor is reported too: the import readers still yield it, but
+    ``class C: size = len(items); from helpers import len`` calls the builtin,
+    so holding that later import as the call's binding would credit a
+    correction to ``helpers.len`` (PRRT_kwDOSJAM6s6vLRfX). That holds inside a
+    loop as well: a later pass may reach the import, but the first pass calls
+    whatever the name held before it, so an import inside the statement holding
+    the anchor is reported as well (PRRT_kwDOSJAM6s6vLnh5). A comprehension is
     anchored as well, because its generator targets bind inside it — they shadow
     the import for the calls it contains and for nothing else
     (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
@@ -554,8 +572,50 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
             bound.update(_names_bound_in_scope(node))
     anchored_class = _anchored_class_scope(tree, line)
     if anchored_class is not None:
-        bound.update(_names_bound_in_scope(anchored_class))
+        trimmed = _class_body_through_line(anchored_class, line)
+        bound.update(_names_bound_in_scope(trimmed))
+        finished = _class_body_through_line(anchored_class, line, through_anchor=False)
+        bound.update(_scope_own_import_names(anchored_class) - _scope_own_import_names(finished))
     return frozenset(bound)
+
+
+def _class_body_through_line(
+    node: ast.ClassDef, line: int, *, through_anchor: bool = True
+) -> ast.ClassDef:
+    """``node`` with only the top-level body statements that may run before ``line``.
+
+    A class body executes top to bottom, so a name a *later* statement binds is
+    not yet in the class namespace when ``line`` runs: ``class C: result =
+    validate(); validate = local`` calls the imported ``validate`` (issue #1045
+    item 2). Only top-level body statements starting strictly after the
+    anchored line are dropped. The statement holding the anchor is kept whole —
+    every header target, ``as`` name, walrus, handler and ``case`` capture in
+    it — rather than ordered against the call, because a mistake in such
+    ordering silently drops a binding that does shadow the import
+    (PRRT_kwDOSJAM6s6vWtm4). The rare call that runs before a binding in its own
+    statement therefore fails closed, the safe direction. Decorators, bases and
+    keywords run before the body and are kept.
+
+    ``through_anchor=False`` cuts the body to the statements that have finished
+    before the anchored line instead, which is what an import must have done
+    for its binding to be trusted: an import inside the statement holding the
+    anchor, or on its line, may not have run by the call
+    (PRRT_kwDOSJAM6s6vLnh5). The copy is shallow; ``node`` is left as it was.
+    """
+    trimmed = copy.copy(node)
+    trimmed.body = [
+        statement
+        for statement in node.body
+        if _statement_start(statement) <= line
+        and (through_anchor or (statement.end_lineno or statement.lineno) < line)
+    ]
+    return trimmed
+
+
+def _statement_start(statement: ast.stmt) -> int:
+    """The first line of ``statement``, counting its decorators."""
+    decorators: list[ast.expr] = getattr(statement, "decorator_list", [])
+    return min([statement.lineno, *(decorator.lineno for decorator in decorators)])
 
 
 def _global_declared_names(scope: ast.AST) -> Iterator[str]:
