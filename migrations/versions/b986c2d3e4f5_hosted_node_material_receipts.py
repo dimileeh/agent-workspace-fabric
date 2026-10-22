@@ -60,6 +60,7 @@ def upgrade() -> None:
         sa.Column("state", sa.String(16), nullable=False),
         sa.UniqueConstraint("owner", "idempotency_key"),
     )
+    op.create_index("ix_hosted_receipts_grant", "hosted_receipts", ["grant"])
 
 
 def downgrade() -> None:

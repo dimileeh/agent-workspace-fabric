@@ -52,7 +52,7 @@ class Receipt(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     owner: Mapped[str] = mapped_column(String(128))
     idempotency_key: Mapped[str] = mapped_column(String(128))
-    grant: Mapped[str] = mapped_column(String(32))
+    grant: Mapped[str] = mapped_column(String(32), index=True)
     binding: Mapped[dict[str, Any]] = mapped_column(JSON)
     operation: Mapped[str] = mapped_column(String(16))
     predecessor: Mapped[str | None] = mapped_column(String(32), nullable=True)
