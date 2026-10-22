@@ -889,3 +889,30 @@ def test_definition_heads_skip_body_less_function_overload_signatures() -> None:
         1,
         2,
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "end_line", "expected"),
+    [
+        # A ``;`` ends a variable; a statement after it on the line is another.
+        ("export const record = (v) => v; const other = () => {\n  v;\n};\n", 3, True),
+        # A variable's own ``}`` does not end it; its ``;`` does, past the span.
+        ("export const record = () => {\n  v;\n};\nother();\n", 3, False),
+        # A declaration's body ``}`` ends it.
+        ("export function record() { v; } function other() {\n  v;\n}\n", 3, True),
+        ("export class record { v = 1 } other(() => {\n  v;\n});\n", 3, True),
+        # A ``}`` closing a return type that the body's ``{`` continues does not.
+        ("function record(): { a: 1 } {\n  v;\n}\n", 3, False),
+        # Tokens past the span's last line are not in it.
+        ("function record() {\n  v;\n}\nfunction other() {}\n", 3, False),
+    ],
+)
+def test_span_holds_another_statement_finds_the_definition_end(
+    text: str, end_line: int, expected: bool
+) -> None:
+    """The span may not reach past its definition (PRRT_kwDOSJAM6s6vQABw)."""
+    tokens = _tokens(text)
+    head = es._es_definition_heads(tokens, "record")[0]
+
+    assert es._es_span_holds_another_statement(tokens, head, end_line) is expected

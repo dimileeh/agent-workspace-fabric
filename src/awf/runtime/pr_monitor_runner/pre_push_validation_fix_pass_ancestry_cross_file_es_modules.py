@@ -1062,6 +1062,45 @@ def _es_overload_signature(tokens: tuple[_EsToken, ...], index: int) -> bool:
     return False
 
 
+# Punctuators that continue a type after its ``}`` (``(): { a: 1 } {``,
+# ``Promise<{ a: 1 }>``), so that ``}`` does not end the declaration.
+_TYPE_CONTINUATION_PUNCTUATORS = frozenset({"{", ">", "|", "&", "[", ","})
+
+
+def _es_span_holds_another_statement(
+    tokens: tuple[_EsToken, ...], head: _EsToken, end_line: int
+) -> bool:
+    """True when a statement after the one ``head`` opens starts by ``end_line``.
+
+    The line-based span cannot see a definition end mid-line, so it swallows
+    whatever follows on that line and below it
+    (``export const record = (v) => v; const other = () => {``). The
+    definition ends at a ``;`` at the head's depth or, unless it is a
+    variable, at the ``}`` closing its body; any token at that depth after
+    the end and within the span is another statement. A ``}`` closing a type
+    that no type punctuator continues also reads as the end, which only fails
+    it closed.
+    """
+    start = next(index for index, token in enumerate(tokens) if token is head)
+    variable = _ident_value(_token_at(tokens, start - 1)) in _VARIABLE_KEYWORDS
+    ended = False
+    for index in range(start + 1, len(tokens)):
+        token = tokens[index]
+        if token.line > end_line:
+            return False
+        if token.depth != head.depth:
+            continue
+        if ended:
+            return True
+        after = _token_at(tokens, index + 1)
+        ended = _is(token, "punct", ";") or (
+            not variable
+            and _is(token, "punct", "}")
+            and not (_is(after, "punct") and after.value in _TYPE_CONTINUATION_PUNCTUATORS)
+        )
+    return False
+
+
 def _es_chained_member_refs(tokens: tuple[_EsToken, ...], line: int) -> frozenset[tuple[str, str]]:
     """``(receiver, name)`` pairs ``line`` reaches as ``... .receiver.name``.
 

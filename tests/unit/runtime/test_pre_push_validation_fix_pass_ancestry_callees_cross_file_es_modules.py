@@ -922,6 +922,18 @@ async def test_a_non_null_division_cannot_hide_a_shadow_from_the_tokenizer() -> 
             "  record(value: number) {\n  return value + 1;\n  }\n}\n",
             3,
         ),
+        # Another statement the span swallows after the definition ends on its
+        # head line: the edit changes ``other``, never ``record``.
+        (
+            "export const record = (value: number) => value; const other = () => {\n"
+            "  return value + 1;\n};\n",
+            2,
+        ),
+        (
+            "export function record(value: number) { return value; } function other() {\n"
+            "  return value + 1;\n}\n",
+            2,
+        ),
     ],
 )
 async def test_a_target_without_one_module_scope_head_fails_closed(
@@ -941,6 +953,23 @@ async def test_an_unrelated_nested_head_outside_the_span_still_accepts() -> None
     probe.files[_TELEMETRY] = (
         _RECORD_DEFINITION + "class Box {\n  record(value: number) {\n    return value;\n  }\n}\n"
     )
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "definition",
+    [
+        "export const record = (value: number) => {\n  return value + 1;\n};\n",
+        "export const record = (value: number) =>\n  value + 1;\n",
+        "export function record(value: number): { a: number } {\n  return value + 1;\n}\n",
+    ],
+)
+async def test_a_definition_ending_with_its_span_still_accepts(definition: str) -> None:
+    """A body edit inside a definition the span ends with is evidence."""
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    probe.files[_TELEMETRY] = definition
 
     assert await _accepted(probe)
 

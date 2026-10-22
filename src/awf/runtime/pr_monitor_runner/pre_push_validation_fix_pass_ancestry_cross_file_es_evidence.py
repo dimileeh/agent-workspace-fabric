@@ -121,6 +121,13 @@ class _EsModuleReader:
         parsed = await self.parsed(path)
         return [] if parsed is None else _es._es_definition_heads(parsed[2], name)
 
+    async def span_holds_another_statement(
+        self, path: str, head: _es._EsToken, end_line: int
+    ) -> bool:
+        """True when ``path``'s span for ``head`` reaches past its definition; True when unreadable."""
+        parsed = await self.parsed(path)
+        return parsed is None or _es._es_span_holds_another_statement(parsed[2], head, end_line)
+
     async def lookup(self, module: str, name: str, *, hops: int) -> _Lookup:
         """Where ``module``'s export ``name`` is defined, following ``hops`` re-exports.
 
@@ -299,13 +306,15 @@ async def _es_module_commit_range_changes_callee_definition(
         # exactly one head for the name at depth 0, and it must be the only
         # head inside the one span found. A nested head outside that span (an
         # unrelated ``Box.record``) cannot be what the overlapping edit changed.
+        # Nor may the span run past the definition's own end into another
+        # statement, whose edit would overlap it (PRRT_kwDOSJAM6s6vQABw).
         heads = await at_left.definition_heads(path, local_name)
         module_heads = [head for head in heads if head.depth == 0]
         if not (
             len(spans) == 1
             and len(module_heads) == 1
             and [head for head in heads if spans[0][0] <= head.line <= spans[0][1]] == module_heads
-        ):
+        ) or await at_left.span_holds_another_statement(path, module_heads[0], spans[0][1]):
             continue
         diff_text = await _path_diff_text_in_commit_range(
             self,
