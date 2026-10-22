@@ -526,35 +526,20 @@ async def _maybe_reap_terminal_workspace_gc(self: Any) -> None:
 
 
 def _log_terminal_gc_reap_summary(report: dict[str, object]) -> None:
-    """Emit a structured summary for a completed terminal-workspace GC sweep.
-
-    Logs ``info`` when auth/worktree/compose paths were reclaimed and ``warning`` when
-    the GC self-reported a ``partial`` (e.g. a delete error or an unverifiable overlay
-    unmount). A clean run that reclaimed nothing (no eligible candidates, or a dry-run
-    preview) is intentionally silent to avoid log noise each interval. Only counts and
-    the reason code the GC report already surfaces are logged — never auth-dir contents
-    or secrets.
-    """
-    deleted_path_count = report.get("deleted_path_count") or 0
-    # Independent conditions, not mutually exclusive: a ``partial`` pass can still have
-    # reclaimed some paths while another path errored, so surface both the reclaim
-    # (info) and the partial (warning) rather than masking one behind the other.
-    if deleted_path_count:
-        _log.info(
-            "worker.terminal_workspace_gc_reaped",
-            reason_code=report.get("reason_code"),
-            deleted_path_count=deleted_path_count,
-            candidate_count=report.get("candidate_count"),
-            preserved_count=report.get("preserved_count"),
-        )
-    if report.get("status") == "partial":
-        _log.warning(
-            "worker.terminal_workspace_gc_partial",
-            reason_code=report.get("reason_code"),
-            # Count only — never the per-path ``error``/``path`` entries — so an
-            # auth-dir path can't leak into the worker log.
-            delete_error_count=len(cast("list[object]", report.get("delete_errors") or [])),
-        )
+    """Log one summary per sweep, including no-ops; never include path contents."""
+    partial = report.get("status") == "partial"
+    log = _log.warning if partial else _log.info
+    log(
+        "worker.terminal_workspace_gc_partial"
+        if partial
+        else "worker.terminal_workspace_gc_reaped",
+        status=report.get("status"),
+        reason_code=report.get("reason_code"),
+        deleted_path_count=report.get("deleted_path_count") or 0,
+        candidate_count=report.get("candidate_count") or 0,
+        preserved_count=report.get("preserved_count") or 0,
+        delete_error_count=len(cast("list[object]", report.get("delete_errors") or [])),
+    )
 
 
 async def _release_terminal_runtime_resources(self: Any) -> None:

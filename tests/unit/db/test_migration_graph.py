@@ -41,8 +41,8 @@ _BLOCKED_STATUS_REVISION = "c1d2e3f4a5b6"
 _AWAITING_HUMAN_ATTENTION_REVISION = "d7e8f9a0b1c2"
 # Flip workspaces.auto_merge database default to opt-out.
 _AUTO_MERGE_DEFAULT_OPT_OUT_REVISION = "e9f0a1b2c3d4"
-# Current head: persist the pre-agent index symlink checkout mode.
-_BLOCK_INDEX_SYMLINKS_REVISION = "f1a2b3c4d5e6"
+# Current head: persist completed workspace filesystem reclamation.
+_FILESYSTEM_RECLAIMED_REVISION = "a875b1c2d3e4"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -110,7 +110,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_BLOCK_INDEX_SYMLINKS_REVISION]
+    assert script.get_heads() == [_FILESYSTEM_RECLAIMED_REVISION]
 
 
 @pytest.mark.unit
@@ -361,7 +361,7 @@ async def test_auth_overlay_unmount_backfill_postgres_seeds_only_qualifying_rows
             # version does not change what the test exercises; pinning to a
             # pre-column revision broke the ORM seeding once a later migration
             # added a column.
-            _run_alembic(repo_root, env, "upgrade", _BLOCK_INDEX_SYMLINKS_REVISION)
+            _run_alembic(repo_root, env, "upgrade", _FILESYSTEM_RECLAIMED_REVISION)
 
         engine = make_engine(database_url)
         try:

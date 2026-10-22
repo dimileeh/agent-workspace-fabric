@@ -1377,6 +1377,97 @@ async def test_release_gc_reservations_rollback_on_db_exception(
     assert result.reservation_releases[ws_b].get("released_count", 0) >= 1
 
 
+@pytest.mark.parametrize("single", [False, True])
+async def test_gc_retries_failed_reservation_release_before_marking_reclaimed(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    single: bool,
+) -> None:
+    now = datetime(2026, 10, 22, tzinfo=UTC)
+    old = now - timedelta(days=60)
+    workspace_ids = [
+        await _workspace(
+            session_factory,
+            status=WorkspaceStatus.completed,
+            updated_at=old,
+            pr=True,
+            pr_merge_sha="a" * 40,
+        )
+        for _ in range(1 if single else 2)
+    ]
+    failed_id = workspace_ids[0]
+    auth_dir = tmp_path / "auth" / failed_id
+    _write(auth_dir / "data", "cleanup must still proceed")
+    async with session_factory() as session:
+        repo = ResourceReservationRepository(session)
+        for workspace_id in workspace_ids:
+            attempt_id = await _task_attempt_for_workspace(session, workspace_id)
+            await repo.create(
+                workspace_id=workspace_id,
+                attempt_id=attempt_id,
+                node_id="node_retry",
+                steady_cpu=1.0,
+                steady_memory_gb=2.0,
+                peak_cpu=2.0,
+                peak_memory_gb=4.0,
+                disk_mb=1024,
+                phase="steady",
+                reserved_at=old,
+            )
+        await session.commit()
+
+    original_release = ResourceReservationRepository.release_active_for_workspace
+
+    async def fail_after_release(self, workspace_id):
+        released = await original_release(self, workspace_id)
+        if workspace_id == failed_id:
+            raise RuntimeError("reservation release failed")
+        return released
+
+    async def execute():
+        if single:
+            return await run_workspace_filesystem_gc(
+                session_factory, work_dir=tmp_path, workspace_id=failed_id, execute=True, now=now
+            )
+        return await run_terminal_workspace_gc(
+            session_factory, work_dir=tmp_path, execute=True, now=now
+        )
+
+    with patch.object(
+        ResourceReservationRepository, "release_active_for_workspace", fail_after_release
+    ):
+        first = await execute()
+
+    assert first.status == "partial"
+    assert first.reservation_releases[failed_id] == {
+        "released_count": 0,
+        "reason_code": "TERMINAL_GC",
+        "error": "reservation release failed",
+    }
+    assert not auth_dir.exists()
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, failed_id)
+        assert workspace.filesystem_reclaimed_at is None
+        assert workspace.updated_at == old
+        repo = ResourceReservationRepository(session)
+        assert await repo.active_for_workspace(failed_id) is not None
+        for successful_id in workspace_ids[1:]:
+            workspace = await session.get(Workspace, successful_id)
+            assert workspace.filesystem_reclaimed_at == now
+            assert await repo.active_for_workspace(successful_id) is None
+
+    second = await execute()
+    assert second.status == "succeeded"
+    assert [candidate.workspace_id for candidate in second.plan.candidates] == [failed_id]
+    assert second.reservation_releases[failed_id]["released_count"] == 1
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, failed_id)
+        assert workspace.filesystem_reclaimed_at == now
+        assert workspace.updated_at == old
+        assert await ResourceReservationRepository(session).active_for_workspace(failed_id) is None
+    assert not (await execute()).plan.candidates
+
+
 async def test_release_gc_reservations_session_isolation_on_db_error(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

@@ -147,6 +147,33 @@ def _service(session: AsyncSession) -> WorkspaceControlService:
 
 
 @pytest.mark.unit
+async def test_remonitor_reclaimed_failed_workspace_clears_persisted_marker(
+    session: AsyncSession,
+) -> None:
+    """Operator remonitor reactivates reclaimed workspaces without a task attempt."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_number = 51
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/51"
+    workspace.branch_name = f"awf/{workspace.id}"
+    workspace.remote_push_branch = workspace.branch_name
+    workspace.filesystem_reclaimed_at = datetime.now(UTC)
+    await session.commit()
+
+    response = await _service(session).remonitor_workspace(
+        workspace.id,
+        reason="reattach reclaimed workspace",
+        idempotency_key="remonitor-reclaimed-failed-workspace",
+        expected_version=workspace.version,
+    )
+    await session.commit()
+    await session.refresh(workspace)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.filesystem_reclaimed_at is None
+
+
+@pytest.mark.unit
 async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     session: AsyncSession,
 ) -> None:
@@ -158,6 +185,7 @@ async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     )
     workspace.failure_reason = "infrastructure_failure"
     workspace.failure_message = "monitor crashed during repair"
+    workspace.filesystem_reclaimed_at = datetime.now(UTC)
     workspace.monitor_iter_count = 5
     candidate.status = "closed"
     candidate.close_reason = "STALE_MONITOR_FAILED"
@@ -176,6 +204,7 @@ async def test_remonitor_failed_workspace_reopens_existing_merge_candidate(
     events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id, limit=20)
 
     assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.filesystem_reclaimed_at is None
     assert attempt is not None
     assert attempt.status == WorkspaceStatus.monitoring_pr.value
     assert candidate.status == "open"
