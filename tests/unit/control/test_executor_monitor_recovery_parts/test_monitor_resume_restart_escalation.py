@@ -863,6 +863,42 @@ async def test_guide_retry_after_exhaustion_recreates_the_dependencies_left_unse
 
 
 @pytest.mark.unit
+async def test_dependency_wait_timeout_counts_even_when_the_runtime_settles_afterwards(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent was never recreated, so a stack that turns usable cannot pass the resume."""
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    compose.fail = False
+    executor = _executor(fake, factory, tmp_path, compose)
+    _dependency_health(monkeypatch, {"postgres": "unhealthy"})
+
+    async def _usable(*_args: Any) -> bool:
+        return True
+
+    replays: list[str] = []
+
+    async def _replay(_self: Any, *, workspace_id: str, **_kwargs: Any) -> bool:
+        replays.append(workspace_id)
+        return True
+
+    monkeypatch.setattr(monitor_handoff, "_compose_runtime_usable_after_restart_failure", _usable)
+    monkeypatch.setattr(monitor_handoff, "replay_setup_on_monitor_resume", _replay)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert compose.calls == []
+    assert replays == []
+    assert await _streak(factory, ws_id) == 1
+    assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE) == []
+    assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
 async def test_unrecorded_recovery_after_the_park_stops_recreating_dependencies(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

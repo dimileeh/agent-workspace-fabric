@@ -115,35 +115,11 @@ async def _restart_compose_runtime_for_monitor_resume(
         )
         return False
     except ComposeOperationError as exc:
-        if isinstance(
-            exc, AgentRecreateError
-        ) and not await _monitor_handoff._agent_recreated_despite_error(
-            compose_project, identity_before
-        ):
-            # The old stack may look healthy, but its stale agent has no
-            # refreshed auth/env and no new identity to replay setup for.
-            _log.error(
-                "executor.resume_agent_recreate_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                stderr=redact_audit_text(exc.stderr, limit=1000),
-            )
-            await self._record_monitor_runtime_restart_failed(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file_path=str(compose_file),
-                error=exc,
-            )
-            await escalate_monitor_resume_restart_failure(
-                self,
-                workspace_id=workspace_id,
-                monitor_owner_id=monitor_owner_id,
-                compose_project=compose_project,
-                error=exc,
-            )
-            return False
+        agent_recreate_failed = isinstance(exc, AgentRecreateError)
         _log.error(
-            "executor.resume_compose_up_failed",
+            "executor.resume_agent_recreate_failed"
+            if agent_recreate_failed
+            else "executor.resume_compose_up_failed",
             workspace_id=workspace_id,
             reason_code=exc.reason_code,
             stderr=redact_audit_text(exc.stderr, limit=1000),
@@ -154,6 +130,20 @@ async def _restart_compose_runtime_for_monitor_resume(
             compose_file_path=str(compose_file),
             error=exc,
         )
+        # Any other error was raised before the agent recreate was reached.
+        # The old stack may look healthy, but its stale agent has no
+        # refreshed auth/env and no new identity to replay setup for.
+        if not agent_recreate_failed or not await _monitor_handoff._agent_recreated_despite_error(
+            compose_project, identity_before
+        ):
+            await escalate_monitor_resume_restart_failure(
+                self,
+                workspace_id=workspace_id,
+                monitor_owner_id=monitor_owner_id,
+                compose_project=compose_project,
+                error=exc,
+            )
+            return False
         runtime_usable = await _monitor_handoff._compose_runtime_usable_after_restart_failure(
             compose_project,
             compose_file,
