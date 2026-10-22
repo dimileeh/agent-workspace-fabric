@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import pytest_mock
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
@@ -367,6 +368,57 @@ async def test_unresolvable_profile_parks_monitor_with_replay_reason_code(
     assert len(adapter.calls) == 1
     payload = await _assert_parked_blocked(factory, workspace_id)
     assert payload["failure_reason"] == FailureReason.profile_resolution_failure.value
+
+
+@pytest.mark.unit
+async def test_unresolvable_profile_log_omits_chained_profile_error_text(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    adapter = _idle_timeout_adapter(retry_stdout=None)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        validation=_OrderedValidation(container, adapter),
+    )
+    _patch_compose(mocker, container, recreate=True)
+    secret = "profile-secret-token-123"
+    resolution_error = ProfileResolutionError(f"invalid workspace profile: {secret}")
+    resolution_error.__cause__ = ValueError(f"input_value={{'token': '{secret}'}}")
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_setup_replay._profile_for_workspace",
+        side_effect=resolution_error,
+    )
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(_MonitorAgentServiceRecoveryFailedError),
+    ):
+        await _run(runner, workspace_id, tmp_path)
+
+    entries = [
+        entry
+        for entry in captured
+        if entry["event"] == "monitor.agent_service_setup_replay_profile_unavailable"
+    ]
+    assert entries == [
+        {
+            "event": "monitor.agent_service_setup_replay_profile_unavailable",
+            "log_level": "warning",
+            "workspace_id": workspace_id,
+            "error_type": "ProfileResolutionError",
+            "reason_code": RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+        }
+    ]
+    assert all(secret not in repr(entry) for entry in captured)
 
 
 @pytest.mark.unit

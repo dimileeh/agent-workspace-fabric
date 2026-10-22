@@ -72,10 +72,14 @@ async def replay_setup_after_monitor_agent_service_restart(
             return
         try:
             profile = _profile_for_workspace(workspace, worktree_path=worktree_path)
-        except (OSError, ValueError, ProfileResolutionError):
-            _log.exception(
+        except (OSError, ValueError, ProfileResolutionError) as exc:
+            # The chained YAML/Pydantic error can echo profile values (secrets
+            # included), so log only the exception type and stable reason code.
+            _log.warning(
                 "monitor.agent_service_setup_replay_profile_unavailable",
                 workspace_id=workspace_id,
+                error_type=type(exc).__name__,
+                reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
             )
     if profile is None:
         outcome = _replay.SetupReplayOutcome(
