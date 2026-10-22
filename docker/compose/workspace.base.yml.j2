@@ -31,7 +31,7 @@ services:
         - {{ s.healthcheck_cmd | tojson }}
       interval: 5s
       timeout: 5s
-      retries: {{ healthcheck_retries }}
+      retries: {{ healthcheck_retries | tojson }}
       start_period: 5s
     {% endif %}{% if s.command %}command: {{ s.command | tojson }}
     {% endif %}{% if s.ports %}ports:
