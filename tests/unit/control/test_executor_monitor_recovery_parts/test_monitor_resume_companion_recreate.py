@@ -1,8 +1,9 @@
-"""Companions whose env the resume refresh rewrote are recreated with the agent (#936).
+"""Companions whose env the resume refresh rewrote are recreated before the agent (#936).
 
 The resume brings dependencies up with ``--no-recreate``, so a compose.yml
 environment rewrite never reaches an existing companion container unless the
-resume force-recreates that companion (``--no-deps``) together with the agent.
+resume force-recreates that companion (``--no-deps``). It does so first, before
+anything is waited on, and recreates the agent last.
 """
 
 from __future__ import annotations
@@ -116,16 +117,24 @@ class _RecordingCompose:
 
 
 @pytest.mark.unit
-async def test_restart_force_recreates_rewritten_companions_with_the_agent(
+async def test_restart_force_recreates_rewritten_companions_before_the_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    inspections: list[int] = []
+
     async def _inspect(_compose_project: str) -> RuntimeSnapshot:
-        # A recreated companion is never waited on; a stopped one is recreated first.
+        # The recreated companions are waited on, never started: ``worker`` exits again.
+        inspections.append(len(compose.calls))
+        backend_health = "starting" if len(inspections) == 1 else "healthy"
         return RuntimeSnapshot(
             stack_state="running",
             services=[
                 RuntimeService(
-                    name="backend", container_id="b", image=None, state="running", health="starting"
+                    name="backend",
+                    container_id="b",
+                    image=None,
+                    state="running",
+                    health=backend_health,
                 ),
                 RuntimeService(name="worker", container_id="w", image=None, state="exited"),
                 RuntimeService(
@@ -135,7 +144,11 @@ async def test_restart_force_recreates_rewritten_companions_with_the_agent(
             ],
         )
 
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
     monkeypatch.setattr(monitor_resume_runtime, "inspect_resume_runtime", _inspect)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", _no_sleep)
     compose = _RecordingCompose()
 
     await monitor_resume_runtime.restart_runtime_for_monitor_resume(
@@ -148,12 +161,14 @@ async def test_restart_force_recreates_rewritten_companions_with_the_agent(
         recreate_services=("worker", "backend"),
     )
 
+    assert inspections == [1, 1]
     assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
-        (("worker",), True),
-        (("postgres",), None),
-        (("agent", "backend"), True),
+        (("backend", "worker"), True),
+        (("backend", "postgres", "worker"), None),
+        (("agent",), True),
     ]
     assert compose.calls[0]["no_deps"] is True
+    assert compose.calls[0]["wait"] is False
     assert compose.calls[2]["no_deps"] is True
 
 
@@ -191,9 +206,9 @@ async def test_resume_recreates_the_companions_the_refresh_rewrote(
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
 
     recreate = [call for call in compose.calls if call.get("force_recreate")]
-    assert [call["services"] for call in recreate] == [("agent", "backend")]
+    assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
     assert [call.get("services") for call in compose.calls if call.get("no_recreate")] == [
-        ("worker",)
+        ("backend", "worker")
     ]
 
 
@@ -280,7 +295,7 @@ async def test_resume_recreates_declared_companions_with_set_env_secrets(
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
 
     recreate = [call for call in compose.calls if call.get("force_recreate")]
-    assert [call["services"] for call in recreate] == [("agent", "worker")]
+    assert [call["services"] for call in recreate] == [("worker",), ("agent",)]
     assert [call.get("services") for call in compose.calls if call.get("no_recreate")] == [
-        ("backend",)
+        ("backend", "worker")
     ]

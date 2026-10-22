@@ -5,12 +5,13 @@ force-recreate the whole compose project. That restarted dependencies still in
 their own crash recovery, such as Postgres replaying its WAL after an unclean
 stop, so the resume could fail and be retried forever. The restart now:
 
-1. starts each exited or absent dependency on its own with ``--no-recreate --no-deps`` and
-   no ``--wait``, so no compose health gate can fail it on the healthcheck
-   retries stored in a container created from an older compose.yml (the normal
-   state after a host restart, as every service runs with ``restart: "no"``); a
-   stopped dependency the resume must recreate anyway is force-recreated here
-   instead, so a running dependency that needs it can settle in step 2;
+1. force-recreates each dependency the resume must recreate (``recreate_services``)
+   and starts each other exited or absent dependency on its own with
+   ``--no-recreate``, all ``--no-deps`` and without ``--wait``, so no compose
+   health gate can fail them on the healthcheck retries stored in a container
+   created from an older compose.yml (the normal state after a host restart, as
+   every service runs with ``restart: "no"``). Nothing is waited on before every
+   prerequisite is started or recreated;
 2. waits for every running declared dependency (never a ``compose run`` or
    orphan container) whose Docker health is ``starting`` or
    ``unhealthy`` to become healthy, bounded by the stack's startup budget rather
@@ -22,8 +23,11 @@ stop, so the resume could fail and be retried forever. The restart now:
 4. recreates only the agent with ``--force-recreate --no-deps agent``: auth
    overlay bind mounts are bound at container creation, and #1090's setup
    replay keys off the agent's new identity. A failure here raises
-   ``AgentRecreateError``: unless the agent identity verifiably changed, the
-   caller counts it as a failed restart, never as a usable runtime.
+   ``AgentRecreateError``.
+
+A resume passes only when step 4 ran and succeeded. Every earlier failure either
+still reaches step 4 (a dependency start or up failure on a usable runtime) or
+raises, and the caller counts every raised error as a failed restart.
 """
 
 from __future__ import annotations
@@ -70,12 +74,11 @@ class DependencyWaitTimeoutError(ComposeOperationError):
 
 
 class AgentRecreateError(ComposeOperationError):
-    """The final agent force-recreate failed, so only the stale agent is left running.
+    """The final agent force-recreate failed, so compose never confirmed a fresh agent.
 
-    Unless the agent identity changed anyway, the old agent has neither the
-    refreshed auth overlays and env nor a new identity for #1090's setup
-    replay, so the caller counts it as a failed restart however healthy the
-    old stack looks.
+    The agent may lack the refreshed auth overlays and env and a new identity
+    for #1090's setup replay, so the caller counts it as a failed restart
+    however healthy the old stack looks.
     """
 
     def __init__(self, error: ComposeOperationError) -> None:
@@ -99,14 +102,12 @@ async def inspect_resume_runtime(compose_project: str) -> RuntimeSnapshot:
 def _dependency_containers(
     snapshot: RuntimeSnapshot,
     declared_services: tuple[str, ...] | None,
-    recreate_services: tuple[str, ...] = (),
 ) -> list[RuntimeService]:
-    """Return the containers of declared non-agent services that are not recreated.
+    """Return the containers of declared non-agent services.
 
     ``compose run`` containers and orphans of services no longer in compose.yml
     never settle on their own; ``declared_services`` is ``None`` when compose.yml
-    is unreadable, and then every non-agent service counts. Services the resume
-    force-recreates are not worth waiting on.
+    is unreadable, and then every non-agent service counts.
     """
     return [
         service
@@ -114,18 +115,16 @@ def _dependency_containers(
         if service.name != AGENT_SERVICE_NAME
         and not service.one_off
         and (declared_services is None or service.name in declared_services)
-        and service.name not in recreate_services
     ]
 
 
 def _recovering_dependencies(
     snapshot: RuntimeSnapshot,
     declared_services: tuple[str, ...] | None,
-    recreate_services: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Return running dependencies whose health is not settled yet."""
     recovering: dict[str, str] = {}
-    for service in _dependency_containers(snapshot, declared_services, recreate_services):
+    for service in _dependency_containers(snapshot, declared_services):
         if service.state.strip().lower() != "running":
             continue
         health = (service.health or "").strip().lower()
@@ -137,13 +136,13 @@ def _recovering_dependencies(
 def _stopped_dependencies(
     snapshot: RuntimeSnapshot,
     declared_services: tuple[str, ...] | None,
+    recreated_services: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """Return dependencies whose container is not running or, when declared, absent.
 
     An absent container (a released runtime) would otherwise be created by the
     ``up --wait`` and gated on the healthcheck retries of an older compose.yml.
-    Services the resume force-recreates are included: a running dependency may
-    need them to turn healthy before the final recreate is reached.
+    Services the resume already recreated are never started again.
     """
     containers = _dependency_containers(snapshot, declared_services)
     stopped = {
@@ -154,7 +153,7 @@ def _stopped_dependencies(
         stopped.update(
             name for name in declared_services if name != AGENT_SERVICE_NAME and name not in present
         )
-    return tuple(sorted(stopped))
+    return tuple(sorted(stopped - set(recreated_services)))
 
 
 async def wait_for_recovering_dependencies(
@@ -164,12 +163,13 @@ async def wait_for_recovering_dependencies(
     budget_seconds: int,
     start_stopped: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     declared_services: tuple[str, ...] | None = None,
-    recreate_services: tuple[str, ...] = (),
+    recreated_services: tuple[str, ...] = (),
 ) -> None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
-    ``start_stopped`` receives the dependencies stopped in the first snapshot; once
-    it has started them they are waited on like any other running dependency.
+    ``start_stopped`` receives the dependencies stopped in the first snapshot,
+    other than the ``recreated_services`` already recreated; once it has started
+    them they are waited on like any other running dependency.
 
     Raises ``DependencyWaitTimeoutError`` (``MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT``)
     naming each unsettled service when the budget runs out. An unreadable runtime
@@ -198,11 +198,11 @@ async def wait_for_recovering_dependencies(
             return
         if start_pending is not None:
             start, start_pending = start_pending, None
-            stopped = _stopped_dependencies(snapshot, declared_services)
+            stopped = _stopped_dependencies(snapshot, declared_services, recreated_services)
             if stopped:
                 await start(stopped)
                 continue
-        recovering = _recovering_dependencies(snapshot, declared_services, recreate_services)
+        recovering = _recovering_dependencies(snapshot, declared_services)
         if not recovering:
             return
         remaining = deadline - _monotonic()
@@ -233,15 +233,14 @@ async def restart_runtime_for_monitor_resume(
 
     ``dependency_services`` lists the compose services that are not the agent;
     ``None`` (unreadable compose file) falls back to bringing up the whole project.
-    ``recreate_services`` are dependencies force-recreated with the agent (env
-    rewritten in compose.yml or backed by a set env secret, or still unsettled
-    when the last attempt gave up); one that is stopped or absent is
-    force-recreated before the dependency wait instead, so a running dependency
-    that needs it can settle. Every other dependency is never recreated.
-    When a dependency start or up fails, ``runtime_usable`` decides whether the agent is
-    still recreated (auth overlays, env and #1090's setup replay depend on it);
-    the tolerated failure is returned so the caller can record it. A failed
-    agent recreate raises ``AgentRecreateError`` and is never tolerated.
+    ``recreate_services`` are dependencies force-recreated first (env rewritten
+    in compose.yml or backed by a set env secret, or still unsettled when the
+    last attempt gave up), so nothing waits on them while they hold stale config;
+    a failed recreate raises and is never tolerated. Every other dependency is
+    never recreated. When a dependency start or up fails, ``runtime_usable``
+    decides whether the agent is still recreated (auth overlays, env and #1090's
+    setup replay depend on it); the tolerated failure is returned so the caller
+    can record it. A failed agent recreate raises ``AgentRecreateError``.
     """
     common: dict[str, Any] = {
         "project_name": compose_project,
@@ -250,6 +249,17 @@ async def restart_runtime_for_monitor_resume(
         "wait": True,
         "compose_up_timeout_seconds": budget_seconds,
     }
+    recreated = tuple(sorted(set(recreate_services) - {AGENT_SERVICE_NAME}))
+    if recreated:
+        _log.info(
+            "executor.resume_dependency_recreate",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            services=list(recreated),
+        )
+        await compose.ensure_project_up(
+            **{**common, "wait": False}, force_recreate=True, no_deps=True, services=recreated
+        )
 
     async def _start_stopped(services: tuple[str, ...]) -> None:
         _log.info(
@@ -260,15 +270,6 @@ async def restart_runtime_for_monitor_resume(
         )
         # One service per call: ``--no-deps`` then skips every depends_on health gate.
         for service in services:
-            if service in recreate_services:
-                await compose.ensure_project_up(
-                    **{**common, "wait": False},
-                    force_recreate=True,
-                    no_deps=True,
-                    services=(service,),
-                )
-                recreated_early.add(service)
-                continue
             await compose.ensure_project_up(
                 **{**common, "wait": False},
                 no_recreate=True,
@@ -276,7 +277,6 @@ async def restart_runtime_for_monitor_resume(
                 services=(service,),
             )
 
-    recreated_early: set[str] = set()
     tolerated: ComposeOperationError | None = None
     try:
         await wait_for_recovering_dependencies(
@@ -285,16 +285,12 @@ async def restart_runtime_for_monitor_resume(
             budget_seconds=budget_seconds,
             start_stopped=_start_stopped,
             declared_services=dependency_services,
-            recreate_services=recreate_services,
+            recreated_services=recreated,
         )
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
         else:
-            dependencies = tuple(
-                name
-                for name in dependency_services
-                if name != AGENT_SERVICE_NAME and name not in recreate_services
-            )
+            dependencies = tuple(name for name in dependency_services if name != AGENT_SERVICE_NAME)
             if dependencies:
                 await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
     except DependencyWaitTimeoutError:
@@ -313,13 +309,7 @@ async def restart_runtime_for_monitor_resume(
         tolerated = exc
     try:
         await compose.ensure_project_up(
-            **common,
-            force_recreate=True,
-            no_deps=True,
-            services=(
-                AGENT_SERVICE_NAME,
-                *sorted(set(recreate_services) - recreated_early - {AGENT_SERVICE_NAME}),
-            ),
+            **common, force_recreate=True, no_deps=True, services=(AGENT_SERVICE_NAME,)
         )
     except ComposeOperationError as exc:
         raise AgentRecreateError(exc) from exc

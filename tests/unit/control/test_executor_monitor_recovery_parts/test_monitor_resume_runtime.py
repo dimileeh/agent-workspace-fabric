@@ -402,7 +402,7 @@ async def test_absent_legacy_dependency_is_created_outside_the_health_gate(
 
     Creating it in the ``up --wait`` would gate it on the legacy ``retries: 60``, so
     it is created alone without ``--wait``; a one-off container does not count as
-    its container, and a dependency the resume force-recreates is recreated alone.
+    its container, and a dependency the resume force-recreates is recreated first.
     """
     absent = RuntimeSnapshot(
         stack_state="stopped",
@@ -439,21 +439,21 @@ async def test_absent_legacy_dependency_is_created_outside_the_health_gate(
     assert compose.calls[0] == {
         **common,
         "wait": False,
-        "no_recreate": True,
-        "no_deps": True,
-        "services": ("postgres",),
-    }
-    assert compose.calls[1] == {
-        **common,
-        "wait": False,
         "force_recreate": True,
         "no_deps": True,
         "services": ("redis",),
     }
+    assert compose.calls[1] == {
+        **common,
+        "wait": False,
+        "no_recreate": True,
+        "no_deps": True,
+        "services": ("postgres",),
+    }
     assert [call.get("services") for call in compose.calls] == [
-        ("postgres",),
         ("redis",),
         ("postgres",),
+        ("postgres", "redis"),
         ("agent",),
     ]
 
@@ -465,19 +465,23 @@ async def test_stopped_recreated_companion_is_recreated_before_the_dependency_wa
     """A running dependency that needs a stopped recreated companion can still settle.
 
     Skipping the companion until the final recreate left ``web`` unhealthy until
-    the wait timed out, so repeated attempts parked a recoverable workspace.
+    the wait timed out, so repeated attempts parked a recoverable workspace. It is
+    recreated rather than started, then waited on like any running dependency.
     """
-    stopped = _running(
+    recreated = _running(
         _service("web", health="unhealthy"),
-        _service("api", state="exited"),
+        _service("api", health="starting"),
         _service("agent"),
     )
     settled = _running(
         _service("web", health="healthy"),
-        _service("api", health="starting"),
+        _service("api", health="healthy"),
         _service("agent"),
     )
-    inspector = _install_inspector(monkeypatch, _ScriptedInspector(stopped, settled))
+    inspector = _install_inspector(monkeypatch, _ScriptedInspector(recreated, settled))
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
     compose = _RecordingCompose()
 
     tolerated = await monitor_resume_runtime.restart_runtime_for_monitor_resume(
@@ -496,10 +500,105 @@ async def test_stopped_recreated_companion_is_recreated_before_the_dependency_wa
         (call.get("services"), call.get("force_recreate"), call["wait"]) for call in compose.calls
     ] == [
         (("api",), True, False),
-        (("web",), None, True),
+        (("api", "web"), None, True),
         # Recreated once: the final recreate leaves the settled companion alone.
         (("agent",), True, True),
     ]
+
+
+@pytest.mark.unit
+async def test_every_recreated_companion_is_recreated_before_anything_is_waited_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6vY2fF: no dependency waits on a companion still holding stale config.
+
+    A running companion whose env was rewritten used to be skipped by the wait and
+    only recreated with the agent, so ``web``, which needs the new ``api``, stayed
+    unhealthy until the wait timed out. The fresh ``api`` is then waited on itself.
+    """
+    recreated = _running(
+        _service("web", health="unhealthy"),
+        _service("api", health="starting"),
+        _service("agent"),
+    )
+    settled = _running(
+        _service("web", health="healthy"),
+        _service("api", health="healthy"),
+        _service("agent"),
+    )
+    compose = _RecordingCompose()
+    inspected_after: list[int] = []
+
+    class _Inspector(_ScriptedInspector):
+        async def __call__(self, compose_project: str) -> RuntimeSnapshot:
+            inspected_after.append(len(compose.calls))
+            return await super().__call__(compose_project)
+
+    inspector = _install_inspector(monkeypatch, _Inspector(recreated, recreated, settled))
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+
+    tolerated = await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=300,
+        dependency_services=("agent", "api", "web"),
+        recreate_services=("api",),
+    )
+
+    assert tolerated is None
+    # Every inspection of the wait follows the companion recreate.
+    assert inspected_after == [1, 1, 1]
+    assert inspector.calls == 3
+    assert clock.sleeps == [5.0, 5.0]
+    assert [
+        (call.get("services"), call.get("force_recreate"), call.get("no_deps"), call["wait"])
+        for call in compose.calls
+    ] == [
+        (("api",), True, True, False),
+        (("api", "web"), None, None, True),
+        (("agent",), True, True, True),
+    ]
+
+
+@pytest.mark.unit
+async def test_failed_companion_recreate_is_never_tolerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A companion left on stale env or secrets fails the restart before any wait."""
+    inspector = _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(_running(_service("api", health="healthy"), _service("agent"))),
+    )
+    compose = _RecordingCompose()
+
+    async def _ensure(**kwargs: Any) -> None:
+        compose.calls.append(kwargs)
+        raise ComposeOperationError(operation="up", returncode=1, stdout="", stderr="api failed")
+
+    monkeypatch.setattr(compose, "ensure_project_up", _ensure)
+
+    async def _never_judged() -> bool:
+        raise AssertionError("a failed companion recreate is never judged for tolerance")
+
+    with pytest.raises(ComposeOperationError, match="api failed") as raised:
+        await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+            compose,
+            compose_project="awf_ws",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws",
+            budget_seconds=300,
+            dependency_services=("agent", "api"),
+            runtime_usable=_never_judged,
+            recreate_services=("api",),
+        )
+
+    assert not isinstance(raised.value, monitor_resume_runtime.AgentRecreateError)
+    assert inspector.calls == 0
+    assert [call.get("services") for call in compose.calls] == [("api",)]
 
 
 @pytest.mark.unit

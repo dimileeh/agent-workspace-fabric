@@ -848,12 +848,17 @@ async def test_guide_retry_after_exhaustion_recreates_the_dependencies_left_unse
     assert failed[-1].payload["unsettled_dependencies"] == ["postgres"]
 
     await _guide(factory, ws_id)
+    # Recreated first, the fresh postgres is waited on and settles.
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
 
     assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
-        (("agent", "postgres"), True)
+        (("postgres",), True),
+        (("postgres",), None),
+        (("agent",), True),
     ]
     assert compose.calls[0]["no_deps"] is True
+    assert compose.calls[0]["wait"] is False
 
     # Only the first attempt after the park recreates them.
     compose.calls.clear()
@@ -916,11 +921,12 @@ async def test_unrecorded_recovery_after_the_park_stops_recreating_dependencies(
         assert await executor.resume_pr_monitor_handoff(ws_id) is None
     await _guide(factory, ws_id)
     _fail_the_next_streak_count(monkeypatch)
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
     assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE) == []
+    assert compose.calls[0]["force_recreate"] is True
 
     compose.calls.clear()
-    _dependency_health(monkeypatch, {"postgres": "healthy"})
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
 
     assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
