@@ -105,6 +105,37 @@ def test_regex_literals_are_told_apart_from_division() -> None:
 
 
 @pytest.mark.unit
+def test_a_non_null_assertion_is_followed_by_division() -> None:
+    assert _values("x = a! / b / c") == ["x", "=", "a", "!", "/", "b", "/", "c"]
+    assert _values("x = f(a)! / 2")[-3:] == ["!", "/", "2"]
+    assert _values("x = a[0]! / 2")[-3:] == ["!", "/", "2"]
+    assert _values("x = a!! / 2")[-4:] == ["!", "!", "/", "2"]
+    # A prefix ``!`` still starts an expression, so the ``/`` after it opens a regex.
+    assert _values("x = !/'/.test(s)")[2:4] == ["!", ""]
+    assert _values("x = !!/'/.test(s)")[2:5] == ["!", "!", ""]
+    assert _values("!/'/.test(s)")[:2] == ["!", ""]
+    assert _values("return !/'/.test(s)")[:3] == ["return", "!", ""]
+    assert _values("if (ok) !/'/.test(s)")[4:6] == ["!", ""]
+    assert _values("x = a\n!/'/.test(s)")[3:5] == ["!", ""]
+    assert _values("x = (a) + !/'/.test(s)")[6:8] == ["!", ""]
+
+
+@pytest.mark.unit
+def test_tokens_carry_the_line_splitlines_numbers_them_on() -> None:
+    tokens = _tokens("a\r\nb\rc\u2028d /* x\n */ e\n`t\n` f")
+
+    assert [(token.value, token.line) for token in tokens] == [
+        ("a", 1),
+        ("b", 2),
+        ("c", 3),
+        ("d", 4),
+        ("e", 5),
+        ("", 7),
+        ("f", 7),
+    ]
+
+
+@pytest.mark.unit
 def test_punctuators_numbers_and_private_names() -> None:
     assert _values("a?.b ?? c => d ... e") == ["a", "?.", "b", "??", "c", "=>", "d", "...", "e"]
     assert _values("x = a?.5:1") == ["x", "=", "a", "?", ".5", ":", "1"]
@@ -645,6 +676,20 @@ def test_a_module_resolves_only_to_exactly_one_runtime_file() -> None:
     assert es._resolved_module_path(probes, frozenset({"a.ts", "a.js"})) is None
     assert es._resolved_module_path(probes, frozenset({"a.ts", "a/index.ts"})) is None
     assert es._resolved_module_path(("a.d.mts", "a.d.cts"), frozenset({"a.d.mts"})) is None
+    # A ``package.json`` beside a resolved ``index`` may point the directory elsewhere.
+    assert es._resolved_module_path(probes, frozenset({"a/index.ts", "a/package.json"})) is None
+    assert es._resolved_module_path(("index.ts",), frozenset({"index.ts", "package.json"})) is None
+    assert es._resolved_module_path(probes, frozenset({"a.ts", "a/package.json"})) == "a.ts"
+
+
+@pytest.mark.unit
+def test_index_probes_also_probe_their_directory_manifest() -> None:
+    probes = es._relative_specifier_probe_paths("src/app/main.ts", "./telemetry")
+    assert probes is not None
+
+    assert es._directory_manifest_paths(probes) == ("src/app/telemetry/package.json",)
+    assert es._directory_manifest_paths(("index.ts", "index.js")) == ("package.json",)
+    assert es._directory_manifest_paths(("src/app/telemetry.ts",)) == ()
 
 
 # --- call-site refs --------------------------------------------------------------
@@ -684,3 +729,53 @@ def test_receivers_reached_as_properties_are_reported() -> None:
 
     assert es._es_chained_member_refs(_tokens(text)) == frozenset({("tel", "record"), ("ns", "go")})
     assert es._es_chained_member_refs(_tokens("a.b")) == frozenset()
+
+
+# --- anchor lines and definition heads -------------------------------------------
+
+
+@pytest.mark.unit
+def test_names_an_anchor_line_does_not_call_bare_are_reported() -> None:
+    text = (
+        "class C {\n"
+        "  record(v: number) { return go(v); }\n"
+        "  flush(): void;\n"
+        "  get size() { return 1; }\n"
+        "}\n"
+        "const r = getClient().\n"
+        "  send(1) + track(2) + cond ? pick(3) : 4;\n"
+        "const s = a.\n"
+        "  b?.c(1);\n"
+        "const handlers = { replay: (v) => v, go(v) {} };\n"
+    )
+    tokens = _tokens(text)
+
+    assert es._es_line_non_call_names(tokens, 2) == frozenset({"record"})
+    assert es._es_line_non_call_names(tokens, 3) == frozenset({"flush"})
+    assert es._es_line_non_call_names(tokens, 4) == frozenset({"size"})
+    # ``pick(3) :`` reads as a signature head too, which only fails it closed.
+    assert es._es_line_non_call_names(tokens, 7) == frozenset({"send", "pick"})
+    assert es._es_line_non_call_names(tokens, 9) == frozenset({"b", "c"})
+    assert es._es_line_non_call_names(tokens, 10) == frozenset({"go"})
+    assert es._es_line_non_call_names(tokens, 1) == frozenset()
+
+
+@pytest.mark.unit
+def test_definition_heads_cover_declarations_and_signatures_at_any_depth() -> None:
+    text = (
+        "export function record(v) {\n"
+        "  return record(v) + other.record(v);\n"
+        "}\n"
+        "function* gen() {}\n"
+        "class Box {\n"
+        "  record(v) {}\n"
+        "}\n"
+        "const x = a * record(1);\n"
+        "if (ok) { const record = 1; }\n"
+        "export const sink = function* record() {};\n"
+    )
+    heads = es._es_definition_heads(_tokens(text), "record")
+
+    assert [(token.line, token.depth) for token in heads] == [(1, 0), (6, 1), (9, 1), (10, 0)]
+    assert es._es_definition_heads(_tokens(text), "gen")[0].line == 4
+    assert es._es_definition_heads(_tokens(text), "missing") == []

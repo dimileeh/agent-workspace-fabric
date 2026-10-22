@@ -89,7 +89,10 @@ class _EsModuleReader:
                 None
                 if probes is None
                 else await _paths_existing_at_ref(
-                    self.owner, worktree_path=self.worktree_path, ref=self.ref, paths=probes
+                    self.owner,
+                    worktree_path=self.worktree_path,
+                    ref=self.ref,
+                    paths=probes + _es._directory_manifest_paths(probes),
                 )
             )
             self._resolved[key] = (
@@ -112,6 +115,11 @@ class _EsModuleReader:
                 else (exports, imports, tokens)
             )
         return self._parsed[path]
+
+    async def definition_heads(self, path: str, name: str) -> list[_es._EsToken]:
+        """The tokens heading a definition of ``name`` in ``path``; none when unreadable."""
+        parsed = await self.parsed(path)
+        return [] if parsed is None else _es._es_definition_heads(parsed[2], name)
 
     async def lookup(self, module: str, name: str, *, hops: int) -> _Lookup:
         """Where ``module``'s export ``name`` is defined, following ``hops`` re-exports.
@@ -183,8 +191,16 @@ class _EsModuleReader:
 
 def _es_call_site_bindings(
     text: str, *, path: str
-) -> tuple[dict[str, _es._EsBinding], frozenset[str], frozenset[tuple[str, str]]] | None:
-    """``(imports, rebound, chained)`` of one call-site text, or None when unreadable."""
+) -> (
+    tuple[
+        dict[str, _es._EsBinding],
+        frozenset[str],
+        frozenset[tuple[str, str]],
+        tuple[_es._EsToken, ...],
+    ]
+    | None
+):
+    """``(imports, rebound, chained, tokens)`` of one call-site text, or None when unreadable."""
     tokens = _es._es_module_tokens(text, path=path)
     imports = None if tokens is None else _es._es_import_bindings(tokens)
     if tokens is None or imports is None:
@@ -193,6 +209,7 @@ def _es_call_site_bindings(
         imports,
         _es._es_rebound_names(tokens, frozenset(imports)),
         _es._es_chained_member_refs(tokens),
+        tokens,
     )
 
 
@@ -241,10 +258,13 @@ async def _es_module_commit_range_changes_callee_definition(
     call_site = _es_call_site_bindings(item_text, path=item_path)
     if call_site is None:
         return False
-    imports, rebound, chained = call_site
+    imports, rebound, chained, tokens = call_site
     # A chained receiver (``tel.sub.record()``) is an attribute no import binds,
-    # and every other unresolvable ref drops out here, so it fails closed.
+    # and every other unresolvable ref drops out here, so it fails closed. So
+    # does a bare ref the anchored line also defines or reaches as a member
+    # (``record(v) {``, or ``getClient().`` ending the line above).
     chains = _receiver_chain_segments_from_file_line(item_text, item_line, path=item_path)
+    non_calls = _es._es_line_non_call_names(tokens, item_line)
     refs = [
         (qualifier, name, reached)
         for qualifier, name in sorted(
@@ -252,6 +272,7 @@ async def _es_module_commit_range_changes_callee_definition(
             key=lambda ref: (ref[0] or "", ref[1]),
         )
         if qualifier not in chains
+        and (qualifier is not None or name not in non_calls)
         and (reached := _es._es_ref_target(imports, rebound, chained, qualifier, name)) is not None
     ]
     if not refs:
@@ -284,7 +305,15 @@ async def _es_module_commit_range_changes_callee_definition(
         spans = _importable_definition_spans_for_names(
             text or "", frozenset(), path=path, bare_names=bare_names
         )
-        if not spans:
+        # The line-based span scan cannot see brackets, so the file must hold
+        # exactly one head for the name, at depth 0, inside the one span found.
+        heads = await at_left.definition_heads(path, local_name)
+        if not (
+            len(spans) == 1
+            and len(heads) == 1
+            and heads[0].depth == 0
+            and spans[0][0] <= heads[0].line <= spans[0][1]
+        ):
             continue
         diff_text = await _path_diff_text_in_commit_range(
             self,
@@ -326,6 +355,6 @@ async def _es_caller_still_reaches(
     call_site = None if text is None else _es_call_site_bindings(text, path=caller)
     if call_site is None:
         return None
-    imports, rebound, chained = call_site
+    imports, rebound, chained, _tokens = call_site
     reached = _es._es_ref_target(imports, rebound, chained, qualifier, name)
     return None if reached is None else await reader.target(caller, *reached)

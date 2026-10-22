@@ -17,6 +17,8 @@ one file all yield None, which the evidence gate treats as "no evidence".
 
 from __future__ import annotations
 
+import bisect
+import itertools
 import posixpath
 import re
 from typing import NamedTuple, TypeGuard
@@ -79,17 +81,21 @@ _LINE_TERMINATORS = frozenset("\n\r  ")
 
 
 class _EsToken(NamedTuple):
-    """One significant token: kind, value, bracket depth, preceding newline.
+    """One significant token: kind, value, bracket depth, preceding newline, line.
 
     ``kind`` is ``ident``, ``punct``, ``string``, ``template``, ``regex``,
     ``number`` or ``jsx`` (a skipped JSX element). A string keeps
     its raw text between the quotes, so a module specifier is readable.
+    ``line`` is 1-based and counted the way ``str.splitlines`` counts, the
+    numbering a review anchor uses; a literal or JSX token sits on the line
+    where it ends.
     """
 
     kind: str
     value: str
     depth: int
     newline_before: bool
+    line: int
 
 
 class _EsLexError(Exception):
@@ -106,13 +112,37 @@ class _EsLexer:
         self.newline = False
         self.jsx = jsx
         self.tokens: list[_EsToken] = []
+        # Offset just past each line, so a position's line is one bisect away.
+        self.line_ends = list(
+            itertools.accumulate(len(line) for line in text.splitlines(keepends=True))
+        )
         # Index of the last ``)`` that closed an ``if`` / ``for`` / ``while`` /
         # ``with`` condition: a statement, so a regex, may start after it.
         self.condition_close = -1
 
     def emit(self, kind: str, value: str) -> None:
-        self.tokens.append(_EsToken(kind, value, self.depth, self.newline))
+        line = bisect.bisect_right(self.line_ends, self.pos) + 1
+        self.tokens.append(_EsToken(kind, value, self.depth, self.newline, line))
         self.newline = False
+
+    def ends_operand(self, index: int) -> bool:
+        """True when ``tokens[index]`` ends an operand, so a ``!`` after it is postfix.
+
+        TS reads ``x!`` / ``f()!`` / ``a[0]!`` as a non-null assertion when no
+        line break precedes the ``!``. An identifier counts unless it is a
+        keyword taking an operand (``return !x``), a ``)`` unless it closes a
+        statement condition, and a ``!`` only when it is itself postfix.
+        """
+        token = self.tokens[index] if index >= 0 else None
+        if token is None:
+            return False
+        if token.kind == "ident":
+            return token.value not in _masking._JS_REGEX_PREFIX_KEYWORDS
+        if token.value == "!":
+            return not token.newline_before and self.ends_operand(index - 1)
+        if token.value == ")":
+            return self.condition_close != index
+        return token.value == "]"
 
     def expression_may_start(self) -> bool:
         """True when a ``/`` here opens a regex, and a ``<`` a JSX element.
@@ -125,13 +155,15 @@ class _EsLexer:
         there as division would let a quote or backtick inside it swallow the
         code below into a literal while the stream still balances. Template
         and JSX tokens are emitted at their *end*, so a ``/`` after them is
-        division.
+        division, as it is after a TS non-null ``!`` (``x! / y``).
         """
         if not self.tokens:
             return True
         prev = self.tokens[-1]
         if prev.kind == "punct" and prev.value == ")":
             return self.condition_close == len(self.tokens) - 1
+        if prev.kind == "punct" and prev.value == "!":
+            return not self.ends_operand(len(self.tokens) - 1)
         if prev.kind == "punct":
             return prev.value not in ("]", "++", "--")
         if prev.kind == "ident":
@@ -914,6 +946,61 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
     return frozenset(assigned & names)
 
 
+def _es_signature_head(tokens: tuple[_EsToken, ...], index: int) -> bool:
+    """True when the identifier at ``index`` heads a parameter list, not a call.
+
+    ``name( ... )`` followed by ``{``, ``:`` or ``=>`` is a method, accessor,
+    object-literal method or interface signature (``record(v: number) {``,
+    ``get size() {``, ``flush(): void;``). A call followed by a ternary ``:``
+    also reads as one, which only fails it closed.
+    """
+    opener = _token_at(tokens, index + 1)
+    if not _is(opener, "punct", "("):
+        return False
+    close = index + 2
+    while not (tokens[close].depth == opener.depth and _is(tokens[close], "punct", ")")):
+        close += 1
+    after = _token_at(tokens, close + 1)
+    return _is(after, "punct") and after.value in ("=>", "{", ":")
+
+
+def _es_line_non_call_names(tokens: tuple[_EsToken, ...], line: int) -> frozenset[str]:
+    """Names some occurrence on ``line`` does not use as a bare callee.
+
+    A property after ``.`` / ``?.`` is a member call even when the dot ends the
+    line above (``getClient().`` then ``record(v)``), which the line-based
+    callee scan reads as bare; a name heading a parameter list is a definition
+    (``_es_signature_head``). A bare ref to any such name fails closed.
+    """
+    return frozenset(
+        token.value
+        for index, token in enumerate(tokens)
+        if token.line == line
+        and token.kind == "ident"
+        and (_is_reference_position(tokens, index) or _es_signature_head(tokens, index))
+    )
+
+
+def _es_definition_heads(tokens: tuple[_EsToken, ...], name: str) -> list[_EsToken]:
+    """Every token heading a definition of ``name``, at any depth.
+
+    A head follows a declaring keyword (``function`` / ``function*``,
+    ``class``, ``const``, ...) or heads a parameter list (a method, accessor
+    or signature). The callee's file must hold exactly one, at depth 0, for
+    the line-based span scan to have found the definition importers reach.
+    """
+    heads: list[_EsToken] = []
+    for index, token in enumerate(tokens):
+        if not _is(token, "ident", name) or _is_reference_position(tokens, index):
+            continue
+        before = _token_at(tokens, index - 1)
+        if _is(before, "punct", "*") and _is(_token_at(tokens, index - 2), "ident", "function"):
+            before = _token_at(tokens, index - 2)
+        if _ident_value(before) in _DECLARING_KEYWORDS or _es_signature_head(tokens, index):
+            heads.append(token)
+    return heads
+
+
 def _es_chained_member_refs(tokens: tuple[_EsToken, ...]) -> frozenset[tuple[str, str]]:
     """``(receiver, name)`` pairs the file reaches as ``... .receiver.name``.
 
@@ -976,17 +1063,34 @@ def _relative_specifier_probe_paths(importer: str, specifier: str) -> tuple[str,
     )
 
 
+def _directory_manifest_paths(probes: tuple[str, ...]) -> tuple[str, ...]:
+    """The ``package.json`` beside each ``index`` file among ``probes``, deduplicated."""
+    return tuple(
+        dict.fromkeys(
+            posixpath.join(posixpath.dirname(path), "package.json")
+            for path in probes
+            if posixpath.basename(path).startswith("index.")
+        )
+    )
+
+
 def _resolved_module_path(probes: tuple[str, ...], existing: frozenset[str]) -> str | None:
     """The one runtime file ``probes`` resolve to among ``existing``, or None.
 
     Declaration files carry no runtime definition and are ignored. Zero or
     several runtime candidates (``x.ts`` beside ``x.js`` or ``x/index.ts``)
-    fail closed, which is deterministic whatever a toolchain would prefer.
+    fail closed, which is deterministic whatever a toolchain would prefer. An
+    ``index`` file with a ``package.json`` beside it fails closed too: the
+    manifest's ``main`` / ``exports`` / ``types`` may point the directory
+    import at another file.
     """
     found = [
         path for path in probes if path in existing and not path.endswith(_DECLARATION_SUFFIXES)
     ]
-    return found[0] if len(found) == 1 else None
+    if len(found) != 1:
+        return None
+    manifests = _directory_manifest_paths((found[0],))
+    return None if any(manifest in existing for manifest in manifests) else found[0]
 
 
 def _es_ref_target(

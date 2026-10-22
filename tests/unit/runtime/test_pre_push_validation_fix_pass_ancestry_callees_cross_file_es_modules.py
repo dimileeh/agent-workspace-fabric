@@ -618,3 +618,108 @@ async def test_a_call_inside_jsx_with_apostrophes_in_its_text_is_evidence() -> N
     probe.files[caller_path] = caller
 
     assert await _accepted(probe, item_path=caller_path)
+
+
+# --- anchors and targets this reader cannot pin to one call fail closed --------------
+
+
+def _anchored(body: str) -> tuple[str, int]:
+    """``body`` under the ``record`` import, and the line of its ``record(`` marker."""
+    caller = "import { record } from './telemetry';\n" + body
+    anchor = next(i for i, line in enumerate(caller.splitlines(), 1) if "record(" in line)
+    return caller, anchor
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        "export class Ingest {\n  record(value: number) {\n    return value;\n  }\n}\n",
+        "export class Ingest {\n  async record(value: number) {\n    return value;\n  }\n}\n",
+        "export class Ingest {\n  get record() {\n    return 1;\n  }\n}\n",
+        "export const handlers = {\n  record(value: number) {\n    return value;\n  },\n};\n",
+        "export interface Sink {\n  record(value: number): void;\n}\n",
+        "export class Ingest {\n  record(value: number): number {\n    return value;\n  }\n}\n",
+        "export const handlers = {\n  record: (value: number) => value,\n  flush: () => 1,\n"
+        "  replay() {},\n  record(value) { return value; },\n};\n",
+    ],
+)
+async def test_a_definition_on_the_anchored_line_is_not_a_call(body: str) -> None:
+    """``record(v) {`` in a class, object or interface defines ``record``; it calls nothing."""
+    caller, anchor = _anchored(body)
+
+    assert not await _accepted(_telemetry_probe(caller), item_line=anchor)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call",
+    [
+        "getClient().\n    record(value)",
+        "clients[0]?.\n    record(value)",
+        "clients[0].\n\n    record(value)",
+    ],
+)
+async def test_a_member_call_split_after_its_dot_is_not_a_bare_call(call: str) -> None:
+    """``getClient().`` ending the line above makes ``record(value)`` a member call."""
+    caller = _caller("import { record } from './telemetry';", call)
+    anchor = next(i for i, line in enumerate(caller.splitlines(), 1) if "record(" in line)
+
+    assert not await _accepted(_telemetry_probe(caller), item_line=anchor)
+
+
+@pytest.mark.unit
+async def test_a_non_null_division_cannot_hide_a_shadow_from_the_tokenizer() -> None:
+    """``value! / 2`` is division; read as a regex it swallowed the ``record`` binding."""
+    caller, anchor = _anchored(
+        "export function ingest(value: number) {\n"
+        "  const half = value! / 2, record = (v: number) => v * half; const q = value / 3;\n"
+        "  return record(value) + q;\n"
+        "}\n"
+    )
+
+    assert not await _accepted(_telemetry_probe(caller), item_line=anchor)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("definition", "edited_line"),
+    [
+        # A second, nested ``record`` whose edit the line-based span scan accepted.
+        (
+            _RECORD_DEFINITION + "function wrap() {\nfunction record(value: number) {\n"
+            "  return value;\n}\nreturn record;\n}\n",
+            6,
+        ),
+        # The only head sits inside a block, not at module scope.
+        (
+            "if (enabled) {\nfunction record(value: number) {\n  return value + 1;\n}\n}\n"
+            "export { record };\n",
+            3,
+        ),
+    ],
+)
+async def test_a_target_without_one_module_scope_head_fails_closed(
+    definition: str, edited_line: int
+) -> None:
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    probe.files[_TELEMETRY] = definition
+    probe.diffs[_TELEMETRY] = _body_edit(_TELEMETRY, line=edited_line)
+
+    assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_a_directory_import_with_a_package_manifest_fails_closed() -> None:
+    """``package.json`` beside ``index.ts`` may point the directory import elsewhere."""
+    index = "src/app/telemetry/index.ts"
+    probe = _EsProbe(
+        files={
+            _CALLER: _caller("import { record } from './telemetry';"),
+            index: _RECORD_DEFINITION,
+            "src/app/telemetry/package.json": '{"main": "./dist/other.js"}\n',
+        },
+        diffs={index: _body_edit(index)},
+    )
+
+    assert not await _accepted(probe)
