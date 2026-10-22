@@ -47,9 +47,16 @@ class _FakeClock:
         self.now += seconds
 
 
-def _service(name: str, *, state: str = "running", health: str | None = None) -> RuntimeService:
+def _service(
+    name: str, *, state: str = "running", health: str | None = None, one_off: bool = False
+) -> RuntimeService:
     return RuntimeService(
-        name=name, container_id=f"{name}-id", image=None, state=state, health=health
+        name=name,
+        container_id=f"{name}-id",
+        image=None,
+        state=state,
+        health=health,
+        one_off=one_off,
     )
 
 
@@ -378,6 +385,65 @@ async def test_stopped_legacy_dependency_gets_the_profile_budget(
         {**common, "wait": True, "no_recreate": True},
         {**common, "wait": True, "force_recreate": True, "no_deps": True, "services": ("agent",)},
     ]
+
+
+@pytest.mark.unit
+async def test_one_off_and_orphan_containers_are_neither_waited_on_nor_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only declared compose services gate the resume.
+
+    A ``compose run`` container of a declared service and an orphan left by an
+    older compose.yml never settle on their own, so waiting on them would
+    burn the whole budget and fail a resume whose stack is fine.
+    """
+    inspector = _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(
+            _running(
+                _service("postgres", health="healthy"),
+                _service("postgres", health="unhealthy", one_off=True),
+                _service("postgres", state="exited", one_off=True),
+                _service("legacy-cache", health="starting"),
+                _service("legacy-worker", state="exited"),
+                _service("agent"),
+            )
+        ),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+
+    await _restart(compose, tmp_path, dependency_services=("agent", "postgres"))
+
+    assert inspector.calls == 1
+    assert clock.sleeps == []
+    assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
+    assert compose.calls[0]["no_recreate"] is True
+
+
+@pytest.mark.unit
+async def test_one_off_containers_are_skipped_without_a_readable_compose_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inspector = _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(
+            _running(_service("postgres", health="starting", one_off=True), _service("agent"))
+        ),
+    )
+    started: list[tuple[str, ...]] = []
+
+    async def _start(services: tuple[str, ...]) -> None:
+        started.append(services)
+
+    await monitor_resume_runtime.wait_for_recovering_dependencies(
+        "awf_ws", workspace_id="ws", budget_seconds=300, start_stopped=_start
+    )
+
+    assert inspector.calls == 1
+    assert started == []
 
 
 @pytest.mark.unit

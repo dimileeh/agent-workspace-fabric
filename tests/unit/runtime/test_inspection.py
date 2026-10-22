@@ -194,6 +194,37 @@ async def test_runtime_inspector_builds_running_service_snapshot(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("labels", "one_off"),
+    [
+        ({"com.docker.compose.service": "postgres", "com.docker.compose.oneoff": "True"}, True),
+        ({"com.docker.compose.service": "postgres", "com.docker.compose.oneoff": "False"}, False),
+        ({"com.docker.compose.service": "postgres"}, False),
+    ],
+)
+async def test_runtime_inspector_flags_compose_run_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    labels: dict[str, str],
+    one_off: bool,
+) -> None:
+    ps_row = {"ID": "abc123", "Names": "awf_ws-postgres-run-1", "State": "running"}
+
+    async def _fake_run(args: list[str]) -> _ProcessResult:
+        return _ProcessResult(returncode=0, stdout=json.dumps(ps_row) + "\n", stderr="")
+
+    async def _fake_inspect(_container_id: str) -> dict[str, object]:
+        return {"Config": {"Labels": labels}, "State": {"Status": "running"}}
+
+    monkeypatch.setattr(inspection, "_run", _fake_run)
+    monkeypatch.setattr(inspection, "_inspect_container", _fake_inspect)
+
+    snapshot = await RuntimeInspector().inspect("awf_ws")
+
+    assert snapshot.services[0].name == "postgres"
+    assert snapshot.services[0].one_off is one_off
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "inspect_data",
     [
         {},

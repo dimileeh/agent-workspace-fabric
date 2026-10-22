@@ -9,7 +9,8 @@ stop, so the resume could fail and be retried forever. The restart now:
    no ``--wait``, so no compose health gate can fail it on the healthcheck
    retries stored in a container created from an older compose.yml (the normal
    state after a host restart, as every service runs with ``restart: "no"``);
-2. waits for every running dependency whose Docker health is ``starting`` or
+2. waits for every running declared dependency (never a ``compose run`` or
+   orphan container) whose Docker health is ``starting`` or
    ``unhealthy`` to become healthy, bounded by the stack's startup budget rather
    than by those rendered retries (Docker keeps probing an ``unhealthy``
    container and flips it back on success);
@@ -33,7 +34,7 @@ from awf.common.audit import redact_audit_text
 from awf.control.executor.constants import MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE
 from awf.control.executor.quality_gates import _log
 from awf.node.compose_manager import ComposeOperationError
-from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 
 AGENT_SERVICE_NAME: Final[str] = "agent"
 DEPENDENCY_POLL_INTERVAL_SECONDS: Final[float] = 5.0
@@ -54,12 +55,30 @@ async def inspect_resume_runtime(compose_project: str) -> RuntimeSnapshot:
     )
 
 
-def _recovering_dependencies(snapshot: RuntimeSnapshot) -> dict[str, str]:
-    """Return running non-agent services whose health is not settled yet."""
+def _dependency_containers(
+    snapshot: RuntimeSnapshot, declared_services: tuple[str, ...] | None
+) -> list[RuntimeService]:
+    """Return the containers of declared non-agent services.
+
+    ``compose run`` containers and orphans of services no longer in compose.yml
+    never settle on their own; ``declared_services`` is ``None`` when compose.yml
+    is unreadable, and then every non-agent service counts.
+    """
+    return [
+        service
+        for service in snapshot.services
+        if service.name != AGENT_SERVICE_NAME
+        and not service.one_off
+        and (declared_services is None or service.name in declared_services)
+    ]
+
+
+def _recovering_dependencies(
+    snapshot: RuntimeSnapshot, declared_services: tuple[str, ...] | None
+) -> dict[str, str]:
+    """Return running dependencies whose health is not settled yet."""
     recovering: dict[str, str] = {}
-    for service in snapshot.services:
-        if service.name == AGENT_SERVICE_NAME:
-            continue
+    for service in _dependency_containers(snapshot, declared_services):
         if service.state.strip().lower() != "running":
             continue
         health = (service.health or "").strip().lower()
@@ -68,14 +87,15 @@ def _recovering_dependencies(snapshot: RuntimeSnapshot) -> dict[str, str]:
     return recovering
 
 
-def _stopped_dependencies(snapshot: RuntimeSnapshot) -> tuple[str, ...]:
-    """Return non-agent services whose container exists but is not running."""
+def _stopped_dependencies(
+    snapshot: RuntimeSnapshot, declared_services: tuple[str, ...] | None
+) -> tuple[str, ...]:
+    """Return dependencies whose container exists but is not running."""
     return tuple(
         sorted(
             service.name
-            for service in snapshot.services
-            if service.name != AGENT_SERVICE_NAME
-            and service.state.strip().lower() in _STOPPED_STATES
+            for service in _dependency_containers(snapshot, declared_services)
+            if service.state.strip().lower() in _STOPPED_STATES
         )
     )
 
@@ -86,6 +106,7 @@ async def wait_for_recovering_dependencies(
     workspace_id: str,
     budget_seconds: int,
     start_stopped: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
+    declared_services: tuple[str, ...] | None = None,
 ) -> None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
@@ -119,11 +140,11 @@ async def wait_for_recovering_dependencies(
             return
         if start_pending is not None:
             start, start_pending = start_pending, None
-            stopped = _stopped_dependencies(snapshot)
+            stopped = _stopped_dependencies(snapshot, declared_services)
             if stopped:
                 await start(stopped)
                 continue
-        recovering = _recovering_dependencies(snapshot)
+        recovering = _recovering_dependencies(snapshot, declared_services)
         if not recovering:
             return
         remaining = deadline - _monotonic()
@@ -192,6 +213,7 @@ async def restart_runtime_for_monitor_resume(
         workspace_id=workspace_id,
         budget_seconds=budget_seconds,
         start_stopped=_start_stopped,
+        declared_services=dependency_services,
     )
     if dependency_services is None:
         await compose.ensure_project_up(**common, no_recreate=True)
