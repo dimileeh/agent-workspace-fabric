@@ -540,6 +540,67 @@ async def test_reopen_retires_an_acknowledgement_not_yet_posted(
     assert len(gh.thread_replies) == 1
 
 
+async def test_reopen_retires_a_posted_acknowledgement(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    assert len(gh.thread_replies) == 1
+    # The reviewer reopens the acknowledged thread without commenting.
+    gh.resolved = False
+
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    assert read_item_disposition(state, _SILENT) is None
+
+    # A later silent resolve keeps the old reply, but its marker answered the
+    # resolution the reopen ended (PRRT_kwDOSJAM6s6vW9p0).
+    gh.resolved = True
+    blocked = await _gate(runner, workspace_id, state)
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert len(gh.thread_replies) == 1
+
+    # Only a guide acknowledging the current resolution certifies it, with a fresh reply.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert passed.count_rows is not None
+    assert dict(passed.count_rows)["operator acknowledged"] == 1
+    assert len(gh.thread_replies) == 2
+
+
+async def test_reopen_seen_by_the_re_audit_retires_the_posted_acknowledgement(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.reopen_during_reply = True
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    assert read_item_disposition(state, _SILENT) is None
+
+    # Silently resolved again before the next gate run: the posted reply answered
+    # the resolution the reopen ended, so it certifies nothing.
+    gh.resolved = True
+    blocked = await _gate(runner, workspace_id, state)
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert len(gh.thread_replies) == 1
+
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert len(gh.thread_replies) == 2
+
+
 async def test_guide_naming_unflagged_thread_records_nothing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

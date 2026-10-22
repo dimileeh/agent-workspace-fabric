@@ -170,14 +170,11 @@ async def review_thread_disposition_gate(
             legacy_conversation = None
         if not thread.is_resolved:
             # A reopen ends the flagged resolution: a later guide cannot acknowledge
-            # it, and one already recorded but not yet posted no longer applies.
+            # it, and one already recorded no longer applies — posted or not, as a
+            # posted reply's marker would otherwise pass a later silent re-resolve.
             state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
             pending = read_item_disposition(state, thread.thread_id)
-            if (
-                pending is not None
-                and pending.disposition_class == "operator_acknowledged"
-                and not pending.reply_comment_id
-            ):
+            if pending is not None and pending.disposition_class == "operator_acknowledged":
                 _supersede_acknowledgement(state, thread.thread_id, workspace_id=workspace_id)
             if thread.external_comment_bodies and (
                 thread.external_comment_bodies not in decided.get(thread.thread_id, ())
@@ -511,6 +508,10 @@ async def _post_operator_acknowledgement(
     posted = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if posted is not None:
         digests[thread_id] = posted.conversation_digest
+        if not posted.is_resolved:
+            # Reopened meanwhile: the acknowledged resolution is gone, so the reply
+            # just posted must not certify a later silent re-resolve either.
+            _supersede_acknowledgement(state, thread_id, workspace_id=workspace_id)
     if (
         posted is None
         or not posted.is_resolved  # reopened meanwhile: the acknowledged resolution is gone
@@ -539,7 +540,11 @@ def _acknowledgement_followed(state: MonitorState, thread: AuditedReviewThread) 
 
 
 def _supersede_acknowledgement(state: MonitorState, thread_id: str, *, workspace_id: str) -> None:
-    """Drop a guide's unposted acknowledgement of a resolution that no longer stands."""
+    """Drop a guide's acknowledgement of a resolution that no longer stands.
+
+    A posted reply stays in the thread, but without the record
+    :func:`_acknowledgement_followed` refuses its marker.
+    """
     state.threads_addressed_ids.pop(_item_disposition_key(thread_id), None)
     _log.info(
         "monitor.operator_acknowledgement_superseded",
