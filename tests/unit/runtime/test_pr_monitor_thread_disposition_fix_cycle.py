@@ -30,6 +30,7 @@ from awf.db.session import make_session_factory
 from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.monitor_state_keys import (
     _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
+    _disposition_retired_key,
     _item_disposition_key,
 )
 from awf.runtime.pr_monitor import (
@@ -914,6 +915,7 @@ def _serve_live_thread(
     *,
     supported: bool = True,
     error: GitHubClientError | None = None,
+    before_reply: str = "",
 ) -> list[int]:
     """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited."""
     audited: list[int] = []
@@ -928,6 +930,7 @@ def _serve_live_thread(
             is_resolved=False,
             is_outdated=False,
             resolved_by=None,
+            conversation_digest_before_reply=before_reply,
             external_comment_bodies=bodies,
         )
         return ReviewThreadAudit(supported=supported, viewer_login="awf-test-bot", threads=(live,))
@@ -956,7 +959,8 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_feedback_moved"
     thread = _commented_thread(tid, _ASK)
-    audited = _serve_live_thread(gh, monkeypatch, tid, live)
+    followed = "d" * 64
+    audited = _serve_live_thread(gh, monkeypatch, tid, live, before_reply=followed)
 
     workspace_id, state, result = await _run_cycle(
         factory=factory,
@@ -981,12 +985,13 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
-    for kept in (
-        read_item_disposition(state, tid),
-        read_item_disposition(_load_state(None, ws), tid),
-    ):
+    for kept_state in (state, _load_state(None, ws)):
+        kept = read_item_disposition(kept_state, tid)
         assert kept is not None and kept.reply_comment_id is None
         assert kept.reason == "the reviewed code already handles this case"
+        # The retired reply follows that feedback: its marker never certifies it
+        # (PRRT_kwDOSJAM6s6vaq4v), even once the record is gone.
+        assert _disposition_retired_key(tid, followed) in kept_state.threads_addressed_ids
     moved = _commented_thread(tid, *live)
     action = decide(_status(_PUSHED, (moved,)), state, MonitorConfig(auto_merge=True))
     assert isinstance(action, AddressComments)
@@ -1046,6 +1051,52 @@ async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
         "reply-1",
         True,
     )
+
+
+async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombstone(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6vaq4v: the re-read right after the reply records the
+    # conversation it followed, saved at once. A reopen before any audit bound the
+    # reply then still tombstones that conversation, which outlives the record.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_landed_followed"
+    thread = _commented_thread(tid, _ASK)
+    followed = "e" * 64
+    _serve_live_thread(gh, monkeypatch, tid, (_ASK,), before_reply=followed)
+
+    workspace_id, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    saved = read_item_disposition(_load_state(None, ws), tid)
+    assert saved is not None
+    assert (saved.reply_comment_id, saved.resolved, saved.reply_conversation_digest) == (
+        "reply-1",
+        True,
+        followed,
+    )
+
+    assert retire_reopened_dispositions(
+        state, _status(_PUSHED, (thread,)), workspace_id=workspace_id
+    ) == [tid]
+
+    assert _disposition_retired_key(tid, followed) in state.threads_addressed_ids
+    retired = read_item_disposition(state, tid)
+    assert retired is not None and retired.reply_conversation_digest is None
 
 
 async def test_fix_cycle_parks_when_the_thread_cannot_be_re_read_after_the_reply(

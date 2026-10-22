@@ -51,6 +51,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
 )
+from awf.service.pr_monitor_adoption_seed import seedable_monitor_state
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._merge_methods_fixtures import (
@@ -643,6 +644,66 @@ async def test_a_reopen_retires_a_reply_whose_resolve_landed_before_any_audit(
 
     gh.audit = audit
     blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+
+
+@pytest.mark.parametrize("seen_by", ["poll", "audit"])
+async def test_a_reopen_before_any_audit_leaves_a_tombstone_that_crosses_adoption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    seen_by: str,
+) -> None:
+    # PRRT_kwDOSJAM6s6vaq4v: the reply's resolve landed and the thread reopened
+    # before any audit bound it. An adoption onto a moved head then drops the
+    # code-dependent record, so only a tombstone of the conversation the reply
+    # followed (read right after it was posted) keeps the shared identity's silent
+    # re-resolve from certifying the historical marker.
+    followed = "b" * 64
+    state = settled_baseline_state()
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=_SILENT,
+            disposition_class="fixed",
+            verdict="fix_committed",
+            commits=("c" * 40,),
+            reply_comment_id="reply-1",
+            resolved=True,
+            reply_conversation_digest=followed,
+        ),
+    )
+    resolved = replace(
+        _thread(_SILENT, bodies=(_marker("fixed", _SILENT),)),
+        conversation_digest="a" * 64,
+        conversation_digest_before_reply=followed,
+    )
+    audit = ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(resolved,))
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    if seen_by == "poll":
+        listed = ReviewThread(
+            thread_id=_SILENT, path="widgets/core.py", line=1, body_excerpt="x", author="bot"
+        )
+        retire_reopened_dispositions(
+            state,
+            replace(_green_status(), unresolved_inline_threads=(listed,)),
+            workspace_id=workspace_id,
+        )
+    else:
+        gh.audit = replace(audit, threads=(replace(resolved, is_resolved=False, resolved_by=None),))
+        await _gate(runner, workspace_id, state)
+    retired = read_item_disposition(state, _SILENT)
+    assert retired is not None and retired.reply_conversation_digest is None
+    adopted = MonitorState()
+    for key, value in seedable_monitor_state(
+        state.threads_addressed_ids, head_continuity=False
+    ).items():
+        adopted.mark_addressed(key, value)
+    assert read_item_disposition(adopted, _SILENT) is None
+
+    gh.audit = audit
+    blocked = await _gate(runner, workspace_id, adopted)
 
     assert blocked.blocker is not None and _SILENT in blocked.blocker
 

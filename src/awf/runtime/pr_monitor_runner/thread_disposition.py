@@ -127,6 +127,10 @@ class ThreadDisposition:
     # AWF's own resolve on this reply landed: unlike a failed resolve's reply, it
     # is never reused once the thread is seen open again (PRRT_kwDOSJAM6s6vZ4nJ).
     resolved: bool = False
+    # The conversation the posted reply followed, as the re-read right after it
+    # read it. It binds nothing; it keys the reply's tombstone when the reply is
+    # retired before any audit bound it (PRRT_kwDOSJAM6s6vaq4v).
+    reply_conversation_digest: str | None = None
 
     @property
     def is_bound(self) -> bool:
@@ -166,6 +170,7 @@ class ThreadDisposition:
             "thread_body_hash": self.thread_body_hash,
             "conversation_digest": self.conversation_digest,
             "resolved": self.resolved,
+            "reply_conversation_digest": self.reply_conversation_digest,
         }
 
     @classmethod
@@ -202,6 +207,7 @@ class ThreadDisposition:
             thread_body_hash=_optional_text(raw.get("thread_body_hash")),
             conversation_digest=_optional_text(raw.get("conversation_digest")),
             resolved=raw.get("resolved") is True,
+            reply_conversation_digest=_optional_text(raw.get("reply_conversation_digest")),
         )
 
 
@@ -292,23 +298,28 @@ def retire_item_disposition(
 ) -> ThreadDisposition | None:
     """Retire ``disposition``: its thread reopened, or its conversation moved on.
 
-    Its reply, posted or not, answers nothing current any more. A posted bound
-    reply is remembered by the conversation it followed, so its marker never
-    certifies again, whatever happens to the record. An operator
+    Its reply, posted or not, answers nothing current any more. A posted reply is
+    remembered by the conversation it followed (its binding, else as read right
+    after posting it), so its marker never certifies again, whatever happens to
+    the record (PRRT_kwDOSJAM6s6vaq4v). An operator
     acknowledgement is dropped: only a new ``ACK-THREAD`` for the current
     resolution replaces it. Any other record keeps its evidence but loses its
     reply id, binding and landed resolve, so the thread's next AWF resolve posts
     a fresh reply. Returns the record left in state.
     """
-    if disposition.reply_comment_id and disposition.conversation_digest is not None:
-        state.mark_addressed(
-            _disposition_retired_key(disposition.item_id, disposition.conversation_digest),
-            "retired",
-        )
+    followed = disposition.conversation_digest or disposition.reply_conversation_digest
+    if disposition.reply_comment_id and followed is not None:
+        state.mark_addressed(_disposition_retired_key(disposition.item_id, followed), "retired")
     if disposition.disposition_class == "operator_acknowledged":
         state.threads_addressed_ids.pop(_item_disposition_key(disposition.item_id), None)
         return None
-    retired = replace(disposition, reply_comment_id=None, conversation_digest=None, resolved=False)
+    retired = replace(
+        disposition,
+        reply_comment_id=None,
+        conversation_digest=None,
+        resolved=False,
+        reply_conversation_digest=None,
+    )
     record_item_disposition(state, retired)
     return retired
 

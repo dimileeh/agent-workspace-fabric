@@ -27,6 +27,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
+    _disposition_retired_key,
     _item_disposition_key,
     _outdated_resolve_requeued_key,
 )
@@ -87,7 +88,7 @@ async def reply_before_resolve(
 
     ``thread`` is the thread as the monitor listed it. With ``repo`` too, a fresh
     reply is checked against the live thread before it is returned
-    (:func:`_feedback_moved_before_reply`).
+    (:func:`_reread_thread_after_reply`).
     """
     verdict = state.threads_addressed_ids.get(thread_id)
     disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
@@ -157,7 +158,7 @@ async def reply_before_resolve(
             exc.reason_code,
         )
         return None
-    disposition = replace(disposition, reply_comment_id=reply_id)
+    disposition = replace(disposition, reply_comment_id=reply_id, reply_conversation_digest=None)
     record_item_disposition(state, disposition)
     await _persist_posted_disposition(
         self, workspace_id=workspace_id, state=state, item_id=thread_id
@@ -173,7 +174,7 @@ async def reply_before_resolve(
     if repo is None or thread is None:
         return disposition
     try:
-        moved = await _feedback_moved_before_reply(
+        moved, followed = await _reread_thread_after_reply(
             self, repo=repo, pr_number=pr_number, thread=thread
         )
     except ForgeClientError as exc:
@@ -185,6 +186,15 @@ async def reply_before_resolve(
             exc.reason_code,
         )
         return None
+    if followed is not None:
+        # Kept with the reply, so retiring it before any audit bound it still
+        # tombstones the conversation its marker follows (PRRT_kwDOSJAM6s6vaq4v).
+        disposition = replace(disposition, reply_conversation_digest=followed)
+        record_item_disposition(state, disposition)
+        if not moved:
+            await _persist_posted_disposition(
+                self, workspace_id=workspace_id, state=state, item_id=thread_id
+            )
     if moved:
         # Feedback added or edited after the listed snapshot sits before the
         # reply, where the gate would read the reply as its answer
@@ -207,30 +217,31 @@ async def reply_before_resolve(
     return disposition
 
 
-async def _feedback_moved_before_reply(
+async def _reread_thread_after_reply(
     self: Any,
     *,
     repo: RepoRef,
     pr_number: int,
     thread: ReviewThread,
-) -> bool:
-    """True when the live thread's outside feedback is no longer ``thread``'s.
+) -> tuple[bool, str | None]:
+    """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
-    Runs once a fresh reply has landed, so anything that arrived before the
-    reply shows up here; anything later follows the reply, which the gate
-    already refuses as its answer. Outside comments are compared as
-    ``fetch_pr_status`` lists them. Only a provable difference counts: an
+    ``moved`` is True when its outside feedback is no longer ``thread``'s;
+    ``followed`` is the conversation the reply followed (``None`` when the
+    re-read cannot tell). Runs once a fresh reply has landed, so anything that
+    arrived before the reply shows up here; anything later follows the reply,
+    which the gate already refuses as its answer. Outside comments are compared
+    as ``fetch_pr_status`` lists them. Only a provable difference counts: an
     unsupported audit, a thread missing from it, or a snapshot without
     comments is no evidence of new feedback.
     """
     audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
-    if not audit.supported or not thread.comments:
-        return False
+    live = next((t for t in audit.threads if t.thread_id == thread.thread_id), None)
+    if not audit.supported or live is None:
+        return False, None
     listed = tuple(comment.body for comment in thread.comments)
-    return any(
-        audited.thread_id == thread.thread_id and audited.external_comment_bodies != listed
-        for audited in audit.threads
-    )
+    moved = bool(listed) and live.external_comment_bodies != listed
+    return moved, live.conversation_digest_before_reply or None
 
 
 async def _with_item_commit_recorded_this_cycle(
@@ -299,7 +310,9 @@ async def _persist_posted_disposition(
     Runs right after the reply lands, so a resolve that then fails — or a
     restart before the loop's ``_persist_state`` — still finds the reply id and
     never posts a second reply. A DEFER's filed-issue marker travels with it so
-    a re-triage after a reload never files a second issue. It must not flush the
+    a re-triage after a reload never files a second issue, and the thread's
+    retired-reply tombstones so a reload never lets a retired marker certify
+    again. It must not flush the
     rest of the in-memory state: inside a fix cycle that still carries
     unconfirmed verdicts whose resolves have not run yet (#305). Best-effort: the
     reply already landed and the in-memory record still reaches the DB with the
@@ -310,7 +323,11 @@ async def _persist_posted_disposition(
         workspace_id=workspace_id,
         state=state,
         item_id=item_id,
-        keys=(_item_disposition_key(item_id), *_filed_issue_marker_keys(state, item_id)),
+        keys=(
+            _item_disposition_key(item_id),
+            *_retired_disposition_keys(state, item_id),
+            *_filed_issue_marker_keys(state, item_id),
+        ),
     )
 
 
@@ -344,6 +361,12 @@ async def persist_parked_thread(
             *_filed_issue_marker_keys(state, thread_id),
         ),
     )
+
+
+def _retired_disposition_keys(state: MonitorState, thread_id: str) -> tuple[str, ...]:
+    """The thread's retired-reply tombstones (any conversation) held in memory."""
+    prefix = _disposition_retired_key(thread_id, "")
+    return tuple(key for key in state.threads_addressed_ids if key.startswith(prefix))
 
 
 def _filed_issue_marker_keys(state: MonitorState, thread_id: str) -> tuple[str, ...]:
