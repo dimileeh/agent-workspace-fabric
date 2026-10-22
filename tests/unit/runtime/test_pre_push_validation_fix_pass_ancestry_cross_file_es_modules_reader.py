@@ -122,6 +122,32 @@ def test_a_brace_closing_an_object_literal_is_followed_by_division() -> None:
 
 
 @pytest.mark.unit
+def test_a_brace_closing_a_class_or_function_expression_is_followed_by_division() -> None:
+    text = "const q = class {} / (record = replacement) / 2;"
+    assert _values(text)[6:] == ["/", "(", "record", "=", "replacement", ")", "/", "2", ";"]
+    assert es._es_assigned_names(_tokens(text), frozenset({"record"})) == frozenset({"record"})
+    assert _values("x = function () {} / 2").count("/") == 1
+    assert _values("x = async function* g(): {a: 1} {} / 2").count("/") == 1
+    assert _values("f(class extends Base<T> { m() {} } / 2, () => class {} / 3)").count("/") == 2
+    # A ``}`` closing a class or function declaration still precedes a regex.
+    assert _values("class A {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("export default function () {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("async function f() {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("x = async\nfunction f() {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("@dec() class A {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("a.class; if (b) {}\n/`/.test(s)")[-6:-4] == ["", "."]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "text", ["x = a ? b : class {} / 2", "return\nfunction f() {}\n/`/.test(s)"]
+)
+def test_a_slash_after_an_ambiguous_class_or_function_body_is_unparseable(text: str) -> None:
+    """A class or function after ``:`` or a line-broken keyword may be either: fail closed."""
+    assert es._es_module_tokens(text, path="src/app.ts") is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("text", ["x = {a: {b: 1} / 2, c: d / 3}", "L: {}\n/`/.test(s)"])
 def test_a_slash_after_a_brace_opened_after_a_colon_is_unparseable(text: str) -> None:
     """``{`` after ``:`` opens an object, a label's block or a case block: fail closed."""

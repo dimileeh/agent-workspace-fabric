@@ -82,6 +82,8 @@ _CONDITION_KEYWORDS = frozenset({"for", "if", "while", "with"})
 # a generic return type (``(): A<B> {``).
 _BLOCK_BRACE_PREFIXES = frozenset({";", "{", "}", ")", "=>", ">", ">>", ">>>", "else", "do"})
 _LINE_TERMINATORS = frozenset("\n\r  ")
+# Tokens after which ``class`` / ``function`` starts a declaration, not an expression.
+_DECLARATION_PREFIXES = frozenset({";", "{", "}", ")", "else", "do", "export", "default"})
 
 
 class _EsToken(NamedTuple):
@@ -125,8 +127,14 @@ class _EsLexer:
         # ``with`` condition: a statement, so a regex, may start after it.
         self.condition_close = -1
         # Indexes of the ``}`` tokens closing an object literal (``"object"``),
-        # or a ``{`` after ``:`` that may open an object or a block (``"colon"``).
+        # a class or function expression's body (``"operand"``), or a ``{``
+        # after ``:`` that may open an object or a block (``"colon"``).
         self.brace_closes: dict[int, str] = {}
+        # ``(depth, role)`` of each ``class`` / ``function`` whose body ``{`` is
+        # still ahead; the body's ``}`` takes the role, as an object's does.
+        self.callable_heads: list[tuple[int, str]] = []
+        # The head role an ``async`` read, for an ``async function`` after it.
+        self.async_head_role: str | None = None
 
     def emit(self, kind: str, value: str) -> None:
         line = bisect.bisect_right(self.line_ends, self.pos) + 1
@@ -252,6 +260,9 @@ class _EsLexer:
             if ch in _CLOSER_FOR:
                 if ch == "{":
                     role = self.brace_role()
+                    heads = self.callable_heads
+                    if not role and heads and heads[-1][0] == self.depth:
+                        role = heads.pop()[1]
                 else:
                     role = "condition" if self.opens_condition() else ""
                 self.emit("punct", ch)
@@ -268,6 +279,8 @@ class _EsLexer:
                 if closer_char != ch:
                     raise _EsLexError
                 self.depth -= 1
+                while self.callable_heads and self.callable_heads[-1][0] > self.depth:
+                    self.callable_heads.pop()
                 self.emit("punct", ch)
                 if role == "condition":
                     self.condition_close = len(self.tokens) - 1
@@ -292,11 +305,47 @@ class _EsLexer:
             else:
                 self.read_word_or_punctuator(ch)
 
+    def callable_head_role(self) -> str | None:
+        """The role a ``class`` / ``function`` here gives its body's ``}``.
+
+        A class or function expression is an operand, so a ``/`` after the
+        ``}`` closing its body divides (``class {} / x``, ``"operand"``); after
+        a declaration's ``}`` it opens a regex (``""``). A head where no
+        expression may start, or after a token in ``_DECLARATION_PREFIXES``,
+        starts a declaration; after a ``:`` or a line-broken keyword
+        (``return`` then a declaration, by ASI) it may start either, so its
+        ``}`` fails closed (``"colon"``). A member name (``a.class``) is
+        neither (None). ``async function`` takes the role read at ``async``.
+        """
+        prev = self.tokens[-1] if self.tokens else None
+        if prev is None or prev.value in _DECLARATION_PREFIXES:
+            return ""
+        if prev.value in (".", "?."):
+            return None
+        if not self.expression_may_start():
+            return ""
+        if prev.value == ":" or prev.kind == "ident" and self.newline:
+            return "colon"
+        return "operand"
+
     def read_word_or_punctuator(self, ch: str) -> None:
         text = self.text
         ident = _IDENT_RE.match(text, self.pos + (ch == "#"))
         if ident is not None:
-            self.emit("ident", text[self.pos : ident.end()])
+            word = text[self.pos : ident.end()]
+            if word == "async":
+                self.async_head_role = self.callable_head_role()
+            elif word in ("class", "function"):
+                prev = self.tokens[-1] if self.tokens else None
+                is_async = word == "function" and prev is not None and prev.value == "async"
+                role = (
+                    self.async_head_role
+                    if is_async and not self.newline
+                    else self.callable_head_role()
+                )
+                if role is not None:
+                    self.callable_heads.append((self.depth, role))
+            self.emit("ident", word)
             self.pos = ident.end()
             return
         number = _NUMBER_RE.match(text, self.pos)
