@@ -17,6 +17,8 @@ class AuditedReviewThread:
     identity authored (only those can carry AWF's disposition marker), oldest first.
     The first ``superseded_viewer_comments`` of them predate the thread's newest
     comment by anyone else, so they answered earlier feedback, not the current one.
+    ``conversation_digest`` fingerprints every comment (author side and body, in
+    order), so a new or edited comment shows up as a changed conversation.
     """
 
     thread_id: str
@@ -25,6 +27,7 @@ class AuditedReviewThread:
     resolved_by: str | None
     viewer_comment_bodies: tuple[str, ...] = ()
     superseded_viewer_comments: int = 0
+    conversation_digest: str = ""
 
     @property
     def current_viewer_comment_bodies(self) -> tuple[str, ...]:

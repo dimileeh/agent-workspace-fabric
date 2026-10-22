@@ -113,3 +113,21 @@ def test_disposition_gate_baseline_crosses_verbatim(record: str, head_continuity
     assert seedable_monitor_state({_BASELINE: record}, head_continuity=head_continuity) == {
         _BASELINE: record
     }
+
+
+_BASELINE_CONVERSATIONS = "__awf_review_thread_disposition_baseline_conversations__"
+
+
+@pytest.mark.parametrize("record", ['{"PRRT_test_legacy": "abc"}', "{}", "{not json"])
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_disposition_gate_baseline_conversations_cross_verbatim(
+    record: str, head_continuity: bool
+) -> None:
+    """The conversations each legacy exemption is tied to follow the baseline.
+
+    Left behind, the successor would hold the predecessor's baseline with no
+    conversation to match, and the gate would block its still-legacy threads.
+    """
+    assert seedable_monitor_state(
+        {_BASELINE_CONVERSATIONS: record}, head_continuity=head_continuity
+    ) == {_BASELINE_CONVERSATIONS: record}

@@ -462,9 +462,12 @@ counts per disposition class and "resolved by others".
 Rollout: a workspace's first gate run records the threads it finds resolved
 by AWF's identity without a marker as a legacy baseline — they predate
 reply-before-resolve — in state and in one audit event with their ids
-(`REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE`). Baseline threads never block and
+(`REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE`). Baseline threads do not block and
 the certificate lists their count separately; every unmarked resolution after
-that first run still blocks. A PR AWF opens itself (a feature PR, or a release
+that first run still blocks. Each exemption is tied to the thread's
+conversation as that first run saw it: once the thread reopens or gains (or
+edits) a comment, the exemption is retired for good, and a later silent
+resolution needs a marker like any other. A PR AWF opens itself (a feature PR, or a release
 PR it creates) has no pre-rollout history, so its handoff settles the baseline
 empty: no first-run exemption, and every unmarked resolution blocks. On a
 reused or adopted PR, a thread the monitor already recorded a disposition for

@@ -170,10 +170,20 @@ _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY = "__awf_review_thread_audit_unavaila
 # Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON list of
 # review threads the workspace's FIRST disposition-gate run found resolved by
 # AWF's identity without a marker (#1018 rollout). Those predate reply-before-
-# resolve: they are counted as a legacy baseline and never block. Its presence
-# also marks the first run as done, so every later unmarked resolution blocks.
+# resolve: they are counted as a legacy baseline and do not block while their
+# conversation stands (see the conversations key below). Its presence also marks
+# the first run as done, so every later unmarked resolution blocks.
 # A PR AWF opens itself has no such history: its handoff seeds the key empty.
 _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY = "__awf_review_thread_disposition_baseline__"
+
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON object
+# that ties each legacy-baseline thread to its conversation digest at baseline
+# time (#1018). The exemption holds only while that thread stays resolved with
+# that same conversation: a reopen or any changed comment retires it for good,
+# so new feedback on a grandfathered thread needs a marker like any other.
+_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY = (
+    "__awf_review_thread_disposition_baseline_conversations__"
+)
 
 
 def _with_settled_disposition_baseline(

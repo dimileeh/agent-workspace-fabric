@@ -10,6 +10,8 @@ time.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
@@ -146,4 +148,13 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
         resolved_by=_clean_optional_str(_dig(node, "resolvedBy", "login")),
         viewer_comment_bodies=tuple(viewer_bodies),
         superseded_viewer_comments=superseded,
+        conversation_digest=_conversation_digest(comment_nodes),
     )
+
+
+def _conversation_digest(comment_nodes: list[dict[str, Any]]) -> str:
+    """Fingerprint the thread's whole conversation: each comment's author side and body."""
+    conversation = [
+        [comment.get("viewerDidAuthor") is True, comment.get("body")] for comment in comment_nodes
+    ]
+    return hashlib.sha256(json.dumps(conversation).encode()).hexdigest()

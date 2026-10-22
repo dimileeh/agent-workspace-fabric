@@ -32,6 +32,7 @@ from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
+    _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
     _disposition_unverified_key,
     _item_disposition_key,
@@ -134,10 +135,22 @@ async def review_thread_disposition_gate(
         )
     baseline_record = state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY)
     legacy_baseline = _decode_baseline(baseline_record)
+    legacy_conversations = _decode_baseline_conversations(
+        state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY)
+    )
+    retired: list[str] = []  # legacy exemptions whose thread reopened or moved on
     counts: Counter[str] = Counter()
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
     for thread in audit.threads:
+        legacy_conversation = legacy_conversations.get(thread.thread_id)
+        if legacy_conversation is not None and (
+            not thread.is_resolved or legacy_conversation != thread.conversation_digest
+        ):
+            # The baseline exempted the conversation it saw, resolved: a reopen
+            # or a new / edited comment is feedback no legacy resolution answered.
+            retired.append(thread.thread_id)
+            legacy_conversation = None
         if not thread.is_resolved:
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
@@ -156,6 +169,7 @@ async def review_thread_disposition_gate(
             )
         if (
             disposition_class is None
+            and legacy_conversation is not None
             and thread.thread_id in legacy_baseline
             and thread.thread_id not in marked
         ):
@@ -166,6 +180,14 @@ async def review_thread_disposition_gate(
             continue
         counts[disposition_class] += 1
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
+    if retired:
+        _retire_legacy_exemptions(
+            state,
+            legacy_conversations,
+            retired,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+        )
     if baseline_record is None:
         # A thread this monitor recorded a disposition for (or that carries an
         # AWF marker) was handled after the rollout, so its unmarked resolution
@@ -175,12 +197,13 @@ async def review_thread_disposition_gate(
             for tid in unverified
             if tid not in marked and _item_disposition_key(tid) not in state.threads_addressed_ids
         ]
+        digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
         await _record_legacy_baseline(
             self,
             workspace_id=workspace_id,
             pr_number=pr_number,
             state=state,
-            thread_ids=legacy,
+            conversations={tid: digests[tid] for tid in legacy},
             base_branch=base_branch,
             remote_branch=remote_branch,
             monitor_log=monitor_log,
@@ -234,13 +257,48 @@ def _decode_baseline(record: str | None) -> frozenset[str]:
     return frozenset(tid for tid in thread_ids if isinstance(tid, str))
 
 
+def _decode_baseline_conversations(record: str | None) -> dict[str, str]:
+    """Each live legacy exemption's conversation digest; malformed ties none."""
+    try:
+        conversations = json.loads(record or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(conversations, dict):
+        return {}
+    return {tid: digest for tid, digest in conversations.items() if isinstance(digest, str)}
+
+
+def _retire_legacy_exemptions(
+    state: MonitorState,
+    conversations: dict[str, str],
+    thread_ids: list[str],
+    *,
+    workspace_id: str,
+    pr_number: int,
+) -> None:
+    """Drop the exemptions of legacy threads that reopened or moved on, for good."""
+    for thread_id in thread_ids:
+        conversations.pop(thread_id, None)
+    state.mark_addressed(
+        _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY,
+        json.dumps(conversations, sort_keys=True),
+    )
+    _log.info(
+        "monitor.review_thread_disposition_legacy_baseline_retired",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        thread_ids=thread_ids,
+        reason_code=REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE,
+    )
+
+
 async def _record_legacy_baseline(
     self: Any,
     *,
     workspace_id: str,
     pr_number: int,
     state: MonitorState,
-    thread_ids: list[str],
+    conversations: dict[str, str],
     base_branch: str,
     remote_branch: str,
     monitor_log: WorkspaceLogSink | None,
@@ -249,16 +307,20 @@ async def _record_legacy_baseline(
 
     Those the monitor holds no disposition record for predate reply-before-
     resolve (the #1018 rollout), so they are recorded — in state and, with their
-    ids, in one audit event — and never block. The record also closes the first
+    ids, in one audit event — and do not block while each stays resolved with
+    the ``conversations`` digest it had here. The record also closes the first
     run: every later unmarked resolution blocks.
     """
-    state.mark_addressed(
-        _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, json.dumps(sorted(thread_ids))
-    )
+    thread_ids = sorted(conversations)
+    state.mark_addressed(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, json.dumps(thread_ids))
     for thread_id in thread_ids:
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
     if not thread_ids:
         return
+    state.mark_addressed(
+        _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY,
+        json.dumps(conversations, sort_keys=True),
+    )
     _log.info(
         "monitor.review_thread_disposition_legacy_baseline",
         workspace_id=workspace_id,
@@ -277,7 +339,7 @@ async def _record_legacy_baseline(
         base_branch=base_branch,
         remote_branch=remote_branch,
         monitor_log=monitor_log,
-        evidence={"thread_ids": sorted(thread_ids)},
+        evidence={"thread_ids": thread_ids},
     )
 
 

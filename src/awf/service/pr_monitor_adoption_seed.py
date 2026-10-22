@@ -170,6 +170,9 @@ _HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred", "operator_acknowl
 # the gate reads a malformed or empty record fail-closed (first run done,
 # nothing exempt), whereas dropping it would fail open.
 _DISPOSITION_BASELINE_KEY = "__awf_review_thread_disposition_baseline__"
+# ``__awf_review_thread_disposition_baseline_conversations__`` ties each of those
+# exemptions to the conversation it covered, so it crosses verbatim with them.
+_DISPOSITION_BASELINE_CONVERSATIONS_KEY = "__awf_review_thread_disposition_baseline_conversations__"
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
@@ -247,7 +250,7 @@ def seedable_monitor_state(
             _is_verdict_entry(key, value, head_continuity=head_continuity)
             or _is_copied_marker(key, value)
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
-            or key == _DISPOSITION_BASELINE_KEY
+            or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
     return dict(

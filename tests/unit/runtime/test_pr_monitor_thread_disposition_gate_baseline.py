@@ -24,6 +24,7 @@ from awf.common.github_client import RepoRef
 from awf.db.models import WorkspaceEvent
 from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import (
+    _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
     _disposition_unverified_key,
     _with_settled_disposition_baseline,
@@ -74,15 +75,22 @@ def _marker(cls: str, tid: str) -> str:
 
 
 def _thread(
-    tid: str, *, bodies: tuple[str, ...] = (), resolved_by: str = _VIEWER, superseded: int = 0
+    tid: str,
+    *,
+    bodies: tuple[str, ...] = (),
+    resolved_by: str = _VIEWER,
+    superseded: int = 0,
+    resolved: bool = True,
+    conversation: str = "",
 ) -> Any:
     return AuditedReviewThread(
         thread_id=tid,
-        is_resolved=True,
+        is_resolved=resolved,
         is_outdated=False,
         resolved_by=resolved_by,
         viewer_comment_bodies=bodies,
         superseded_viewer_comments=superseded,
+        conversation_digest=conversation,
     )
 
 
@@ -375,4 +383,88 @@ async def test_a_thread_whose_marker_newer_feedback_outdated_is_never_legacy(
 
     result = await _gate(runner, workspace_id, baselined)
 
+    assert result.blocker is not None and _LEGACY in result.blocker
+
+
+def _baseline_conversations(state: MonitorState) -> dict[str, str]:
+    return dict(
+        json.loads(
+            state.threads_addressed_ids[_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY]
+        )
+    )
+
+
+async def test_a_baselined_thread_whose_conversation_moves_on_loses_its_exemption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # The exemption covers the conversation the first run saw. New feedback on
+    # a reopened legacy thread, resolved silently by AWF's shared identity, is
+    # not that conversation: it needs a marker like any other resolution.
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LEGACY, conversation="original"),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+
+    first = await _gate(runner, workspace_id, state)
+
+    assert first.blocker is None
+    assert _baseline_conversations(state) == {_LEGACY: "original"}
+
+    gh.threads = (_thread(_LEGACY, conversation="new feedback"),)
+    moved_on = await _gate(runner, workspace_id, state)
+
+    assert moved_on.blocker is not None and _LEGACY in moved_on.blocker
+    assert _baseline_conversations(state) == {}
+
+    # Retired for good: restoring the old conversation does not restore it.
+    gh.threads = (_thread(_LEGACY, conversation="original"),)
+    restored = await _gate(runner, workspace_id, state)
+
+    assert restored.blocker is not None and _LEGACY in restored.blocker
+    assert json.loads(
+        state.threads_addressed_ids[_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY]
+    ) == [_LEGACY]
+
+
+async def test_a_reopened_baselined_thread_loses_its_exemption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LEGACY, conversation="original"),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    await _gate(runner, workspace_id, state)
+
+    gh.threads = (_thread(_LEGACY, conversation="original", resolved=False),)
+    reopened = await _gate(runner, workspace_id, state)
+
+    assert reopened.blocker is None  # an unresolved thread is decide()'s to handle
+    assert _baseline_conversations(state) == {}
+
+    gh.threads = (_thread(_LEGACY, conversation="original"),)
+    resolved_again = await _gate(runner, workspace_id, state)
+
+    assert resolved_again.blocker is not None and _LEGACY in resolved_again.blocker
+
+
+@pytest.mark.parametrize(
+    "conversations", [None, "{not json", f'["{_LEGACY}"]', f'{{"{_LEGACY}": 1}}']
+)
+async def test_a_baselined_thread_without_its_conversation_record_is_never_exempt(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    conversations: str | None,
+) -> None:
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LEGACY),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    state.mark_addressed(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY, json.dumps([_LEGACY]))
+    if conversations is not None:
+        state.mark_addressed(
+            _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY, conversations
+        )
+
+    result = await _gate(runner, workspace_id, state)
+
+    # Nothing (readable) ties the exemption to a conversation: it fails closed.
     assert result.blocker is not None and _LEGACY in result.blocker

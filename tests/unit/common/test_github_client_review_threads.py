@@ -244,3 +244,28 @@ async def test_audit_marks_viewer_comments_older_than_the_newest_feedback() -> N
     )
     assert audited[0].superseded_viewer_comments == 2
     assert audited[0].current_viewer_comment_bodies == ()
+
+
+async def _conversation_digest(comments: list[dict[str, object]]) -> str:
+    fake = FakeCommandRunner()
+    fake.queue_result(
+        stdout=_audit_page([_audit_thread("PRRT_test_a", comments=comments)], cursor=None)
+    )
+    audit = await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)
+    return audit.threads[0].conversation_digest
+
+
+async def test_audit_fingerprints_the_whole_thread_conversation() -> None:
+    feedback = {"body": "P1: crash on None", "viewerDidAuthor": False}
+    reply = {"body": "fixed", "viewerDidAuthor": True}
+    original = await _conversation_digest([feedback, reply])
+
+    # The same conversation keeps its digest; new feedback, a changed author side
+    # or an edited comment each change it.
+    assert original and original == await _conversation_digest([dict(feedback), dict(reply)])
+    changed = {
+        await _conversation_digest([feedback, reply, {"body": "still", "viewerDidAuthor": False}]),
+        await _conversation_digest([feedback, {"body": "fixed", "viewerDidAuthor": False}]),
+        await _conversation_digest([{"body": "P1: edited", "viewerDidAuthor": False}, reply]),
+    }
+    assert len(changed) == 3 and original not in changed
