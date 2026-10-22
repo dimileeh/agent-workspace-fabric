@@ -9,7 +9,7 @@ with ``MONITOR_RUNTIME_RESTART_EXHAUSTED``. The workspace is never failed.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from awf.control.executor import (
     monitor_resume_runtime,
 )
 from awf.control.executor.constants import (
+    MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS,
     MONITOR_RUNTIME_RESTART_BLOCK_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE,
@@ -843,3 +844,92 @@ async def test_unreadable_streak_recreates_no_dependency(
         )
         == ()
     )
+
+
+def _record_backoff(monkeypatch: pytest.MonkeyPatch, *, clock_offset: timedelta) -> list[float]:
+    sleeps: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    def _now() -> datetime:
+        return datetime.now(UTC) + clock_offset
+
+    monkeypatch.setattr(monitor_resume_restart_escalation, "_sleep", _sleep)
+    monkeypatch.setattr(monitor_resume_restart_escalation, "_now", _now)
+    return sleeps
+
+
+@pytest.mark.unit
+async def test_failed_resume_attempts_back_off_before_the_next_restart(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient error cannot burn every strike within seconds."""
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    sleeps = _record_backoff(monkeypatch, clock_offset=timedelta(0))
+    restarts: list[int] = []
+    original_ensure = compose.ensure_project_up
+
+    async def _ensure(**kwargs: Any) -> None:
+        restarts.append(len(sleeps))
+        await original_ensure(**kwargs)
+
+    monkeypatch.setattr(compose, "ensure_project_up", _ensure)
+
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert len(sleeps) == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1
+    assert sleeps[0] == pytest.approx(MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS[0], abs=5)
+    assert sleeps[1] == pytest.approx(MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS[1], abs=5)
+    # Each backoff happens before that attempt's restart, never after it.
+    assert restarts == [0, 1, 2]
+    assert await _status(factory, ws_id) == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_backoff_already_served_does_not_sleep_again(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed(factory, tmp_path)
+    executor = _executor(fake, factory, tmp_path, _ScriptedCompose())
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    # The worker came back long after the failure (e.g. after a host restart).
+    sleeps = _record_backoff(monkeypatch, clock_offset=timedelta(hours=1))
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert sleeps == []
+
+
+@pytest.mark.unit
+async def test_backoff_lookup_failure_does_not_block_the_resume(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    sleeps = _record_backoff(monkeypatch, clock_offset=timedelta(0))
+
+    async def _db_down(*_args: Any, **_kwargs: Any) -> Any:
+        raise OperationalError("select", {}, Exception("connection refused"))
+
+    monkeypatch.setattr(monitor_resume_restart_escalation, "_last_streak_failure_at", _db_down)
+    calls_before = len(compose.calls)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert sleeps == []
+    assert len(compose.calls) > calls_before

@@ -50,6 +50,7 @@ from awf.control.executor.monitor_handoff_setup import (
 from awf.control.executor.monitor_resume_restart_escalation import (
     dependencies_to_recreate_after_exhaustion,
     escalate_monitor_resume_restart_failure,
+    pace_monitor_resume_restart,
     reset_monitor_resume_restart_streak,
 )
 from awf.control.executor.monitor_resume_runtime import restart_runtime_for_monitor_resume
@@ -349,6 +350,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
 
     identity_before: _runtime_setup_replay.AgentIdentityObservation = None
     if not workspace_is_hosted:
+        # Back off after a failed restart before the next one, outside the
+        # writer lock; the locked recheck below fences the wait.
+        await pace_monitor_resume_restart(self, workspace_id=workspace_id)
         # Monitor agent-service recovery replays setup under this lock; holding it
         # across identity capture, restart and replay keeps a reclaimed lease's
         # resume from replaying concurrently with the old runner's recovery.

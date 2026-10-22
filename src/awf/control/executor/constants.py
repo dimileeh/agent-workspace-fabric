@@ -76,6 +76,10 @@ RUNTIME_SETUP_REPLAYED_EVENT_TYPE = "workspace.runtime_setup_replayed"
 
 RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE = "workspace.runtime_setup_replay_failed"
 
+# Minimum gap, in seconds, before the next restart after the 1st and the 2nd
+# consecutive failure, so a transient error cannot use every strike in seconds.
+MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS = (60, 120)
+
 # Monitor-origin (``monitor_`` prefix) resume phase of the block a failed PR-monitor
 # setup replay parks in, so ``guide`` resumes it back into the PR monitor.
 MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE = "monitor_runtime_setup_replay"

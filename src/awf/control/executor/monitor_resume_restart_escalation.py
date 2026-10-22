@@ -17,16 +17,18 @@ write on the next usable restart.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_text
 from awf.control.blocked_transition import enter_blocked_for_protected_violation_in_session
 from awf.control.executor.constants import (
+    MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS,
     MONITOR_RUNTIME_RESTART_BLOCK_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE,
@@ -50,6 +52,11 @@ _STREAK_EVENT_TYPES: Final = (
 )
 # Caps the reported count, not the decision: it is always above the limit.
 _STREAK_QUERY_LIMIT: Final[int] = 50
+_sleep = asyncio.sleep
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _unpersisted_recoveries(self: Any) -> dict[str, datetime]:
@@ -108,6 +115,53 @@ async def consecutive_restart_failures(
     failures at or before it are not counted.
     """
     return len(_open_streak(await _newest_streak_events(session, workspace_id, since)))
+
+
+async def _last_streak_failure_at(
+    session: AsyncSession, workspace_id: str, since: datetime | None
+) -> tuple[int, datetime | None]:
+    """Return the open streak length and when its newest failure was recorded."""
+    failures = len(_open_streak(await _newest_streak_events(session, workspace_id, since)))
+    if failures == 0:
+        return 0, None
+    last_failed_at = await session.scalar(
+        select(func.max(WorkspaceEvent.occurred_at)).where(
+            WorkspaceEvent.workspace_id == workspace_id,
+            WorkspaceEvent.event_type == MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+        )
+    )
+    return failures, last_failed_at
+
+
+async def pace_monitor_resume_restart(self: Any, *, workspace_id: str) -> None:
+    """Hold the next restart until the backoff after the last failed one has passed.
+
+    The gap is measured from the failure event, so a worker restart in between
+    neither resets nor repeats it. An unreadable event log never blocks a resume.
+    """
+    since = _unpersisted_recoveries(self).get(workspace_id)
+    try:
+        async with self._session_factory() as session:
+            failures, last_failed_at = await _last_streak_failure_at(session, workspace_id, since)
+    except SQLAlchemyError:
+        _log.exception("executor.resume_restart_backoff_lookup_failed", workspace_id=workspace_id)
+        return
+    if failures == 0 or last_failed_at is None:
+        return
+    backoff = MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS[
+        min(failures, len(MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS)) - 1
+    ]
+    remaining = backoff - (_now() - last_failed_at).total_seconds()
+    if remaining <= 0:
+        return
+    _log.info(
+        "executor.resume_restart_backoff",
+        workspace_id=workspace_id,
+        consecutive_failures=failures,
+        backoff_seconds=backoff,
+        remaining_seconds=round(remaining, 1),
+    )
+    await _sleep(remaining)
 
 
 async def _parked_streak_open(session: AsyncSession, workspace_id: str) -> bool:

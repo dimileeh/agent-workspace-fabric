@@ -6,7 +6,11 @@ from typing import Any
 
 import pytest
 
-from awf.control.executor import monitor_resume_runtime, runtime_setup_replay
+from awf.control.executor import (
+    monitor_resume_restart_escalation,
+    monitor_resume_runtime,
+    runtime_setup_replay,
+)
 from awf.control.executor.runtime_setup_replay import AgentContainerIdentity
 from awf.runtime.inspection import RuntimeSnapshot
 
@@ -55,3 +59,17 @@ def _settled_resume_dependencies(
         return RuntimeSnapshot(stack_state="stopped", services=[])
 
     monkeypatch.setattr(monitor_resume_runtime, "inspect_resume_runtime", _inspect)
+
+
+@pytest.fixture(autouse=True)
+def _unpaced_resume_restart_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the backoff between failed monitor-resume restarts (#936).
+
+    Unit tests drive several failing resumes back to back; tests of the pacing
+    itself patch the sleep with a recorder.
+    """
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(monitor_resume_restart_escalation, "_sleep", _no_sleep)
