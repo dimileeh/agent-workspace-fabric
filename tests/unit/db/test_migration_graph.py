@@ -41,8 +41,10 @@ _BLOCKED_STATUS_REVISION = "c1d2e3f4a5b6"
 _AWAITING_HUMAN_ATTENTION_REVISION = "d7e8f9a0b1c2"
 # Flip workspaces.auto_merge database default to opt-out.
 _AUTO_MERGE_DEFAULT_OPT_OUT_REVISION = "e9f0a1b2c3d4"
-# Current head: persist completed workspace filesystem reclamation.
+# Persist completed workspace filesystem reclamation.
 _FILESYSTEM_RECLAIMED_REVISION = "a875b1c2d3e4"
+# Current head: independent hosted owner authority and material tombstones.
+_HOSTED_NODE_MATERIAL_REVISION = "b986c2d3e4f5"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -110,7 +112,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_FILESYSTEM_RECLAIMED_REVISION]
+    assert script.get_heads() == [_HOSTED_NODE_MATERIAL_REVISION]
 
 
 @pytest.mark.unit
