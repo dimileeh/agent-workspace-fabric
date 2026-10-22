@@ -47,6 +47,24 @@ _sleep = asyncio.sleep
 _monotonic = time.monotonic
 
 
+class DependencyWaitTimeoutError(ComposeOperationError):
+    """The dependency wait ran out of budget; names each dependency still unsettled."""
+
+    def __init__(self, *, budget_seconds: int, recovering: dict[str, str]) -> None:
+        detail = ", ".join(f"{name}={health}" for name, health in sorted(recovering.items()))
+        super().__init__(
+            operation="dependency_wait",
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"dependencies still recovering after {budget_seconds}s "
+                f"(docker.startup_timeout_seconds budget): {detail}"
+            ),
+            reason_code=MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE,
+        )
+        self.unsettled_services = tuple(sorted(recovering))
+
+
 async def inspect_resume_runtime(compose_project: str) -> RuntimeSnapshot:
     """Inspect the compose project under a timeout so a wedged daemon cannot stall resume."""
     return await asyncio.wait_for(
@@ -122,7 +140,7 @@ async def wait_for_recovering_dependencies(
     ``start_stopped`` receives the dependencies stopped in the first snapshot; once
     it has started them they are waited on like any other running dependency.
 
-    Raises ``ComposeOperationError`` with ``MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT``
+    Raises ``DependencyWaitTimeoutError`` (``MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT``)
     naming each unsettled service when the budget runs out. An unreadable runtime
     is logged and skipped: the compose call that follows surfaces the real error.
     """
@@ -158,17 +176,7 @@ async def wait_for_recovering_dependencies(
             return
         remaining = deadline - _monotonic()
         if remaining <= 0:
-            detail = ", ".join(f"{name}={health}" for name, health in sorted(recovering.items()))
-            raise ComposeOperationError(
-                operation="dependency_wait",
-                returncode=1,
-                stdout="",
-                stderr=(
-                    f"dependencies still recovering after {budget_seconds}s "
-                    f"(docker.startup_timeout_seconds budget): {detail}"
-                ),
-                reason_code=MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE,
-            )
+            raise DependencyWaitTimeoutError(budget_seconds=budget_seconds, recovering=recovering)
         _log.info(
             "executor.resume_dependency_wait",
             workspace_id=workspace_id,

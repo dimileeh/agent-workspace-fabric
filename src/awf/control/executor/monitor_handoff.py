@@ -48,6 +48,7 @@ from awf.control.executor.monitor_handoff_setup import (
     _run_hosted_monitor_handoff_profile_setup,
 )
 from awf.control.executor.monitor_resume_restart_escalation import (
+    dependencies_to_recreate_after_exhaustion,
     escalate_monitor_resume_restart_failure,
     reset_monitor_resume_restart_streak,
 )
@@ -376,6 +377,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     environ=os.environ,
                 )
                 requirements = _compose_runtime_requirements_from_file(compose_file)
+                unsettled_services = await dependencies_to_recreate_after_exhaustion(
+                    self, workspace_id=workspace_id
+                )
                 # Recreate only the agent; recovering dependencies are left alone (#936).
                 tolerated_error = await restart_runtime_for_monitor_resume(
                     self._compose,
@@ -389,7 +393,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     runtime_usable=lambda: _compose_runtime_usable_after_restart_failure(
                         compose_project, compose_file
                     ),
-                    recreate_services=rewritten_services,
+                    recreate_services=tuple(
+                        sorted(set(rewritten_services) | set(unsettled_services))
+                    ),
                 )
                 if tolerated_error is not None:
                     await self._record_monitor_runtime_restart_failed(

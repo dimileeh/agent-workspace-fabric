@@ -93,6 +93,11 @@ MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE = "workspace.monitor_runtime_restart_f
 # recorded before the streak rule lack it and act as a boundary instead.
 MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY = "counts_toward_restart_streak"
 
+# Payload key listing the dependencies still ``starting``/``unhealthy`` when a
+# restart failed on the dependency wait; the guided retry after the park
+# force-recreates them.
+MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY = "unsettled_dependencies"
+
 MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE = "workspace.monitor_runtime_restart_recovered"
 
 MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE = "workspace.monitor_runtime_restart_exhausted"

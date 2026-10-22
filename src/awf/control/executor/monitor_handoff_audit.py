@@ -12,6 +12,7 @@ from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
     MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
+    MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
@@ -21,6 +22,7 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_event_payload,
 )
 from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.monitor_resume_runtime import DependencyWaitTimeoutError
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -321,6 +323,15 @@ async def _record_monitor_runtime_restart_failed(
                     "stderr": redact_audit_text(error.stderr, limit=1000),
                     "reason_code": error.reason_code,
                     MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True,
+                    **(
+                        {
+                            MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY: list(
+                                error.unsettled_services
+                            )
+                        }
+                        if isinstance(error, DependencyWaitTimeoutError)
+                        else {}
+                    ),
                 },
             )
             await session.commit()

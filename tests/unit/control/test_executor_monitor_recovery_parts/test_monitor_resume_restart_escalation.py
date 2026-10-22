@@ -22,7 +22,11 @@ from awf.adapters import registry as _registry  # noqa: F401 — populate regist
 from awf.common.attention_events import ATTENTION_REQUIRED_EVENT_TYPE
 from awf.common.commands import FakeCommandRunner
 from awf.control.blocked_transition import is_monitor_origin_block_resume_phase
-from awf.control.executor import monitor_handoff, monitor_resume_restart_escalation
+from awf.control.executor import (
+    monitor_handoff,
+    monitor_resume_restart_escalation,
+    monitor_resume_runtime,
+)
 from awf.control.executor.constants import (
     MONITOR_RUNTIME_RESTART_BLOCK_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE,
@@ -39,7 +43,7 @@ from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeOperationError
-from awf.runtime.inspection import RuntimeSnapshot
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
     factory,
@@ -719,3 +723,123 @@ async def test_streak_follows_event_order_not_a_skewed_clock(
     assert recovered.event_order > failed.event_order
 
     assert await _streak(factory, ws_id) == 0
+
+
+_POSTGRES_COMPOSE = "services:\n  agent:\n    image: agent\n  postgres:\n    image: postgres\n"
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _dependency_health(monkeypatch: pytest.MonkeyPatch, health: dict[str, str]) -> None:
+    async def _inspect(_compose_project: str) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name=name, container_id=name, image=None, state="running", health=state
+                )
+                for name, state in health.items()
+            ],
+        )
+
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "inspect_resume_runtime", _inspect)
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+
+
+async def _guide(factory: async_sessionmaker[AsyncSession], ws_id: str) -> None:
+    async with factory() as session:
+        service, _stopper, _cleaner = _service(session)
+        response = await service.guide_workspace(
+            ws_id, directive="recreate the wedged dependency", reason="retry the resume"
+        )
+        await session.commit()
+    assert response.status == WorkspaceStatus.monitoring_pr
+
+
+@pytest.mark.unit
+async def test_guide_retry_after_exhaustion_recreates_the_dependencies_left_unsettled(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    compose.fail = False
+    executor = _executor(fake, factory, tmp_path, compose)
+    # Postgres never leaves ``unhealthy``: every attempt times out in the dependency wait.
+    _dependency_health(monkeypatch, {"postgres": "unhealthy", "redis": "starting"})
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    assert compose.calls == []
+    assert await _status(factory, ws_id) == WorkspaceStatus.blocked.value
+    failed = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE)
+    assert failed[-1].payload is not None
+    # ``redis`` is not declared in compose.yml, so it never gated the wait.
+    assert failed[-1].payload["unsettled_dependencies"] == ["postgres"]
+
+    await _guide(factory, ws_id)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
+        (("agent", "postgres"), True)
+    ]
+    assert compose.calls[0]["no_deps"] is True
+
+    # Only the first attempt after the park recreates them.
+    compose.calls.clear()
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
+
+
+@pytest.mark.unit
+async def test_guide_retry_after_a_non_timeout_exhaustion_recreates_only_the_agent(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    await _guide(factory, ws_id)
+    compose.fail = False
+    compose.calls.clear()
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
+
+
+@pytest.mark.unit
+async def test_unreadable_streak_recreates_no_dependency(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _db_down(*_args: Any) -> list[Any]:
+        raise OperationalError("select", {}, Exception("connection refused"))
+
+    monkeypatch.setattr(monitor_resume_restart_escalation, "_newest_streak_events", _db_down)
+    executor = type("_Executor", (), {"_session_factory": factory})()
+
+    assert (
+        await monitor_resume_restart_escalation.dependencies_to_recreate_after_exhaustion(
+            executor, workspace_id="ws_x"
+        )
+        == ()
+    )

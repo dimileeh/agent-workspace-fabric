@@ -35,6 +35,7 @@ from awf.control.executor.constants import (
     MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_RESUME_PHASE,
     MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
+    MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY,
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import WorkspaceStatus
@@ -60,6 +61,41 @@ def _unpersisted_recoveries(self: Any) -> dict[str, datetime]:
     return recoveries
 
 
+async def _newest_streak_events(
+    session: AsyncSession,
+    workspace_id: str,
+    since: datetime | None = None,
+    *,
+    limit: int = _STREAK_QUERY_LIMIT,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return the newest streak and boundary events, newest first, as (type, payload)."""
+    query = select(WorkspaceEvent.event_type, WorkspaceEvent.payload).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type.in_(_STREAK_EVENT_TYPES),
+    )
+    if since is not None:
+        query = query.where(WorkspaceEvent.occurred_at > since)
+    rows = await session.execute(
+        query.order_by(
+            WorkspaceEvent.event_order.desc().nulls_last(),
+            WorkspaceEvent.occurred_at.desc(),
+        ).limit(limit)
+    )
+    return [(event_type, payload or {}) for event_type, payload in rows.tuples()]
+
+
+def _open_streak(events: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Return the payloads of the leading streak failures, up to the first boundary."""
+    streak: list[dict[str, Any]] = []
+    for event_type, payload in events:
+        if event_type != MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE:
+            break
+        if not payload.get(MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY):
+            break
+        streak.append(payload)
+    return streak
+
+
 async def consecutive_restart_failures(
     session: AsyncSession, workspace_id: str, since: datetime | None = None
 ) -> int:
@@ -71,26 +107,39 @@ async def consecutive_restart_failures(
     ``since`` is a usable restart whose ``recovered`` event could not be stored;
     failures at or before it are not counted.
     """
-    query = select(WorkspaceEvent.event_type, WorkspaceEvent.payload).where(
-        WorkspaceEvent.workspace_id == workspace_id,
-        WorkspaceEvent.event_type.in_(_STREAK_EVENT_TYPES),
-    )
-    if since is not None:
-        query = query.where(WorkspaceEvent.occurred_at > since)
-    rows = await session.execute(
-        query.order_by(
-            WorkspaceEvent.event_order.desc().nulls_last(),
-            WorkspaceEvent.occurred_at.desc(),
-        ).limit(_STREAK_QUERY_LIMIT)
-    )
-    count = 0
-    for event_type, payload in rows.tuples():
-        if event_type != MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE:
-            break
-        if not (payload or {}).get(MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY):
-            break
-        count += 1
-    return count
+    return len(_open_streak(await _newest_streak_events(session, workspace_id, since)))
+
+
+async def _parked_streak_open(session: AsyncSession, workspace_id: str) -> bool:
+    events = await _newest_streak_events(session, workspace_id, limit=1)
+    return bool(events) and events[0][0] == MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE
+
+
+async def dependencies_to_recreate_after_exhaustion(
+    self: Any, *, workspace_id: str
+) -> tuple[str, ...]:
+    """Return the dependencies a guided retry after the park must force-recreate.
+
+    Only the first resume after ``exhausted`` gets them: the dependencies still
+    ``starting``/``unhealthy`` at the last dependency-wait timeout of the parked
+    streak, which waiting on again would only time out once more.
+    """
+    try:
+        async with self._session_factory() as session:
+            events = await _newest_streak_events(session, workspace_id)
+    except SQLAlchemyError:
+        _log.exception(
+            "executor.resume_exhausted_dependencies_lookup_failed",
+            workspace_id=workspace_id,
+        )
+        return ()
+    if not events or events[0][0] != MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE:
+        return ()
+    for payload in _open_streak(events[1:]):
+        unsettled = payload.get(MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY)
+        if unsettled:
+            return tuple(sorted(str(name) for name in unsettled))
+    return ()
 
 
 async def escalate_monitor_resume_restart_failure(
@@ -217,12 +266,14 @@ async def _park_blocked(
 
 
 async def reset_monitor_resume_restart_streak(self: Any, *, workspace_id: str) -> None:
-    """Close an open failure streak after a usable restart; a no-op without one."""
+    """Close an open failure streak or park after a usable restart; a no-op without one."""
     recoveries = _unpersisted_recoveries(self)
     try:
         async with self._session_factory() as session:
             failures = await consecutive_restart_failures(session, workspace_id)
-            if failures == 0:
+            # A clean first resume after the park closes it too, so only that
+            # resume recreates the dependencies left unsettled.
+            if failures == 0 and not await _parked_streak_open(session, workspace_id):
                 recoveries.pop(workspace_id, None)
                 return
             repo = WorkspaceRepository(session)
