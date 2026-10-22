@@ -100,6 +100,9 @@ def test_regex_literals_are_told_apart_from_division() -> None:
     assert _values("if (ok) {}\n/`/.test(s);")[6:8] == ["", "."]
     assert _values("if (ok) /`/.test(s);")[4:6] == ["", "."]
     assert _values("while (a) /x/g.exec(s)")[4] == ""
+    # ``for await (...)`` heads a statement too, though ``await`` precedes ``(``.
+    assert _values("for await (const x of xs) /`/.test(s);")[8:10] == ["", "."]
+    assert _values("x = await (a) / 2")[-2:] == ["/", "2"]
     assert _values("x = `a` / 2")[2:4] == ["", "/"]
     assert _values("x = `a${b}` / 2")[-2:] == ["/", "2"]
 

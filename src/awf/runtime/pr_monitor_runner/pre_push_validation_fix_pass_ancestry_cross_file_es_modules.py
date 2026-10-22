@@ -191,6 +191,13 @@ class _EsLexer:
             else:
                 return
 
+    def opens_condition(self) -> bool:
+        """True when a ``(`` here opens a statement condition, ``for await (`` included."""
+        tail = [(t.kind, t.value) for t in self.tokens[-2:]]
+        if tail[-1:] == [("ident", "await")]:
+            return tail[:1] == [("ident", "for")]
+        return bool(tail) and tail[-1][0] == "ident" and tail[-1][1] in _CONDITION_KEYWORDS
+
     def line_end(self, start: int) -> int:
         end = start
         while end < len(self.text) and self.text[end] not in _LINE_TERMINATORS:
@@ -209,9 +216,7 @@ class _EsLexer:
                 return
             ch = text[self.pos]
             if ch in _CLOSER_FOR:
-                condition = bool(self.tokens) and (
-                    self.tokens[-1].kind == "ident" and self.tokens[-1].value in _CONDITION_KEYWORDS
-                )
+                condition = self.opens_condition()
                 self.emit("punct", ch)
                 stack.append((_CLOSER_FOR[ch], condition))
                 self.depth += 1
