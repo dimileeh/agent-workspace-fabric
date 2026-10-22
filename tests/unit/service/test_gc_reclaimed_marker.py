@@ -10,11 +10,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.common.config import DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
-from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service import gc
+from awf.service.controls_helpers import _reset_failed_workspace_for_remonitor
 from awf.service.gc_worktrees import WorkspaceGCWorktreeRemoveTargetResult
 
 NOW = datetime(2026, 10, 22, tzinfo=UTC)
@@ -217,9 +217,7 @@ async def test_obsolete_plan_cannot_mark_changed_workspace(factory, tmp_path, ch
             if change == "status":
                 repo = WorkspaceRepository(session)
                 ws = await repo.get(ws_id)
-                await repo.transition(
-                    ws, to=WorkspaceStatus.monitoring_pr, reason_code="OPERATOR_REMONITOR"
-                )
+                await _reset_failed_workspace_for_remonitor(session, ws)
             elif change == "timestamp":
                 values["updated_at"] = NOW
             else:
@@ -228,12 +226,14 @@ async def test_obsolete_plan_cannot_mark_changed_workspace(factory, tmp_path, ch
             await session.commit()
         return gc.WorkspaceGCComposeTeardownResult(status="succeeded", reason_code="COMPOSE_OK")
 
-    await run(
+    result = await run(
         factory, tmp_path, execute=True, compose_teardown=compose, include_statuses=["failed"]
     )
-    assert (await rows(factory))[ws_id].filesystem_reclaimed_at == (
-        OLD if change == "marker" else None
-    )
+    assert result.compose_teardowns[ws_id].status == "succeeded"
+    after = (await rows(factory))[ws_id]
+    assert after.status == ("monitoring_pr" if change == "status" else "failed")
+    assert after.updated_at == (NOW if change == "timestamp" else OLD)
+    assert after.filesystem_reclaimed_at == (OLD if change == "marker" else None)
 
 
 @pytest.mark.parametrize(
