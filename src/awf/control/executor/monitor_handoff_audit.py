@@ -11,6 +11,7 @@ from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
     MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+    MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
@@ -319,6 +320,7 @@ async def _record_monitor_runtime_restart_failed(
                     "returncode": error.returncode,
                     "stderr": redact_audit_text(error.stderr, limit=1000),
                     "reason_code": error.reason_code,
+                    MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True,
                 },
             )
             await session.commit()

@@ -89,6 +89,10 @@ MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE = "MONITOR_RESUME_DEPENDENCY_
 
 MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE = "workspace.monitor_runtime_restart_failed"
 
+# Payload key marking a restart-failure event as counted toward the streak. Events
+# recorded before the streak rule lack it and act as a boundary instead.
+MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY = "counts_toward_restart_streak"
+
 MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE = "workspace.monitor_runtime_restart_recovered"
 
 MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE = "workspace.monitor_runtime_restart_exhausted"

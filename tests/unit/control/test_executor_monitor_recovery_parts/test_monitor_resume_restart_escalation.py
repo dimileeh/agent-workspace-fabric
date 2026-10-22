@@ -531,3 +531,36 @@ async def test_reset_skips_a_workspace_that_disappeared(
             )
         )
         assert list(rows.scalars()) == []
+
+
+@pytest.mark.unit
+async def test_failures_recorded_before_the_streak_rule_do_not_count(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Failure events written before #936 carry no streak marker and bound the streak.
+
+    The deploy restarts the worker, which resumes every monitor; one transient
+    failure must not park a workspace because of unrelated historic failures.
+    """
+    ws_id = await _seed(factory, tmp_path)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+            await repo.add_event(
+                ws,
+                event_type=MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+                reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+                payload={"operation": "up", "returncode": 1, "stderr": "old"},
+            )
+        await session.commit()
+    assert await _streak(factory, ws_id) == 0
+    executor = _executor(fake, factory, tmp_path, _ScriptedCompose())
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert await _streak(factory, ws_id) == 1
+    assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value

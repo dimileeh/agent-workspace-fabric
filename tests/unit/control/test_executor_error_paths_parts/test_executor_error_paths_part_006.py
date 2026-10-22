@@ -1023,6 +1023,7 @@ class TestExecutorCoverageEdgesPart002:
             "returncode": 1,
             "stderr": "network unavailable",
             "reason_code": "COMPOSE_UP_FAILED",
+            "counts_toward_restart_streak": True,
         }
 
     @pytest.mark.unit

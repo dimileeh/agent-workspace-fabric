@@ -31,6 +31,7 @@ from awf.control.executor.constants import (
     MONITOR_RUNTIME_RESTART_FAILURE_LIMIT,
     MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_RESUME_PHASE,
+    MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
 )
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import WorkspaceStatus
@@ -48,9 +49,14 @@ _STREAK_QUERY_LIMIT: Final[int] = 50
 
 
 async def consecutive_restart_failures(session: AsyncSession, workspace_id: str) -> int:
-    """Count the newest ``monitor_runtime_restart_failed`` events since the last boundary."""
+    """Count the newest ``monitor_runtime_restart_failed`` events since the last boundary.
+
+    Boundaries are a ``recovered`` or ``exhausted`` event, and a failure event
+    recorded before the streak rule (no streak marker), so historic failures that
+    were followed by unrecorded successful resumes never inflate a new streak.
+    """
     rows = await session.execute(
-        select(WorkspaceEvent.event_type)
+        select(WorkspaceEvent.event_type, WorkspaceEvent.payload)
         .where(
             WorkspaceEvent.workspace_id == workspace_id,
             WorkspaceEvent.event_type.in_(_STREAK_EVENT_TYPES),
@@ -62,8 +68,10 @@ async def consecutive_restart_failures(session: AsyncSession, workspace_id: str)
         .limit(_STREAK_QUERY_LIMIT)
     )
     count = 0
-    for event_type in rows.scalars():
+    for event_type, payload in rows.tuples():
         if event_type != MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE:
+            break
+        if not (payload or {}).get(MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY):
             break
         count += 1
     return count
