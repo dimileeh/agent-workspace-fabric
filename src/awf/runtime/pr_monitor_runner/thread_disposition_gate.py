@@ -71,6 +71,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     unverified_blocker_message,
     unverified_flag,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import _persist_posted_disposition
 
 _AUDIT_CONTEXT = "review_thread_audit"
 _AUDIT_ACTION = "review_thread_disposition_audit"
@@ -585,7 +586,9 @@ async def _post_acknowledgements(
     These replies are the gate's only forge writes. :func:`_retire_broken_bindings`
     already dropped every acknowledgement whose flagged resolution ``audit`` no
     longer shows, so each one left answers the conversation that was flagged.
-    Returns the thread ids replied to.
+    Each reply id is saved to the row as soon as it lands: an acknowledgement
+    never certifies from its marker alone, so a restart that lost it would block
+    and post again (PRRT_kwDOSJAM6s6vZKxY). Returns the thread ids replied to.
     """
     posted: list[str] = []
     for thread in audit.threads:
@@ -612,6 +615,9 @@ async def _post_acknowledgements(
             )
             continue
         record_item_disposition(state, replace(disposition, reply_comment_id=reply_id))
+        await _persist_posted_disposition(
+            self, workspace_id=workspace_id, state=state, item_id=thread_id
+        )
         posted.append(thread_id)
     return posted
 

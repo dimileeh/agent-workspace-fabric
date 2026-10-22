@@ -23,6 +23,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import _disposition_unverified_key
 from awf.runtime.operator_hints import mark_operator_hint_needs_human
@@ -35,6 +36,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_actions import AddressOperatorHint
+from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint,
 )
@@ -311,6 +313,37 @@ async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
 
     # Later audits find the posted reply's marker: no second post.
     again = await _gate(runner, workspace_id, state)
+    assert again.blocker is None
+    assert len(gh.thread_replies) == 1
+
+
+async def test_posted_acknowledgement_reply_survives_a_restart_before_the_loop_flush(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A crash, cancellation or ``_execute`` fault after the reply lands skips the
+    # loop's ``_persist_state``; the next poll reloads the row, so the reply id
+    # must already be on it or the gate posts a second acknowledgement
+    # (PRRT_kwDOSJAM6s6vZKxY). Only that record is written (#305).
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    await _gate(runner, workspace_id, state)
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    await runner._persist_state(workspace_id, state)  # the guide cycle's flush
+    state.mark_addressed("PRRT_test_unconfirmed", "fix_committed")
+
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    reloaded = _load_state(None, ws)
+
+    ack = read_item_disposition(reloaded, _SILENT)
+    assert ack is not None and ack.reply_comment_id
+    assert "PRRT_test_unconfirmed" not in reloaded.threads_addressed_ids
+    again = await _gate(runner, workspace_id, reloaded)
     assert again.blocker is None
     assert len(gh.thread_replies) == 1
 
