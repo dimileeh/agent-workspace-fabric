@@ -402,7 +402,7 @@ async def test_absent_legacy_dependency_is_created_outside_the_health_gate(
 
     Creating it in the ``up --wait`` would gate it on the legacy ``retries: 60``, so
     it is created alone without ``--wait``; a one-off container does not count as
-    its container, and a dependency the resume force-recreates is left alone.
+    its container, and a dependency the resume force-recreates is recreated alone.
     """
     absent = RuntimeSnapshot(
         stack_state="stopped",
@@ -443,10 +443,62 @@ async def test_absent_legacy_dependency_is_created_outside_the_health_gate(
         "no_deps": True,
         "services": ("postgres",),
     }
+    assert compose.calls[1] == {
+        **common,
+        "wait": False,
+        "force_recreate": True,
+        "no_deps": True,
+        "services": ("redis",),
+    }
     assert [call.get("services") for call in compose.calls] == [
         ("postgres",),
+        ("redis",),
         ("postgres",),
-        ("agent", "redis"),
+        ("agent",),
+    ]
+
+
+@pytest.mark.unit
+async def test_stopped_recreated_companion_is_recreated_before_the_dependency_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A running dependency that needs a stopped recreated companion can still settle.
+
+    Skipping the companion until the final recreate left ``web`` unhealthy until
+    the wait timed out, so repeated attempts parked a recoverable workspace.
+    """
+    stopped = _running(
+        _service("web", health="unhealthy"),
+        _service("api", state="exited"),
+        _service("agent"),
+    )
+    settled = _running(
+        _service("web", health="healthy"),
+        _service("api", health="starting"),
+        _service("agent"),
+    )
+    inspector = _install_inspector(monkeypatch, _ScriptedInspector(stopped, settled))
+    compose = _RecordingCompose()
+
+    tolerated = await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=300,
+        dependency_services=("agent", "api", "web"),
+        recreate_services=("api",),
+    )
+
+    assert tolerated is None
+    assert inspector.calls == 2
+    assert [
+        (call.get("services"), call.get("force_recreate"), call["wait"]) for call in compose.calls
+    ] == [
+        (("api",), True, False),
+        (("web",), None, True),
+        # Recreated once: the final recreate leaves the settled companion alone.
+        (("agent",), True, True),
     ]
 
 

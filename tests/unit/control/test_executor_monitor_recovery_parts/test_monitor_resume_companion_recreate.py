@@ -120,7 +120,7 @@ async def test_restart_force_recreates_rewritten_companions_with_the_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _inspect(_compose_project: str) -> RuntimeSnapshot:
-        # A recreated companion is neither waited on nor started beforehand.
+        # A recreated companion is never waited on; a stopped one is recreated first.
         return RuntimeSnapshot(
             stack_state="running",
             services=[
@@ -149,10 +149,12 @@ async def test_restart_force_recreates_rewritten_companions_with_the_agent(
     )
 
     assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
+        (("worker",), True),
         (("postgres",), None),
-        (("agent", "backend", "worker"), True),
+        (("agent", "backend"), True),
     ]
-    assert compose.calls[1]["no_deps"] is True
+    assert compose.calls[0]["no_deps"] is True
+    assert compose.calls[2]["no_deps"] is True
 
 
 class _IdleMonitor:
