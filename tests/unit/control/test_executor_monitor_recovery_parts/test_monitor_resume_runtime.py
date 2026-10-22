@@ -2,7 +2,8 @@
 
 Resume used to force-recreate the whole compose project, restarting a dependency
 that was still in its own crash recovery (Postgres fsync after an unclean stop).
-It now waits for running dependencies that are ``starting``/``unhealthy``, brings
+It now starts exited dependencies one by one without a compose health gate,
+waits for running dependencies that are ``starting``/``unhealthy``, brings
 the project up with ``--no-recreate`` and recreates only the agent with
 ``--no-deps``. The wait is bounded by the profile budget, not by the healthcheck
 retries baked into an already-rendered compose.yml.
@@ -260,10 +261,10 @@ async def test_unreadable_runtime_does_not_block_compose(
 
 
 @pytest.mark.unit
-async def test_agent_health_and_stopped_dependencies_are_not_waited_on(
+async def test_agent_health_is_not_waited_on_and_stopped_dependencies_are_started(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only running dependencies recover on their own; compose starts the rest."""
+    """A dependency that stays exited after its start is left to the project ``up``."""
     inspector = _install_inspector(
         monkeypatch,
         _ScriptedInspector(
@@ -278,8 +279,60 @@ async def test_agent_health_and_stopped_dependencies_are_not_waited_on(
 
     await _restart(compose, tmp_path)
 
-    assert inspector.calls == 1
-    assert len(compose.calls) == 2
+    assert inspector.calls == 2
+    assert [call.get("services") for call in compose.calls] == [("postgres",), None, ("agent",)]
+
+
+@pytest.mark.unit
+async def test_stopped_legacy_dependency_gets_the_profile_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a host restart, a pre-#936 dependency must not fail on its stored ``retries: 60``.
+
+    Each stopped dependency is started alone with ``--no-deps`` and no ``--wait``, so
+    no compose health gate can fail it; the budgeted wait then covers its recovery.
+    """
+    stopped = _running(
+        _service("postgres", state="exited"),
+        _service("redis", state="created"),
+        _service("agent", state="exited"),
+    )
+    recovering = _running(
+        _service("postgres", health="unhealthy"),
+        _service("redis", health="healthy"),
+        _service("agent", state="exited"),
+    )
+    healthy = _running(
+        _service("postgres", health="healthy"),
+        _service("redis", health="healthy"),
+        _service("agent", state="exited"),
+    )
+    # Unhealthy for 600 s of fake time: past the rendered 60 x 5 s, inside 900 s.
+    inspector = _install_inspector(
+        monkeypatch, _ScriptedInspector(stopped, *([recovering] * 121), healthy)
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+
+    await _restart(compose, tmp_path, budget=900)
+
+    assert clock.now == pytest.approx(605.0)
+    assert inspector.calls == 123
+    common = {
+        "project_name": "awf_ws",
+        "compose_file": tmp_path / "compose.yml",
+        "workspace_id": "ws",
+        "compose_up_timeout_seconds": 900,
+    }
+    start = {**common, "wait": False, "no_recreate": True, "no_deps": True}
+    assert compose.calls == [
+        {**start, "services": ("postgres",)},
+        {**start, "services": ("redis",)},
+        {**common, "wait": True, "no_recreate": True},
+        {**common, "wait": True, "force_recreate": True, "no_deps": True, "services": ("agent",)},
+    ]
 
 
 @pytest.mark.unit

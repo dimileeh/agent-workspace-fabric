@@ -5,13 +5,17 @@ force-recreate the whole compose project. That restarted dependencies still in
 their own crash recovery, such as Postgres replaying its WAL after an unclean
 stop, so the resume could fail and be retried forever. The restart now:
 
-1. waits for every running dependency whose Docker health is ``starting`` or
+1. starts each exited dependency on its own with ``--no-recreate --no-deps`` and
+   no ``--wait``, so no compose health gate can fail it on the healthcheck
+   retries stored in a container created from an older compose.yml (the normal
+   state after a host restart, as every service runs with ``restart: "no"``);
+2. waits for every running dependency whose Docker health is ``starting`` or
    ``unhealthy`` to become healthy, bounded by the stack's startup budget rather
-   than by the healthcheck retries rendered into an existing compose.yml (Docker
-   keeps probing an ``unhealthy`` container and flips it back on success);
-2. brings the project up with ``--no-recreate``, which starts exited or absent
+   than by those rendered retries (Docker keeps probing an ``unhealthy``
+   container and flips it back on success);
+3. brings the project up with ``--no-recreate``, which starts exited or absent
    containers and never recreates an existing one;
-3. recreates only the agent with ``--force-recreate --no-deps agent``: auth
+4. recreates only the agent with ``--force-recreate --no-deps agent``: auth
    overlay bind mounts are bound at container creation, and #1090's setup
    replay keys off the agent's new identity.
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Final
 
@@ -34,6 +39,7 @@ DEPENDENCY_POLL_INTERVAL_SECONDS: Final[float] = 5.0
 DEPENDENCY_INSPECT_TIMEOUT_SECONDS: Final[float] = 30.0
 """Upper bound on one ``docker ps``/``docker inspect`` round of the dependency wait."""
 _RECOVERING_HEALTH: Final = frozenset({"starting", "unhealthy"})
+_STOPPED_STATES: Final = frozenset({"exited", "created"})
 _UNREADABLE_STACK_STATES: Final = frozenset({"unknown", "unavailable"})
 _sleep = asyncio.sleep
 _monotonic = time.monotonic
@@ -61,19 +67,36 @@ def _recovering_dependencies(snapshot: RuntimeSnapshot) -> dict[str, str]:
     return recovering
 
 
+def _stopped_dependencies(snapshot: RuntimeSnapshot) -> tuple[str, ...]:
+    """Return non-agent services whose container exists but is not running."""
+    return tuple(
+        sorted(
+            service.name
+            for service in snapshot.services
+            if service.name != AGENT_SERVICE_NAME
+            and service.state.strip().lower() in _STOPPED_STATES
+        )
+    )
+
+
 async def wait_for_recovering_dependencies(
     compose_project: str,
     *,
     workspace_id: str,
     budget_seconds: int,
+    start_stopped: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
 ) -> None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
+
+    ``start_stopped`` receives the dependencies stopped in the first snapshot; once
+    it has started them they are waited on like any other running dependency.
 
     Raises ``ComposeOperationError`` with ``MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT``
     naming each unsettled service when the budget runs out. An unreadable runtime
     is logged and skipped: the compose call that follows surfaces the real error.
     """
     deadline = _monotonic() + budget_seconds
+    start_pending = start_stopped
     while True:
         try:
             snapshot = await inspect_resume_runtime(compose_project)
@@ -93,6 +116,12 @@ async def wait_for_recovering_dependencies(
                 stack_state=snapshot.stack_state,
             )
             return
+        if start_pending is not None:
+            start, start_pending = start_pending, None
+            stopped = _stopped_dependencies(snapshot)
+            if stopped:
+                await start(stopped)
+                continue
         recovering = _recovering_dependencies(snapshot)
         if not recovering:
             return
@@ -128,11 +157,6 @@ async def restart_runtime_for_monitor_resume(
     budget_seconds: int,
 ) -> None:
     """Restart the runtime for a monitor resume without recreating any dependency."""
-    await wait_for_recovering_dependencies(
-        compose_project,
-        workspace_id=workspace_id,
-        budget_seconds=budget_seconds,
-    )
     common: dict[str, Any] = {
         "project_name": compose_project,
         "compose_file": compose_file,
@@ -140,6 +164,29 @@ async def restart_runtime_for_monitor_resume(
         "wait": True,
         "compose_up_timeout_seconds": budget_seconds,
     }
+
+    async def _start_stopped(services: tuple[str, ...]) -> None:
+        _log.info(
+            "executor.resume_dependency_start",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            services=list(services),
+        )
+        # One service per call: ``--no-deps`` then skips every depends_on health gate.
+        for service in services:
+            await compose.ensure_project_up(
+                **{**common, "wait": False},
+                no_recreate=True,
+                no_deps=True,
+                services=(service,),
+            )
+
+    await wait_for_recovering_dependencies(
+        compose_project,
+        workspace_id=workspace_id,
+        budget_seconds=budget_seconds,
+        start_stopped=_start_stopped,
+    )
     await compose.ensure_project_up(**common, no_recreate=True)
     await compose.ensure_project_up(
         **common,
