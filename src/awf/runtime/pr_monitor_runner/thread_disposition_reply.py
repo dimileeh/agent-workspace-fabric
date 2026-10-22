@@ -30,7 +30,10 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.pr_monitor import MonitorState, ReviewThread
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import recorded_item_commit
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
-from awf.runtime.pr_monitor_runner.fix_cycle_deferred import _deferred_issue_url
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
+    _deferred_issue_filed_marker,
+    _deferred_issue_url,
+)
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
@@ -199,17 +202,19 @@ async def _persist_posted_disposition(
 
     Runs right after the reply lands, so a resolve that then fails — or a
     restart before the loop's ``_persist_state`` — still finds the reply id and
-    never posts a second reply. It must not flush the rest of the in-memory
-    state: inside a fix cycle that still carries unconfirmed verdicts whose
-    resolves have not run yet (#305). Best-effort: the reply already landed and
-    the in-memory record still reaches the DB with the loop's own flush.
+    never posts a second reply. A DEFER's filed-issue marker travels with it so
+    a re-triage after a reload never files a second issue. It must not flush the
+    rest of the in-memory state: inside a fix cycle that still carries
+    unconfirmed verdicts whose resolves have not run yet (#305). Best-effort: the
+    reply already landed and the in-memory record still reaches the DB with the
+    loop's own flush.
     """
     await _persist_item_keys(
         self,
         workspace_id=workspace_id,
         state=state,
         item_id=item_id,
-        keys=(_item_disposition_key(item_id),),
+        keys=(_item_disposition_key(item_id), *_filed_issue_marker_keys(state, item_id)),
     )
 
 
@@ -226,8 +231,9 @@ async def persist_parked_thread(
     transient ``_execute`` fault reloads state from the DB and would drop it, so
     the resolvable verdict returns and ``reply_to_thread`` re-runs on a reply that
     may already have landed. The body hash travels with the verdict so an older
-    row hash cannot re-route the parked thread through AddressComments. As with
-    the posted reply, nothing else is flushed (#305).
+    row hash cannot re-route the parked thread through AddressComments, and a
+    DEFER's filed-issue marker so its re-triage never files a second issue. As
+    with the posted reply, nothing else is flushed (#305).
     """
     await _persist_item_keys(
         self,
@@ -239,8 +245,15 @@ async def persist_parked_thread(
             _needs_human_reason_state_key(thread_id),
             review_thread_body_state_key(thread_id),
             _outdated_resolve_requeued_key(thread_id),
+            *_filed_issue_marker_keys(state, thread_id),
         ),
     )
+
+
+def _filed_issue_marker_keys(state: MonitorState, thread_id: str) -> tuple[str, ...]:
+    """The thread's DEFER filed-issue markers (any body-hash era) held in memory."""
+    prefix = _deferred_issue_filed_marker(thread_id, "")
+    return tuple(key for key in state.threads_addressed_ids if key.startswith(prefix))
 
 
 async def _persist_item_keys(

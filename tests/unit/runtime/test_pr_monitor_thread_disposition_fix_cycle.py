@@ -39,6 +39,7 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReviewThread,
+    _review_thread_body_hash,
     decide,
 )
 from awf.runtime.pr_monitor_runner import fix_cycle as fix_cycle_module
@@ -49,6 +50,7 @@ from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     recorded_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import _deferred_issue_url
 from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
@@ -742,6 +744,66 @@ async def test_fix_cycle_defer_reply_failure_does_not_resolve(
     )
     # The filed-issue marker survives, so a retry never files a duplicate issue.
     assert state.threads_addressed_ids[filed_marker] == _ISSUE
+
+
+@pytest.mark.parametrize(
+    ("reply_stderr", "resolve_stderr"),
+    [("HTTP 502", None), (None, "HTTP 502")],
+    ids=["parked", "replied"],
+)
+async def test_defer_filed_issue_marker_survives_a_clean_state_reload(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reply_stderr: str | None,
+    resolve_stderr: str | None,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6vW9qI: the narrow saves keep the DEFER issue marker.
+
+    A later transient ``_execute`` fault reloads state from the row. Without the
+    marker there, re-triaging the still-open thread files a second tracking issue.
+    """
+
+    def _error(stderr: str | None) -> GitHubClientError | None:
+        if stderr is None:
+            return None
+        return GitHubClientError(operation="gh api graphql", returncode=1, stderr=stderr)
+
+    gh = OrderedForge(
+        FakeCommandRunner(),
+        reply_error=_error(reply_stderr),
+        resolve_error=_error(resolve_stderr),
+    )
+    tid = "PRRT_test_defer_marker_durable"
+    thread = _thread(tid)
+    filed_marker = f"__deferred_issue_filed__:{tid}:{_review_thread_body_hash(thread)}"
+    state = MonitorState()
+    state.mark_addressed("PRRT_test_unconfirmed", "fix_committed")
+
+    def _defer(state: MonitorState, addressed: ReviewThread) -> None:
+        state.mark_addressed(f"__defer_reason__:{addressed.thread_id}", "track the follow-up")
+        state.mark_addressed(filed_marker, _ISSUE)
+
+    workspace_id, _state, _result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="defer",
+        on_address=_defer,
+        thread=thread,
+        pushed=False,
+        state=state,
+    )
+
+    assert "resolve" not in [event[0] for event in gh.events]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    reloaded = _load_state(None, ws)
+    assert reloaded.threads_addressed_ids[filed_marker] == _ISSUE
+    assert _deferred_issue_url(reloaded, thread) == _ISSUE
+    assert "PRRT_test_unconfirmed" not in reloaded.threads_addressed_ids
 
 
 async def test_silently_resolved_p1_false_positive_now_replies_first(
