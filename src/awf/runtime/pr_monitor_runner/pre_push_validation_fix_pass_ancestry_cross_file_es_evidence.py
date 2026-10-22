@@ -302,7 +302,7 @@ async def _es_module_commit_range_changes_callee_definition(
         )
         line_after = (
             None
-            if caller_diff is None or _es_diff_deletes_line(caller_diff, item_line)
+            if caller_diff is None or _es_diff_unpairs_line(caller_diff, item_line)
             else _map_review_line_through_diff(item_line, caller_diff)
         )
     if line_after is None:
@@ -340,8 +340,14 @@ async def _es_module_commit_range_changes_callee_definition(
     return False
 
 
-def _es_diff_deletes_line(diff_text: str, line: int) -> bool:
-    """True when a pure-deletion hunk of ``diff_text`` removes old line ``line``."""
+def _es_diff_unpairs_line(diff_text: str, line: int) -> bool:
+    """True when a hunk of ``diff_text`` rewrites old line ``line`` unevenly.
+
+    A ``-U0`` hunk whose old and new counts differ deleted or inserted lines
+    somewhere inside it, so no new line pairs with the anchor by position: a
+    neighbor the same hunk edits or inserts must not stand in for the anchored
+    call (PRRT_kwDOSJAM6s6vRZzr). Pure deletions are the ``+N,0`` case.
+    """
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _UNIFIED_DIFF_HUNK_HEADER_RE,
     )
@@ -349,7 +355,8 @@ def _es_diff_deletes_line(diff_text: str, line: int) -> bool:
     for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
         old_start = int(match.group(1))
         old_count = 1 if match.group(2) is None else int(match.group(2))
-        if match.group(4) == "0" and old_start <= line < old_start + old_count:
+        new_count = 1 if match.group(4) is None else int(match.group(4))
+        if old_count != new_count and old_start <= line < old_start + old_count:
             return True
     return False
 

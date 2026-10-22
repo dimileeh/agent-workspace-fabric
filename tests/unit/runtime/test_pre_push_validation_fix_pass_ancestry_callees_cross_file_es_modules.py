@@ -805,6 +805,21 @@ _AUDIT_HELPER = "export function audit(value: number) {\n  return record(value);
             _caller(_IMPORT_RECORD, "").replace("  return ;", "  record(value);"),
             "@@ -5 +4,0 @@\n-  return record(value);\n",
         ),
+        # A mixed hunk deletes the anchored line beside an edited neighbor that
+        # still calls (PRRT_kwDOSJAM6s6vRZzr).
+        (
+            _caller(_IMPORT_RECORD).replace("  return", "  record(value);\n  return", 1),
+            _caller(_IMPORT_RECORD, "").replace("  return ;", "  record(value + 1);"),
+            "@@ -4,2 +4 @@\n-  record(value);\n-  return record(value);\n+  record(value + 1);\n",
+        ),
+        # A mixed hunk drops the anchored call and inserts a call above it.
+        (
+            _caller(_IMPORT_RECORD),
+            _caller(_IMPORT_RECORD, "value").replace(
+                "  return value;", "  record(value);\n  return value;"
+            ),
+            "@@ -4 +4,2 @@\n-  return record(value);\n+  record(value);\n+  return value;\n",
+        ),
     ],
 )
 async def test_another_surviving_call_does_not_stand_in_for_the_anchored_one(
