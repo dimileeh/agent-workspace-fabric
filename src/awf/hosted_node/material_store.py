@@ -55,7 +55,9 @@ class MaterialStore:
             raise
 
     @contextmanager
-    def _directory(self, workspace: str, slot: str, *, create: bool = False) -> Iterator[int]:
+    def _directory(
+        self, workspace: str, slot: str, *, create: bool = False, remove_empty: bool = False
+    ) -> Iterator[int]:
         if self.closed or not _SLOT.fullmatch(workspace) or not _SLOT.fullmatch(slot):
             raise MaterialDeniedError("INVALID_FILE_SLOT")
         root = self._open_root()
@@ -82,6 +84,9 @@ class MaterialStore:
                 if create and len(os.listdir(directory)) >= 128:  # noqa: PTH208 - directory fd
                     raise MaterialDeniedError("MATERIAL_CAPACITY", 503)
                 yield directory
+                if remove_empty and not os.listdir(directory):  # noqa: PTH208 - directory fd
+                    os.rmdir(workspace, dir_fd=root)  # noqa: PTH106 - root fd holds lock
+                    os.fsync(root)
             finally:
                 os.close(directory)
         finally:
@@ -143,7 +148,7 @@ class MaterialStore:
 
     def remove(self, workspace: str, slot: str) -> None:
         try:
-            with self._directory(workspace, slot) as directory:
+            with self._directory(workspace, slot, remove_empty=True) as directory:
                 for suffix in (".material", ".pending"):
                     with suppress(FileNotFoundError):
                         os.unlink(slot + suffix, dir_fd=directory)
