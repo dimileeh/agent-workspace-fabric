@@ -22,6 +22,8 @@ from urllib.parse import unquote, urlsplit
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from awf.hosted_node.config import HostedSettings
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEnv = Literal["local", "ci", "staging", "prod"]
 DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
@@ -240,7 +242,11 @@ class Settings(BaseSettings):
     ``api_token`` explicitly.
     """
 
+    hosted_node: HostedSettings | None = None
+
     model_config = SettingsConfigDict(
+        # Nested hosted settings include a controller credential even on invalid input.
+        hide_input_in_errors=True,
         env_prefix="AWF_",
         env_file=".env",
         env_file_encoding="utf-8",
