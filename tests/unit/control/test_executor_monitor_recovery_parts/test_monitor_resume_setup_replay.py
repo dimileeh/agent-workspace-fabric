@@ -466,6 +466,63 @@ async def test_failed_replay_does_not_park_when_monitor_claim_moved(
 
 
 @pytest.mark.unit
+async def test_successful_replay_rechecks_monitor_claim_before_monitor_build(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup that outlives the lease must stop the superseded resume before its
+    monitor-build failure paths can fail the newer claimant's row."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-old"
+        await session.commit()
+    factory_calls: list[Any] = []
+
+    def _failing_monitor_factory(*args: Any, **kwargs: Any) -> Any:
+        factory_calls.append((args, kwargs))
+        raise RuntimeError("monitor build failed")
+
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=FakeCompose(container, recreate=True),
+        validation=validation,
+        pr_monitor_factory=_failing_monitor_factory,
+    )
+    original_run = validation.run_profile_phases
+
+    async def _setup_outlives_lease(**kwargs: Any) -> Any:
+        result = await original_run(**kwargs)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-new"
+            await session.commit()
+        return result
+
+    monkeypatch.setattr(validation, "run_profile_phases", _setup_outlives_lease)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert validation.setup_runs() == 1
+    assert factory_calls == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.monitor_claimed_by == "worker-new"
+    assert await _failed_transitions(factory, ws_id) == []
+
+
+@pytest.mark.unit
 async def test_replay_failure_skips_mark_failed_when_resume_was_superseded(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

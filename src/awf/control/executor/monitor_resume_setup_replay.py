@@ -103,7 +103,16 @@ async def replay_setup_on_monitor_resume(
             ),
         )
     if outcome.ok:
-        return True
+        # Setup can outlive the monitor lease; fence again so a superseded resume
+        # never reaches monitor build, whose failure paths would fail the row.
+        return bool(
+            await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_setup_replayed",
+                monitor_owner_id=monitor_owner_id,
+            )
+        )
     # Setup can outlive the monitor lease; fence again so a superseded resume
     # never parks the row underneath a newer claimant.
     if not await self._recheck_status(
