@@ -107,7 +107,10 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition import attach_item_commits
-from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_resolve
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import (
+    persist_parked_thread,
+    reply_before_resolve,
+)
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
@@ -1127,7 +1130,13 @@ async def _run_fix_cycle(
             source_head_sha=pushed_head_sha,
         )
         if disposition is None:
-            continue  # #1018: parked needs_human — never resolve without the reply.
+            # #1018: parked needs_human — never resolve without the reply. Persist
+            # only this park now: a later transient ``_execute`` fault skips
+            # ``_persist_state`` and would reload the resolvable verdict, so the
+            # reply could be re-posted. A full flush would leak the other threads'
+            # unconfirmed verdicts (#305).
+            await persist_parked_thread(self, workspace_id=workspace_id, state=state, thread_id=tid)
+            continue
         dispositions = [disposition.as_payload()]
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)

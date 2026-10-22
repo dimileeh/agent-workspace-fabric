@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.forge_errors import ForgeClientError
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
     _item_disposition_key,
@@ -203,15 +204,66 @@ async def _persist_posted_disposition(
     resolves have not run yet (#305). Best-effort: the reply already landed and
     the in-memory record still reaches the DB with the loop's own flush.
     """
-    key = _item_disposition_key(item_id)
-    record = state.threads_addressed_ids[key]
+    await _persist_item_keys(
+        self,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=item_id,
+        keys=(_item_disposition_key(item_id),),
+    )
+
+
+async def persist_parked_thread(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    thread_id: str,
+) -> None:
+    """Save ONLY ``thread_id``'s ``needs_human`` park, merged onto the row.
+
+    A fix-cycle park lives in memory until the loop's ``_persist_state``; a later
+    transient ``_execute`` fault reloads state from the DB and would drop it, so
+    the resolvable verdict returns and ``reply_to_thread`` re-runs on a reply that
+    may already have landed. The body hash travels with the verdict so an older
+    row hash cannot re-route the parked thread through AddressComments. As with
+    the posted reply, nothing else is flushed (#305).
+    """
+    await _persist_item_keys(
+        self,
+        workspace_id=workspace_id,
+        state=state,
+        item_id=thread_id,
+        keys=(
+            thread_id,
+            _needs_human_reason_state_key(thread_id),
+            review_thread_body_state_key(thread_id),
+            _outdated_resolve_requeued_key(thread_id),
+        ),
+    )
+
+
+async def _persist_item_keys(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    item_id: str,
+    keys: tuple[str, ...],
+) -> None:
+    """Mirror ``keys`` from the in-memory map onto the row (absent keys are dropped)."""
     try:
         async with self._deps.session_factory() as session:
             ws = await WorkspaceRepository(session).get_for_update(workspace_id)
             if ws is None:
                 return
             threads_addressed = dict(ws.monitor_threads_addressed or {})
-            threads_addressed[key] = record
+            for key in keys:
+                value = state.threads_addressed_ids.get(key)
+                if value is None:
+                    threads_addressed.pop(key, None)
+                else:
+                    threads_addressed[key] = value
             ws.monitor_threads_addressed = threads_addressed
             await session.commit()
     except (SQLAlchemyError, OSError) as exc:

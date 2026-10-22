@@ -25,6 +25,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.monitor_state_keys import (
     _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
     _item_disposition_key,
@@ -48,6 +49,7 @@ from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     recorded_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
+from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
@@ -324,6 +326,53 @@ async def test_fix_cycle_reply_failure_parks_without_resolve_and_keeps_pushed_co
     assert parked[0]["evidence"]["thread_ids"] == [tid]
     assert parked[0]["evidence"]["forge_reason_code"] == "GITHUB_API_ERROR"
     assert parked[0]["evidence"]["disposition"]["class"] == "fixed"
+
+
+async def test_fix_cycle_reply_failure_park_survives_a_clean_state_reload(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A later transient ``_execute`` fault reloads state from the DB and drops the
+    # in-memory map; the park must already be on the row, or the resolvable
+    # verdict returns and ``reply_to_thread`` re-runs on a reply that may have
+    # landed. Only the parked thread is written — never another thread's
+    # unconfirmed verdict (#305).
+    gh = OrderedForge(
+        FakeCommandRunner(),
+        reply_error=GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502"),
+    )
+    tid = "PRRT_test_reply_fail_durable"
+    thread = _thread(tid)
+    state = MonitorState()
+    state.mark_addressed("PRRT_test_unconfirmed", "fix_committed")
+
+    workspace_id, _state, _result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="fix_committed",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "fix_committed"),
+        thread=thread,
+        state=state,
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    reloaded = _load_state(None, ws)
+    row = reloaded.threads_addressed_ids
+    assert row[tid] == "needs_human"
+    assert row["__needs_human_reason__:" + tid].startswith("THREAD_DISPOSITION_REPLY_FAILED:")
+    assert (
+        row[review_thread_body_state_key(tid)]
+        == state.threads_addressed_ids[review_thread_body_state_key(tid)]
+    )
+    assert "PRRT_test_unconfirmed" not in row
+    action = decide(_status(_PUSHED, (thread,)), reloaded, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+    assert gh.events == [("reply_failed", tid)]
 
 
 @pytest.mark.parametrize(
