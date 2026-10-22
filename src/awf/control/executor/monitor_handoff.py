@@ -375,6 +375,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     companion_specs=companion_specs,
                     environ=os.environ,
                 )
+                requirements = _compose_runtime_requirements_from_file(compose_file)
                 # Recreate only the agent; recovering dependencies are left alone (#936).
                 await restart_runtime_for_monitor_resume(
                     self._compose,
@@ -382,6 +383,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     compose_file=compose_file,
                     workspace_id=workspace_id,
                     budget_seconds=compose_up_timeout_seconds,
+                    dependency_services=(
+                        None if requirements is None else tuple(sorted(requirements.service_names))
+                    ),
                 )
             except CompanionEnvSecretPrecheckError as exc:
                 _log.error(

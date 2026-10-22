@@ -141,6 +141,43 @@ def _provisioned_container() -> FakeAgentContainer:
 
 
 @pytest.mark.unit
+async def test_restart_recovery_brings_up_only_dependencies_before_agent_recreate(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container)
+    monitor = ValidatingMonitor(validation)
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        "services:\n"
+        "  agent:\n"
+        "    image: agent\n"
+        "  postgres:\n"
+        "    image: postgres\n"
+        "  debug:\n"
+        "    image: debug\n"
+        "    profiles: [debug]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    executor, compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+
+    await executor.resume_pr_monitor(ws_id)
+
+    assert [
+        (call.get("no_recreate", False), call.get("force_recreate", False), call.get("services"))
+        for call in compose.calls
+    ] == [(True, False, ("postgres",)), (False, True, ("agent",))]
+
+
+@pytest.mark.unit
 async def test_restart_recovery_replays_setup_before_monitor_validation(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

@@ -13,8 +13,9 @@ stop, so the resume could fail and be retried forever. The restart now:
    ``unhealthy`` to become healthy, bounded by the stack's startup budget rather
    than by those rendered retries (Docker keeps probing an ``unhealthy``
    container and flips it back on success);
-3. brings the project up with ``--no-recreate``, which starts exited or absent
-   containers and never recreates an existing one;
+3. brings the dependencies up with ``--no-recreate``, which starts exited or
+   absent containers and never recreates an existing one; the agent is left out
+   so its stale container is neither started nor waited on before step 4;
 4. recreates only the agent with ``--force-recreate --no-deps agent``: auth
    overlay bind mounts are bound at container creation, and #1090's setup
    replay keys off the agent's new identity.
@@ -155,8 +156,13 @@ async def restart_runtime_for_monitor_resume(
     compose_file: Path,
     workspace_id: str,
     budget_seconds: int,
+    dependency_services: tuple[str, ...] | None,
 ) -> None:
-    """Restart the runtime for a monitor resume without recreating any dependency."""
+    """Restart the runtime for a monitor resume without recreating any dependency.
+
+    ``dependency_services`` lists the compose services that are not the agent;
+    ``None`` (unreadable compose file) falls back to bringing up the whole project.
+    """
     common: dict[str, Any] = {
         "project_name": compose_project,
         "compose_file": compose_file,
@@ -187,7 +193,12 @@ async def restart_runtime_for_monitor_resume(
         budget_seconds=budget_seconds,
         start_stopped=_start_stopped,
     )
-    await compose.ensure_project_up(**common, no_recreate=True)
+    if dependency_services is None:
+        await compose.ensure_project_up(**common, no_recreate=True)
+    else:
+        dependencies = tuple(name for name in dependency_services if name != AGENT_SERVICE_NAME)
+        if dependencies:
+            await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
     await compose.ensure_project_up(
         **common,
         force_recreate=True,

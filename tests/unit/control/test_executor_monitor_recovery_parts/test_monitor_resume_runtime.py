@@ -80,13 +80,20 @@ def _install_inspector(
     return inspector
 
 
-async def _restart(compose: _RecordingCompose, tmp_path: Path, *, budget: int = 300) -> None:
+async def _restart(
+    compose: _RecordingCompose,
+    tmp_path: Path,
+    *,
+    budget: int = 300,
+    dependency_services: tuple[str, ...] | None = None,
+) -> None:
     await monitor_resume_runtime.restart_runtime_for_monitor_resume(
         compose,
         compose_project="awf_ws",
         compose_file=tmp_path / "compose.yml",
         workspace_id="ws",
         budget_seconds=budget,
+        dependency_services=dependency_services,
     )
 
 
@@ -118,6 +125,44 @@ async def test_resume_recreates_only_the_agent(
         if call.get("force_recreate"):
             assert call["services"] == ("agent",)
             assert call["no_deps"] is True
+
+
+@pytest.mark.unit
+async def test_dependency_up_leaves_the_stale_agent_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stale agent is neither started nor waited on before it is recreated.
+
+    A whole-project ``up --wait`` started the old agent container, so a failure
+    there (a vanished auth overlay bind source) skipped the agent recreate.
+    """
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(
+            _running(_service("postgres", health="healthy"), _service("agent", state="exited"))
+        ),
+    )
+    compose = _RecordingCompose()
+
+    await _restart(compose, tmp_path, dependency_services=("agent", "postgres", "redis"))
+
+    assert [(call.get("no_recreate"), call.get("services")) for call in compose.calls] == [
+        (True, ("postgres", "redis")),
+        (None, ("agent",)),
+    ]
+
+
+@pytest.mark.unit
+async def test_agent_only_project_skips_the_dependency_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_inspector(monkeypatch, _ScriptedInspector(_running(_service("agent"))))
+    compose = _RecordingCompose()
+
+    await _restart(compose, tmp_path, dependency_services=("agent",))
+
+    assert [call.get("services") for call in compose.calls] == [("agent",)]
+    assert compose.calls[0]["force_recreate"] is True
 
 
 @pytest.mark.unit
