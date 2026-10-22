@@ -570,6 +570,8 @@ async def _post_human_notification_once(
         head_sha=status.head_sha,
         blocker_reason=reason,
         items_digest=items_digest,
+        # Only the reasonless cert renders the counts; a blocker body ignores them.
+        disposition_count_rows=None if reason else disposition_count_rows,
     )
     already_notified = state.threads_addressed_ids.get(key) == "notified"
     # Fresh forge read at the notification boundary (#910 follow-up): the

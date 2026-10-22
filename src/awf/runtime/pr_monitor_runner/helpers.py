@@ -1060,12 +1060,26 @@ def _base_fetch_retry_wait_seconds(
 
 
 def _notification_key(
-    *, head_sha: str, blocker_reason: str | None, items_digest: str | None = None
+    *,
+    head_sha: str,
+    blocker_reason: str | None,
+    items_digest: str | None = None,
+    disposition_count_rows: Sequence[tuple[str, int]] | None = None,
 ) -> str:
-    """Build a stable notification deduplication key."""
+    """Build a stable notification deduplication key.
+
+    ``disposition_count_rows`` are the audited counts the READY_TO_MERGE cert
+    renders (#1018). A no-commit FALSE POSITIVE / DEFER changes them at an
+    unchanged head, so they join the identity and the updated cert re-posts.
+    """
     reason = blocker_reason or "ready-to-merge"
     key = f"__awf_notify__:{head_sha}:{reason}"
-    return f"{key}:{items_digest}" if items_digest else key
+    if items_digest:
+        key = f"{key}:{items_digest}"
+    if disposition_count_rows:
+        payload = json.dumps(list(disposition_count_rows), separators=(",", ":"))
+        key = f"{key}:dispositions={hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+    return key
 
 
 def _protected_block_violations_digest(violations: Sequence[QualityGateViolation]) -> str:

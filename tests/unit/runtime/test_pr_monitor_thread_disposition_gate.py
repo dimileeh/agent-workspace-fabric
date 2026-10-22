@@ -337,6 +337,43 @@ async def test_cert_posts_per_class_counts_when_all_markers_present(
     assert await _audit_events(factory, workspace_id) == []
 
 
+async def test_cert_reposts_at_same_head_when_audited_counts_change(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-commit FALSE POSITIVE / DEFER changes the counts but not the head.
+
+    The cert renders the audited counts, so they are part of its dedupe identity:
+    an unchanged audit stays deduped, a changed one re-posts the certificate.
+    """
+    audit = ReviewThreadAudit(
+        supported=True,
+        viewer_login=_VIEWER,
+        threads=(_thread("PRRT_test_f1", bodies=(_marker("fixed", "PRRT_test_f1"),)),),
+    )
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    state = MonitorState()
+
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    gh.audit = ReviewThreadAudit(
+        supported=True,
+        viewer_login=_VIEWER,
+        threads=(
+            *audit.threads,
+            _thread("PRRT_test_fp", bodies=(_marker("false_positive", "PRRT_test_fp"),)),
+        ),
+    )
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+
+    assert len(gh.comments) == 2
+    assert all("is ready to merge at commit `abc1234567`" in c for c in gh.comments)
+    assert "fixed 1, fixed (branch evidence) 0, false positive 0," in gh.comments[0]
+    assert "fixed 1, fixed (branch evidence) 0, false positive 1," in gh.comments[1]
+
+
 @pytest.mark.parametrize(
     ("viewer", "resolved_by", "blocked"),
     [
