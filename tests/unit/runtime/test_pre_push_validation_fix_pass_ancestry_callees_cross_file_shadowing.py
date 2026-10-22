@@ -882,6 +882,86 @@ def test_a_non_loop_compound_holding_the_anchor_is_trimmed_by_execution_order() 
 
 
 @pytest.mark.unit
+def test_only_the_compound_arm_holding_the_anchor_is_followed() -> None:
+    """A mutually exclusive arm before the anchor has not run when the call does.
+
+    ``class C: if enabled: validate = local; else: result = validate()`` calls
+    the imported ``validate`` in the ``else``, so the ``if`` body must not be
+    read as a binding there (PRRT_kwDOSJAM6s6vMLgj). The same holds for an
+    ``elif``, an earlier ``except`` arm, the ``try`` handlers seen from its
+    ``else``, and an earlier ``case`` body. What can precede the arm still
+    counts: the ``try`` body, the patterns of earlier cases, which a failed
+    match may have bound, and everything a ``finally`` may follow.
+    """
+    if_else = (
+        "class C:\n"
+        "    if enabled:\n"
+        "        validate = local\n"
+        "    else:\n"
+        "        result = validate()\n"
+    )
+    elif_arm = (
+        "class C:\n"
+        "    if enabled:\n"
+        "        validate = local\n"
+        "    elif ready:\n"
+        "        result = validate()\n"
+    )
+    later_handler = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except Error:\n"
+        "        validate = local\n"
+        "    except Other:\n"
+        "        result = validate()\n"
+    )
+    try_else = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except Error:\n"
+        "        validate = local\n"
+        "    else:\n"
+        "        result = validate()\n"
+    )
+    try_finally = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except Error:\n"
+        "        validate = local\n"
+        "    finally:\n"
+        "        result = validate()\n"
+    )
+    later_case = (
+        "class C:\n"
+        "    match subject:\n"
+        "        case [captured] if (guarded := captured):\n"
+        "            validate = captured\n"
+        "        case other:\n"
+        "            result = validate()\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(if_else, 5, path=_CALLER) == frozenset(
+        {"result"}
+    )
+    assert cross_file._locally_rebound_names_at_line(elif_arm, 5, path=_CALLER) == frozenset(
+        {"result"}
+    )
+    assert cross_file._locally_rebound_names_at_line(later_handler, 7, path=_CALLER) == frozenset(
+        {"before", "result"}
+    )
+    assert cross_file._locally_rebound_names_at_line(try_else, 7, path=_CALLER) == frozenset(
+        {"before", "result"}
+    )
+    assert "validate" in cross_file._locally_rebound_names_at_line(try_finally, 7, path=_CALLER)
+    assert cross_file._locally_rebound_names_at_line(later_case, 6, path=_CALLER) == frozenset(
+        {"captured", "guarded", "other", "result"}
+    )
+
+
+@pytest.mark.unit
 def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
     """A class-body import below the anchor has not run when the call does.
 

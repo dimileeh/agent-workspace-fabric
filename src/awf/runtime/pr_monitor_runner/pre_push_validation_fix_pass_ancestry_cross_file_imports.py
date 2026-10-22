@@ -604,22 +604,17 @@ def _statements_through_line(
     may rebind the name on a later pass. Any other compound statement holding
     the anchor runs its body once, top to bottom, so it is trimmed the same way
     in turn: ``class C: with ctx: if enabled: result = validate(); validate =
-    local`` still calls the imported ``validate`` (PRRT_kwDOSJAM6s6vLPzj).
-    ``first_pass`` trims a loop holding the anchor the same way, giving what
+    local`` still calls the imported ``validate`` (PRRT_kwDOSJAM6s6vLPzj),
+    following only the arm that holds the anchor (see
+    ``_compound_through_line``). ``first_pass`` trims a loop holding the anchor the same way, giving what
     has run by the anchor's *first* pass rather than by any pass.
     """
     kept: list[ast.stmt] = []
     for statement in statements:
-        start = min(
-            [
-                statement.lineno,
-                *(decorator.lineno for decorator in getattr(statement, "decorator_list", ())),
-            ]
-        )
-        if start > line:
+        if _statement_start(statement) > line:
             continue
         trimmable = _RUN_ONCE_COMPOUNDS + (_LOOP_COMPOUNDS if first_pass else ())
-        if isinstance(statement, trimmable) and (statement.end_lineno or statement.lineno) > line:
+        if isinstance(statement, trimmable) and (statement.end_lineno or statement.lineno) >= line:
             statement = _compound_through_line(statement, line, first_pass=first_pass)
         kept.append(statement)
     return kept
@@ -640,9 +635,16 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
     """A shallow copy of a compound ``statement`` trimmed at ``line``.
 
     Its header expressions run before its body and are kept. Each statement
-    list is cut by ``_statements_through_line``; an ``except`` handler or a
-    ``case`` starting below the anchor is dropped, and one at or above it keeps
-    its own target or pattern and has its body cut the same way.
+    list is cut by ``_statements_through_line``, and only the arm holding the
+    anchor is followed, because its mutually exclusive siblings have not run:
+    ``class C: if enabled: validate = local; else: result = validate()`` calls
+    the imported ``validate`` (PRRT_kwDOSJAM6s6vMLgj). So an ``if`` whose
+    ``else`` holds the anchor drops its body, and a ``try`` keeps only the
+    ``except`` handler holding the anchor — its body may have run part way
+    first, so it is kept — unless the anchor is in ``finally``, which may
+    follow any of them. A ``case`` below the anchor is dropped; an earlier one
+    keeps only its pattern and guard, which a failed match may still have
+    bound, and the one holding the anchor has its body cut the same way.
     """
     trimmed = copy.copy(statement)
     for field in ("body", "orelse", "finalbody"):
@@ -652,10 +654,13 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
                 field,
                 _statements_through_line(getattr(statement, field), line, first_pass=first_pass),
             )
+    if isinstance(trimmed, ast.If) and _arm_holds_line(trimmed.orelse, line):
+        trimmed.body = []
     if isinstance(trimmed, (ast.Try, ast.TryStar)):
+        in_finally = _arm_holds_line(trimmed.finalbody, line)
         handlers = []
         for handler in trimmed.handlers:
-            if handler.lineno <= line:
+            if in_finally or handler.lineno <= line <= (handler.end_lineno or handler.lineno):
                 handler = copy.copy(handler)
                 handler.body = _statements_through_line(handler.body, line, first_pass=first_pass)
                 handlers.append(handler)
@@ -665,10 +670,29 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
         for case in trimmed.cases:
             if case.pattern.lineno <= line:
                 case = copy.copy(case)
-                case.body = _statements_through_line(case.body, line, first_pass=first_pass)
+                if line <= (case.body[-1].end_lineno or case.body[-1].lineno):
+                    case.body = _statements_through_line(case.body, line, first_pass=first_pass)
+                else:
+                    case.body = []
                 cases.append(case)
         trimmed.cases = cases
     return trimmed
+
+
+def _statement_start(statement: ast.stmt) -> int:
+    """The first line of ``statement``, counting its decorators."""
+    decorators: list[ast.expr] = getattr(statement, "decorator_list", [])
+    return min([statement.lineno, *(decorator.lineno for decorator in decorators)])
+
+
+def _arm_holds_line(statements: list[ast.stmt], line: int) -> bool:
+    """Whether the trailing arm ``statements`` of a compound holding ``line`` holds it.
+
+    Callers pass an ``else`` / ``finally`` arm of a compound statement that
+    spans ``line``; such an arm runs to the compound's end, so it holds the
+    line once it has started.
+    """
+    return bool(statements) and _statement_start(statements[0]) <= line
 
 
 def _global_declared_names(scope: ast.AST) -> Iterator[str]:
