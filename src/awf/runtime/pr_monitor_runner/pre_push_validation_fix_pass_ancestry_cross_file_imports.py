@@ -564,32 +564,83 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
 
 
 def _class_body_through_line(node: ast.ClassDef, line: int) -> ast.ClassDef:
-    """``node`` with only the body statements that start at or before ``line``.
+    """``node`` with only the body statements that run before ``line`` can.
 
     A class body executes top to bottom, so a name it binds on a later line is
     not yet in the class namespace when ``line`` runs: ``class C: result =
     validate(); validate = local`` calls the imported ``validate`` (issue #1045
-    item 2). A statement starting on ``line`` itself is kept, because a
-    same-line binding may run first, and so is a compound statement that opens
-    before the anchor and holds it, because a loop may rebind the name on a
-    later pass. Decorators, bases and keywords run before the body and are
-    kept. A decorated definition starts at its first decorator: an anchor
-    inside the stack may follow a decorator that binds the name with ``:=``,
-    so the whole definition is kept, which only over-reports. The copy is
-    shallow; ``node`` is left as it was.
+    item 2). Decorators, bases and keywords run before the body and are kept.
+    See ``_statements_through_line`` for how each body statement is read. The
+    copy is shallow; ``node`` is left as it was.
     """
     trimmed = copy.copy(node)
-    trimmed.body = [
-        statement
-        for statement in node.body
-        if min(
+    trimmed.body = _statements_through_line(node.body, line)
+    return trimmed
+
+
+def _statements_through_line(statements: list[ast.stmt], line: int) -> list[ast.stmt]:
+    """``statements`` cut to what may have run when ``line`` runs.
+
+    A statement starting on ``line`` itself is kept, because a same-line
+    binding may run first. A decorated definition starts at its first
+    decorator: an anchor inside the stack may follow a decorator that binds the
+    name with ``:=``, so the whole definition is kept, which only over-reports.
+    A loop that opens before the anchor and holds it is kept whole, because it
+    may rebind the name on a later pass. Any other compound statement holding
+    the anchor runs its body once, top to bottom, so it is trimmed the same way
+    in turn: ``class C: with ctx: if enabled: result = validate(); validate =
+    local`` still calls the imported ``validate`` (PRRT_kwDOSJAM6s6vLPzj).
+    """
+    kept: list[ast.stmt] = []
+    for statement in statements:
+        start = min(
             [
                 statement.lineno,
                 *(decorator.lineno for decorator in getattr(statement, "decorator_list", ())),
             ]
         )
-        <= line
-    ]
+        if start > line:
+            continue
+        if (
+            isinstance(statement, _RUN_ONCE_COMPOUNDS)
+            and (statement.end_lineno or statement.lineno) > line
+        ):
+            statement = _compound_through_line(statement, line)
+        kept.append(statement)
+    return kept
+
+
+_RUN_ONCE_COMPOUNDS = (ast.AsyncWith, ast.If, ast.Match, ast.Try, ast.TryStar, ast.With)
+
+
+def _compound_through_line(statement: ast.stmt, line: int) -> ast.stmt:
+    """A shallow copy of a run-once compound ``statement`` trimmed at ``line``.
+
+    Its header expressions run before its body and are kept. Each statement
+    list is cut by ``_statements_through_line``; an ``except`` handler or a
+    ``case`` starting below the anchor is dropped, and one at or above it keeps
+    its own target or pattern and has its body cut the same way.
+    """
+    trimmed = copy.copy(statement)
+    for field in ("body", "orelse", "finalbody"):
+        if hasattr(statement, field):
+            setattr(trimmed, field, _statements_through_line(getattr(statement, field), line))
+    if isinstance(trimmed, (ast.Try, ast.TryStar)):
+        handlers = []
+        for handler in trimmed.handlers:
+            if handler.lineno <= line:
+                handler = copy.copy(handler)
+                handler.body = _statements_through_line(handler.body, line)
+                handlers.append(handler)
+        trimmed.handlers = handlers
+    if isinstance(trimmed, ast.Match):
+        cases = []
+        for case in trimmed.cases:
+            if case.pattern.lineno <= line:
+                case = copy.copy(case)
+                case.body = _statements_through_line(case.body, line)
+                cases.append(case)
+        trimmed.cases = cases
     return trimmed
 
 

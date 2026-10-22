@@ -776,8 +776,8 @@ def test_a_class_body_binding_after_the_anchor_does_not_shadow() -> None:
 def test_class_body_ordering_keeps_its_conservative_edges() -> None:
     """Statements sharing the anchor line, or enclosing it, still count.
 
-    A same-line binding may run before the call, and a loop or ``if`` that
-    starts before the anchor may rebind the name on a later pass, so both stay
+    A same-line binding may run before the call, and a loop that starts
+    before the anchor may rebind the name on a later pass, so both stay
     shadows rather than being read as ordered after the call. A decorated
     definition starts at its first decorator, so an anchor inside its decorator
     stack still sees what that stack binds (a ``:=`` in an earlier decorator),
@@ -802,6 +802,74 @@ def test_class_body_ordering_keeps_its_conservative_edges() -> None:
     assert cross_file._locally_rebound_names_at_line(later, 2, path=_CALLER) == frozenset(
         {"result"}
     )
+
+
+@pytest.mark.unit
+def test_a_non_loop_compound_holding_the_anchor_is_trimmed_by_execution_order() -> None:
+    """An ``if`` / ``with`` / ``try`` / ``match`` body runs once, top to bottom.
+
+    Only a loop can come back round to the anchor, so a binding below the
+    anchor inside any other compound statement has not run when the call does
+    (PRRT_kwDOSJAM6s6vLPzj). What does precede the anchor still counts: a
+    header, an earlier statement or handler, and the pattern of the case
+    holding the anchor. A loop nested inside such a statement is still kept
+    whole.
+    """
+    with_if = (
+        "class C:\n"
+        "    with ctx:\n"
+        "        if enabled:\n"
+        "            result = validate()\n"
+        "            validate = local\n"
+        "        else:\n"
+        "            other = 1\n"
+    )
+    earlier = (
+        "class C:\n"
+        "    with ctx as handle:\n"
+        "        validate = handle\n"
+        "        result = validate()\n"
+    )
+    handler = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except Error as caught:\n"
+        "        result = validate()\n"
+        "        validate = caught\n"
+        "    except Other:\n"
+        "        late = 1\n"
+        "    finally:\n"
+        "        validate = 2\n"
+    )
+    match = (
+        "class C:\n"
+        "    match subject:\n"
+        "        case [captured]:\n"
+        "            result = validate()\n"
+        "            validate = captured\n"
+        "        case later:\n"
+        "            validate = later\n"
+    )
+    nested_loop = (
+        "class C:\n"
+        "    if enabled:\n"
+        "        while pending:\n"
+        "            result = validate()\n"
+        "            validate = local\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(with_if, 4, path=_CALLER) == frozenset(
+        {"result"}
+    )
+    assert "validate" in cross_file._locally_rebound_names_at_line(earlier, 4, path=_CALLER)
+    assert cross_file._locally_rebound_names_at_line(handler, 5, path=_CALLER) == frozenset(
+        {"before", "caught", "result"}
+    )
+    assert cross_file._locally_rebound_names_at_line(match, 4, path=_CALLER) == frozenset(
+        {"captured", "result"}
+    )
+    assert "validate" in cross_file._locally_rebound_names_at_line(nested_loop, 4, path=_CALLER)
 
 
 @pytest.mark.unit
