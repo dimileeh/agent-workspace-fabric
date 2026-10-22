@@ -16,15 +16,19 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import runtime_setup_replay
 from awf.control.executor.constants import (
+    MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE,
+    RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE,
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
 )
+from awf.control.executor.state_ops import RESUME_SETUP_FAILURE_BLOCK_TYPE
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.profiles.resolver import ProfileResolutionError
 from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
 )
 from tests.postgres import postgres_test_engine
@@ -118,6 +122,34 @@ async def _run(runner: Any, workspace_id: str, tmp_path: Path) -> Any:
         log_source="recovery",
         command_evidence=[],
     )
+
+
+async def _assert_parked_blocked(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> dict[str, Any]:
+    """A failed monitor-side replay parks ``blocked`` (#743) instead of failing."""
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.blocked.value
+        assert workspace.block_type == RESUME_SETUP_FAILURE_BLOCK_TYPE
+        assert workspace.block_reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert workspace.block_resume_phase == MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE
+        failed = [
+            event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
+        ]
+        replay_failed = [
+            event
+            for event in workspace.events
+            if event.event_type == RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE
+        ]
+    assert failed == []
+    assert [event.reason_code for event in replay_failed] == [
+        RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    ]
+    payload = replay_failed[0].payload
+    assert payload is not None
+    return payload
 
 
 def _provisioned_container() -> FakeAgentContainer:
@@ -228,15 +260,8 @@ async def test_runner_without_validation_fails_closed_when_agent_recreated(
     assert raised.value.details["restart_attempts"] == 1
     # The agent is never retried in a runtime whose setup was not replayed.
     assert len(adapter.calls) == 1
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.failed.value
-        assert workspace.failure_reason == FailureReason.infrastructure_failure.value
-        failed = [
-            event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
-        ]
-    assert [event.reason_code for event in failed] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
+    payload = await _assert_parked_blocked(factory, workspace_id)
+    assert payload["failure_reason"] == FailureReason.infrastructure_failure.value
 
 
 @pytest.mark.unit
@@ -266,7 +291,7 @@ async def test_runner_without_validation_retries_when_agent_unchanged(
 
 
 @pytest.mark.unit
-async def test_failed_replay_terminates_monitor_with_reason_code(
+async def test_failed_replay_parks_monitor_blocked_with_reason_code(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
@@ -301,22 +326,13 @@ async def test_failed_replay_terminates_monitor_with_reason_code(
     up.assert_awaited_once()
     assert len(adapter.calls) == 1
     assert validation.setup_runs() == 1
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.failed.value
-        failed = [
-            event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
-        ]
-    assert [event.reason_code for event in failed] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
-    payload = failed[0].payload
-    assert payload is not None
+    payload = await _assert_parked_blocked(factory, workspace_id)
     assert payload["details"]["agent_service_recovery"]["restart_attempts"] == 1
     assert payload["details"]["command"].startswith("install-tool")
 
 
 @pytest.mark.unit
-async def test_unresolvable_profile_terminates_monitor_with_replay_reason_code(
+async def test_unresolvable_profile_parks_monitor_with_replay_reason_code(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
@@ -349,15 +365,8 @@ async def test_unresolvable_profile_terminates_monitor_with_replay_reason_code(
     assert raised.value.details["trigger"] == "monitor_agent_service_recovery"
     assert validation.phase_calls == []
     assert len(adapter.calls) == 1
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.failed.value
-        assert workspace.failure_reason == FailureReason.profile_resolution_failure.value
-        failed = [
-            event for event in workspace.events if event.new_state == WorkspaceStatus.failed.value
-        ]
-    assert [event.reason_code for event in failed] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
+    payload = await _assert_parked_blocked(factory, workspace_id)
+    assert payload["failure_reason"] == FailureReason.profile_resolution_failure.value
 
 
 @pytest.mark.unit
@@ -405,3 +414,59 @@ async def test_replay_cleanup_failure_runs_monitor_head_recovery(
     assert raised.value.details is not None
     assert raised.value.details["head_recovered"] is head_recovered
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.unit
+async def test_failed_replay_does_not_park_when_monitor_claim_moved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The park is fenced by ``monitor_owner_id``: a superseded monitor keeps its hands off."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-old"
+        await session.commit()
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    adapter = _idle_timeout_adapter(retry_stdout=None)
+    validation = _OrderedValidation(container, adapter, setup_returncode=1)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        validation=validation,
+    )
+    runner._monitor_owner_id = "worker-old"
+    _patch_compose(mocker, container, recreate=True)
+    original_run = validation.run_profile_phases
+
+    async def _setup_outlives_lease(**kwargs: Any) -> Any:
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.monitor_claimed_by = "worker-new"
+            await session.commit()
+        return await original_run(**kwargs)
+
+    monkeypatch.setattr(validation, "run_profile_phases", _setup_outlives_lease)
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as raised:
+        await _run(runner, workspace_id, tmp_path)
+
+    assert raised.value.reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.monitoring_pr.value
+        assert workspace.monitor_claimed_by == "worker-new"
+        assert not [
+            event
+            for event in workspace.events
+            if event.event_type == RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE
+        ]

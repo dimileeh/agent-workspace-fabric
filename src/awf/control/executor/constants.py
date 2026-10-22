@@ -74,6 +74,12 @@ RUNTIME_SETUP_REPLAYED_REASON_CODE = "RUNTIME_SETUP_REPLAYED"
 
 RUNTIME_SETUP_REPLAYED_EVENT_TYPE = "workspace.runtime_setup_replayed"
 
+RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE = "workspace.runtime_setup_replay_failed"
+
+# Monitor-origin (``monitor_`` prefix) resume phase of the block a failed PR-monitor
+# setup replay parks in, so ``guide`` resumes it back into the PR monitor.
+MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE = "monitor_runtime_setup_replay"
+
 RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE = "RUNTIME_IDENTITY_PROBE_TIMEOUT"
 
 # Adopt-pr handoff skips the coding agent (PR_ADOPTION_SKIP_AGENT), so the

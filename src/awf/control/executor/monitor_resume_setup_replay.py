@@ -5,9 +5,10 @@ monitor-origin block (blocked -> monitoring_pr) all resume through
 ``resume_pr_monitor_handoff``, which brings the runtime back with
 ``compose up``. When that recreated the agent container, this replays the
 profile's ``setup``/``pre_agent`` phases before the monitor loop, its pre-push
-validation, or any agent run continues. A failed replay fails the workspace with
-``RUNTIME_SETUP_REPLAY_FAILED``, like the other ``MONITOR_RECOVERY_*`` resume
-failures, so the worker finalizes the recovery without a retry.
+validation, or any agent run continues. A failed replay parks the workspace in
+``blocked`` with ``RUNTIME_SETUP_REPLAY_FAILED`` (#743) instead of failing it, so a
+transient setup failure cannot kill a healthy monitor; the worker finalizes the
+recovery from that reason code without a retry, and a later ``guide`` resumes.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from awf.control.executor import runtime_setup_replay as _replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.helpers import _profile_for_workspace
 from awf.control.executor.quality_gates import _log
+from awf.control.executor.state_ops import enter_blocked_for_monitor_setup_replay_failure
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import MergeCandidateRepository
@@ -103,7 +105,7 @@ async def replay_setup_on_monitor_resume(
     if outcome.ok:
         return True
     # Setup can outlive the monitor lease; fence again so a superseded resume
-    # never fails the row underneath a newer claimant.
+    # never parks the row underneath a newer claimant.
     if not await self._recheck_status(
         workspace_id,
         expected=WorkspaceStatus.monitoring_pr,
@@ -111,12 +113,11 @@ async def replay_setup_on_monitor_resume(
         monitor_owner_id=monitor_owner_id,
     ):
         return False
-    await self._mark_failed(
+    await enter_blocked_for_monitor_setup_replay_failure(
+        self._session_factory,
         workspace_id=workspace_id,
-        from_status=WorkspaceStatus.monitoring_pr,
+        message=f"monitor recovery: {outcome.message}",
         failure_reason=outcome.failure_reason or FailureReason.infrastructure_failure,
-        message=f"monitor recovery: {outcome.message}"[:2000],
-        reason_code=outcome.reason_code,
         details=outcome.details,
         monitor_owner_id=monitor_owner_id,
     )

@@ -173,3 +173,60 @@ async def test_guide_unblock_resume_replays_setup_before_validate(
     assert len(events) == 1
     assert events[0].payload is not None
     assert events[0].payload["basis"] == "agent_container_created"
+
+
+@pytest.mark.unit
+async def test_replay_failure_parks_blocked_and_a_later_guide_retries_setup(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient setup failure parks the monitor; ``guide`` resumes and replays again."""
+    ws_id = await _seed(factory, tmp_path)
+    container = FakeAgentContainer()
+    container.tmp.add(TOOL_PATH)
+    patch_identity(monkeypatch, container)
+    flaky = FakeToolValidation(container, setup_returncode=1, setup_stdout="429 Too Many Requests")
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=FakeCompose(container),
+        validation=flaky,
+        pr_monitor_factory=lambda *_a, **_k: ValidatingMonitor(flaky),
+    )
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.blocked.value
+        # Only monitor-origin blocks route ``guide`` back into the PR monitor.
+        assert ws.block_resume_phase is not None
+        assert ws.block_resume_phase.startswith("monitor_")
+
+    async with factory() as session:
+        service, _stopper, _cleaner = _service(session)
+        response = await service.guide_workspace(
+            ws_id, directive="registry recovered; continue", reason="retry setup"
+        )
+        await session.commit()
+    assert response.status == WorkspaceStatus.monitoring_pr
+
+    validation, monitor = await _resume_and_validate(
+        fake, factory, tmp_path, monkeypatch, ws_id, container
+    )
+
+    assert validation.setup_runs() == 1
+    assert monitor.validate_returncodes == [0]
+    assert len(await _replay_events(factory, ws_id)) == 1
+    async with factory() as session:
+        failed = (
+            await session.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.new_state == WorkspaceStatus.failed.value,
+                )
+            )
+        ).scalars()
+        assert list(failed) == []

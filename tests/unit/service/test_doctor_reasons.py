@@ -252,7 +252,9 @@ def test_runtime_setup_replay_failed_has_doctor_guidance() -> None:
     reason = _REASON_TEXT[code]
 
     assert "setup" in reason.message
-    assert "remonitor" in reason.action
+    # A failed PR-monitor replay parks the workspace blocked; guide resumes it.
+    assert "blocked" in reason.action
+    assert "guide" in reason.action
     assert reason.likely_cause
     assert reason.related_command == "awf workspace logs <workspace_id>"
     assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"

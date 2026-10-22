@@ -22,12 +22,15 @@ def get_runtime_setup_replay_reasons(
         "RUNTIME_SETUP_REPLAY_FAILED": reason_text_cls(
             (
                 "AWF recreated the workspace agent runtime and could not re-run the profile's "
-                "setup phase, so the workspace failed instead of validating without its tools."
+                "setup phase, so it stopped the workspace instead of validating without its "
+                "tools."
             ),
             (
-                "Read the failing setup command and its output in the failure details or "
-                "workspace logs, fix the profile setup or the dependency it needs, then "
-                "remonitor the workspace."
+                "Read the failing setup command and its output in the block or failure "
+                "details or workspace logs, and fix the profile setup or the dependency it "
+                "needs. A PR-monitor workspace is parked in blocked with its work preserved: "
+                "run guide to resume monitoring, which replays setup. A pre-PR workspace "
+                "failed: retry it."
             ),
             (
                 "A monitor resume (restart recovery, remonitor or guide) or an agent-service "

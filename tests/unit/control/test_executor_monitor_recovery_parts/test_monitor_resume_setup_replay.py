@@ -20,15 +20,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.control.blocked_transition import is_monitor_origin_block_resume_phase
 from awf.control.executor import (
     monitor_handoff,
     monitor_resume_setup_replay,
     runtime_setup_replay,
 )
 from awf.control.executor.constants import (
+    MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE,
+    RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE,
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
     RUNTIME_SETUP_REPLAYED_EVENT_TYPE,
 )
+from awf.control.executor.state_ops import RESUME_SETUP_FAILURE_BLOCK_TYPE
 from awf.control.worker.dispatch_methods import _monitor_recovery_handoff_failure_error
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
@@ -255,23 +259,53 @@ async def test_released_runtime_gets_setup_on_resume(
     ]
 
 
+async def _replay_failed_events(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> list[WorkspaceEvent]:
+    return await _events(factory, workspace_id, RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE)
+
+
+async def _assert_parked_blocked(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> WorkspaceEvent:
+    """A failed monitor-side replay parks ``blocked`` (#743) instead of failing."""
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.blocked.value
+        assert ws.block_type == RESUME_SETUP_FAILURE_BLOCK_TYPE
+        assert ws.block_reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+        assert ws.block_resume_phase == MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE
+        assert is_monitor_origin_block_resume_phase(ws.block_resume_phase)
+        assert ws.failure_reason is None
+    assert await _failed_transitions(factory, workspace_id) == []
+    events = await _replay_failed_events(factory, workspace_id)
+    assert len(events) == 1
+    assert events[0].reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    return events[0]
+
+
 @pytest.mark.unit
-async def test_failed_replay_fails_workspace_with_reason_code_and_no_retry(
+async def test_failed_replay_parks_monitor_blocked_and_preserves_worktree(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A transient setup failure (registry 429) must not kill a healthy PR monitor."""
     container = _provisioned_container()
     patch_identity(monkeypatch, container)
     validation = FakeToolValidation(
-        container, setup_returncode=1, setup_stdout=f"auth token={_SECRET} rejected"
+        container, setup_returncode=1, setup_stdout=f"429 Too Many Requests token={_SECRET}"
     )
     monitor = ValidatingMonitor(validation)
     ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
     executor, compose = _executor(
         fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
     )
+    worktree = executor._config.worktrees_root / ws_id
+    worktree.mkdir(parents=True)
+    (worktree / "unpushed.txt").write_text("keep me\n", encoding="utf-8")
 
     handoff = await executor.resume_pr_monitor_handoff(ws_id)
 
@@ -279,22 +313,68 @@ async def test_failed_replay_fails_workspace_with_reason_code_and_no_retry(
     assert len(compose.calls) == 1
     assert validation.setup_runs() == 1
     assert monitor.validate_returncodes == []
+    event = await _assert_parked_blocked(factory, ws_id)
+    payload = event.payload
+    assert payload is not None
+    assert payload["message"].startswith("monitor recovery: runtime setup replay failed")
+    assert payload["failure_reason"] == FailureReason.service_startup_failure.value
+    assert payload["details"]["trigger"] == "monitor_resume"
+    assert "429 Too Many Requests" in payload["details"]["stdout_tail"]
+    assert _SECRET not in repr(payload)
+    assert (worktree / "unpushed.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert await _events(factory, ws_id, RUNTIME_SETUP_REPLAYED_EVENT_TYPE) == []
+    error_code, message = await _monitor_recovery_handoff_failure_error(
+        SimpleNamespace(_session_factory=factory), ws_id
+    )
+    assert error_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    assert message.startswith("monitor recovery: runtime setup replay failed")
+
+
+@pytest.mark.unit
+async def test_failed_replay_does_not_park_when_monitor_claim_moved(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The park is fenced by ``monitor_owner_id``: a newer claimant keeps the row."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container, setup_returncode=1)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_reason == FailureReason.service_startup_failure.value
-        assert ws.failure_message is not None
-        assert ws.failure_message.startswith("monitor recovery: runtime setup replay failed")
-    transitions = await _failed_transitions(factory, ws_id)
-    assert len(transitions) == 1
-    assert transitions[0].reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
-    payload = transitions[0].payload
-    assert payload is not None
-    assert payload["details"]["trigger"] == "monitor_resume"
-    assert "rejected" in payload["details"]["stdout_tail"]
-    assert _SECRET not in repr(payload)
-    assert await _events(factory, ws_id, RUNTIME_SETUP_REPLAYED_EVENT_TYPE) == []
+        ws.monitor_claimed_by = "worker-old"
+        await session.commit()
+    executor, _compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    original_run = validation.run_profile_phases
+
+    async def _setup_outlives_lease(**kwargs: Any) -> Any:
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-new"
+            await session.commit()
+        return await original_run(**kwargs)
+
+    async def _recheck_passes(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(validation, "run_profile_phases", _setup_outlives_lease)
+    monkeypatch.setattr(executor, "_recheck_status", _recheck_passes)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.monitor_claimed_by == "worker-new"
+    assert await _replay_failed_events(factory, ws_id) == []
 
 
 @pytest.mark.unit
@@ -389,8 +469,9 @@ async def test_replay_without_resolved_profile_fails_with_reason_code(
     assert await executor.resume_pr_monitor_handoff(ws_id) is None
 
     assert validation.setup_runs() == 0
-    transitions = await _failed_transitions(factory, ws_id)
-    assert [event.reason_code for event in transitions] == [RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE]
+    event = await _assert_parked_blocked(factory, ws_id)
+    assert event.payload is not None
+    assert event.payload["failure_reason"] == FailureReason.profile_resolution_failure.value
 
 
 @pytest.mark.unit
