@@ -108,6 +108,28 @@ def test_regex_literals_are_told_apart_from_division() -> None:
 
 
 @pytest.mark.unit
+def test_a_brace_closing_an_object_literal_is_followed_by_division() -> None:
+    text = "const q = {a: 1} / (record = replacement) / 2;"
+    assert _values(text)[8:] == ["/", "(", "record", "=", "replacement", ")", "/", "2", ";"]
+    assert es._es_assigned_names(_tokens(text), frozenset({"record"})) == frozenset({"record"})
+    assert _values("f({} / 2, [{} / 3], c ? {} / 4 : 0)").count("/") == 3
+    assert _values("x = !{} / 2\nreturn {} / 3").count("/") == 2
+    # A ``}`` closing a block or a TS return-type body still precedes a regex.
+    assert _values("else {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("f = () => {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("function f(): A<B> {}\n/`/.test(s)")[-6:-4] == ["", "."]
+    assert _values("return\n{}\n/`/.test(s)")[-6:-4] == ["", "."]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("text", ["x = {a: {b: 1} / 2, c: d / 3}", "L: {}\n/`/.test(s)"])
+def test_a_slash_after_a_brace_opened_after_a_colon_is_unparseable(text: str) -> None:
+    """``{`` after ``:`` opens an object, a label's block or a case block: fail closed."""
+    assert es._es_module_tokens(text, path="src/app.ts") is None
+    assert _values("switch (a) { case 1: {} }")[-2:] == ["}", "}"]
+
+
+@pytest.mark.unit
 def test_a_non_null_assertion_is_followed_by_division() -> None:
     assert _values("x = a! / b / c") == ["x", "=", "a", "!", "/", "b", "/", "c"]
     assert _values("x = f(a)! / 2")[-3:] == ["!", "/", "2"]

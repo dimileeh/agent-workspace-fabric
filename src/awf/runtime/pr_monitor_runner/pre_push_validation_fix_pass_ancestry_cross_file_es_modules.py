@@ -77,6 +77,10 @@ _SINGLE_CHAR_PUNCTUATORS = frozenset("+-*/%&|^!~?:;,.<>=@")
 _CLOSER_FOR = {"(": ")", "[": "]", "{": "}"}
 # Keywords whose ``( ... )`` is a statement head rather than an expression.
 _CONDITION_KEYWORDS = frozenset({"for", "if", "while", "with"})
+# Tokens after which an expression may start, yet a ``{`` opens a block: a
+# statement boundary, an arrow body, ``else`` / ``do``, or a TS ``>`` closing
+# a generic return type (``(): A<B> {``).
+_BLOCK_BRACE_PREFIXES = frozenset({";", "{", "}", ")", "=>", ">", ">>", ">>>", "else", "do"})
 _LINE_TERMINATORS = frozenset("\n\r  ")
 
 
@@ -120,6 +124,9 @@ class _EsLexer:
         # Index of the last ``)`` that closed an ``if`` / ``for`` / ``while`` /
         # ``with`` condition: a statement, so a regex, may start after it.
         self.condition_close = -1
+        # Indexes of the ``}`` tokens closing an object literal (``"object"``),
+        # or a ``{`` after ``:`` that may open an object or a block (``"colon"``).
+        self.brace_closes: dict[int, str] = {}
 
     def emit(self, kind: str, value: str) -> None:
         line = bisect.bisect_right(self.line_ends, self.pos) + 1
@@ -154,7 +161,10 @@ class _EsLexer:
         ``)`` closing an ``if`` / ``for`` / ``while`` / ``with`` condition ends
         a statement head, so both start an expression too: reading a regex
         there as division would let a quote or backtick inside it swallow the
-        code below into a literal while the stream still balances. Template
+        code below into a literal while the stream still balances. A ``}``
+        closing an object literal ends an operand, so ``{a: 1} / x`` divides,
+        and one whose ``{`` followed a ``:`` (an object, a label's block or a
+        ``case`` block) cannot be told apart and raises, failing closed. Template
         and JSX tokens are emitted at their *end*, so a ``/`` after them is
         division, as it is after a TS non-null ``!`` (``x! / y``).
         """
@@ -165,6 +175,11 @@ class _EsLexer:
             return self.condition_close == len(self.tokens) - 1
         if prev.kind == "punct" and prev.value == "!":
             return not self.ends_operand(len(self.tokens) - 1)
+        if prev.kind == "punct" and prev.value == "}":
+            role = self.brace_closes.get(len(self.tokens) - 1)
+            if role == "colon":
+                raise _EsLexError
+            return role is None
         if prev.kind == "punct":
             return prev.value not in ("]", "++", "--")
         if prev.kind == "ident":
@@ -192,6 +207,24 @@ class _EsLexer:
             else:
                 return
 
+    def brace_role(self) -> str:
+        """What the ``{`` here opens: ``"object"``, ``"colon"`` (unknown) or ``""`` (a block).
+
+        A ``{`` where no expression may start, or after a token in
+        ``_BLOCK_BRACE_PREFIXES``, opens a block; after a ``:`` it may open
+        either. Elsewhere — after an operator, ``(``, ``[``, ``,`` or a
+        keyword taking an operand — it opens an object literal, unless a line
+        break follows the keyword (``return`` then a block, by ASI).
+        """
+        prev = self.tokens[-1] if self.tokens else None
+        if prev is None or prev.kind in ("ident", "punct") and prev.value in _BLOCK_BRACE_PREFIXES:
+            return ""
+        if not self.expression_may_start():
+            return ""
+        if prev.value == ":":
+            return "colon"
+        return "" if prev.kind == "ident" and self.newline else "object"
+
     def opens_condition(self) -> bool:
         """True when a ``(`` here opens a statement condition, ``for await (`` included."""
         tail = [(t.kind, t.value) for t in self.tokens[-2:]]
@@ -207,7 +240,7 @@ class _EsLexer:
 
     def lex_code(self, closer: str | None) -> None:
         """Lex until EOF, or until the ``}`` closing a ``${`` / JSX ``{``."""
-        stack: list[tuple[str, bool]] = []
+        stack: list[tuple[str, str]] = []
         text, n = self.text, len(self.text)
         while True:
             self.skip_trivia()
@@ -217,9 +250,12 @@ class _EsLexer:
                 return
             ch = text[self.pos]
             if ch in _CLOSER_FOR:
-                condition = self.opens_condition()
+                if ch == "{":
+                    role = self.brace_role()
+                else:
+                    role = "condition" if self.opens_condition() else ""
                 self.emit("punct", ch)
-                stack.append((_CLOSER_FOR[ch], condition))
+                stack.append((_CLOSER_FOR[ch], role))
                 self.depth += 1
                 self.pos += 1
             elif ch in ")]}":
@@ -228,13 +264,15 @@ class _EsLexer:
                         raise _EsLexError
                     self.pos += 1
                     return
-                closer_char, condition = stack.pop()
+                closer_char, role = stack.pop()
                 if closer_char != ch:
                     raise _EsLexError
                 self.depth -= 1
                 self.emit("punct", ch)
-                if condition and ch == ")":
+                if role == "condition":
                     self.condition_close = len(self.tokens) - 1
+                elif role:
+                    self.brace_closes[len(self.tokens) - 1] = role
                 self.pos += 1
             elif ch in "'\"":
                 self.emit("string", self.read_string(ch))
