@@ -523,6 +523,71 @@ async def test_successful_replay_rechecks_monitor_claim_before_monitor_build(
 
 
 @pytest.mark.unit
+async def test_unchanged_identity_rechecks_monitor_claim_before_monitor_build(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed-but-usable restart that kept the container must still stop a
+    superseded resume before its monitor-build failure paths fail the row."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = FakeToolValidation(container)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-old"
+        await session.commit()
+    factory_calls: list[Any] = []
+
+    def _failing_monitor_factory(*args: Any, **kwargs: Any) -> Any:
+        factory_calls.append((args, kwargs))
+        raise RuntimeError("monitor build failed")
+
+    compose = FakeCompose(container, recreate=False)
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        validation=validation,
+        pr_monitor_factory=_failing_monitor_factory,
+    )
+
+    async def _up_fails_while_lease_moves(**kwargs: Any) -> None:
+        compose.calls.append(kwargs)
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "worker-new"
+            await session.commit()
+        raise ComposeOperationError(
+            operation="up", returncode=1, stdout="", stderr="companion unhealthy"
+        )
+
+    async def _runtime_usable(*_args: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(compose, "ensure_project_up", _up_fails_while_lease_moves)
+    monkeypatch.setattr(
+        monitor_handoff, "_compose_runtime_usable_after_restart_failure", _runtime_usable
+    )
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert validation.setup_runs() == 0
+    assert factory_calls == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.monitor_claimed_by == "worker-new"
+    assert await _failed_transitions(factory, ws_id) == []
+
+
+@pytest.mark.unit
 async def test_replay_failure_skips_mark_failed_when_resume_was_superseded(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

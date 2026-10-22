@@ -50,7 +50,16 @@ async def replay_setup_on_monitor_resume(
     identity_after = await _replay.capture_agent_container_identity(compose_project)
     verdict = _replay.runtime_recreation_decision(identity_before, identity_after)
     if verdict.decision is _replay.RecreationDecision.unchanged:
-        return True
+        # The restart (or a failed-but-usable one) can outlive the monitor lease;
+        # fence so a superseded resume never reaches monitor build's failure paths.
+        return bool(
+            await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_setup_unchanged",
+                monitor_owner_id=monitor_owner_id,
+            )
+        )
     if not await self._recheck_status(
         workspace_id,
         expected=WorkspaceStatus.monitoring_pr,
