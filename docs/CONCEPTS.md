@@ -396,8 +396,8 @@ imports, relative specifiers probed the way TS/Node probe them (`.js` maps to
 `export * from`, or a barrel re-exporting its own import). Type-only imports bind
 nothing. A JS/TS callee the reader cannot resolve to exactly one file fails
 closed: bare packages, path aliases, dynamic `import()`, `require`, deeper or
-ambiguous re-export chains, unparseable files, and a name the file rebinds
-anywhere. It never falls back to matching by name, and the corrected caller has
+ambiguous re-export chains, unparseable files, a name the call site rebinds
+anywhere, and an export its defining module reassigns. It never falls back to matching by name, and the corrected caller has
 to reach the same definition afterwards. Only languages with no binding reader
 keep the name-only match. A name that a scope binds shadows the import for the
 anchored call. In a Python class body, which runs top to bottom, only bindings
