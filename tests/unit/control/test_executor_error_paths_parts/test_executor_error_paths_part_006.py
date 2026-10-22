@@ -162,9 +162,11 @@ class _NoopResumeCompose:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-        del force_recreate, services
+        del force_recreate, services, no_recreate, no_deps
 
 
 class _RecordingValidation:
@@ -968,9 +970,11 @@ class TestExecutorCoverageEdgesPart002:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
@@ -1045,10 +1049,12 @@ class TestExecutorCoverageEdgesPart002:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 """Raise or record a compose restart for the test."""
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
@@ -1127,9 +1133,11 @@ class TestExecutorCoverageEdgesPart002:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 session_factory.fail_next = True
                 raise ComposeOperationError(
                     operation="up",

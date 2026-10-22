@@ -47,6 +47,11 @@ from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
     _run_hosted_monitor_handoff_profile_setup,
 )
+from awf.control.executor.monitor_resume_restart_escalation import (
+    escalate_monitor_resume_restart_failure,
+    reset_monitor_resume_restart_streak,
+)
+from awf.control.executor.monitor_resume_runtime import restart_runtime_for_monitor_resume
 from awf.control.executor.monitor_resume_setup_replay import replay_setup_on_monitor_resume
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
@@ -64,8 +69,6 @@ from awf.db.enums import (
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import (
-    COMPANION_ENV_SECRET_SOURCE_EMPTY,
-    COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
 )
@@ -102,6 +105,10 @@ _present_optional_companion_env_secret_refs = (
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
 )
+CompanionEnvSecretPrecheckError = _companion_env.CompanionEnvSecretPrecheckError
+_precheck_required_companion_env_secrets_for_resume = (
+    _companion_env._precheck_required_companion_env_secrets_for_resume
+)
 
 
 def _hosted_handoff_pr_identity(workspace: Workspace) -> dict[str, object]:
@@ -134,22 +141,6 @@ class _ComposeRuntimeRequirements:
 
 class MonitorResumePreStartError(Exception):
     """Raised when resumed monitor setup fails before entering the monitor loop."""
-
-
-class CompanionEnvSecretPrecheckError(ComposeOperationError):
-    """Raised when monitor resume cannot satisfy required companion env secrets."""
-
-    def __init__(self, *, stderr: str, reason_code: str) -> None:
-        self.operation = "companion_env_secret_precheck"
-        self.returncode = 1
-        self.stdout = ""
-        self.stderr = stderr
-        self.reason_code = reason_code
-        Exception.__init__(
-            self,
-            "companion env secret precheck failed "
-            f"(reason={reason_code}): {stderr.strip() or '<no output>'}",
-        )
 
 
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
@@ -384,20 +375,20 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     companion_specs=companion_specs,
                     environ=os.environ,
                 )
-                await self._compose.ensure_project_up(
-                    project_name=compose_project,
+                # Recreate only the agent; recovering dependencies are left alone (#936).
+                await restart_runtime_for_monitor_resume(
+                    self._compose,
+                    compose_project=compose_project,
                     compose_file=compose_file,
                     workspace_id=workspace_id,
-                    wait=True,
-                    compose_up_timeout_seconds=compose_up_timeout_seconds,
-                    force_recreate=True,
+                    budget_seconds=compose_up_timeout_seconds,
                 )
             except CompanionEnvSecretPrecheckError as exc:
                 _log.error(
                     "executor.resume_companion_env_secret_precheck_failed",
                     workspace_id=workspace_id,
                     reason_code=exc.reason_code,
-                    stderr=exc.stderr[:1000],
+                    stderr=redact_audit_text(exc.stderr, limit=1000),
                 )
                 await self._record_monitor_runtime_restart_failed(
                     workspace_id=workspace_id,
@@ -406,13 +397,20 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     error=exc,
                     event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
                 )
+                await escalate_monitor_resume_restart_failure(
+                    self,
+                    workspace_id=workspace_id,
+                    monitor_owner_id=monitor_owner_id,
+                    compose_project=compose_project,
+                    error=exc,
+                )
                 return None
             except ComposeOperationError as exc:
                 _log.error(
                     "executor.resume_compose_up_failed",
                     workspace_id=workspace_id,
                     reason_code=exc.reason_code,
-                    stderr=exc.stderr[:1000],
+                    stderr=redact_audit_text(exc.stderr, limit=1000),
                 )
                 await self._record_monitor_runtime_restart_failed(
                     workspace_id=workspace_id,
@@ -431,6 +429,13 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                         compose_project_name=compose_project,
                         reason_code=exc.reason_code,
                     )
+                    await escalate_monitor_resume_restart_failure(
+                        self,
+                        workspace_id=workspace_id,
+                        monitor_owner_id=monitor_owner_id,
+                        compose_project=compose_project,
+                        error=exc,
+                    )
                     return None
                 _log.warning(
                     "executor.resume_compose_up_failed_runtime_still_usable",
@@ -438,6 +443,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     compose_project_name=compose_project,
                     reason_code=exc.reason_code,
                 )
+            await reset_monitor_resume_restart_streak(self, workspace_id=workspace_id)
             if not await replay_setup_on_monitor_resume(
                 self,
                 ws=ws,
@@ -810,40 +816,6 @@ def _compose_runtime_service_completed_successfully(service: RuntimeService) -> 
         return False
     status = (service.status or "").strip().lower()
     return re.match(r"^exited\s*\(\s*0\s*\)(?:\s|$)", status) is not None
-
-
-def _precheck_required_companion_env_secrets_for_resume(
-    *,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> None:
-    """Fail monitor resume early when a required env-backed companion secret is unavailable."""
-    failures: list[tuple[str, str]] = []
-    for spec in companion_specs:
-        for secret in spec.environment_secrets:
-            if not secret.required or secret.provider != "env" or secret.kind != "env":
-                continue
-            source_is_set = secret.value_from in environ
-            source_is_empty = source_is_set and environ[secret.value_from] == ""
-            if source_is_set and not source_is_empty:
-                continue
-            reason_code = (
-                COMPANION_ENV_SECRET_SOURCE_EMPTY
-                if source_is_empty
-                else COMPANION_ENV_SECRET_SOURCE_MISSING
-            )
-            failures.append(
-                (
-                    reason_code,
-                    f"{reason_code}: companion={spec.name}, target={secret.target}, "
-                    f"provider={secret.provider}, source={secret.value_from}",
-                )
-            )
-    if failures:
-        raise CompanionEnvSecretPrecheckError(
-            stderr="\n".join(stderr for _reason_code, stderr in failures),
-            reason_code=failures[0][0],
-        )
 
 
 async def _reject_unsupported_task_kind(

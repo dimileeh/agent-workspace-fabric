@@ -111,9 +111,11 @@ class _RecordingCompose:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         del project_name, compose_file, wait, compose_up_timeout_seconds
-        del force_recreate, services
+        del force_recreate, services, no_recreate, no_deps
         self.ensure_project_up_calls.append(workspace_id)
 
 
@@ -130,6 +132,8 @@ class _FailingCompose(_RecordingCompose):
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         await super().ensure_project_up(
             project_name=project_name,
@@ -268,7 +272,7 @@ class TestResumeHandoffHostedSeam:
         await executor_obj.resume_pr_monitor(ws_id)
 
         # Injection alone does not opt a workspace into hosted mode.
-        assert compose.ensure_project_up_calls == [ws_id]
+        assert compose.ensure_project_up_calls == [ws_id, ws_id]
         assert len(monitor.run_calls) == 1
         assert monitor.run_calls[0]["workspace_id"] == ws_id
 
@@ -332,8 +336,8 @@ class TestResumeHandoffHostedSeam:
 
         await executor_obj.resume_pr_monitor(ws_id)
 
-        # Local path still restarts compose exactly once.
-        assert compose.ensure_project_up_calls == [ws_id]
+        # Local path still restarts compose: dependencies, then the agent (#936).
+        assert compose.ensure_project_up_calls == [ws_id, ws_id]
         assert len(monitor.run_calls) == 1
 
 

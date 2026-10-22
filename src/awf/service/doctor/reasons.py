@@ -16,6 +16,9 @@ from awf.service.doctor.reasons_helpers import (
 from awf.service.doctor.reasons_helpers import (
     reason_catalog_link as _reason_catalog_link,
 )
+from awf.service.doctor.reasons_monitor_runtime_restart import (
+    get_monitor_runtime_restart_reasons,
+)
 from awf.service.doctor.reasons_runtime_setup_replay import get_runtime_setup_replay_reasons
 
 
@@ -1445,6 +1448,7 @@ _REASON_TEXT.update(get_comment_repair_reasons(_ReasonText))
 _REASON_TEXT.update(get_salvage_and_monitor_reasons(_ReasonText))
 _REASON_TEXT.update(get_claude_overlay_reasons(_ReasonText))
 _REASON_TEXT.update(get_runtime_setup_replay_reasons(_ReasonText))
+_REASON_TEXT.update(get_monitor_runtime_restart_reasons(_ReasonText))
 
 
 def _reason_text(

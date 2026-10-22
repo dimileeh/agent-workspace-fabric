@@ -12,7 +12,10 @@ from functools import partial
 from typing import Any, cast
 
 from awf.common.redaction import redact_secrets
-from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+from awf.control.executor.constants import (
+    MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE,
+    RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+)
 from awf.control.executor.monitor_handoff import MonitorResumePreStartError
 from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.constants import (
@@ -68,6 +71,7 @@ _MONITOR_RECOVERY_HANDOFF_FAILURE_REASON_CODES = frozenset(
         "UNSUPPORTED_TASK_KIND",
         "UNSUPPORTED_AGENT_RUNTIME",
         RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+        MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE,
     }
 )
 

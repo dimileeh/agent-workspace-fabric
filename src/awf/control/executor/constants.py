@@ -82,6 +82,35 @@ MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE = "monitor_runtime_setup_replay"
 
 RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE = "RUNTIME_IDENTITY_PROBE_TIMEOUT"
 
+# Monitor resume runtime restart (#936). A running dependency that is still
+# ``starting``/``unhealthy`` is waited on, never recreated; the wait is bounded by
+# the stack's startup budget.
+MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE = "MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT"
+
+MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE = "workspace.monitor_runtime_restart_failed"
+
+MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE = "workspace.monitor_runtime_restart_recovered"
+
+MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE = "workspace.monitor_runtime_restart_exhausted"
+
+MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE = "MONITOR_RUNTIME_RESTART_EXHAUSTED"
+
+# Consecutive failed monitor-resume runtime restarts before the workspace is parked
+# in ``blocked`` instead of being retried forever.
+MONITOR_RUNTIME_RESTART_FAILURE_LIMIT = 3
+
+# Monitor-origin (``monitor_`` prefix) resume phase, so ``guide`` resumes the park
+# back into the PR monitor.
+MONITOR_RUNTIME_RESTART_RESUME_PHASE = "monitor_runtime_restart"
+
+MONITOR_RUNTIME_RESTART_BLOCK_TYPE = "monitor_runtime_restart_failure"
+
+# Block reasons a monitor resume parks ``monitoring_pr -> blocked`` with; the worker
+# finalizes the recovery operation as failed with them rather than cancelled.
+MONITOR_RESUME_PARK_BLOCK_REASON_CODES = frozenset(
+    {RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE, MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE}
+)
+
 # Adopt-pr handoff skips the coding agent (PR_ADOPTION_SKIP_AGENT), so the
 # profile's ``setup`` phase is the only thing that provisions the workspace. If
 # a ``validate``-phase command's executable is still not on PATH after setup,

@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
+from awf.common.audit import redact_audit_text
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
+    MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
@@ -308,14 +310,14 @@ async def _record_monitor_runtime_restart_failed(
                 return
             await repo.add_event(
                 ws,
-                event_type="workspace.monitor_runtime_restart_failed",
+                event_type=MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
                 reason_code=event_reason_code,
                 payload={
                     "compose_project_name": compose_project,
                     "compose_file_path": compose_file_path,
                     "operation": error.operation,
                     "returncode": error.returncode,
-                    "stderr": error.stderr[:1000],
+                    "stderr": redact_audit_text(error.stderr, limit=1000),
                     "reason_code": error.reason_code,
                 },
             )

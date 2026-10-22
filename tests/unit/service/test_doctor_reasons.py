@@ -258,3 +258,25 @@ def test_runtime_setup_replay_failed_has_doctor_guidance() -> None:
     assert reason.likely_cause
     assert reason.related_command == "awf workspace logs <workspace_id>"
     assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("code", "action_terms"),
+    [
+        ("MONITOR_RUNTIME_RESTART_EXHAUSTED", ("blocked", "guide")),
+        ("MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT", ("docker.startup_timeout_seconds",)),
+    ],
+)
+def test_monitor_runtime_restart_reasons_have_doctor_guidance(
+    code: str, action_terms: tuple[str, ...]
+) -> None:
+    """Verify the monitor-resume restart reason codes (#936) map to operator guidance."""
+    reason = _REASON_TEXT[code]
+
+    assert reason.message
+    assert reason.likely_cause
+    for term in action_terms:
+        assert term in reason.action
+    assert reason.related_command == "awf workspace logs <workspace_id>"
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"

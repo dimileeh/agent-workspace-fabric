@@ -15,9 +15,12 @@ from yaml.nodes import MappingNode, ScalarNode
 
 from awf.common.logging import get_logger
 from awf.node.companion_services import (
+    COMPANION_ENV_SECRET_SOURCE_EMPTY,
+    COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     optional_env_secret_compose_placeholder,
 )
+from awf.node.compose_manager import ComposeOperationError
 
 # Own module logger so these moved helpers log under their actual module name
 # (per the get_logger(__name__) convention) rather than inheriting the
@@ -352,3 +355,53 @@ def _present_optional_companion_env_secret_refs(
                 optional_env_secret_compose_placeholder(secret.value_from)
             )
     return present_refs
+
+
+class CompanionEnvSecretPrecheckError(ComposeOperationError):
+    """Raised when monitor resume cannot satisfy required companion env secrets."""
+
+    def __init__(self, *, stderr: str, reason_code: str) -> None:
+        self.operation = "companion_env_secret_precheck"
+        self.returncode = 1
+        self.stdout = ""
+        self.stderr = stderr
+        self.reason_code = reason_code
+        Exception.__init__(
+            self,
+            "companion env secret precheck failed "
+            f"(reason={reason_code}): {stderr.strip() or '<no output>'}",
+        )
+
+
+def _precheck_required_companion_env_secrets_for_resume(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> None:
+    """Fail monitor resume early when a required env-backed companion secret is unavailable."""
+    failures: list[tuple[str, str]] = []
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if not secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            source_is_set = secret.value_from in environ
+            source_is_empty = source_is_set and environ[secret.value_from] == ""
+            if source_is_set and not source_is_empty:
+                continue
+            reason_code = (
+                COMPANION_ENV_SECRET_SOURCE_EMPTY
+                if source_is_empty
+                else COMPANION_ENV_SECRET_SOURCE_MISSING
+            )
+            failures.append(
+                (
+                    reason_code,
+                    f"{reason_code}: companion={spec.name}, target={secret.target}, "
+                    f"provider={secret.provider}, source={secret.value_from}",
+                )
+            )
+    if failures:
+        raise CompanionEnvSecretPrecheckError(
+            stderr="\n".join(stderr for _reason_code, stderr in failures),
+            reason_code=failures[0][0],
+        )

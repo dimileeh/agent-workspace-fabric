@@ -648,6 +648,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
 
+### MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT
+**Problem:** A PR monitor resume waited for a running dependency service to become healthy and the stack's startup budget ran out.
+**Likely Cause:** Monitor resume never restarts a dependency that is still starting or unhealthy; it waits for it instead. The dependency stayed unsettled for longer than docker.startup_timeout_seconds (or a companion's larger compose_up_timeout_seconds).
+**Operator Fix:** Check the named dependency's logs (for example Postgres crash recovery after an unclean stop). If its recovery legitimately takes longer, raise docker.startup_timeout_seconds in the workspace profile. AWF retries the resume and parks the workspace in blocked after repeated failures.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_resume_dependency_wait_timeout](#monitor_resume_dependency_wait_timeout)
+
+### MONITOR_RUNTIME_RESTART_EXHAUSTED
+**Problem:** AWF could not bring the workspace runtime back after several consecutive PR monitor resumes, so it stopped retrying and parked the workspace in blocked with its PR, worktree and stack preserved.
+**Likely Cause:** Every monitor resume (restart recovery, remonitor or guide) restarts the agent container and brings dependencies up. That restart failed on several resumes in a row, and retrying it forever would hide the problem.
+**Operator Fix:** Read the last compose error and the failure count in the workspace.monitor_runtime_restart_exhausted event or workspace logs, and fix the stack (for example a dependency that cannot finish its recovery, a missing companion secret or a full disk). Then run guide on the blocked workspace to resume monitoring; the resume gets a fresh set of attempts.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_runtime_restart_exhausted](#monitor_runtime_restart_exhausted)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.

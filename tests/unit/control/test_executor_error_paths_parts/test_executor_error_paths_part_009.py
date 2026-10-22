@@ -49,6 +49,8 @@ class TestExecutorCoverageEdgesPart003:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 captured.update(
                     {

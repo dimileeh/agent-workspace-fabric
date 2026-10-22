@@ -158,8 +158,11 @@ async def test_restart_recovery_replays_setup_before_monitor_validation(
 
     await executor.resume_pr_monitor(ws_id)
 
-    # Recreate flags are unchanged; the replay happens because identity changed.
-    assert [call["force_recreate"] for call in compose.calls] == [True]
+    # Only the agent is recreated (#936); the replay happens because identity changed.
+    assert [
+        (call.get("no_recreate", False), call.get("force_recreate", False), call.get("services"))
+        for call in compose.calls
+    ] == [(True, False, None), (False, True, ("agent",))]
     assert validation.trace == [
         "phases:setup,pre_agent",
         "monitor.run",
@@ -209,7 +212,7 @@ async def test_resume_restart_and_replay_wait_for_worktree_writer_lock(
     release.set()
     await holder
     await resume
-    assert len(compose.calls) == 1
+    assert len(compose.calls) == 2  # dependencies, then the agent (#936)
     assert validation.setup_runs() == 1
 
 
@@ -312,7 +315,7 @@ async def test_unchanged_identity_does_not_replay_setup(
 
     await executor.resume_pr_monitor(ws_id)
 
-    assert len(compose.calls) == 1
+    assert len(compose.calls) == 2  # dependencies, then the agent (#936)
     assert validation.setup_runs() == 0
     assert validation.probe_calls == 0
     assert monitor.validate_returncodes == [0]
@@ -398,7 +401,7 @@ async def test_failed_replay_parks_monitor_blocked_and_preserves_worktree(
     handoff = await executor.resume_pr_monitor_handoff(ws_id)
 
     assert handoff is None
-    assert len(compose.calls) == 1
+    assert len(compose.calls) == 2  # dependencies, then the agent (#936)
     assert validation.setup_runs() == 1
     assert monitor.validate_returncodes == []
     event = await _assert_parked_blocked(factory, ws_id)
