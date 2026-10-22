@@ -166,13 +166,18 @@ class ProtectedResolver:
             self._closed = True
 
             async def dispose() -> None:
-                self._receiver.closed = True
-                self._receiver.store.close()
-                await self._engine.dispose()
+                try:
+                    async with self._resolve_gate:
+                        self._receiver.closed = True
+                        self._receiver.store.close()
+                        await self._engine.dispose()
+                finally:
+                    # The bridge owns shutdown even if close() times out while
+                    # waiting for resolution cancellation or disposal to finish.
+                    self._loop.call_soon(self._loop.stop)
 
             future = asyncio.run_coroutine_threadsafe(dispose(), self._loop)
             try:
                 future.result(self.timeout)
             finally:
-                self._loop.call_soon_threadsafe(self._loop.stop)
                 self._thread.join(self.timeout)

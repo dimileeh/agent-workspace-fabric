@@ -414,3 +414,65 @@ async def test_resolver_rechecks_grant_after_selecting_mount(hosted, monkeypatch
     with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         await resolver._resolve(profile, "ws")
     assert changed
+
+
+@pytest.mark.parametrize("dispose_fails", [False, True])
+def test_close_waits_for_cancelled_resolution_cleanup(monkeypatch, dispose_fails):
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from awf.hosted_node import resolver as module
+
+    finished = threading.Event()
+
+    async def dispose():
+        assert finished.is_set()
+        if dispose_fails:
+            raise OSError("disposal failed")
+
+    engine = SimpleNamespace(dispose=AsyncMock(side_effect=dispose))
+    receiver = SimpleNamespace(store=SimpleNamespace(close=Mock()), closed=False)
+    monkeypatch.setattr(module, "make_engine", lambda _url: engine)
+    monkeypatch.setattr(module, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(module, "MaterialStore", lambda _root: receiver.store)
+    monkeypatch.setattr(module, "Receiver", lambda *_args: receiver)
+    resolver = ProtectedResolver(
+        "unused", SimpleNamespace(material_root=None), object(), {}, timeout=0.1
+    )
+    cancelling = threading.Event()
+    release = asyncio.Event()
+
+    async def resolve_with_cleanup(*args):
+        try:
+            await asyncio.Future()
+        finally:
+            cancelling.set()
+            await release.wait()
+            finished.set()
+
+    monkeypatch.setattr(resolver, "_resolve", resolve_with_cleanup)
+    try:
+        with pytest.raises(MaterialDeniedError, match="^RESOLVER_UNAVAILABLE$"):
+            resolver.resolve(WorkspaceProfile(name="test"), workspace_id="ws")
+        assert cancelling.wait(5)
+        with pytest.raises(TimeoutError):
+            resolver.close()
+        assert resolver._thread.is_alive()
+        assert not resolver._loop.is_closed()
+        assert not receiver.closed
+        receiver.store.close.assert_not_called()
+        engine.dispose.assert_not_awaited()
+        with pytest.raises(MaterialDeniedError, match="^RESOLVER_CLOSED$"):
+            resolver.resolve(WorkspaceProfile(name="test"), workspace_id="ws")
+    finally:
+        if not resolver._loop.is_closed():
+            resolver._loop.call_soon_threadsafe(release.set)
+        resolver._thread.join(5)
+    assert finished.is_set()
+    assert receiver.closed
+    receiver.store.close.assert_called_once()
+    engine.dispose.assert_awaited_once()
+    assert not resolver._thread.is_alive()
+    assert resolver._loop.is_closed()
+    resolver.close()
