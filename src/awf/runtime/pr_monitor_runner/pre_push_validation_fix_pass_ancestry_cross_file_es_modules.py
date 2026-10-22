@@ -1001,20 +1001,46 @@ def _es_definition_heads(tokens: tuple[_EsToken, ...], name: str) -> list[_EsTok
     ``class``, ``const``, ...) or heads a parameter list (a method, accessor
     or signature). The callee's file must hold exactly one at depth 0, the
     only head inside the line-based span, for that span to be the definition
-    importers reach.
+    importers reach. A function expression initializing a declaration of the
+    same name (``const record = function record() {}``) only binds that name
+    inside itself, so it is the declaration's head, not a second one.
     """
     heads: list[_EsToken] = []
+    declared: int | None = None
     for index, token in enumerate(tokens):
         if not _is(token, "ident", name) or _is_reference_position(tokens, index):
             continue
-        before = _token_at(tokens, index - 1)
-        if _is(before, "punct", "*") and _is(_token_at(tokens, index - 2), "ident", "function"):
-            before = _token_at(tokens, index - 2)
-        if _ident_value(before) == "function" and _es_overload_signature(tokens, index):
+        keyword = index - 1
+        if _is(tokens[keyword], "punct", "*") and _is(
+            _token_at(tokens, index - 2), "ident", "function"
+        ):
+            keyword = index - 2
+        before = _token_at(tokens, keyword)
+        if _ident_value(before) == "function" and (
+            _es_overload_signature(tokens, index)
+            or (declared is not None and _es_initializes(tokens, declared, keyword))
+        ):
             continue
         if _ident_value(before) in _DECLARING_KEYWORDS or _es_signature_head(tokens, index):
             heads.append(token)
+            declared = index if _ident_value(before) in _VARIABLE_KEYWORDS else None
     return heads
+
+
+def _es_initializes(tokens: tuple[_EsToken, ...], declared: int, function: int) -> bool:
+    """True when the ``function`` at ``function`` is the initializer of the variable at ``declared``.
+
+    The declaration's first ``=`` at its own depth must directly precede the
+    ``function`` keyword (or its ``async``). A ``=`` inside a type annotation
+    comes first and fails closed, as does a later declarator
+    (``const record = 1, other = function record() {}``).
+    """
+    depth = tokens[declared].depth
+    assign = function - (2 if _is(_token_at(tokens, function - 1), "ident", "async") else 1)
+    for index in range(declared + 1, function):
+        if tokens[index].depth == depth and _is(tokens[index], "punct", "="):
+            return index == assign
+    return False
 
 
 def _es_overload_signature(tokens: tuple[_EsToken, ...], index: int) -> bool:

@@ -238,6 +238,10 @@ async def test_only_a_direct_call_of_the_same_pair_lifts_a_chained_one(call: str
         "export const record: Recorder = (value) => {\n  return value + 1;\n};\n",
         "export const record: Recorder<number> = async (value) => {\n  return value + 1;\n};\n",
         "export let record: Recorder = function (value) {\n  return value + 1;\n};\n",
+        # A function expression's own name binds only inside it, so it is no
+        # second module-level head (PRRT_kwDOSJAM6s6vO2Gy).
+        "export const record = function record(value: number) {\n  return value + 1;\n};\n",
+        "export const record = async function* record(value: number) {\n  return value + 1;\n};\n",
     ],
 )
 async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> None:

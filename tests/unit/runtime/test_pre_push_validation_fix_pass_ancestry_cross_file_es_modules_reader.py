@@ -822,6 +822,27 @@ def test_definition_heads_cover_declarations_and_signatures_at_any_depth() -> No
 
 
 @pytest.mark.unit
+def test_definition_heads_fold_a_self_named_function_initializer_into_its_declaration() -> None:
+    """``const record = function record() {}`` is one head (PRRT_kwDOSJAM6s6vO2Gy)."""
+    text = (
+        "export const record = function record(v) {};\n"
+        "let record: Recorder = async function record(v) {};\n"
+        "var record = 1, other = function record() {};\n"
+        "let record: Map<K = number> = function record() {};\n"
+        "let record;\n"
+        "function record() {}\n"
+        "class record {}\n"
+        "function record() {}\n"
+    )
+    heads = es._es_definition_heads(_tokens(text), "record")
+
+    # A later declarator (line 3), a ``=`` in the type (line 4), a function
+    # declaration after an uninitialized one (line 6) and one after a
+    # non-variable head (line 8) each keep their own head.
+    assert [token.line for token in heads] == [1, 2, 3, 3, 4, 4, 5, 6, 7, 8]
+
+
+@pytest.mark.unit
 def test_definition_heads_skip_body_less_function_overload_signatures() -> None:
     text = (
         "export function record(v: string): void;\n"
