@@ -807,6 +807,34 @@ async def test_guide_retry_after_exhaustion_recreates_the_dependencies_left_unse
 
 
 @pytest.mark.unit
+async def test_unrecorded_recovery_after_the_park_stops_recreating_dependencies(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A usable first resume closes the park even when its ``recovered`` write fails."""
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    compose.fail = False
+    executor = _executor(fake, factory, tmp_path, compose)
+    _dependency_health(monkeypatch, {"postgres": "unhealthy"})
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    await _guide(factory, ws_id)
+    _fail_the_next_streak_count(monkeypatch)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE) == []
+
+    compose.calls.clear()
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
+
+
+@pytest.mark.unit
 async def test_guide_retry_after_a_non_timeout_exhaustion_recreates_only_the_agent(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

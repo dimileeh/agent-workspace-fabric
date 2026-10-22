@@ -176,11 +176,13 @@ async def dependencies_to_recreate_after_exhaustion(
 
     Only the first resume after ``exhausted`` gets them: the dependencies still
     ``starting``/``unhealthy`` at the last dependency-wait timeout of the parked
-    streak, which waiting on again would only time out once more.
+    streak, which waiting on again would only time out once more. A usable
+    resume whose ``recovered`` write failed closes the park all the same.
     """
+    since = _unpersisted_recoveries(self).get(workspace_id)
     try:
         async with self._session_factory() as session:
-            events = await _newest_streak_events(session, workspace_id)
+            events = await _newest_streak_events(session, workspace_id, since)
     except SQLAlchemyError:
         _log.exception(
             "executor.resume_exhausted_dependencies_lookup_failed",
