@@ -114,11 +114,15 @@ _CALLEE_KEYWORD_BLOCKLIST = frozenset(
 # ``export const helper = () =>`` is a head too (PRRT_kwDOSJAM6s6vLkoD).
 # Optional TS generic type parameters (one nesting level) before the arrow
 # params so ``const helper = <T>(value: T) =>`` / ``async <T,>(...)`` are heads
-# too (PRRT_kwDOSJAM6s6vL9AV).
+# too (PRRT_kwDOSJAM6s6vL9AV). An optional variable type annotation, as the
+# plain-assignment matcher accepts, so ``export const record: Recorder = (value) =>``
+# is a head too (PRRT_kwDOSJAM6s6vMwSF); block-label colons such as ``else:`` /
+# ``default:`` are not annotations.
 _TS_ARROW_RETURN_TYPE = r"(?::(?![ \t]*=>)[^;=\n]*?)?"
 _TS_ARROW_TYPE_PARAMS = r"(?:<[^<>;\n]*(?:<[^<>;\n]*>[^<>;\n]*)*>[ \t]*)?"
 _ASSIGNMENT_DEFINITION_HEAD = (
-    rf"(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?({_JS_IDENT})[ \t]*="
+    rf"(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?"
+    rf"(?!(?:else|try|finally|default)[ \t]*:)({_JS_IDENT})(?:[ \t]*:[^=\n]*)?[ \t]*="
     rf"[ \t]*(?:async[ \t]+)?{_TS_ARROW_TYPE_PARAMS}(?:(?:\([^)]*\)|{_JS_IDENT})[ \t]*"
     rf"{_TS_ARROW_RETURN_TYPE}[ \t]*=>|function\b|lambda\b)"
 )

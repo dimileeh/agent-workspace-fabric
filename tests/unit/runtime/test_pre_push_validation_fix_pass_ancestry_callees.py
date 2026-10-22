@@ -451,6 +451,12 @@ def test_diff_text_changes_definition_names_detects_def_forms() -> None:
         "@@ -1,1 +1,1 @@\n-export abstract class Helper {\n+export abstract class Helper {\n"
     )
     assert callees._diff_text_changes_definition_names(export_class, frozenset({"Helper"})) is True
+    # A variable type annotation may precede the initializer (PRRT_kwDOSJAM6s6vMwSF);
+    # a block-label colon is not an annotation.
+    annotated = "@@ -1,1 +1,1 @@\n-const helper: Fn = () => {\n+const helper: Fn = () => {\n"
+    assert callees._diff_text_changes_definition_names(annotated, frozenset({"helper"})) is True
+    label = "@@ -1,1 +1,1 @@\n-else: helper = lambda: 1\n+else: helper = lambda: 2\n"
+    assert callees._diff_text_changes_definition_names(label, frozenset({"else"})) is False
 
 
 @pytest.mark.unit

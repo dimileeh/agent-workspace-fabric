@@ -190,6 +190,11 @@ async def test_a_fix_in_the_bound_module_is_evidence(import_line: str, call: str
         "export const record = async <T,>(value: T) => {\n  return value;\n};\n",
         "export const record = <K extends keyof Row, V = Row[K]>(value: V): V => {\n"
         "  return value;\n};\n",
+        # A variable type annotation may precede the callable initializer
+        # (PRRT_kwDOSJAM6s6vMwSF).
+        "export const record: Recorder = (value) => {\n  return value + 1;\n};\n",
+        "export const record: Recorder<number> = async (value) => {\n  return value + 1;\n};\n",
+        "export let record: Recorder = function (value) {\n  return value + 1;\n};\n",
     ],
 )
 async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> None:
