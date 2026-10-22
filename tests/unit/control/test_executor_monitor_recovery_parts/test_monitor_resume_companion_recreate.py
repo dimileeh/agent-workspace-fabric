@@ -532,3 +532,57 @@ def test_pending_companion_recreates_tolerate_an_unreadable_or_stuck_marker(
         workspace_id="ws", compose_file=compose_file
     )
     assert marker.is_dir()
+
+
+class _AgentRecreateFailsOnce(_RecordingCompose):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def ensure_project_up(self, **kwargs: Any) -> None:
+        await super().ensure_project_up(**kwargs)
+        if kwargs.get("services") == ("agent",) and not self.failed:
+            self.failed = True
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr="agent recreate failed",
+                reason_code="COMPOSE_UP_FAILED",
+            )
+
+
+@pytest.mark.unit
+async def test_resume_clears_the_pending_recreate_once_companions_were_recreated(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(_COMPOSE, encoding="utf-8")
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    marker = monitor_handoff._companion_env._pending_companion_recreates_path(compose_file)
+    marker.write_text("backend\n", encoding="utf-8")
+    compose = _AgentRecreateFailsOnce()
+
+    def _executor() -> Any:
+        return _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=compose,
+            pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+        )
+
+    # ``backend`` is recreated, then the agent recreate fails the restart.
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
+    assert not marker.exists()
+
+    # The retry recreates only the agent: the recovered ``backend`` is left alone (#936).
+    compose.calls.clear()
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("agent",)]

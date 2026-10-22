@@ -100,10 +100,11 @@ async def _restart_compose_runtime_for_monitor_resume(
             recreate_services=tuple(
                 sorted(set(rewritten_services) | secret_companions | set(unsettled_services))
             ),
-        )
-        # The companion recreate runs first and raises on failure, so it succeeded.
-        _monitor_handoff._clear_pending_companion_recreates_for_resume(
-            workspace_id=workspace_id, compose_file=compose_file
+            # Cleared once the companions are recreated, so a later failure never
+            # makes the next resume recreate them again mid-recovery (#936).
+            on_recreated=lambda: _monitor_handoff._clear_pending_companion_recreates_for_resume(
+                workspace_id=workspace_id, compose_file=compose_file
+            ),
         )
         if tolerated_error is not None:
             await self._record_monitor_runtime_restart_failed(
