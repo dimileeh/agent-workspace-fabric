@@ -50,7 +50,6 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     ReviewThreadComment,
     WaitForCI,
-    _mark_review_thread_addressed,
     _review_thread_body_hash,
     decide,
 )
@@ -67,6 +66,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 from tests.unit.runtime.test_pr_monitor_outdated_resolution_parts._helpers import (
     _call_resolve,
+    _mark_addressed_with_disposition,
     _outdated_thread,
     _RecordingGitHub,
     _resolution_events,
@@ -95,7 +95,7 @@ async def test_outdated_addressed_thread_is_resolved(
     )
     state = MonitorState()
     thread = _outdated_thread("T_outdated")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -134,7 +134,7 @@ async def test_successful_resolve_clears_prior_transient_requeue_flag(
     )
     state = MonitorState()
     thread = _outdated_thread("T_outdated")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
     # Simulate a requeue flag left by a prior poll's transient fault.
     state.threads_addressed_ids[_outdated_resolve_requeued_key("T_outdated")] = "requeued"
 
@@ -169,7 +169,7 @@ async def test_false_positive_outdated_thread_is_resolved(
     )
     state = MonitorState()
     thread = _outdated_thread("T_fp")
-    _mark_review_thread_addressed(state, thread, "false_positive")
+    _mark_addressed_with_disposition(state, thread, "false_positive")
 
     await _call_resolve(
         runner,
@@ -286,7 +286,7 @@ async def test_durably_captured_defer_outdated_thread_is_resolved(
     )
     state = MonitorState()
     thread = _outdated_thread("T_defer_captured")
-    _mark_review_thread_addressed(state, thread, "defer")
+    _mark_addressed_with_disposition(state, thread, "defer")
     marker = _deferred_issue_filed_marker(
         thread.thread_id,
         _review_thread_body_hash(thread),
@@ -335,7 +335,7 @@ async def test_successful_outdated_resolve_under_blocked_defers_stale_merge_stat
     )
     state = MonitorState()
     thread = _outdated_thread("T_blocked_resolve")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     status = replace(
         _status_with_outdated(thread),
@@ -384,7 +384,7 @@ async def test_duplicate_outdated_captured_defer_resolves_once(
     # Identical second transport node for the same conversation (same body hash
     # so the captured-defer predicate passes for every copy).
     second = _outdated_thread("T_defer_dup")
-    _mark_review_thread_addressed(state, first, "defer")
+    _mark_addressed_with_disposition(state, first, "defer")
     marker = _deferred_issue_filed_marker(
         first.thread_id,
         _review_thread_body_hash(first),
@@ -430,7 +430,7 @@ async def test_duplicate_outdated_refuses_resolve_when_any_copy_needs_attention(
     )
     state = MonitorState()
     stale = _outdated_thread("T_dup_fresh", body_excerpt="addressed body")
-    _mark_review_thread_addressed(state, stale, "fix_committed")
+    _mark_addressed_with_disposition(state, stale, "fix_committed")
     fresher = ReviewThread(
         thread_id="T_dup_fresh",
         path="src/anchor.py",
@@ -511,7 +511,7 @@ async def test_duplicate_outdated_resolves_when_freshest_copy_is_settled(
             ),
         ),
     )
-    _mark_review_thread_addressed(state, fresher, "fix_committed")
+    _mark_addressed_with_disposition(state, fresher, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -576,7 +576,7 @@ async def test_outdated_thread_with_fresh_reply_is_not_resolved(
     )
     state = MonitorState()
     addressed = _outdated_thread("T_reply")
-    _mark_review_thread_addressed(state, addressed, "fix_committed")
+    _mark_addressed_with_disposition(state, addressed, "fix_committed")
     # A new reviewer reply lands on the now-outdated thread: same id + verdict,
     # but a changed body, so the recorded body hash no longer matches.
     with_reply = _outdated_thread("T_reply", body_excerpt="actually this is still broken")
@@ -617,7 +617,7 @@ async def test_outdated_resolve_skips_ids_still_active(
     )
     state = MonitorState()
     stale_outdated = _outdated_thread("T_dup", body_excerpt="addressed body")
-    _mark_review_thread_addressed(state, stale_outdated, "fix_committed")
+    _mark_addressed_with_disposition(state, stale_outdated, "fix_committed")
     active = ReviewThread(
         thread_id="T_dup",
         path="src/anchor.py",
@@ -680,7 +680,7 @@ async def test_dual_feed_clears_persisted_outdated_resolve_requeue(
     state = MonitorState()
     tid = "T_dual_requeue"
     outdated = _outdated_thread(tid, body_excerpt="addressed body")
-    _mark_review_thread_addressed(state, outdated, "fix_committed")
+    _mark_addressed_with_disposition(state, outdated, "fix_committed")
     state.threads_addressed_ids[_outdated_resolve_requeued_key(tid)] = "requeued"
     active = ReviewThread(
         thread_id=tid,
@@ -749,7 +749,7 @@ async def test_bitbucket_outdated_thread_resolves_via_resolve_thread(
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:100"
     thread = _outdated_thread(bb_id)
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -788,7 +788,7 @@ async def test_transient_resolve_error_is_requeued_not_failed(
     )
     state = MonitorState()
     thread = _outdated_thread("T_transient")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -840,7 +840,7 @@ async def test_transient_resolve_without_wait_still_sets_requeue(
     )
     state = MonitorState()
     thread = _outdated_thread("T_no_wait")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -894,7 +894,7 @@ async def test_bitbucket_transient_resolve_without_wait_still_sets_requeue(
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:101"
     thread = _outdated_thread(bb_id)
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -942,7 +942,7 @@ async def test_unknown_forge_error_without_wait_downgrades_to_needs_human(
     )
     state = MonitorState()
     thread = _outdated_thread("T_unknown_forge")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -993,7 +993,7 @@ async def test_transient_resolve_error_blocks_merge_same_iteration(
     )
     state = MonitorState()
     thread = _outdated_thread("T_transient")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
     status = _status_with_outdated(thread)
 
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
@@ -1035,7 +1035,7 @@ async def test_permanent_resolve_error_downgrades_to_needs_human(
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:100"
     thread = _outdated_thread(bb_id)
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
     # A prior poll's transient fault left a requeue flag; the permanent downgrade
     # must clear it (``needs_human`` blocks on its own — leaving the flag would be
     # redundant stale state).
@@ -1094,7 +1094,7 @@ async def test_permanent_resolve_error_is_not_retried_next_poll(
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:100"
     thread = _outdated_thread(bb_id)
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
     status = _status_with_outdated(thread)
 
     # First poll: permanent fault, one attempt, downgrade to needs_human.
@@ -1139,7 +1139,7 @@ async def test_permanent_resolve_downgrade_survives_state_reload(
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:100"
     thread = _outdated_thread(bb_id)
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
     status = _status_with_outdated(thread)
 
     # First poll: permanent fault, one attempt, downgrade to needs_human (persisted).
