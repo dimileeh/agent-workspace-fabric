@@ -395,8 +395,9 @@ def acknowledge_unverified_threads(
 
     ``thread_ids`` are the guide's explicit ``ACK-THREAD`` tokens
     (:func:`acknowledged_thread_ids`). Only threads the disposition gate flagged
-    can be acknowledged; acknowledging any other thread records nothing. The gate posts the acknowledgement
-    reply (with its marker) into each thread on its next run.
+    can be acknowledged; acknowledging any other thread records nothing. The gate
+    posts the acknowledgement reply (with its marker) into each thread on its next
+    run.
     """
     reason = "An AWF operator guide acknowledged this resolution" + (
         f" (operation {operation_id})" if operation_id else ""
