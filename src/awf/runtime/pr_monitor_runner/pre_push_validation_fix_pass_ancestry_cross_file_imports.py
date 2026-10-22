@@ -649,7 +649,9 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
     ``else`` holds the anchor drops its body, and a ``try`` keeps only the
     ``except`` handler holding the anchor — its body may have run part way
     first, so it is kept — unless the anchor is in ``finally``, which may
-    follow any of them. A ``case`` below the anchor is dropped; an earlier one
+    follow any of them. ``except*`` handlers are not exclusive: one exception
+    group may run each in turn, so every one up to the anchor is kept
+    (PRRT_kwDOSJAM6s6vQAB7). A ``case`` below the anchor is dropped; an earlier one
     keeps only its pattern and guard, which a failed match may still have
     bound, and the one holding the anchor has its body cut the same way.
 
@@ -683,7 +685,11 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
         in_finally = _arm_holds_line(trimmed.finalbody, line)
         handlers = []
         for handler in trimmed.handlers:
-            if in_finally or handler.lineno <= line <= (handler.end_lineno or handler.lineno):
+            if handler.lineno <= line and (
+                in_finally
+                or isinstance(trimmed, ast.TryStar)
+                or line <= (handler.end_lineno or handler.lineno)
+            ):
                 handler = copy.copy(handler)
                 if _header_holds_line(handler, line):
                     handler.name = None

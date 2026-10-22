@@ -962,6 +962,32 @@ def test_only_the_compound_arm_holding_the_anchor_is_followed() -> None:
 
 
 @pytest.mark.unit
+def test_an_earlier_except_star_handler_may_run_before_the_anchored_one() -> None:
+    """``except*`` handlers are not mutually exclusive.
+
+    One exception group may hold both a ``ValueError`` and a ``TypeError``, so
+    ``except* ValueError: validate = local`` can run before a later ``except*
+    TypeError: result = validate()``, which then calls ``local``
+    (PRRT_kwDOSJAM6s6vQAB7). A handler below the anchor has still not run.
+    """
+    later_star_handler = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except* ValueError:\n"
+        "        validate = local\n"
+        "    except* TypeError:\n"
+        "        result = validate()\n"
+        "    except* KeyError:\n"
+        "        after = 1\n"
+    )
+
+    assert cross_file._locally_rebound_names_at_line(
+        later_star_handler, 7, path=_CALLER
+    ) == frozenset({"before", "validate", "result"})
+
+
+@pytest.mark.unit
 def test_a_compound_header_target_binds_only_after_its_expression_runs() -> None:
     """A ``with`` / ``for`` / ``except`` target is bound after its header's expression.
 
