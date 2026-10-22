@@ -366,6 +366,38 @@ def _missing_optional_companion_env_secret_targets(
     return missing_targets
 
 
+def _companions_with_stale_optional_env_secret_targets_for_resume(
+    *,
+    compose_file: Path,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Return companions whose compose.yml still carries an unset optional target.
+
+    The refresh omits these targets; when it could not persist that, only a
+    recreate resolves ``${SOURCE:-}`` empty and drops the revoked value. An
+    already-omitted target is the steady state and needs no recreate.
+    """
+    missing_targets = _missing_optional_companion_env_secret_targets(
+        companion_specs=companion_specs,
+        environ=environ,
+    )
+    if not missing_targets:
+        return ()
+    try:
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return ()
+    # The payload is a throwaway copy; removal counts which targets remain.
+    return tuple(
+        sorted(
+            name
+            for name, targets in missing_targets.items()
+            if _remove_compose_environment_targets(payload, {name: targets})
+        )
+    )
+
+
 def _present_optional_companion_env_secret_refs(
     *,
     companion_specs: tuple[WorkspaceCompanionSpec, ...],

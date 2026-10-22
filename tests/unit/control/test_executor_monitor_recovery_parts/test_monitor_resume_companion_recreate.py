@@ -352,3 +352,76 @@ async def test_resume_recreates_companions_with_a_removed_optional_source_when_r
     assert "${OPTIONAL_TOKEN_SOURCE:-}" in compose_file.read_text(encoding="utf-8")
     recreate = [call for call in compose.calls if call.get("force_recreate")]
     assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
+
+
+@pytest.mark.unit
+async def test_resume_leaves_companions_alone_when_an_unset_optional_source_is_already_omitted(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        _COMPOSE.replace(
+            '    environment:\n      OPTIONAL_TOKEN: "${OPTIONAL_TOKEN_SOURCE:-}"\n', ""
+        ),
+        encoding="utf-8",
+    )
+    ws_id = await _seed_monitoring_pr(
+        factory,
+        compose_file_path=str(compose_file),
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.delenv("OPTIONAL_TOKEN_SOURCE", raising=False)
+    compose = _RecordingCompose()
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    # An unused optional secret is the steady state: nothing in compose.yml to clear.
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("agent",)]
+
+
+@pytest.mark.unit
+def test_companions_still_carrying_an_unset_optional_target_are_reported(
+    tmp_path: Path,
+) -> None:
+    def _stale(compose_file: Path, environ: dict[str, str]) -> tuple[str, ...]:
+        return monitor_handoff._companions_with_stale_optional_env_secret_targets_for_resume(
+            compose_file=compose_file,
+            companion_specs=_specs(),
+            environ=environ,
+        )
+
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(_COMPOSE, encoding="utf-8")
+    # ``backend`` still carries ``${OPTIONAL_TOKEN_SOURCE:-}``; ``worker`` never had it.
+    assert _stale(compose_file, {}) == ("backend",)
+    assert _stale(compose_file, {"OPTIONAL_TOKEN_SOURCE": "x"}) == ()
+    assert _stale(tmp_path / "missing.yml", {}) == ()
+    unparsable = tmp_path / "unparsable.yml"
+    unparsable.write_text("services: [\n", encoding="utf-8")
+    assert _stale(unparsable, {}) == ()
