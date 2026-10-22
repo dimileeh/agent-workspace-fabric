@@ -573,7 +573,7 @@ def test_a_class_body_binding_shadows_for_a_call_in_the_class_body() -> None:
     )
 
     assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset(
-        {"validate", "result", "refresh"}
+        {"validate", "result"}
     )
     assert cross_file._locally_rebound_names_at_line(text, 6, path=_CALLER) == frozenset({"self"})
 

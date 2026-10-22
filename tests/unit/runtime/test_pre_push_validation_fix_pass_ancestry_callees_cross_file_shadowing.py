@@ -725,3 +725,85 @@ def test_delete_targets_of_the_anchored_scope_are_read() -> None:
     assert cross_file._locally_rebound_names_at_line(text, 6, path=_CALLER) == frozenset(
         {"pool", "record"}
     )
+
+
+# --- class bodies execute top to bottom (issue #1045 item 2) ------------------
+
+# The class body calls the imported name on line 5 and only rebinds it on line
+# 6, so the call reaches the import: the class namespace does not hold the name
+# yet when line 5 runs.
+_CLASS_BODY_CALL_BEFORE_BINDING_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "class Pools:\n"
+    "    depth = record_ready_queue_depth(1)\n"
+    "    record_ready_queue_depth = staticmethod(len)\n"
+)
+
+# The mirror: the class body binds the name on line 5, so the call on line 6
+# reaches the class attribute, not the import.
+_CLASS_BODY_CALL_AFTER_BINDING_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "class Pools:\n"
+    "    record_ready_queue_depth = staticmethod(len)\n"
+    "    depth = record_ready_queue_depth(1)\n"
+)
+
+
+@pytest.mark.unit
+def test_a_class_body_binding_after_the_anchor_does_not_shadow() -> None:
+    """A class body runs top to bottom, so a later binding cannot reach an earlier call.
+
+    ``class C: result = validate(); validate = local`` calls the imported
+    ``validate``: the class namespace only gains the name on the line after the
+    call. Reading the whole body regardless of position rejected a correct fix
+    to the imported definition (issue #1045 item 2). The mirror, where the
+    binding comes first, still shadows.
+    """
+    text = "from m import validate\nclass C:\n    result = validate()\n    validate = local\n"
+    mirror = "from m import validate\nclass C:\n    validate = local\n    result = validate()\n"
+
+    assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset({"result"})
+    assert cross_file._locally_rebound_names_at_line(mirror, 4, path=_CALLER) == frozenset(
+        {"validate", "result"}
+    )
+
+
+@pytest.mark.unit
+def test_class_body_ordering_keeps_its_conservative_edges() -> None:
+    """Statements sharing the anchor line, or enclosing it, still count.
+
+    A same-line binding may run before the call, and a loop or ``if`` that
+    starts before the anchor may rebind the name on a later pass, so both stay
+    shadows rather than being read as ordered after the call. Decorators run
+    before the name they decorate binds, so a method defined after an anchored
+    decorator call does not shadow it.
+    """
+    same_line = "class C:\n    validate = local; result = validate()\n"
+    loop = (
+        "class C:\n    for item in items:\n        result = validate()\n        validate = item\n"
+    )
+    decorated = "class C:\n    @validate()\n    def validate(self):\n        return 1\n"
+
+    assert "validate" in cross_file._locally_rebound_names_at_line(same_line, 2, path=_CALLER)
+    assert "validate" in cross_file._locally_rebound_names_at_line(loop, 3, path=_CALLER)
+    assert cross_file._locally_rebound_names_at_line(decorated, 2, path=_CALLER) == frozenset()
+
+
+@pytest.mark.unit
+async def test_a_correction_to_an_import_the_class_body_rebinds_later_is_evidence() -> None:
+    """End to end: the earlier class-body call reaches the import, so its fix counts."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_BEFORE_BINDING_TEXT)
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_correction_to_an_import_the_class_body_rebound_earlier_fails_closed() -> None:
+    """End to end: a call after the class-body binding reaches the attribute instead."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_AFTER_BINDING_TEXT)
+
+    assert not await _probe(probe, item_line=6)

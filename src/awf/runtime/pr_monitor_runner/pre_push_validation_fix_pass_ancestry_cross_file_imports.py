@@ -14,6 +14,7 @@ same-named definition the call site cannot reach is not FIXED evidence.
 from __future__ import annotations
 
 import ast
+import copy
 import re
 from collections.abc import Iterator
 
@@ -529,7 +530,10 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     calls inside its methods, but a line executing *directly* in the class body
     resolves through the class namespace — ``class C: validate = local;
     result = validate()`` calls the attribute — so the class body the anchor
-    sits in directly is read as well (PRRT_kwDOSJAM6s6q_ywe). A comprehension is
+    sits in directly is read as well (PRRT_kwDOSJAM6s6q_ywe) — but only through
+    the anchored line, because a class body runs top to bottom and a binding
+    below the call has not happened yet when it runs (issue #1045 item 2, see
+    ``_class_body_through_line``). A comprehension is
     anchored as well, because its generator targets bind inside it — they shadow
     the import for the calls it contains and for nothing else
     (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
@@ -554,8 +558,27 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
             bound.update(_names_bound_in_scope(node))
     anchored_class = _anchored_class_scope(tree, line)
     if anchored_class is not None:
-        bound.update(_names_bound_in_scope(anchored_class))
+        bound.update(_names_bound_in_scope(_class_body_through_line(anchored_class, line)))
     return frozenset(bound)
+
+
+def _class_body_through_line(node: ast.ClassDef, line: int) -> ast.ClassDef:
+    """``node`` with only the body statements that start at or before ``line``.
+
+    A class body executes top to bottom, so a name it binds on a later line is
+    not yet in the class namespace when ``line`` runs: ``class C: result =
+    validate(); validate = local`` calls the imported ``validate`` (issue #1045
+    item 2). A statement starting on ``line`` itself is kept, because a
+    same-line binding may run first, and so is a compound statement that opens
+    before the anchor and holds it, because a loop may rebind the name on a
+    later pass. Decorators, bases and keywords run before the body and are
+    kept. A decorated definition starts at its ``def`` line, which runs after
+    its decorators, so an anchored decorator call does not see the name it
+    decorates. The copy is shallow; ``node`` is left as it was.
+    """
+    trimmed = copy.copy(node)
+    trimmed.body = [statement for statement in node.body if statement.lineno <= line]
+    return trimmed
 
 
 def _global_declared_names(scope: ast.AST) -> Iterator[str]:
