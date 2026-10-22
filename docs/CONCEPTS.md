@@ -415,7 +415,7 @@ copy pasted into another thread is no evidence:
 
 | Class | Reply carries |
 | --- | --- |
-| `fixed` | the item's fix commit sha(s) (its #935 provenance commit) |
+| `fixed` | the item's fix commit sha(s) (its #935 provenance commit; when the chain no longer holds it, the item commit this cycle durably recorded) |
 | `fixed_branch_evidence` | the branch commit an outdated thread's evidence grep matched |
 | `false_positive` | the agent's one-line reason (required by the prompt) |
 | `deferred` | the agent's reason and the tracking-issue link |

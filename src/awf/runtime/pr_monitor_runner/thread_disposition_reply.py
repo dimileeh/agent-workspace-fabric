@@ -27,6 +27,7 @@ from awf.runtime.monitor_state_keys import (
     _outdated_resolve_requeued_key,
 )
 from awf.runtime.pr_monitor import MonitorState, ReviewThread
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import recorded_item_commit
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.fix_cycle_deferred import _deferred_issue_url
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
@@ -75,6 +76,21 @@ async def reply_before_resolve(
     """Post the thread's disposition reply; ``None`` means parked — do NOT resolve."""
     verdict = state.threads_addressed_ids.get(thread_id)
     disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
+    if (
+        disposition is not None
+        and disposition.disposition_class == "fixed"
+        and not disposition.commits
+        and not disposition.reply_comment_id
+        and verdict == "fix_committed"
+        and operation_id
+    ):
+        disposition = await _with_item_commit_recorded_this_cycle(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            disposition=disposition,
+            operation_id=operation_id,
+        )
     problem = disposition_problem(disposition, verdict)
 
     async def _park(reason_code: str, detail: str, forge_reason_code: str | None = None) -> None:
@@ -135,6 +151,40 @@ async def reply_before_resolve(
         reply_comment_id=reply_id,
     )
     return replied
+
+
+async def _with_item_commit_recorded_this_cycle(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    disposition: ThreadDisposition,
+    operation_id: str,
+) -> ThreadDisposition:
+    """Cite the item commit this cycle durably recorded for a commit-less FIXED.
+
+    The FIXED citation normally comes from the in-state #935 chain; when that
+    chain no longer holds the item, the cycle's durable item-commit record is the
+    fallback before the thread is parked ``THREAD_DISPOSITION_EVIDENCE_MISSING``.
+    """
+    record = await recorded_item_commit(
+        self,
+        workspace_id=workspace_id,
+        item_id=disposition.item_id,
+        operation_id=operation_id,
+    )
+    if record is None:
+        return disposition
+    cited = replace(disposition, commits=(record.head_sha,), commit_base=record.item_start_head)
+    record_item_disposition(state, cited)
+    _log.info(
+        "monitor.thread_disposition_commit_from_cycle_record",
+        workspace_id=workspace_id,
+        thread_id=disposition.item_id,
+        head_sha=record.head_sha[:10],
+        operation_id=operation_id,
+    )
+    return cited
 
 
 async def _persist_posted_disposition(

@@ -8,7 +8,7 @@ the workspace keeps monitoring and the pushed commits stay pushed.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,7 +43,9 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import fix_cycle as fix_cycle_module
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     ItemCommitProvenance,
+    _persist_item_commit_provenance_durably,
     encode_item_commit_provenance_chain,
+    recorded_item_commit,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
@@ -121,6 +123,8 @@ async def _run_cycle(
     thread: ReviewThread,
     pushed: bool = True,
     state: MonitorState | None = None,
+    operation_id: str | None = None,
+    before_cycle: Callable[[Any, str], Awaitable[None]] | None = None,
 ) -> tuple[str, MonitorState, Any]:
     workspace_id = await seed_monitoring_workspace(factory)
     worktrees_root = tmp_path / "worktrees"
@@ -170,6 +174,8 @@ async def _run_cycle(
     monkeypatch.setattr(runner, "_validated_git_push_result", _push)
     monkeypatch.setattr(fix_cycle_module, "_capture_deferred_review_thread", _capture)
 
+    if before_cycle is not None:
+        await before_cycle(runner, workspace_id)
     result = await runner._run_fix_cycle(
         workspace_id=workspace_id,
         repo=_REPO,
@@ -181,6 +187,7 @@ async def _run_cycle(
         remote_branch=f"awf/{workspace_id}",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
+        operation_id=operation_id,
     )
     return workspace_id, state, result
 
@@ -523,6 +530,66 @@ async def test_fix_cycle_fixed_without_commit_parks_evidence_missing(
     )
 
 
+@pytest.mark.parametrize(
+    ("recorded_operation", "replied"),
+    [("op_cycle_1", True), ("op_earlier_cycle", False)],
+    ids=["recorded-this-cycle", "recorded-another-cycle"],
+)
+async def test_fixed_without_chain_falls_back_to_item_commit_recorded_this_cycle(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_operation: str,
+    replied: bool,
+) -> None:
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_fixed_recorded"
+    recorded = ItemCommitProvenance(
+        item_id=tid, item_start_head=_START, head_sha=_FIX, operation_id=recorded_operation
+    )
+
+    async def _record_item_commit(runner: Any, workspace_id: str) -> None:
+        # The durable COMMENT_REPAIR_ITEM_COMMIT_RECORDED record survives what the
+        # in-state #935 chain does not (compaction, a restart onto a new chain).
+        await _persist_item_commit_provenance_durably(
+            runner,
+            workspace_id=workspace_id,
+            encoded_chain=encode_item_commit_provenance_chain((recorded,)),
+            record=recorded,
+        )
+
+    def _pending(state: MonitorState, thread: ReviewThread) -> None:
+        sync_item_disposition(state, thread.thread_id, VerdictResult(verdict="fix_committed"))
+
+    _, state, result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="fix_committed",
+        on_address=_pending,
+        thread=_thread(tid),
+        operation_id="op_cycle_1",
+        before_cycle=_record_item_commit,
+    )
+
+    assert result.failed is False
+    if not replied:
+        # Another cycle's commit is not this item's evidence: park as before.
+        assert gh.events == []
+        assert state.threads_addressed_ids[tid] == "needs_human"
+        assert state.threads_addressed_ids["__needs_human_reason__:" + tid].startswith(
+            "THREAD_DISPOSITION_EVIDENCE_MISSING:"
+        )
+        return
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    assert _FIX in gh.events[0][2]
+    disposition = read_item_disposition(state, tid)
+    assert disposition is not None
+    assert disposition.commits == (_FIX,) and disposition.commit_base == _START
+    assert state.threads_addressed_ids[tid] == "fix_committed"
+
+
 async def test_fix_cycle_defer_reply_failure_does_not_resolve(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -677,3 +744,20 @@ async def test_posted_reply_persist_is_best_effort(
     assert len(gh.replies()) == 1
     recorded = read_item_disposition(state, tid)
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
+
+
+async def test_recorded_item_commit_lookup_fails_closed_on_a_db_fault() -> None:
+    @asynccontextmanager
+    async def _down() -> AsyncIterator[AsyncSession]:
+        raise SQLAlchemyError("database unavailable")
+        yield  # pragma: no cover - generator shape only
+
+    runner = SimpleNamespace(_deps=SimpleNamespace(session_factory=_down))
+
+    # No record means no citation: the caller parks EVIDENCE_MISSING as before.
+    assert (
+        await recorded_item_commit(
+            runner, workspace_id="ws_x", item_id="PRRT_test_a", operation_id="op_1"
+        )
+        is None
+    )
