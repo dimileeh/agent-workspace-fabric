@@ -890,9 +890,24 @@ def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
     reported here, which holds it to the unmatchable target instead of
     ``helpers`` (PRRT_kwDOSJAM6s6vLRfX). An import at or above the anchor does
     bind it and is not reported, and neither is one in a method below, which
-    binds a local of that method only.
+    binds a local of that method only. A loop holding the anchor is no
+    exception: its first pass calls the builtin before the import below it has
+    run (PRRT_kwDOSJAM6s6vLnh5), while an import above the anchor in the loop
+    binds every pass.
     """
     later = "class C:\n    size = len(items)\n    if ok:\n        from helpers import len\n"
+    loop_later = (
+        "class C:\n"
+        "    for item in items:\n"
+        "        size = len(item)\n"
+        "        from helpers import len\n"
+    )
+    loop_earlier = (
+        "class C:\n"
+        "    while pending:\n"
+        "        from helpers import len\n"
+        "        size = len(pending)\n"
+    )
     earlier = "class C:\n    from helpers import len\n    size = len(items)\n"
     method = "class C:\n    size = len(items)\n    def m(self):\n        from helpers import len\n"
 
@@ -903,6 +918,12 @@ def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
         {"size"}
     )
     assert cross_file._locally_rebound_names_at_line(method, 2, path=_CALLER) == frozenset({"size"})
+    assert cross_file._locally_rebound_names_at_line(loop_later, 3, path=_CALLER) == frozenset(
+        {"item", "size", "len"}
+    )
+    assert cross_file._locally_rebound_names_at_line(loop_earlier, 4, path=_CALLER) == frozenset(
+        {"size"}
+    )
 
 
 @pytest.mark.unit

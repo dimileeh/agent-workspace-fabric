@@ -539,7 +539,10 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     below the anchor is reported too: the import readers still yield it, but
     ``class C: size = len(items); from helpers import len`` calls the builtin,
     so holding that later import as the call's binding would credit a
-    correction to ``helpers.len`` (PRRT_kwDOSJAM6s6vLRfX). A comprehension is
+    correction to ``helpers.len`` (PRRT_kwDOSJAM6s6vLRfX). That holds inside a
+    loop as well: a later pass may reach the import, but the first pass calls
+    whatever the name held before it, so the import is read against the body cut
+    at the anchor's first pass (PRRT_kwDOSJAM6s6vLnh5). A comprehension is
     anchored as well, because its generator targets bind inside it — they shadow
     the import for the calls it contains and for nothing else
     (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
@@ -566,26 +569,31 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     if anchored_class is not None:
         trimmed = _class_body_through_line(anchored_class, line)
         bound.update(_names_bound_in_scope(trimmed))
-        bound.update(_scope_own_import_names(anchored_class) - _scope_own_import_names(trimmed))
+        first_pass = _class_body_through_line(anchored_class, line, first_pass=True)
+        bound.update(_scope_own_import_names(anchored_class) - _scope_own_import_names(first_pass))
     return frozenset(bound)
 
 
-def _class_body_through_line(node: ast.ClassDef, line: int) -> ast.ClassDef:
+def _class_body_through_line(
+    node: ast.ClassDef, line: int, *, first_pass: bool = False
+) -> ast.ClassDef:
     """``node`` with only the body statements that run before ``line`` can.
 
     A class body executes top to bottom, so a name it binds on a later line is
     not yet in the class namespace when ``line`` runs: ``class C: result =
     validate(); validate = local`` calls the imported ``validate`` (issue #1045
     item 2). Decorators, bases and keywords run before the body and are kept.
-    See ``_statements_through_line`` for how each body statement is read. The
-    copy is shallow; ``node`` is left as it was.
+    See ``_statements_through_line`` for how each body statement is read, and
+    for ``first_pass``. The copy is shallow; ``node`` is left as it was.
     """
     trimmed = copy.copy(node)
-    trimmed.body = _statements_through_line(node.body, line)
+    trimmed.body = _statements_through_line(node.body, line, first_pass=first_pass)
     return trimmed
 
 
-def _statements_through_line(statements: list[ast.stmt], line: int) -> list[ast.stmt]:
+def _statements_through_line(
+    statements: list[ast.stmt], line: int, *, first_pass: bool = False
+) -> list[ast.stmt]:
     """``statements`` cut to what may have run when ``line`` runs.
 
     A statement starting on ``line`` itself is kept, because a same-line
@@ -597,6 +605,8 @@ def _statements_through_line(statements: list[ast.stmt], line: int) -> list[ast.
     the anchor runs its body once, top to bottom, so it is trimmed the same way
     in turn: ``class C: with ctx: if enabled: result = validate(); validate =
     local`` still calls the imported ``validate`` (PRRT_kwDOSJAM6s6vLPzj).
+    ``first_pass`` trims a loop holding the anchor the same way, giving what
+    has run by the anchor's *first* pass rather than by any pass.
     """
     kept: list[ast.stmt] = []
     for statement in statements:
@@ -608,20 +618,26 @@ def _statements_through_line(statements: list[ast.stmt], line: int) -> list[ast.
         )
         if start > line:
             continue
-        if (
-            isinstance(statement, _RUN_ONCE_COMPOUNDS)
-            and (statement.end_lineno or statement.lineno) > line
-        ):
-            statement = _compound_through_line(statement, line)
+        trimmable = _RUN_ONCE_COMPOUNDS + (_LOOP_COMPOUNDS if first_pass else ())
+        if isinstance(statement, trimmable) and (statement.end_lineno or statement.lineno) > line:
+            statement = _compound_through_line(statement, line, first_pass=first_pass)
         kept.append(statement)
     return kept
 
 
-_RUN_ONCE_COMPOUNDS = (ast.AsyncWith, ast.If, ast.Match, ast.Try, ast.TryStar, ast.With)
+_RUN_ONCE_COMPOUNDS: tuple[type[ast.stmt], ...] = (
+    ast.AsyncWith,
+    ast.If,
+    ast.Match,
+    ast.Try,
+    ast.TryStar,
+    ast.With,
+)
+_LOOP_COMPOUNDS: tuple[type[ast.stmt], ...] = (ast.AsyncFor, ast.For, ast.While)
 
 
-def _compound_through_line(statement: ast.stmt, line: int) -> ast.stmt:
-    """A shallow copy of a run-once compound ``statement`` trimmed at ``line``.
+def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) -> ast.stmt:
+    """A shallow copy of a compound ``statement`` trimmed at ``line``.
 
     Its header expressions run before its body and are kept. Each statement
     list is cut by ``_statements_through_line``; an ``except`` handler or a
@@ -631,13 +647,17 @@ def _compound_through_line(statement: ast.stmt, line: int) -> ast.stmt:
     trimmed = copy.copy(statement)
     for field in ("body", "orelse", "finalbody"):
         if hasattr(statement, field):
-            setattr(trimmed, field, _statements_through_line(getattr(statement, field), line))
+            setattr(
+                trimmed,
+                field,
+                _statements_through_line(getattr(statement, field), line, first_pass=first_pass),
+            )
     if isinstance(trimmed, (ast.Try, ast.TryStar)):
         handlers = []
         for handler in trimmed.handlers:
             if handler.lineno <= line:
                 handler = copy.copy(handler)
-                handler.body = _statements_through_line(handler.body, line)
+                handler.body = _statements_through_line(handler.body, line, first_pass=first_pass)
                 handlers.append(handler)
         trimmed.handlers = handlers
     if isinstance(trimmed, ast.Match):
@@ -645,7 +665,7 @@ def _compound_through_line(statement: ast.stmt, line: int) -> ast.stmt:
         for case in trimmed.cases:
             if case.pattern.lineno <= line:
                 case = copy.copy(case)
-                case.body = _statements_through_line(case.body, line)
+                case.body = _statements_through_line(case.body, line, first_pass=first_pass)
                 cases.append(case)
         trimmed.cases = cases
     return trimmed
