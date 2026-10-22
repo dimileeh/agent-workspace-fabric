@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -919,6 +920,39 @@ async def test_posted_reply_persist_is_best_effort(
     assert len(gh.replies()) == 1
     recorded = read_item_disposition(state, tid)
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
+
+
+async def test_re_resolving_a_reopened_thread_posts_a_fresh_reply(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A gate audit saw AWF's reply resolved and bound it. Resolving the thread
+    # again means it was reopened since, which retires that reply: the resolve
+    # owes a fresh one, never a silent re-resolve on the old reply.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_reopened"
+    state = MonitorState()
+    state.mark_addressed(tid, "fix_committed")
+    disposition = seed_resolvable_disposition(state, tid, "fix_committed")
+    record_item_disposition(
+        state, replace(disposition, reply_comment_id="reply-0", conversation_digest="seen")
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
+
+    replied = await reply_before_resolve(
+        runner,
+        workspace_id="ws_missing",
+        pr_number=42,
+        thread_id=tid,
+        state=state,
+        action="resolve_outdated_thread",
+        base_branch="development",
+        remote_branch="awf/ws_missing",
+    )
+
+    assert replied is not None
+    assert (replied.reply_comment_id, replied.conversation_digest) == ("reply-1", None)
+    assert len(gh.replies()) == 1
+    assert replied.commits == disposition.commits
 
 
 async def test_recorded_item_commit_lookup_fails_closed_on_a_db_fault() -> None:

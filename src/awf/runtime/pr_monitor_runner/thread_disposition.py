@@ -115,8 +115,22 @@ class ThreadDisposition:
     source: str = "agent_verdict"
     reply_comment_id: str | None = None
     thread_body_hash: str | None = None
-    # An operator acknowledgement's audited conversation: it answers only that one.
+    # The audited conversation (before AWF's reply) this disposition answers: an
+    # acknowledgement's flagged one; any other's, once a gate audit saw its reply
+    # resolved. It holds only while that conversation stays resolved (#1018).
     conversation_digest: str | None = None
+
+    @property
+    def is_bound(self) -> bool:
+        """Whether this disposition answers a resolution an audit saw.
+
+        An acknowledgement always does (a missing conversation then matches
+        none); any other once a gate audit bound it. Seeing the thread open again
+        means a bound disposition's resolution was reopened.
+        """
+        return self.conversation_digest is not None or (
+            self.disposition_class == "operator_acknowledged"
+        )
 
     def as_payload(self) -> dict[str, object]:
         """Return the JSON-safe record persisted in state and audit evidence."""
@@ -212,7 +226,8 @@ def sync_item_disposition(
     the retried resolve reuses it instead of posting a second reply — unless the
     re-triaged ``thread``'s reviewer conversation changed since the verdict that
     reply answers (its recorded body hash), which the new verdict answers and so
-    is owed its own reply.
+    is owed its own reply, or an audit already saw that reply resolved (it is
+    bound): the thread was reopened since, which retires it.
     """
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
@@ -220,6 +235,7 @@ def sync_item_disposition(
     if (
         posted is not None
         and posted.reply_comment_id
+        and not posted.is_bound
         and not _feedback_follows_reply(thread, posted)
     ):
         return
@@ -247,6 +263,25 @@ def sync_item_disposition(
             thread_body_hash=review_thread_body_hash(thread) if thread is not None else None,
         ),
     )
+
+
+def retire_item_disposition(
+    state: MonitorState, disposition: ThreadDisposition
+) -> ThreadDisposition | None:
+    """Retire ``disposition``: its thread reopened, or its conversation moved on.
+
+    Its reply, posted or not, answers nothing current any more. An operator
+    acknowledgement is dropped: only a new ``ACK-THREAD`` for the current
+    resolution replaces it. Any other record keeps its evidence but loses its
+    reply id and binding, so the old marker certifies nothing and the thread's
+    next AWF resolve posts a fresh reply. Returns the record left in state.
+    """
+    if disposition.disposition_class == "operator_acknowledged":
+        state.threads_addressed_ids.pop(_item_disposition_key(disposition.item_id), None)
+        return None
+    retired = replace(disposition, reply_comment_id=None, conversation_digest=None)
+    record_item_disposition(state, retired)
+    return retired
 
 
 def _feedback_follows_reply(thread: ReviewThread | None, posted: ThreadDisposition) -> bool:

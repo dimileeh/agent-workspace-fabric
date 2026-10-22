@@ -670,6 +670,48 @@ def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
     assert read_item_disposition(state, "PRRT_test_a") == posted
 
 
+@pytest.mark.parametrize(
+    "bound",
+    [
+        ThreadDisposition(
+            item_id="PRRT_test_a",
+            disposition_class="operator_acknowledged",
+            verdict=None,
+            reason="An AWF operator guide acknowledged this resolution",
+            source="operator_guide",
+            reply_comment_id="reply-1",
+            conversation_digest="flagged",
+        ),
+        replace(_posted_answering(_thread_with("c-1")), conversation_digest="seen-resolved"),
+    ],
+    ids=["acknowledgement", "agent-disposition"],
+)
+def test_sync_item_disposition_retires_a_reply_a_gate_audit_saw_resolved(
+    bound: ThreadDisposition,
+) -> None:
+    # The record is bound: an audit saw the thread resolved after its reply. A
+    # re-triage means the thread was reopened since, which retires that reply,
+    # so the new verdict is owed its own instead of a silent re-resolve.
+    state = MonitorState()
+    record_item_disposition(state, bound)
+
+    sync_item_disposition(
+        state,
+        "PRRT_test_a",
+        VerdictResult(verdict="false_positive", reason="not reachable"),
+        thread=_thread_with("c-1"),
+    )
+
+    disposition = read_item_disposition(state, "PRRT_test_a")
+    assert disposition is not None
+    assert (
+        disposition.disposition_class,
+        disposition.reason,
+        disposition.reply_comment_id,
+        disposition.conversation_digest,
+    ) == ("false_positive", "not reachable", None, None)
+
+
 def test_sync_item_disposition_replaces_a_posted_reply_superseded_by_new_feedback() -> None:
     # A failed resolve cleared the verdict (so the stale-body drop skipped the
     # thread), then a reviewer replied after AWF's FALSE POSITIVE reply. The

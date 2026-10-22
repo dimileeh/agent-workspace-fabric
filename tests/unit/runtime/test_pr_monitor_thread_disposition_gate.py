@@ -41,6 +41,11 @@ from awf.runtime.pr_monitor import (
     ReviewThread,
     ReviewThreadComment,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    ThreadDisposition,
+    read_item_disposition,
+    record_item_disposition,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
 )
@@ -456,6 +461,50 @@ async def test_gate_rejects_a_marker_older_than_the_threads_newest_feedback(
     events = await _audit_events(factory, workspace_id)
     assert [e["evidence"]["thread_ids"] for e in events] == [[_SILENT]]
     assert events[0]["evidence"]["disposition_counts"] == {"fixed": 1}
+
+
+async def test_reopen_retires_a_certified_disposition_so_a_silent_re_resolve_blocks(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # AWF replied FIXED and resolved; a gate audit certified the reply. The
+    # reviewer reopens the thread without commenting and the shared identity
+    # resolves it again: the reply answered the resolution the reopen ended.
+    state = settled_baseline_state()
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=_SILENT,
+            disposition_class="fixed",
+            verdict="fix_committed",
+            commits=("c" * 40,),
+            reply_comment_id="reply-1",
+        ),
+    )
+    resolved = replace(
+        _thread(_SILENT, bodies=(_marker("fixed", _SILENT),)),
+        conversation_digest="feedback|reply-1",
+        conversation_digest_before_reply="feedback",
+    )
+    audit = ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(resolved,))
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    certified = await _gate(runner, workspace_id, state)
+    assert certified.blocker is None and certified.count_rows is not None
+    assert dict(certified.count_rows)["fixed"] == 1
+
+    gh.audit = replace(audit, threads=(replace(resolved, is_resolved=False, resolved_by=None),))
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    retired = read_item_disposition(state, _SILENT)
+    # Retired, not forgotten: the thread's next AWF resolve owes a fresh reply.
+    assert retired is not None and retired.reply_comment_id is None
+
+    gh.audit = audit
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
 
 
 async def test_gate_rejects_a_marker_older_than_the_shared_identitys_own_feedback(

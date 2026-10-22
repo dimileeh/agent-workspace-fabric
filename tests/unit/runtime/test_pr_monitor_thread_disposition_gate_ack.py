@@ -416,8 +416,10 @@ async def test_acknowledgement_posted_after_an_unseen_edit_is_not_accepted(
     assert blocked.blocker is not None and _SILENT in blocked.blocker
     assert blocked.count_rows is None
     assert len(gh.thread_replies) == 1
+    # The edit retires the acknowledgement although its reply is posted.
+    assert read_item_disposition(state, _SILENT) is None
     # Posted after the edit, the reply looks current by time; later audits still
-    # refuse it, and the saved reply id keeps it from being posted again.
+    # refuse it, and nothing posts it again.
     again = await _gate(runner, workspace_id, state)
     assert again.blocker is not None and _SILENT in again.blocker
     assert len(gh.thread_replies) == 1
@@ -728,6 +730,30 @@ async def test_reopen_seen_by_the_re_audit_retires_the_posted_acknowledgement(
     passed = await _gate(runner, workspace_id, state)
     assert passed.blocker is None
     assert len(gh.thread_replies) == 2
+
+
+async def test_acknowledgement_bound_to_no_conversation_is_dropped_not_posted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    # A flag recorded without its conversation binds the acknowledgement to none.
+    state.mark_addressed(
+        _disposition_unverified_key(_SILENT), "REVIEW_THREAD_DISPOSITION_UNVERIFIED"
+    )
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    ack = read_item_disposition(state, _SILENT)
+    assert ack is not None and ack.conversation_digest is None
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert gh.thread_replies == []
+    assert read_item_disposition(state, _SILENT) is None
 
 
 async def test_guide_naming_unflagged_thread_records_nothing(

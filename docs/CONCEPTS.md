@@ -439,7 +439,7 @@ the explanation. A newly posted reply id is saved durably right after the reply
 (the fix cycle writes only that record, never its unconfirmed verdicts), and a
 record whose reply landed survives every rollback and re-triage of the item, so
 a failed resolve never posts a second reply. Only fresh reviewer feedback in the
-thread drops it, because that feedback is owed its own reply.
+thread drops it, because that feedback is owed its own reply — or a reopen, below.
 
 Before READY_TO_MERGE (release monitors) and before merging (feature
 monitors), AWF re-enumerates every review thread with exhaustive pagination,
@@ -450,7 +450,21 @@ operator's own account. The marker must also follow the thread's newest comment
 by anyone else, and be posted after the newest edit to such a comment: an older
 one answered feedback that has since moved on, so a reopened thread resolved
 silently after new or edited feedback blocks. Threads resolved
-by any other login are that person's or bot's disposition and never block. A
+by any other login are that person's or bot's disposition and never block.
+
+One invariant governs every disposition the monitor records, posted or not: it
+is bound to the conversation it answers — an acknowledgement to the flagged one,
+any other once a gate audit first sees its reply resolved — and holds only while
+an audit shows the thread still resolved by AWF's identity with that conversation
+before its reply. A reopen, a resolution by someone else, or a new or edited
+comment retires it for good: its marker then certifies nothing, so a silent
+re-resolve blocks. A retired acknowledgement is dropped (the current resolution
+needs its own `ACK-THREAD`); any other disposition loses its reply id, so the
+monitor's next resolve of the thread — a re-triage or outdated hygiene, both of
+which also treat a bound reply's thread being open again as a reopen — posts a
+fresh reply instead of resolving on the old one. With no record at all (a
+re-adopted PR whose record did not cross), an agent's marker is still the
+evidence. A
 failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
 ids (never a workspace failure); a failed enumeration is
@@ -482,10 +496,8 @@ nothing. Only flagged ids are acknowledged, on intake of the guide and whatever
 its agent run answers; AWF then posts an `operator_acknowledged` reply
 into each such thread — never the directive text — and the gate passes once
 every AWF resolution carries a marker. An acknowledgement answers only the
-conversation that was flagged: a new or edited comment drops the flag and any
-acknowledgement not yet posted, and a reopen seen by the gate drops the flag and
-the acknowledgement even once posted (its reply's marker then certifies nothing),
-so the current resolution needs its own `ACK-THREAD`. Those acknowledgement replies are
+conversation that was flagged, under the invariant above: a reopen also drops the
+flag. Those acknowledgement replies are
 the gate's only writes: it posts them all first, then decides on ONE complete audit
 taken after the last of them — never on the snapshot they were posted from. A reply
 counts only while the conversation it followed is the acknowledged one, so an edit

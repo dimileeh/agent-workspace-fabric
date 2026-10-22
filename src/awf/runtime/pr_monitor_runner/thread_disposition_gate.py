@@ -15,12 +15,15 @@ after the thread's newest feedback (an older marker answered earlier feedback).
 * A failing thread turns into ``NotifyHuman`` with
   ``REVIEW_THREAD_DISPOSITION_UNVERIFIED`` listing the ids — never a workspace
   failure. An operator guide naming a flagged id acknowledges it; this gate then
-  posts the acknowledgement (with its marker) into the thread itself, only while
-  the thread keeps the conversation that was flagged, and the marker counts only
-  while that conversation is what the reply followed.
+  posts the acknowledgement (with its marker) into the thread itself.
 * Those replies are the gate's only writes. They all come first; the decision
   then rests on ONE complete audit taken after the last of them, and an
   acknowledgement it does not certify keeps this cycle from certifying.
+* Every disposition the monitor records is bound to the conversation it answers
+  (an acknowledgement to the flagged one; any other once an audit sees its reply
+  resolved) and holds only while an audit shows that conversation resolved by
+  AWF's identity: a reopen or edit retires it, posted or not, so its marker
+  certifies nothing (:func:`_retire_broken_bindings`).
 * An unresolved thread is ``decide()``'s to handle, so one the status it acted on
   never listed (opened or reopened since), or listed with other outside comments
   (replied to or edited since), re-polls instead of passing.
@@ -63,6 +66,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
     record_item_disposition,
     render_disposition_reply,
+    retire_item_disposition,
     unverified_blocker_message,
     unverified_flag,
 )
@@ -145,9 +149,10 @@ async def review_thread_disposition_gate(
             summary=missing_login,
             detail=missing_login,
         )
-    posted = await _post_acknowledgements(
-        self, audit, viewer=viewer, state=state, workspace_id=workspace_id
+    _retire_broken_bindings(
+        state, audit, viewer=viewer, workspace_id=workspace_id, pr_number=pr_number
     )
+    posted = await _post_acknowledgements(self, audit, state=state, workspace_id=workspace_id)
     if posted:
         # The decision rests on ONE complete audit taken after the cycle's last
         # write, never on the snapshot the replies were posted from
@@ -166,6 +171,9 @@ async def review_thread_disposition_gate(
                 forge_reason_code=exc.reason_code,
             )
             return DispositionGateResult(blocker=unverified_blocker_message(posted))
+        _retire_broken_bindings(
+            state, audit, viewer=viewer, workspace_id=workspace_id, pr_number=pr_number
+        )
     return await _verify_audit(
         self,
         audit,
@@ -205,7 +213,6 @@ async def _verify_audit(
     legacy_conversations = _decode_baseline_conversations(
         state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY)
     )
-    retired: list[str] = []  # legacy exemptions whose thread reopened or moved on
     counts: Counter[str] = Counter()
     unverified: list[str] = []
     marked: set[str] = set()  # carry an AWF marker: handled after the rollout
@@ -218,22 +225,7 @@ async def _verify_audit(
     # The resolved conversation each unverified flag binds to.
     digests: dict[str, str] = {}
     for thread in audit.threads:
-        legacy_conversation = legacy_conversations.get(thread.thread_id)
-        if legacy_conversation is not None and (
-            not thread.is_resolved or legacy_conversation != thread.conversation_digest
-        ):
-            # The baseline exempted the conversation it saw, resolved: a reopen
-            # or a new / edited comment is feedback no legacy resolution answered.
-            retired.append(thread.thread_id)
-            legacy_conversation = None
         if not thread.is_resolved:
-            # A reopen ends the flagged resolution: a later guide cannot acknowledge
-            # it, and one already recorded no longer applies — posted or not, as a
-            # posted reply's marker would otherwise pass a later silent re-resolve.
-            state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
-            pending = read_item_disposition(state, thread.thread_id)
-            if pending is not None and pending.disposition_class == "operator_acknowledged":
-                _supersede_acknowledgement(state, thread.thread_id, workspace_id=workspace_id)
             if thread.external_comment_bodies and (
                 thread.external_comment_bodies not in decided.get(thread.thread_id, ())
             ):
@@ -250,35 +242,22 @@ async def _verify_audit(
             marked.add(thread.thread_id)
         # Only a marker after the newest feedback dispositions the current
         # conversation; an older one answered feedback that has since moved on.
-        disposition_class: DispositionClass | None = disposition_marker_class(
+        disposition_class = disposition_marker_class(
             _current_disposition_bodies(thread), thread_id=thread.thread_id
         )
-        if disposition_class == "operator_acknowledged" and not _acknowledgement_followed(
-            state, thread
-        ):
-            disposition_class = None
-        if (
-            disposition_class is None
-            and legacy_conversation is not None
-            and thread.thread_id in legacy_baseline
-            and thread.thread_id not in marked
-        ):
-            counts[LEGACY_BASELINE] += 1  # resolved before AWF replied before resolving
-            continue
-        if disposition_class is None:
-            unverified.append(thread.thread_id)
+        if disposition_class is None or not _disposition_holds(state, thread, disposition_class):
+            if (
+                thread.thread_id in legacy_conversations
+                and thread.thread_id in legacy_baseline
+                and thread.thread_id not in marked
+            ):
+                counts[LEGACY_BASELINE] += 1  # resolved before AWF replied before resolving
+            else:
+                unverified.append(thread.thread_id)
             continue
         counts[disposition_class] += 1
         certified.add(thread.thread_id)
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
-    if retired:
-        _retire_legacy_exemptions(
-            state,
-            legacy_conversations,
-            retired,
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-        )
     if baseline_record is None:
         # A thread this monitor recorded a disposition for (or that carries an
         # AWF marker) was handled after the rollout, so its unmarked resolution
@@ -300,7 +279,7 @@ async def _verify_audit(
         )
         counts[LEGACY_BASELINE] += len(legacy)
         unverified = [tid for tid in unverified if tid not in legacy]
-    # Reopened or gone since its reply: this audit does not hold what it was bound to.
+    # Retired or gone since its reply: this audit does not hold what it was bound to.
     unverified += [tid for tid in posted if tid not in certified and tid not in unverified]
     if not unverified:
         if undecided:
@@ -365,6 +344,93 @@ def _current_disposition_bodies(thread: AuditedReviewThread) -> tuple[str, ...]:
         if disposition_marker_class((body,), thread_id=thread.thread_id) is None
     ]
     return bodies[unmarked[-1] + 1 :] if unmarked else bodies
+
+
+def _disposition_holds(
+    state: MonitorState, thread: AuditedReviewThread, disposition_class: DispositionClass
+) -> bool:
+    """True when the thread's newest current marker is a live disposition.
+
+    :func:`_retire_broken_bindings` already retired every record this audit
+    breaks, so a record left must be the posted reply of that marker's class. The
+    first audit to see a posted reply resolved binds it to the conversation it
+    followed. With no record at all (a re-adopted PR whose record did not cross)
+    the marker is the evidence, except an acknowledgement: only its record
+    proves the operator acknowledged this conversation.
+    """
+    disposition = read_item_disposition(state, thread.thread_id)
+    if disposition is None:
+        return disposition_class != "operator_acknowledged"
+    if disposition.disposition_class != disposition_class or not disposition.reply_comment_id:
+        return False  # retired or never posted: the marker is an older reply's
+    if disposition.conversation_digest is None:
+        record_item_disposition(
+            state, replace(disposition, conversation_digest=thread.conversation_digest_before_reply)
+        )
+    return True
+
+
+def _retire_broken_bindings(
+    state: MonitorState,
+    audit: ReviewThreadAudit,
+    *,
+    viewer: str,
+    workspace_id: str,
+    pr_number: int,
+) -> None:
+    """Retire every bound record ``audit`` no longer shows holding (#1018).
+
+    A disposition is bound to the conversation it answers and holds only while
+    the thread stays resolved by AWF's identity with that conversation before
+    its reply (before nothing, while an acknowledgement is unposted). A reopen,
+    or a new or edited comment, retires it — posted or not. Likewise a reopen
+    ends a flag (a later guide cannot acknowledge it), and a reopen or change of
+    a legacy-baseline thread retires its exemption for good.
+    """
+    legacy_conversations = _decode_baseline_conversations(
+        state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY)
+    )
+    retired_legacy: list[str] = []
+    for thread in audit.threads:
+        thread_id = thread.thread_id
+        if not thread.is_resolved:
+            state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
+        legacy_conversation = legacy_conversations.get(thread_id)
+        if legacy_conversation is not None and (
+            not thread.is_resolved or legacy_conversation != thread.conversation_digest
+        ):
+            retired_legacy.append(thread_id)
+        disposition = read_item_disposition(state, thread_id)
+        if disposition is None or not disposition.is_bound:
+            continue  # an agent reply no audit saw resolved yet is not bound
+        followed = (
+            thread.conversation_digest_before_reply
+            if disposition.reply_comment_id
+            else thread.conversation_digest
+        )
+        if (
+            thread.is_resolved
+            and (thread.resolved_by or "").strip().casefold() == viewer
+            and followed == disposition.conversation_digest
+        ):
+            continue
+        retire_item_disposition(state, disposition)
+        _log.info(
+            "monitor.thread_disposition_retired",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=thread_id,
+            disposition_class=disposition.disposition_class,
+            reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
+        )
+    if retired_legacy:
+        _retire_legacy_exemptions(
+            state,
+            legacy_conversations,
+            retired_legacy,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+        )
 
 
 def _decode_baseline(record: str | None) -> frozenset[str]:
@@ -503,16 +569,15 @@ async def _post_acknowledgements(
     self: Any,
     audit: ReviewThreadAudit,
     *,
-    viewer: str,
     state: MonitorState,
     workspace_id: str,
 ) -> list[str]:
-    """Post every pending guide acknowledgement whose flagged resolution ``audit`` shows.
+    """Post every pending guide acknowledgement into its flagged thread.
 
-    These replies are the gate's only forge writes. Each answers only the
-    conversation that was flagged: one that has moved on since is dropped, not
-    posted, and the current resolution needs its own acknowledgement. Returns the
-    thread ids replied to.
+    These replies are the gate's only forge writes. :func:`_retire_broken_bindings`
+    already dropped every acknowledgement whose flagged resolution ``audit`` no
+    longer shows, so each one left answers the conversation that was flagged.
+    Returns the thread ids replied to.
     """
     posted: list[str] = []
     for thread in audit.threads:
@@ -522,12 +587,7 @@ async def _post_acknowledgements(
             disposition is None
             or disposition.disposition_class != "operator_acknowledged"
             or disposition.reply_comment_id
-            or not thread.is_resolved
-            or (thread.resolved_by or "").strip().casefold() != viewer
         ):
-            continue
-        if disposition.conversation_digest != thread.conversation_digest:
-            _supersede_acknowledgement(state, thread_id, workspace_id=workspace_id)
             continue
         try:
             reply_id = await self._deps.gh.reply_to_thread(
@@ -546,37 +606,6 @@ async def _post_acknowledgements(
         record_item_disposition(state, replace(disposition, reply_comment_id=reply_id))
         posted.append(thread_id)
     return posted
-
-
-def _acknowledgement_followed(state: MonitorState, thread: AuditedReviewThread) -> bool:
-    """True when the thread's newest reply follows the conversation the guide acknowledged.
-
-    A feedback edit that lands after the gate's audit but before the reply keeps
-    the reply current by time, yet changes the conversation it followed: the
-    acknowledgement then answers nothing the operator saw.
-    """
-    disposition = read_item_disposition(state, thread.thread_id)
-    return (
-        disposition is not None
-        and disposition.disposition_class == "operator_acknowledged"
-        and disposition.conversation_digest is not None
-        and disposition.conversation_digest == thread.conversation_digest_before_reply
-    )
-
-
-def _supersede_acknowledgement(state: MonitorState, thread_id: str, *, workspace_id: str) -> None:
-    """Drop a guide's acknowledgement of a resolution that no longer stands.
-
-    A posted reply stays in the thread, but without the record
-    :func:`_acknowledgement_followed` refuses its marker.
-    """
-    state.threads_addressed_ids.pop(_item_disposition_key(thread_id), None)
-    _log.info(
-        "monitor.operator_acknowledgement_superseded",
-        workspace_id=workspace_id,
-        thread_id=thread_id,
-        reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
-    )
 
 
 async def _audit_unavailable(

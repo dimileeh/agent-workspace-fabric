@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
     record_item_disposition,
     render_disposition_reply,
+    retire_item_disposition,
 )
 
 _PROBLEM_DETAIL = {
@@ -80,6 +81,10 @@ async def reply_before_resolve(
     """Post the thread's disposition reply; ``None`` means parked — do NOT resolve."""
     verdict = state.threads_addressed_ids.get(thread_id)
     disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
+    if disposition is not None and disposition.is_bound:
+        # An audit saw this disposition's thread resolved; resolving it again
+        # means it was reopened since, which retires the reply: answer afresh.
+        disposition = retire_item_disposition(state, disposition)
     if (
         disposition is not None
         and disposition.disposition_class == "fixed"
