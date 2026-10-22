@@ -29,6 +29,10 @@ from dataclasses import dataclass, replace
 from typing import Literal, cast, get_args
 
 from awf.common.redaction import redact_secrets
+from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
+    review_thread_body_hash,
+)
 from awf.runtime.monitor_prompts import (
     LEGACY_BASELINE_LABEL,
     RESOLVED_BY_OTHERS_LABEL,
@@ -110,6 +114,7 @@ class ThreadDisposition:
     issue_url: str | None = None
     source: str = "agent_verdict"
     reply_comment_id: str | None = None
+    thread_body_hash: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         """Return the JSON-safe record persisted in state and audit evidence."""
@@ -124,6 +129,7 @@ class ThreadDisposition:
             "issue_url": self.issue_url,
             "source": self.source,
             "reply_comment_id": self.reply_comment_id,
+            "thread_body_hash": self.thread_body_hash,
         }
 
     @classmethod
@@ -157,6 +163,7 @@ class ThreadDisposition:
             issue_url=_optional_text(raw.get("issue_url")),
             source=_optional_text(raw.get("source")) or "agent_verdict",
             reply_comment_id=_optional_text(raw.get("reply_comment_id")),
+            thread_body_hash=_optional_text(raw.get("thread_body_hash")),
         )
 
 
@@ -199,8 +206,9 @@ def sync_item_disposition(
     published for a re-triaged item. A record whose reply already landed (a failed
     resolve or push re-queued the item) is kept: it is what the thread says, and
     the retried resolve reuses it instead of posting a second reply — unless the
-    re-triaged ``thread`` carries feedback newer than that reply, which the new
-    verdict answers and so is owed its own reply.
+    re-triaged ``thread``'s reviewer conversation changed since the verdict that
+    reply answers (its recorded body hash), which the new verdict answers and so
+    is owed its own reply.
     """
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
@@ -208,7 +216,7 @@ def sync_item_disposition(
     if (
         posted is not None
         and posted.reply_comment_id
-        and not _feedback_follows_reply(thread, posted.reply_comment_id)
+        and not _feedback_follows_reply(thread, posted)
     ):
         return
     disposition_class = _VERDICT_CLASS.get(result.verdict)
@@ -232,20 +240,22 @@ def sync_item_disposition(
             reason=_sanitize_verdict_reason(result.reason),
             commits=commits,
             commit_base=commit_base,
+            thread_body_hash=review_thread_body_hash(thread) if thread is not None else None,
         ),
     )
 
 
-def _feedback_follows_reply(thread: ReviewThread | None, reply_comment_id: str) -> bool:
-    """True when ``thread`` (oldest-first) has a comment after AWF's posted reply.
+def _feedback_follows_reply(thread: ReviewThread | None, posted: ThreadDisposition) -> bool:
+    """True when ``thread`` changed since the feedback ``posted`` answers.
 
-    A thread whose comments do not include the reply (not fetched yet, or a
-    ``bbtask:`` reply posted outside the thread) proves no newer feedback.
+    Forges drop AWF's own comments from ``thread.comments``, so the reply itself
+    is never visible there; the reviewer conversation's body hash, captured when
+    the verdict was recorded, is the evidence instead. A record without that
+    snapshot (or no re-triaged thread) proves no newer feedback.
     """
-    comment_ids = [comment.comment_id for comment in thread.comments] if thread else []
-    if reply_comment_id not in comment_ids:
+    if thread is None or posted.thread_body_hash is None:
         return False
-    return comment_ids.index(reply_comment_id) < len(comment_ids) - 1
+    return not recorded_review_thread_body_matches(posted.thread_body_hash, thread)
 
 
 def _latest_chain_record(

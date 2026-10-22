@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from awf.runtime.feedback_policy import review_thread_body_state_key
+from awf.runtime.feedback_policy import review_thread_body_hash, review_thread_body_state_key
 from awf.runtime.monitor_state_keys import (
     _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
     _disposition_unverified_key,
@@ -440,6 +440,7 @@ def test_payload_roundtrip_and_malformed_payload_fails_closed() -> None:
         issue_url=_ISSUE,
         source="agent_verdict",
         reply_comment_id="991",
+        thread_body_hash="f" * 64,
     )
     payload = d.as_payload()
     assert payload["v"] == 1
@@ -627,25 +628,35 @@ def _thread_with(*comment_ids: str) -> ReviewThread:
     )
 
 
+def _posted_answering(thread: ReviewThread | None) -> ThreadDisposition:
+    return replace(
+        _fp(),
+        item_id="PRRT_test_a",
+        reply_comment_id="reply-1",
+        thread_body_hash=review_thread_body_hash(thread) if thread is not None else None,
+    )
+
+
 @pytest.mark.parametrize(
-    "thread",
+    ("answered", "retriaged"),
     [
-        _thread_with("c-1", "reply-1"),
-        # Not fetched yet, or a ``bbtask:`` reply posted outside the thread: nothing
-        # proves newer feedback, so the reply is reused rather than double-posted.
-        _thread_with("c-1"),
+        # Forges drop AWF's own reply from ``thread.comments``, so an unchanged
+        # reviewer conversation is all the re-triage sees.
+        (_thread_with("c-1"), _thread_with("c-1")),
+        # A record posted before the body snapshot existed proves no newer feedback.
+        (None, _thread_with("c-1", "c-3")),
     ],
-    ids=["reply-is-newest", "reply-not-in-thread"],
+    ids=["conversation-unchanged", "no-body-snapshot"],
 )
 def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
-    thread: ReviewThread,
+    answered: ReviewThread | None, retriaged: ReviewThread
 ) -> None:
     state = MonitorState()
-    posted = replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
+    posted = _posted_answering(answered)
     record_item_disposition(state, posted)
 
     sync_item_disposition(
-        state, "PRRT_test_a", VerdictResult(verdict="defer", reason="later"), thread=thread
+        state, "PRRT_test_a", VerdictResult(verdict="defer", reason="later"), thread=retriaged
     )
 
     assert read_item_disposition(state, "PRRT_test_a") == posted
@@ -654,16 +665,15 @@ def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
 def test_sync_item_disposition_replaces_a_posted_reply_superseded_by_new_feedback() -> None:
     # A failed resolve cleared the verdict (so the stale-body drop skipped the
     # thread), then a reviewer replied after AWF's FALSE POSITIVE reply. The
-    # re-triaged verdict answers that reply and is owed its own disposition.
+    # re-triaged verdict answers that reply and is owed its own disposition. AWF's
+    # reply is absent from the fetched thread, exactly as the forges return it.
     state = MonitorState()
     _seed_chain(
         state,
         ItemCommitProvenance(item_id="PRRT_test_a", item_start_head="0" * 40, head_sha="2" * 40),
     )
-    record_item_disposition(
-        state, replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
-    )
-    thread = _thread_with("c-1", "reply-1", "c-3")
+    record_item_disposition(state, _posted_answering(_thread_with("c-1")))
+    thread = _thread_with("c-1", "c-3")
 
     sync_item_disposition(
         state,
@@ -674,15 +684,14 @@ def test_sync_item_disposition_replaces_a_posted_reply_superseded_by_new_feedbac
 
     fixed = read_item_disposition(state, "PRRT_test_a")
     assert fixed is not None
-    assert (fixed.disposition_class, fixed.commits, fixed.reply_comment_id) == (
-        "fixed",
-        ("2" * 40,),
-        None,
-    )
+    assert (
+        fixed.disposition_class,
+        fixed.commits,
+        fixed.reply_comment_id,
+        fixed.thread_body_hash,
+    ) == ("fixed", ("2" * 40,), None, review_thread_body_hash(thread))
     # A re-triage that leaves the thread open drops the superseded record too.
-    record_item_disposition(
-        state, replace(_fp(), item_id="PRRT_test_a", reply_comment_id="reply-1")
-    )
+    record_item_disposition(state, _posted_answering(_thread_with("c-1")))
     sync_item_disposition(
         state,
         "PRRT_test_a",

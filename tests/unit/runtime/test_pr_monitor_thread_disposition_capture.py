@@ -162,7 +162,10 @@ async def test_address_thread_records_fixed_commit_from_provenance_chain(tmp_pat
 async def test_address_thread_answers_feedback_posted_after_awf_reply() -> None:
     # The earlier reply landed but its resolve failed; a reviewer then pushed back
     # in the thread. The re-triage must publish its own reason, not reuse the old.
+    # The forge omits AWF's own reply from the fetched thread comments.
     state = MonitorState()
+    first = ReviewThreadComment(comment_id="c-1", body="worker crashes on None")
+    answered = replace(_thread("PRRT_test_rt"), comments=(first,))
     record_item_disposition(
         state,
         ThreadDisposition(
@@ -171,13 +174,13 @@ async def test_address_thread_answers_feedback_posted_after_awf_reply() -> None:
             verdict="false_positive",
             reason="the guard already rejects None",
             reply_comment_id="reply-1",
+            thread_body_hash=_review_thread_body_hash(answered),
         ),
     )
     thread = replace(
-        _thread("PRRT_test_rt"),
+        answered,
         comments=(
-            ReviewThreadComment(comment_id="c-1", body="worker crashes on None"),
-            ReviewThreadComment(comment_id="reply-1", body="AWF disposition: false positive"),
+            first,
             ReviewThreadComment(comment_id="c-3", body="that guard is bypassed by the retry"),
         ),
     )
