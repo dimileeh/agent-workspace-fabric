@@ -46,6 +46,8 @@ from awf.api.routes import (
 )
 from awf.common.config import Settings, get_settings, validate_production_settings
 from awf.db.session import make_engine, make_session_factory
+from awf.hosted_node.api import configure as configure_hosted
+from awf.hosted_node.receiver import Receiver
 from awf.service.callbacks import shutdown_callback_target_validation_executor
 from awf.service.core_discovery import CORE_DISCOVERY_STATE_ATTR, build_core_discovery_payload
 
@@ -81,15 +83,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_database(app, factory, engine=engine, database_url=settings.database_url)
 
     try:
+        if settings.hosted_node is not None:
+            app.state.hosted_receiver = await Receiver.start(settings.hosted_node, factory)
         yield
     finally:
         try:
-            current_engine = getattr(app.state, "db_engine", engine)
-            await current_engine.dispose()
-            if current_engine is not engine:
-                await engine.dispose()
+            receiver = getattr(app.state, "hosted_receiver", None)
+            if receiver is not None:
+                await receiver.close()
         finally:
-            shutdown_callback_target_validation_executor(wait=False)
+            try:
+                current_engine = getattr(app.state, "db_engine", engine)
+                await current_engine.dispose()
+                if current_engine is not engine:
+                    await engine.dispose()
+            finally:
+                shutdown_callback_target_validation_executor(wait=False)
 
 
 def create_app(*, use_lifespan: bool = True) -> FastAPI:
@@ -136,4 +145,5 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     app.include_router(service.router)
     app.include_router(ws.router)
 
+    configure_hosted(app)
     return app

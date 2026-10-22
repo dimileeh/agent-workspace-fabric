@@ -42,6 +42,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
+from awf.hosted_node import models as hosted_models  # noqa: F401
 
 ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON = "ADVISORY_PLAN_ARTIFACT_OVERLAP"
 _ADVISORY_STALE_REASON_CODES = frozenset({ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON})
