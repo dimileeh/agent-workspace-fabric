@@ -505,6 +505,7 @@ async def _post_human_notification_once(
     preserve_full_blocker_reason: bool = False,
     workspace_id: str | None = None,
     recheck_context: str = "human_notification",
+    disposition_count_rows: Sequence[tuple[str, int]] | None = None,
 ) -> _PostActionPrTerminalState | None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
@@ -611,6 +612,7 @@ async def _post_human_notification_once(
             blocker_reason=reason,
             blocker_items=items,
             preserve_full_blocker_reason=preserve_full_blocker_reason,
+            disposition_count_rows=disposition_count_rows,
         ),
     )
     state.mark_addressed(key, "notified")

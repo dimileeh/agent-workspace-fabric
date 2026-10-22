@@ -60,6 +60,9 @@ from awf.runtime.pr_monitor_runner.merge_methods import (
     _merge_method_preflight_rejection_reason,
     _resolve_effective_merge_methods,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
+    review_thread_disposition_gate,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -275,6 +278,39 @@ async def handle_merge_action(
             )
             if handled is not None:
                 return cast(bool | None, handled)
+
+        # #1018: never merge over a thread AWF resolved without its disposition.
+        disposition_gate = await review_thread_disposition_gate(
+            self,
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            state=state,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+        )
+        if disposition_gate.retry:
+            return False
+        if disposition_gate.blocker is not None:
+            return cast(
+                bool | None,
+                await self._execute(
+                    action=NotifyHuman(message=disposition_gate.blocker),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                ),
+            )
 
         await self._record_monitor_state_operation(
             workspace_id=workspace_id,

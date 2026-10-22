@@ -36,6 +36,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_wait_operation_context,
     _notify_human_reason,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
+    review_thread_disposition_gate,
+)
 
 
 async def handle_notify_human_action(
@@ -213,6 +216,27 @@ async def handle_notify_human_action(
                 )
                 return False
 
+    disposition_count_rows: tuple[tuple[str, int], ...] | None = None
+    if manual_ready_handoff and action.message is None:
+        # #1018: never certify READY_TO_MERGE over a thread AWF resolved silently.
+        gate = await review_thread_disposition_gate(
+            self,
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            state=state,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+        )
+        if gate.retry:
+            return False
+        if gate.blocker is not None:
+            action = NotifyHuman(message=gate.blocker)
+            manual_ready_handoff = False
+        else:
+            disposition_count_rows = gate.count_rows
+
     # ``NotifyHuman.message`` is optional and ``_notify_human_reason`` returns
     # ``None`` for a clean manual-ready handoff (green PR, ``auto_merge`` off),
     # so fall back to a sensible default. A ``None`` reason would otherwise be
@@ -261,6 +285,7 @@ async def handle_notify_human_action(
             status=status,
             state=state,
             blocker_reason=action.message,
+            disposition_count_rows=disposition_count_rows,
             # No boundary re-read armed here: ``status`` is THIS cycle's poll
             # snapshot that ``decide()`` just returned ``NotifyHuman`` on, with no
             # long action in between — unlike the workflow-scope and merge-rejection
