@@ -2,8 +2,10 @@ import asyncio
 import threading
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
+from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.models import Grant
 from awf.hosted_node.receiver import Receiver
 
@@ -270,3 +272,99 @@ async def test_observed_expiry_is_terminal_even_if_clock_moves_back(hosted, monk
         "status"
     ] == "expired"
     assert not list(receiver.store.root.glob("*/*.material"))
+
+
+@pytest.mark.parametrize("boundary", ["staged", "published"])
+async def test_file_boundary_interruption_never_resolves(
+    hosted, peer, interrupt_publication, protected_resolver, boundary
+):
+    client, receiver, _ = hosted
+    other, _, _ = peer
+    binding = await prepare(hosted)
+    payload = {**binding, "material": "YQ=="}
+    with interrupt_publication(boundary):
+        response = await client.post("/v1/hosted-node/materials/install", json=payload)
+    assert response.json()["status"] == "unavailable"
+    assert list(receiver.store.root.glob("*/*.pending"))
+    assert bool(list(receiver.store.root.glob("*/*.material"))) == (boundary == "published")
+    for action in ("status", "install"):
+        result = await other.post(
+            f"/v1/hosted-node/materials/{action}", json=payload if action == "install" else binding
+        )
+        assert result.json()["status"] == "unavailable"
+        assert result.json()["receipt_id"] == response.json()["receipt_id"]
+    with pytest.raises(MaterialDeniedError):
+        await protected_resolver(binding)
+    revoke = {**binding, "fence": 2, "idempotency_key": "revoke"}
+    assert (await other.post("/v1/hosted-node/materials/revoke", json=revoke)).json()[
+        "status"
+    ] == "revoked"
+    assert not list(receiver.store.root.glob("*/*"))
+    assert (await client.post("/v1/hosted-node/materials/install", json=payload)).json()[
+        "status"
+    ] == "revoked"
+    with pytest.raises(MaterialDeniedError):
+        await protected_resolver(binding)
+    assert not list(receiver.store.root.glob("*/*"))
+
+
+@pytest.mark.parametrize("rollback_before_finalize", [False, True])
+async def test_expiry_during_pending_install_is_terminal(
+    hosted, peer, monkeypatch, protected_resolver, rollback_before_finalize
+):
+    from awf.hosted_node import receiver as receiver_module
+    from awf.hosted_node.models import Receipt
+
+    client, receiver, _ = hosted
+    other, _, _ = peer
+    binding = await prepare(hosted)
+    instant = datetime.now(UTC)
+    binding["expires_at"] = (instant + timedelta(minutes=1)).isoformat()
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, _tz=None):
+            return instant
+
+    monkeypatch.setattr(receiver_module, "datetime", Clock)
+    entered, release = threading.Event(), threading.Event()
+    install = receiver.store.install
+
+    def stalled(*args):
+        entered.set()
+        assert release.wait(10)
+        return install(*args)
+
+    monkeypatch.setattr(receiver.store, "install", stalled)
+    payload = {**binding, "material": "YQ=="}
+    task = asyncio.create_task(client.post("/v1/hosted-node/materials/install", json=payload))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert (await other.post("/v1/hosted-node/materials/status", json=binding)).json()[
+            "status"
+        ] == "unavailable"
+        with pytest.raises(MaterialDeniedError):
+            await protected_resolver(binding)
+        instant += timedelta(minutes=2)
+        assert (await other.post("/v1/hosted-node/materials/status", json=binding)).json()[
+            "status"
+        ] == "expired"
+        with pytest.raises(MaterialDeniedError):
+            await protected_resolver(binding)
+        if rollback_before_finalize:
+            instant -= timedelta(minutes=2)
+    finally:
+        release.set()
+        result = await task
+    assert result.json()["status"] == "expired"
+    assert (await other.post("/v1/hosted-node/materials/install", json=payload)).json()[
+        "status"
+    ] == "expired"
+    with pytest.raises(MaterialDeniedError):
+        await protected_resolver(binding)
+    async with receiver.factory() as session:
+        receipt = (await session.scalars(select(Receipt))).one()
+        assert receipt.state == "expired"
+        grant = (await session.scalars(select(Grant))).one()
+        assert grant.current is None
+    assert not list(receiver.store.root.glob("*/*"))

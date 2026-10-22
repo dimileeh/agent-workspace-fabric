@@ -186,3 +186,74 @@ async def test_bootstrap_headers_are_not_authority_and_uninitialized_mode_is_clo
         assert (await client.get("/v1/hosted-node/identity")).status_code == 503
     finally:
         app.state.hosted_receiver = receiver
+
+
+@pytest.mark.parametrize("fresh_owner", [False, True])
+async def test_competing_startups_allocate_durable_epochs(
+    hosted, peer_engine, monkeypatch, fresh_owner
+):
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Insert
+
+    from awf.api.app import configure_database, create_app
+    from awf.common.config import Settings, get_settings
+    from awf.db.session import make_session_factory
+    from awf.hosted_node.models import Owner
+
+    _, original, _ = hosted
+    config = (
+        original.config.model_copy(update={"owner": "new-owner"})
+        if fresh_owner
+        else original.config
+    )
+    barrier = asyncio.Barrier(2)
+    execute = AsyncSession.execute
+
+    async def competing_insert(session, statement, *args, **kwargs):
+        if isinstance(statement, Insert) and statement.table.name == Owner.__tablename__:
+            await asyncio.wait_for(barrier.wait(), 5)
+        return await execute(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", competing_insert)
+    receivers = await asyncio.wait_for(
+        asyncio.gather(
+            Receiver.start(config, original.factory),
+            Receiver.start(config, make_session_factory(peer_engine)),
+        ),
+        10,
+    )
+    loser, winner = sorted(receivers, key=lambda r: r.identity.boot_epoch)
+    try:
+        assert winner.identity.boot_epoch == loser.identity.boot_epoch + 1
+        assert loser.identity.boot_epoch == (2 if fresh_owner else original.identity.boot_epoch + 1)
+        async with original.factory() as session:
+            owner = (await session.scalars(select(Owner).where(Owner.owner == config.owner))).one()
+            assert owner.boot_epoch == winner.identity.boot_epoch
+        for receiver, expected in ((loser, 403), (winner, 200)):
+            app = create_app(use_lifespan=False)
+            configure_database(app, receiver.factory)
+            app.state.hosted_receiver = receiver
+            app.dependency_overrides[get_settings] = lambda: Settings(
+                _env_file=None, api_token="operator-test-only"
+            )
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://boot"
+            ) as client:
+                client.headers.update(
+                    {"Authorization": "Bearer controller-test-only", **receiver.identity.headers()}
+                )
+                assert (await client.get("/v1/hosted-node/identity")).status_code == expected
+                assert (
+                    await client.post(
+                        "/v1/hosted-node/identity/acknowledge", json={"idempotency_key": "ack"}
+                    )
+                ).status_code == expected
+        await loser.close()
+        assert (await winner.identity_status()).acknowledged
+    finally:
+        await loser.close()
+        await winner.close()

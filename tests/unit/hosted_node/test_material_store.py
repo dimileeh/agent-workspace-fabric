@@ -105,3 +105,25 @@ def test_root_replacement_and_fifo_are_denied():
             root_path.rmdir()
             old.rename(root_path)
             store.close()
+
+
+@pytest.mark.parametrize("boundary", ["staged", "published"])
+def test_interrupted_publication_owned_cleanup(interrupt_publication, boundary):
+    with tempfile.TemporaryDirectory(dir="/dev/shm") as root:
+        store = MaterialStore(Path(root))
+        workspace, slot, winner = "a" * 32, "b" * 32, "c" * 32
+        winning_path = store.install(workspace, winner, b"winning-version")
+        with interrupt_publication(boundary), pytest.raises(OSError):
+            store.install(workspace, slot, b"interrupted-version")
+        pending = store.path(workspace, slot).with_suffix(".pending")
+        assert pending.is_file()
+        assert pending.stat().st_mode & 0o777 == 0o400
+        assert store.path(workspace, slot).exists() == (boundary == "published")
+        assert not store.exists(workspace, slot)
+        store.remove(workspace, slot)
+        store.remove(workspace, slot)
+        assert not pending.exists()
+        assert not store.path(workspace, slot).exists()
+        assert store.exists(workspace, winner)
+        assert winning_path.read_bytes() == b"winning-version"
+        store.close()
