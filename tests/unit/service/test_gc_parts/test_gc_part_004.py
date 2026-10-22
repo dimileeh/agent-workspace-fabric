@@ -667,8 +667,8 @@ async def test_batch_terminal_gc_revokes_each_candidate_and_is_retry_safe(
     }
     assert second.to_dict()["secret_leases"] == {
         first_id: {"revoked_count": 0, "reason_code": "TERMINAL_GC"},
-        second_id: {"revoked_count": 0, "reason_code": "TERMINAL_GC"},
     }
+    assert [c.workspace_id for c in second.plan.candidates] == [first_id]
     async with session_factory() as session:
         first_leases = await SecretLeaseRepository(session).list_for_workspace(first_id)
         second_leases = await SecretLeaseRepository(session).list_for_workspace(second_id)

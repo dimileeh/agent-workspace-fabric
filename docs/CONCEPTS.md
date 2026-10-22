@@ -275,11 +275,24 @@ What each stage means:
 | `validating` | AWF is running profile/request validation. |
 | `pushing` | AWF is pushing the task branch and creating a PR. |
 | `monitoring_pr` | AWF owns the PR until it merges, closes, or fails. |
-| `completed` | The PR merged or was observed as merged. Compose teardown ran best-effort; filesystem pressure-dir cleanup is retention-based. |
+| `completed` | The PR merged or was observed as merged. Compose teardown ran best-effort; filesystem pressure directories are reclaimed immediately after merge, with retention-based GC as a fallback. |
 | `failed` | A terminal failure occurred. The workspace is preserved for inspection. |
 | `cancelled` | Operator or orchestrator cancelled the workspace. |
 | `destroying` | Cleanup requested. |
 | `destroyed` | Workspace resources removed. |
+
+Filesystem GC records `filesystem_reclaimed_at` only after every planned workspace
+path was deleted or already absent, with no workspace cleanup failure. Dry runs
+and partial cleanup leave it unset. The marker leaves status and retention age
+unchanged; terminal GC excludes marked rows before applying its oldest-first batch
+limit, so even an already-empty legacy workspace advances out of the queue on its
+next successful execute pass. Cleanup readiness counts only unmarked candidates.
+Leaving a GC terminal state clears the marker through the state machine, including
+failed-workspace remonitoring, so recreated files can be reclaimed later. The
+periodic worker backstop logs one structured summary per sweep, including zero
+reclaimed paths, with the cleanup reason code and counts (warning on partial
+cleanup). Retention ages, cleanup order, shared-base pin protection, and durable
+rows, events, logs, and artifacts retain their existing policies.
 
 ## PR Monitor Actions
 
