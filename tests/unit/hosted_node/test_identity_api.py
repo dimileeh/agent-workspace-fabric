@@ -257,3 +257,52 @@ async def test_competing_startups_allocate_durable_epochs(
     finally:
         await loser.close()
         await winner.close()
+
+
+@pytest.mark.parametrize("action", ["stop", "cancel", "delete"])
+@pytest.mark.parametrize("advance_boot", [False, True])
+async def test_control_rechecks_identity_after_delayed_body(
+    hosted, monkeypatch, action, advance_boot
+):
+    from unittest.mock import Mock
+
+    from awf.api.routes import controls
+    from awf.service.controls import WorkspaceNotFoundError
+
+    client, receiver, _ = hosted
+    control_factory = Mock(side_effect=WorkspaceNotFoundError("missing"))
+    monkeypatch.setattr(controls, "_controls", control_factory)
+    successor = None
+
+    async def body():
+        nonlocal successor
+        yield b'{"reason":'
+        if advance_boot:
+            successor = await Receiver.start(receiver.config, receiver.factory)
+            assert successor.identity.boot_epoch > receiver.identity.boot_epoch
+        yield b'"test"}'
+
+    method = "DELETE" if action == "delete" else "POST"
+    path = "/v1/workspaces/missing" + ("" if action == "delete" else f"/{action}")
+    try:
+        response = await client.request(
+            method,
+            path,
+            content=body(),
+            headers={
+                "Authorization": "Bearer operator-test-only",
+                "Content-Type": "application/json",
+                "Idempotency-Key": "control-test",
+            },
+        )
+        if advance_boot:
+            assert successor is not None
+            assert response.status_code == 403
+            assert response.json()["error_code"] == "IDENTITY_MISMATCH"
+            control_factory.assert_not_called()
+        else:
+            assert response.status_code == 404
+            control_factory.assert_called_once()
+    finally:
+        if successor is not None:
+            await successor.close()

@@ -77,6 +77,7 @@ class HostedGuard:
             ):
                 raise MaterialDeniedError("IDENTITY_MISMATCH", 403)
             await receiver.identity_status()
+            safe = False
             if not dedicated and scope["type"] == "http" and scope["method"] not in {"GET", "HEAD"}:
                 safe = (
                     scope["method"] == "POST"
@@ -91,7 +92,7 @@ class HostedGuard:
                 )
                 if not safe:
                     raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
-            if dedicated and scope["type"] == "http":
+            if (dedicated or safe) and scope["type"] == "http":
                 body = bytearray()
                 while True:
                     message = await receive()
@@ -108,6 +109,9 @@ class HostedGuard:
                     return {"type": "http.request", "body": bytes(body), "more_body": False}
 
                 receive = buffered
+                if safe:
+                    # Body delivery may outlive this process's durable ownership.
+                    await receiver.identity_status()
         except MaterialDeniedError as exc:
             await deny(exc.reason, exc.status)
             return
