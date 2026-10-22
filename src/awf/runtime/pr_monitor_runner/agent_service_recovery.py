@@ -1150,6 +1150,15 @@ async def _restart_monitor_agent_service_or_fail(
             workspace_id=workspace_id,
         ),
     )
+    # Setup replay can outlast the monitor lease, so re-fence before the caller's
+    # timeout-floor bookkeeping can commit edits for a superseded monitor.
+    await _raise_if_monitor_agent_service_recovery_was_superseded(
+        self,
+        workspace_id=workspace_id,
+        source_reason_code=exc.reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+    )
     return restart_attempts
 
 

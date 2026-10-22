@@ -522,3 +522,57 @@ async def test_failed_replay_does_not_park_when_monitor_claim_moved(
             for event in workspace.events
             if event.event_type == RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE
         ]
+
+
+@pytest.mark.unit
+async def test_successful_replay_refences_monitor_claim_before_timeout_floor(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim lost while a successful replay ran stops recovery before any floor bookkeeping."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_claimed_by = "worker-old"
+        await session.commit()
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    adapter = _idle_timeout_adapter()
+    validation = _OrderedValidation(container, adapter)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        validation=validation,
+    )
+    runner._monitor_owner_id = "worker-old"
+    _patch_compose(mocker, container, recreate=True)
+    original_run = validation.run_profile_phases
+
+    async def _setup_outlives_lease(**kwargs: Any) -> Any:
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.monitor_claimed_by = "worker-new"
+            await session.commit()
+        return await original_run(**kwargs)
+
+    monkeypatch.setattr(validation, "run_profile_phases", _setup_outlives_lease)
+    timeout_floor = mocker.patch(
+        "awf.runtime.pr_monitor_runner.agent_service_recovery._record_timeout_rerun_floor",
+        return_value=True,
+    )
+
+    with pytest.raises(_MonitorAgentServiceRecoverySupersededError) as raised:
+        await _run(runner, workspace_id, tmp_path)
+
+    assert raised.value.details is not None
+    assert raised.value.details["superseded_reason"] == "monitor_claim_changed"
+    assert validation.phase_calls == [("setup", "pre_agent")]
+    timeout_floor.assert_not_awaited()
+    assert len(adapter.calls) == 1
