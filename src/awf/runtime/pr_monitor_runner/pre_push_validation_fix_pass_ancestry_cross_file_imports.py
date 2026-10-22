@@ -546,8 +546,8 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     so holding that later import as the call's binding would credit a
     correction to ``helpers.len`` (PRRT_kwDOSJAM6s6vLRfX). That holds inside a
     loop as well: a later pass may reach the import, but the first pass calls
-    whatever the name held before it, so the import is read against the body cut
-    at the anchor's first pass (PRRT_kwDOSJAM6s6vLnh5). A comprehension is
+    whatever the name held before it, so an import inside the statement holding
+    the anchor is reported as well (PRRT_kwDOSJAM6s6vLnh5). A comprehension is
     anchored as well, because its generator targets bind inside it — they shadow
     the import for the calls it contains and for nothing else
     (PRRT_kwDOSJAM6s6q_M0s). A name *no* import binds is not reported on by this
@@ -574,194 +574,48 @@ def _locally_rebound_names_at_line(file_text: str, line: int, *, path: str) -> f
     if anchored_class is not None:
         trimmed = _class_body_through_line(anchored_class, line)
         bound.update(_names_bound_in_scope(trimmed))
-        first_pass = _class_body_through_line(anchored_class, line, first_pass=True)
-        bound.update(_scope_own_import_names(anchored_class) - _scope_own_import_names(first_pass))
+        finished = _class_body_through_line(anchored_class, line, through_anchor=False)
+        bound.update(_scope_own_import_names(anchored_class) - _scope_own_import_names(finished))
     return frozenset(bound)
 
 
 def _class_body_through_line(
-    node: ast.ClassDef, line: int, *, first_pass: bool = False
+    node: ast.ClassDef, line: int, *, through_anchor: bool = True
 ) -> ast.ClassDef:
-    """``node`` with only the body statements that run before ``line`` can.
+    """``node`` with only the top-level body statements that may run before ``line``.
 
-    A class body executes top to bottom, so a name it binds on a later line is
+    A class body executes top to bottom, so a name a *later* statement binds is
     not yet in the class namespace when ``line`` runs: ``class C: result =
     validate(); validate = local`` calls the imported ``validate`` (issue #1045
-    item 2). Decorators, bases and keywords run before the body and are kept.
-    See ``_statements_through_line`` for how each body statement is read, and
-    for ``first_pass``. The copy is shallow; ``node`` is left as it was.
+    item 2). Only top-level body statements starting strictly after the
+    anchored line are dropped. The statement holding the anchor is kept whole —
+    every header target, ``as`` name, walrus, handler and ``case`` capture in
+    it — rather than ordered against the call, because a mistake in such
+    ordering silently drops a binding that does shadow the import
+    (PRRT_kwDOSJAM6s6vWtm4). The rare call that runs before a binding in its own
+    statement therefore fails closed, the safe direction. Decorators, bases and
+    keywords run before the body and are kept.
+
+    ``through_anchor=False`` cuts the body to the statements that have finished
+    before the anchored line instead, which is what an import must have done
+    for its binding to be trusted: an import inside the statement holding the
+    anchor, or on its line, may not have run by the call
+    (PRRT_kwDOSJAM6s6vLnh5). The copy is shallow; ``node`` is left as it was.
     """
     trimmed = copy.copy(node)
-    trimmed.body = _statements_through_line(node.body, line, first_pass=first_pass)
+    trimmed.body = [
+        statement
+        for statement in node.body
+        if _statement_start(statement) <= line
+        and (through_anchor or (statement.end_lineno or statement.lineno) < line)
+    ]
     return trimmed
-
-
-def _statements_through_line(
-    statements: list[ast.stmt], line: int, *, first_pass: bool = False
-) -> list[ast.stmt]:
-    """``statements`` cut to what may have run when ``line`` runs.
-
-    A statement starting on ``line`` itself is kept, because a same-line
-    binding may run first. A decorated definition starts at its first
-    decorator: an anchor inside the stack may follow a decorator that binds the
-    name with ``:=``, so the whole definition is kept, which only over-reports.
-    A loop that opens before the anchor and holds it is kept whole, because it
-    may rebind the name on a later pass. Any other compound statement holding
-    the anchor runs its body once, top to bottom, so it is trimmed the same way
-    in turn: ``class C: with ctx: if enabled: result = validate(); validate =
-    local`` still calls the imported ``validate`` (PRRT_kwDOSJAM6s6vLPzj),
-    following only the arm that holds the anchor (see
-    ``_compound_through_line``). ``first_pass`` trims a loop holding the anchor the same way, giving what
-    has run by the anchor's *first* pass rather than by any pass. A ``for``
-    whose header holds the anchor is trimmed either way: its iterable runs once,
-    before any pass (PRRT_kwDOSJAM6s6vOa0H).
-    """
-    kept: list[ast.stmt] = []
-    for statement in statements:
-        if _statement_start(statement) > line:
-            continue
-        trimmable = _RUN_ONCE_COMPOUNDS + (_LOOP_COMPOUNDS if first_pass else ())
-        in_for_header = isinstance(statement, (ast.AsyncFor, ast.For)) and _header_holds_line(
-            statement, line
-        )
-        if in_for_header or (
-            isinstance(statement, trimmable) and (statement.end_lineno or statement.lineno) >= line
-        ):
-            statement = _compound_through_line(statement, line, first_pass=first_pass)
-        kept.append(statement)
-    return kept
-
-
-_RUN_ONCE_COMPOUNDS: tuple[type[ast.stmt], ...] = (
-    ast.AsyncWith,
-    ast.If,
-    ast.Match,
-    ast.Try,
-    ast.TryStar,
-    ast.With,
-)
-_LOOP_COMPOUNDS: tuple[type[ast.stmt], ...] = (ast.AsyncFor, ast.For, ast.While)
-
-
-def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) -> ast.stmt:
-    """A shallow copy of a compound ``statement`` trimmed at ``line``.
-
-    Its header expressions run before its body and are kept. Each statement
-    list is cut by ``_statements_through_line``, and only the arm holding the
-    anchor is followed, because its mutually exclusive siblings have not run:
-    ``class C: if enabled: validate = local; else: result = validate()`` calls
-    the imported ``validate`` (PRRT_kwDOSJAM6s6vMLgj). Only arms the language
-    makes mutually exclusive are dropped, and only the parts of them that
-    cannot have run; anything else counts as possibly executed. So an ``if``
-    whose ``else`` holds the anchor drops its body, and in a plain ``try`` an
-    ``except`` handler before the one holding the anchor drops its body and
-    ``as`` name but keeps its type expression, which matching evaluated — the
-    ``try`` body may have run part way first, so it is kept. An ``else``
-    holding the anchor runs only when nothing was raised, so no handler — not
-    even its type expression — has run (PRRT_kwDOSJAM6s6vRFRc). ``finally`` may
-    follow any handler, and ``except*`` handlers are not exclusive at all —
-    one exception group may run each in turn — so there every handler up to
-    the anchor is kept whole (PRRT_kwDOSJAM6s6vQAB7). A ``case`` below the
-    anchor is dropped; an earlier one keeps only its pattern and guard, which a
-    failed match may still have bound, and the one holding the anchor has its
-    body cut the same way.
-
-    A header target binds only after its header expression has run, so an
-    anchor in the header does not see it: ``class C: with validate() as
-    validate:`` and ``for validate in validate():`` call the imported
-    ``validate`` (PRRT_kwDOSJAM6s6vOa0H). Such a ``for`` keeps only its
-    iterable, and a ``with`` item keeps its target only while a later item may
-    reach the anchored line; the same goes for an ``except ... as`` name. A
-    target that itself holds a call on the anchored line is kept too, because
-    it binds its names left to right before such a call runs: ``for validate,
-    sink[validate()] in pairs:`` calls the loop's ``validate``
-    (PRRT_kwDOSJAM6s6vWtm4).
-    """
-    if (
-        isinstance(statement, (ast.AsyncFor, ast.For))
-        and _header_holds_line(statement, line)
-        and not _target_calls_on_line(statement.target, line)
-    ):
-        return ast.Expr(value=statement.iter)
-    trimmed = copy.copy(statement)
-    if isinstance(trimmed, (ast.AsyncWith, ast.With)) and _header_holds_line(trimmed, line):
-        trimmed.items = [
-            item
-            if any(later.context_expr.lineno <= line for later in trimmed.items[index + 1 :])
-            or _target_calls_on_line(item.optional_vars, line)
-            else ast.withitem(context_expr=item.context_expr)
-            for index, item in enumerate(trimmed.items)
-        ]
-    for field in ("body", "orelse", "finalbody"):
-        if hasattr(statement, field):
-            setattr(
-                trimmed,
-                field,
-                _statements_through_line(getattr(statement, field), line, first_pass=first_pass),
-            )
-    if isinstance(trimmed, ast.If) and _arm_holds_line(trimmed.orelse, line):
-        trimmed.body = []
-    if isinstance(trimmed, (ast.Try, ast.TryStar)):
-        in_finally = _arm_holds_line(trimmed.finalbody, line)
-        in_else = not in_finally and _arm_holds_line(trimmed.orelse, line)
-        exclusive = type(trimmed) is ast.Try and not in_finally
-        handlers = []
-        for handler in trimmed.handlers:
-            if in_else or handler.lineno > line:
-                continue
-            handler = copy.copy(handler)
-            if exclusive and line > (handler.end_lineno or handler.lineno):
-                handler.name = None
-                handler.body = []
-            else:
-                if _header_holds_line(handler, line):
-                    handler.name = None
-                handler.body = _statements_through_line(handler.body, line, first_pass=first_pass)
-            handlers.append(handler)
-        trimmed.handlers = handlers
-    if isinstance(trimmed, ast.Match):
-        cases = []
-        for case in trimmed.cases:
-            if case.pattern.lineno <= line:
-                case = copy.copy(case)
-                if line <= (case.body[-1].end_lineno or case.body[-1].lineno):
-                    case.body = _statements_through_line(case.body, line, first_pass=first_pass)
-                else:
-                    case.body = []
-                cases.append(case)
-        trimmed.cases = cases
-    return trimmed
-
-
-def _target_calls_on_line(target: ast.expr | None, line: int) -> bool:
-    """Whether a binding ``target`` holds a call spanning ``line``."""
-    return target is not None and any(
-        isinstance(node, ast.Call) and node.lineno <= line <= (node.end_lineno or node.lineno)
-        for node in ast.walk(target)
-    )
 
 
 def _statement_start(statement: ast.stmt) -> int:
     """The first line of ``statement``, counting its decorators."""
     decorators: list[ast.expr] = getattr(statement, "decorator_list", [])
     return min([statement.lineno, *(decorator.lineno for decorator in decorators)])
-
-
-def _header_holds_line(
-    node: ast.AsyncFor | ast.AsyncWith | ast.ExceptHandler | ast.For | ast.With, line: int
-) -> bool:
-    """Whether ``line`` falls in ``node``'s header, before its body starts."""
-    return node.lineno <= line < _statement_start(node.body[0])
-
-
-def _arm_holds_line(statements: list[ast.stmt], line: int) -> bool:
-    """Whether the trailing arm ``statements`` of a compound holding ``line`` holds it.
-
-    Callers pass an ``else`` / ``finally`` arm of a compound statement that
-    spans ``line``; such an arm runs to the compound's end, so it holds the
-    line once it has started.
-    """
-    return bool(statements) and _statement_start(statements[0]) <= line
 
 
 def _global_declared_names(scope: ast.AST) -> Iterator[str]:

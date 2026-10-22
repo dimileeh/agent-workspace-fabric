@@ -752,6 +752,18 @@ _CLASS_BODY_CALL_AFTER_BINDING_TEXT = (
     "    depth = record_ready_queue_depth(1)\n"
 )
 
+# The reviewer's case: the loop target binds ``record_ready_queue_depth`` before
+# the call inside its second target element runs, so the call on line 5 reaches
+# the loop variable, not the import (PRRT_kwDOSJAM6s6vWtm4).
+_CLASS_BODY_CALL_IN_LOOP_TARGET_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "class Pools:\n"
+    "    for record_ready_queue_depth, sink[record_ready_queue_depth(1)] in pairs:\n"
+    "        depth = 1\n"
+)
+
 # The class body calls the name on line 2 and only imports it on line 3, so the
 # call reaches whatever the module scope binds — here nothing but a builtin —
 # and never the import below it.
@@ -814,290 +826,79 @@ def test_class_body_ordering_keeps_its_conservative_edges() -> None:
 
 
 @pytest.mark.unit
-def test_a_non_loop_compound_holding_the_anchor_is_trimmed_by_execution_order() -> None:
-    """An ``if`` / ``with`` / ``try`` / ``match`` body runs once, top to bottom.
+def test_the_class_body_statement_holding_the_anchor_keeps_every_binding() -> None:
+    """Nothing in the top-level class-body statement holding the anchor is trimmed.
 
-    Only a loop can come back round to the anchor, so a binding below the
-    anchor inside any other compound statement has not run when the call does
-    (PRRT_kwDOSJAM6s6vLPzj). What does precede the anchor still counts: a
-    header, an earlier statement or handler, and the pattern of the case
-    holding the anchor. A loop nested inside such a statement is still kept
-    whole.
+    Ordering a call against the bindings of its own statement is where a trim
+    error drops a real shadow: ``for validate, sink[validate()] in pairs:``
+    binds the loop's ``validate`` before the call in its target runs
+    (PRRT_kwDOSJAM6s6vWtm4). So every binding in that statement counts — a
+    compound body below the anchor, a mutually exclusive arm, a header target,
+    a ``with`` / ``except`` ``as`` name, a walrus in a handler type and a
+    ``case`` capture alike — and a call that does run before one of them fails
+    closed. Only top-level statements below it are dropped (see
+    ``test_a_class_body_binding_after_the_anchor_does_not_shadow``).
     """
-    with_if = (
-        "class C:\n"
-        "    with ctx:\n"
-        "        if enabled:\n"
-        "            result = validate()\n"
-        "            validate = local\n"
-        "        else:\n"
-        "            other = 1\n"
-    )
-    earlier = (
-        "class C:\n"
-        "    with ctx as handle:\n"
-        "        validate = handle\n"
-        "        result = validate()\n"
-    )
-    handler = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except Error as caught:\n"
-        "        result = validate()\n"
-        "        validate = caught\n"
-        "    except Other:\n"
-        "        late = 1\n"
-        "    finally:\n"
-        "        validate = 2\n"
-    )
-    match = (
-        "class C:\n"
-        "    match subject:\n"
-        "        case [captured]:\n"
-        "            result = validate()\n"
-        "            validate = captured\n"
-        "        case later:\n"
-        "            validate = later\n"
-    )
-    nested_loop = (
-        "class C:\n"
-        "    if enabled:\n"
-        "        while pending:\n"
-        "            result = validate()\n"
-        "            validate = local\n"
-    )
+    holding_anchor = {
+        "for_target_call": (
+            "class C:\n    for validate, sink[validate()] in pairs:\n        result = 1\n",
+            2,
+        ),
+        "with_target_call": (
+            "class C:\n    with local() as (validate, sink[validate()]):\n        result = 1\n",
+            2,
+        ),
+        "for_header": ("class C:\n    for validate in validate():\n        result = 1\n", 2),
+        "with_header": ("class C:\n    with validate() as validate:\n        result = 1\n", 2),
+        "handler_header": (
+            "class C:\n"
+            "    try:\n"
+            "        before = 1\n"
+            "    except validate() as validate:\n"
+            "        result = 1\n",
+            4,
+        ),
+        "body_below_anchor": (
+            "class C:\n"
+            "    with ctx:\n"
+            "        if enabled:\n"
+            "            result = validate()\n"
+            "            validate = local\n",
+            4,
+        ),
+        "exclusive_arm": (
+            "class C:\n"
+            "    if enabled:\n"
+            "        validate = local\n"
+            "    else:\n"
+            "        result = validate()\n",
+            5,
+        ),
+        "handler_type_walrus": (
+            "class C:\n"
+            "    try:\n"
+            "        before = 1\n"
+            "    except (validate := ValueError):\n"
+            "        skipped = 1\n"
+            "    else:\n"
+            "        result = validate()\n",
+            7,
+        ),
+        "later_case": (
+            "class C:\n"
+            "    match subject:\n"
+            "        case [first]:\n"
+            "            result = validate()\n"
+            "        case validate:\n"
+            "            other = 1\n",
+            4,
+        ),
+    }
 
-    assert cross_file._locally_rebound_names_at_line(with_if, 4, path=_CALLER) == frozenset(
-        {"result"}
-    )
-    assert "validate" in cross_file._locally_rebound_names_at_line(earlier, 4, path=_CALLER)
-    assert cross_file._locally_rebound_names_at_line(handler, 5, path=_CALLER) == frozenset(
-        {"before", "caught", "result"}
-    )
-    assert cross_file._locally_rebound_names_at_line(match, 4, path=_CALLER) == frozenset(
-        {"captured", "result"}
-    )
-    assert "validate" in cross_file._locally_rebound_names_at_line(nested_loop, 4, path=_CALLER)
-
-
-@pytest.mark.unit
-def test_only_the_compound_arm_holding_the_anchor_is_followed() -> None:
-    """A mutually exclusive arm before the anchor has not run when the call does.
-
-    ``class C: if enabled: validate = local; else: result = validate()`` calls
-    the imported ``validate`` in the ``else``, so the ``if`` body must not be
-    read as a binding there (PRRT_kwDOSJAM6s6vMLgj). The same holds for an
-    ``elif``, an earlier ``except`` arm, the ``try`` handlers seen from its
-    ``else``, and an earlier ``case`` body. What can precede the arm still
-    counts: the ``try`` body, the patterns of earlier cases, which a failed
-    match may have bound, and everything a ``finally`` may follow.
-    """
-    if_else = (
-        "class C:\n"
-        "    if enabled:\n"
-        "        validate = local\n"
-        "    else:\n"
-        "        result = validate()\n"
-    )
-    elif_arm = (
-        "class C:\n"
-        "    if enabled:\n"
-        "        validate = local\n"
-        "    elif ready:\n"
-        "        result = validate()\n"
-    )
-    later_handler = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except Error:\n"
-        "        validate = local\n"
-        "    except Other:\n"
-        "        result = validate()\n"
-    )
-    try_else = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except Error:\n"
-        "        validate = local\n"
-        "    else:\n"
-        "        result = validate()\n"
-    )
-    try_finally = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except Error:\n"
-        "        validate = local\n"
-        "    finally:\n"
-        "        result = validate()\n"
-    )
-    later_case = (
-        "class C:\n"
-        "    match subject:\n"
-        "        case [captured] if (guarded := captured):\n"
-        "            validate = captured\n"
-        "        case other:\n"
-        "            result = validate()\n"
-    )
-
-    assert cross_file._locally_rebound_names_at_line(if_else, 5, path=_CALLER) == frozenset(
-        {"result"}
-    )
-    assert cross_file._locally_rebound_names_at_line(elif_arm, 5, path=_CALLER) == frozenset(
-        {"result"}
-    )
-    assert cross_file._locally_rebound_names_at_line(later_handler, 7, path=_CALLER) == frozenset(
-        {"before", "result"}
-    )
-    assert cross_file._locally_rebound_names_at_line(try_else, 7, path=_CALLER) == frozenset(
-        {"before", "result"}
-    )
-    assert "validate" in cross_file._locally_rebound_names_at_line(try_finally, 7, path=_CALLER)
-    assert cross_file._locally_rebound_names_at_line(later_case, 6, path=_CALLER) == frozenset(
-        {"captured", "guarded", "other", "result"}
-    )
-
-
-@pytest.mark.unit
-def test_an_earlier_except_star_handler_may_run_before_the_anchored_one() -> None:
-    """``except*`` handlers are not mutually exclusive.
-
-    One exception group may hold both a ``ValueError`` and a ``TypeError``, so
-    ``except* ValueError: validate = local`` can run before a later ``except*
-    TypeError: result = validate()``, which then calls ``local``
-    (PRRT_kwDOSJAM6s6vQAB7). A handler below the anchor has still not run.
-    """
-    later_star_handler = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except* ValueError:\n"
-        "        validate = local\n"
-        "    except* TypeError:\n"
-        "        result = validate()\n"
-        "    except* KeyError:\n"
-        "        after = 1\n"
-    )
-
-    assert cross_file._locally_rebound_names_at_line(
-        later_star_handler, 7, path=_CALLER
-    ) == frozenset({"before", "validate", "result"})
-
-
-@pytest.mark.unit
-def test_an_earlier_plain_except_handler_still_evaluates_its_type() -> None:
-    """Only a plain ``except`` handler's *body* is exclusive of the anchored one.
-
-    Matching evaluates each earlier handler's type expression in turn, so a
-    ``:=`` there binds before ``result = validate()`` runs; its body and its
-    ``as`` name, which bind only when it matches, have not run. Anything the
-    trim cannot prove skipped counts as possibly executed (PRRT_kwDOSJAM6s6vQAB7).
-    """
-    later_handler = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except (validate := ValueError) as caught:\n"
-        "        skipped = 1\n"
-        "    except TypeError:\n"
-        "        result = validate()\n"
-        "    except KeyError:\n"
-        "        after = 1\n"
-    )
-
-    assert cross_file._locally_rebound_names_at_line(later_handler, 7, path=_CALLER) == frozenset(
-        {"before", "validate", "result"}
-    )
-
-
-@pytest.mark.unit
-def test_no_except_handler_type_runs_before_a_try_else_anchor() -> None:
-    """A ``try`` / ``else`` runs only when the ``try`` body raised nothing.
-
-    No handler was matched, so no handler's type expression was evaluated and
-    a ``:=`` there has not bound ``validate`` before ``result = validate()``
-    runs — for ``except`` and ``except*`` alike (PRRT_kwDOSJAM6s6vRFRc). A
-    ``finally`` anchor may still follow any handler, so it keeps them.
-    """
-    try_else = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except (validate := ValueError) as caught:\n"
-        "        skipped = 1\n"
-        "    else:\n"
-        "        result = validate()\n"
-    )
-    try_star_else = try_else.replace("except (", "except* (")
-    try_finally = try_else.replace("    else:\n", "    finally:\n")
-
-    assert cross_file._locally_rebound_names_at_line(try_else, 7, path=_CALLER) == frozenset(
-        {"before", "result"}
-    )
-    assert cross_file._locally_rebound_names_at_line(try_star_else, 7, path=_CALLER) == frozenset(
-        {"before", "result"}
-    )
-    assert "validate" in cross_file._locally_rebound_names_at_line(try_finally, 7, path=_CALLER)
-
-
-@pytest.mark.unit
-def test_a_compound_header_target_binds_only_after_its_expression_runs() -> None:
-    """A ``with`` / ``for`` / ``except`` target is bound after its header's expression.
-
-    ``class C: with validate() as validate:`` and ``for validate in
-    validate():`` call the imported ``validate`` before the target binds it, so
-    the target must not be read as a shadow of a call in that header
-    (PRRT_kwDOSJAM6s6vOa0H). A ``for`` iterable runs once, before any pass, so
-    this holds without the first-pass cut. A ``with`` item's target still
-    precedes a later item that reaches the anchored line, and a target still
-    shadows a call in its body.
-    """
-    with_header = "class C:\n    with validate() as validate:\n        result = 1\n"
-    for_header = "class C:\n    for validate in validate():\n        result = 1\n"
-    handler_header = (
-        "class C:\n"
-        "    try:\n"
-        "        before = 1\n"
-        "    except validate() as validate:\n"
-        "        result = 1\n"
-    )
-    later_item = "class C:\n    with (\n        validate() as validate,\n        other() as x,\n    ):\n        result = 1\n"
-    earlier_item = "class C:\n    with local() as validate, validate() as x:\n        result = 1\n"
-    body = "class C:\n    with local() as validate:\n        result = validate()\n"
-
-    assert cross_file._locally_rebound_names_at_line(with_header, 2, path=_CALLER) == frozenset()
-    assert cross_file._locally_rebound_names_at_line(for_header, 2, path=_CALLER) == frozenset()
-    assert cross_file._locally_rebound_names_at_line(handler_header, 4, path=_CALLER) == frozenset(
-        {"before"}
-    )
-    assert cross_file._locally_rebound_names_at_line(later_item, 3, path=_CALLER) == frozenset()
-    assert "validate" in cross_file._locally_rebound_names_at_line(earlier_item, 2, path=_CALLER)
-    assert "validate" in cross_file._locally_rebound_names_at_line(body, 3, path=_CALLER)
-
-
-@pytest.mark.unit
-def test_a_header_target_holding_a_call_keeps_its_bindings() -> None:
-    """A call inside a header target may run after that target binds the name.
-
-    ``class C: for validate, sink[validate()] in pairs:`` assigns ``validate``
-    before evaluating ``sink[validate()]``, so the call reaches the loop
-    target, not the import, and the target must still be read as a shadow
-    (PRRT_kwDOSJAM6s6vWtm4). The same holds for a ``with`` item's target, the
-    last one included. A target holding no call on the anchored line is still
-    dropped.
-    """
-    for_target = "class C:\n    for validate, sink[validate()] in pairs:\n        result = 1\n"
-    with_target = (
-        "class C:\n    with local() as (validate, sink[validate()]):\n        result = 1\n"
-    )
-    plain_target = "class C:\n    for validate, sink[0] in validate():\n        result = 1\n"
-
-    assert "validate" in cross_file._locally_rebound_names_at_line(for_target, 2, path=_CALLER)
-    assert "validate" in cross_file._locally_rebound_names_at_line(with_target, 2, path=_CALLER)
-    assert cross_file._locally_rebound_names_at_line(plain_target, 2, path=_CALLER) == frozenset()
+    for name, (text, line) in holding_anchor.items():
+        assert "validate" in cross_file._locally_rebound_names_at_line(text, line, path=_CALLER), (
+            name
+        )
 
 
 @pytest.mark.unit
@@ -1109,10 +910,11 @@ def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
     reported here, which holds it to the unmatchable target instead of
     ``helpers`` (PRRT_kwDOSJAM6s6vLRfX). An import at or above the anchor does
     bind it and is not reported, and neither is one in a method below, which
-    binds a local of that method only. A loop holding the anchor is no
-    exception: its first pass calls the builtin before the import below it has
-    run (PRRT_kwDOSJAM6s6vLnh5), while an import above the anchor in the loop
-    binds every pass.
+    binds a local of that method only. An import inside the statement holding
+    the anchor is reported too, wherever it sits: a loop's first pass calls the
+    builtin before an import below it has run (PRRT_kwDOSJAM6s6vLnh5), and an
+    import above it in that statement is not ordered against the call, so it
+    fails closed (PRRT_kwDOSJAM6s6vWtm4).
     """
     later = "class C:\n    size = len(items)\n    if ok:\n        from helpers import len\n"
     loop_later = (
@@ -1141,7 +943,7 @@ def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
         {"item", "size", "len"}
     )
     assert cross_file._locally_rebound_names_at_line(loop_earlier, 4, path=_CALLER) == frozenset(
-        {"size"}
+        {"size", "len"}
     )
 
 
@@ -1159,6 +961,14 @@ async def test_a_correction_to_an_import_the_class_body_rebound_earlier_fails_cl
     probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_AFTER_BINDING_TEXT)
 
     assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+async def test_a_correction_to_an_import_a_class_body_loop_target_rebinds_fails_closed() -> None:
+    """End to end: a call inside the loop's own target reaches the loop variable."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_IN_LOOP_TARGET_TEXT)
+
+    assert not await _probe(probe, item_line=5)
 
 
 @pytest.mark.unit

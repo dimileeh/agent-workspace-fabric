@@ -407,8 +407,10 @@ cross-file evidence: without a real ES-module parser its callee cannot be tied
 to one file, and matching by name let an edit to an unrelated same-named export
 count as the fix (#1047). Only languages with no binding reader keep the
 name-only match. A name that a scope binds shadows the import for the anchored
-call. In a Python class body, which runs top to bottom, only bindings at or
-before the anchored line count. Every rejection keeps the item's
+call. In a Python class body, which runs top to bottom, a binding in a later
+top-level statement does not count. Every binding in the statement holding the
+anchored line does, even one that runs after the call, so such a call fails
+closed. Every rejection keeps the item's
 `AGENT_FIXED_WITHOUT_EVIDENCE` outcome and parks it as `needs_human`.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
