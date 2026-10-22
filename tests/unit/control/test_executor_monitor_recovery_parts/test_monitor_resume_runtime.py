@@ -575,6 +575,50 @@ async def test_usable_runtime_after_dependency_up_failure_still_recreates_the_ag
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("dependency_up_fails", [False, True])
+async def test_failed_agent_recreate_raises_a_distinct_error_never_tolerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dependency_up_fails: bool
+) -> None:
+    """A usable old stack never makes a failed agent recreate a tolerated restart."""
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(_running(_service("postgres", health="healthy"), _service("agent"))),
+    )
+    compose = _RecordingCompose()
+
+    async def _ensure(**kwargs: Any) -> None:
+        compose.calls.append(kwargs)
+        if kwargs.get("force_recreate"):
+            raise ComposeOperationError(
+                operation="up",
+                returncode=3,
+                stdout="out",
+                stderr="agent mount failed",
+                reason_code="COMPOSE_UP_TIMEOUT",
+            )
+        if dependency_up_fails:
+            raise ComposeOperationError(operation="up", returncode=1, stdout="", stderr="redis")
+
+    monkeypatch.setattr(compose, "ensure_project_up", _ensure)
+
+    async def _usable() -> bool:
+        return True
+
+    with pytest.raises(monitor_resume_runtime.AgentRecreateError) as raised:
+        await _restart(compose, tmp_path, runtime_usable=_usable)
+
+    error = raised.value
+    assert (error.operation, error.returncode, error.stdout, error.stderr) == (
+        "up",
+        3,
+        "out",
+        "agent mount failed",
+    )
+    assert error.reason_code == "COMPOSE_UP_TIMEOUT"
+    assert compose.calls[-1]["force_recreate"] is True
+
+
+@pytest.mark.unit
 async def test_unusable_runtime_after_dependency_up_failure_skips_the_agent_recreate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

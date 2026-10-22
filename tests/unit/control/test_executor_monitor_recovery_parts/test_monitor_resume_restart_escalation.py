@@ -296,8 +296,19 @@ async def test_successful_resume_resets_the_streak(
     assert await _streak(factory, ws_id) == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1
 
 
+class _DependencyUpFails(_ScriptedCompose):
+    """Only the ``--no-recreate`` dependency up fails; the agent recreate succeeds."""
+
+    async def ensure_project_up(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if kwargs.get("no_recreate"):
+            raise ComposeOperationError(
+                operation="up", returncode=1, stdout="", stderr="redis exited (1)"
+            )
+
+
 @pytest.mark.unit
-async def test_failed_but_usable_restart_resets_the_streak(
+async def test_failed_dependency_up_with_a_usable_runtime_resets_the_streak(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -312,21 +323,66 @@ async def test_failed_but_usable_restart_resets_the_streak(
         return True
 
     monkeypatch.setattr(monitor_handoff, "_compose_runtime_usable_after_restart_failure", _usable)
+    executor._compose = _DependencyUpFails()
 
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
     assert await _streak(factory, ws_id) == 0
     assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
 
 
-class _DependencyUpFails(_ScriptedCompose):
-    """Only the ``--no-recreate`` dependency up fails; the agent recreate succeeds."""
+class _AgentRecreateFails(_ScriptedCompose):
+    """Every dependency step succeeds; only the final agent force-recreate fails."""
 
     async def ensure_project_up(self, **kwargs: Any) -> None:
         self.calls.append(kwargs)
-        if kwargs.get("no_recreate"):
+        if kwargs.get("force_recreate"):
             raise ComposeOperationError(
-                operation="up", returncode=1, stdout="", stderr="redis exited (1)"
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr=f"agent: auth overlay mount failed token={_SECRET}",
             )
+
+
+@pytest.mark.unit
+async def test_failed_agent_recreate_counts_and_parks_even_with_a_healthy_old_stack(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old stack looks usable, but its stale agent has no refreshed auth/env."""
+    ws_id = await _seed(factory, tmp_path)
+    compose = _AgentRecreateFails()
+    executor = _executor(fake, factory, tmp_path, compose)
+
+    async def _usable(*_args: Any) -> bool:
+        return True
+
+    replays: list[str] = []
+
+    async def _replay(_self: Any, *, workspace_id: str, **_kwargs: Any) -> bool:
+        replays.append(workspace_id)
+        return True
+
+    monkeypatch.setattr(monitor_handoff, "_compose_runtime_usable_after_restart_failure", _usable)
+    monkeypatch.setattr(monitor_handoff, "replay_setup_on_monitor_resume", _replay)
+
+    for attempt in range(1, MONITOR_RUNTIME_RESTART_FAILURE_LIMIT + 1):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+        if attempt < MONITOR_RUNTIME_RESTART_FAILURE_LIMIT:
+            assert await _streak(factory, ws_id) == attempt
+            assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
+
+    assert replays == []
+    assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE) == []
+    failed = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE)
+    assert len(failed) == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT
+    assert all(event.payload is not None for event in failed)
+    assert all(_SECRET not in str(event.payload) for event in failed)
+    assert await _status(factory, ws_id) == WorkspaceStatus.blocked.value
+    assert len(await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE)) == 1
+    await _assert_never_failed(factory, ws_id)
 
 
 @pytest.mark.unit

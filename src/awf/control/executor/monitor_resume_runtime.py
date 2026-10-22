@@ -19,7 +19,9 @@ stop, so the resume could fail and be retried forever. The restart now:
    so its stale container is neither started nor waited on before step 4;
 4. recreates only the agent with ``--force-recreate --no-deps agent``: auth
    overlay bind mounts are bound at container creation, and #1090's setup
-   replay keys off the agent's new identity.
+   replay keys off the agent's new identity. A failure here raises
+   ``AgentRecreateError``: unless the agent identity verifiably changed, the
+   caller counts it as a failed restart, never as a usable runtime.
 """
 
 from __future__ import annotations
@@ -63,6 +65,25 @@ class DependencyWaitTimeoutError(ComposeOperationError):
             reason_code=MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE,
         )
         self.unsettled_services = tuple(sorted(recovering))
+
+
+class AgentRecreateError(ComposeOperationError):
+    """The final agent force-recreate failed, so only the stale agent is left running.
+
+    Unless the agent identity changed anyway, the old agent has neither the
+    refreshed auth overlays and env nor a new identity for #1090's setup
+    replay, so the caller counts it as a failed restart however healthy the
+    old stack looks.
+    """
+
+    def __init__(self, error: ComposeOperationError) -> None:
+        super().__init__(
+            operation=error.operation,
+            returncode=error.returncode,
+            stdout=error.stdout,
+            stderr=error.stderr,
+            reason_code=error.reason_code,
+        )
 
 
 async def inspect_resume_runtime(compose_project: str) -> RuntimeSnapshot:
@@ -216,7 +237,8 @@ async def restart_runtime_for_monitor_resume(
     every other dependency is never recreated.
     When the dependency up fails, ``runtime_usable`` decides whether the agent is
     still recreated (auth overlays, env and #1090's setup replay depend on it);
-    the tolerated failure is returned so the caller can record it.
+    the tolerated failure is returned so the caller can record it. A failed
+    agent recreate raises ``AgentRecreateError`` and is never tolerated.
     """
     common: dict[str, Any] = {
         "project_name": compose_project,
@@ -273,13 +295,16 @@ async def restart_runtime_for_monitor_resume(
             stderr=redact_audit_text(exc.stderr, limit=1000),
         )
         tolerated = exc
-    await compose.ensure_project_up(
-        **common,
-        force_recreate=True,
-        no_deps=True,
-        services=(
-            AGENT_SERVICE_NAME,
-            *sorted(set(recreate_services) - {AGENT_SERVICE_NAME}),
-        ),
-    )
+    try:
+        await compose.ensure_project_up(
+            **common,
+            force_recreate=True,
+            no_deps=True,
+            services=(
+                AGENT_SERVICE_NAME,
+                *sorted(set(recreate_services) - {AGENT_SERVICE_NAME}),
+            ),
+        )
+    except ComposeOperationError as exc:
+        raise AgentRecreateError(exc) from exc
     return tolerated

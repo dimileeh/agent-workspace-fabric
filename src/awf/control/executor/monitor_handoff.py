@@ -53,7 +53,10 @@ from awf.control.executor.monitor_resume_restart_escalation import (
     pace_monitor_resume_restart,
     reset_monitor_resume_restart_streak,
 )
-from awf.control.executor.monitor_resume_runtime import restart_runtime_for_monitor_resume
+from awf.control.executor.monitor_resume_runtime import (
+    AgentRecreateError,
+    restart_runtime_for_monitor_resume,
+)
 from awf.control.executor.monitor_resume_setup_replay import replay_setup_on_monitor_resume
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
@@ -431,6 +434,31 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 )
                 return None
             except ComposeOperationError as exc:
+                if isinstance(exc, AgentRecreateError) and not await _agent_recreated_despite_error(
+                    compose_project, identity_before
+                ):
+                    # The old stack may look healthy, but its stale agent has no
+                    # refreshed auth/env and no new identity to replay setup for.
+                    _log.error(
+                        "executor.resume_agent_recreate_failed",
+                        workspace_id=workspace_id,
+                        reason_code=exc.reason_code,
+                        stderr=redact_audit_text(exc.stderr, limit=1000),
+                    )
+                    await self._record_monitor_runtime_restart_failed(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file_path=str(compose_file),
+                        error=exc,
+                    )
+                    await escalate_monitor_resume_restart_failure(
+                        self,
+                        workspace_id=workspace_id,
+                        monitor_owner_id=monitor_owner_id,
+                        compose_project=compose_project,
+                        error=exc,
+                    )
+                    return None
                 _log.error(
                     "executor.resume_compose_up_failed",
                     workspace_id=workspace_id,
@@ -674,6 +702,15 @@ async def run_resumed_pr_monitor(
 async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
     """Inspect the persisted compose project; isolated for test monkeypatching."""
     return await RuntimeInspector().inspect(compose_project)
+
+
+async def _agent_recreated_despite_error(
+    compose_project: str, identity_before: _runtime_setup_replay.AgentIdentityObservation
+) -> bool:
+    """Return whether a failed agent force-recreate still replaced the agent container."""
+    identity_after = await _runtime_setup_replay.capture_agent_container_identity(compose_project)
+    verdict = _runtime_setup_replay.runtime_recreation_decision(identity_before, identity_after)
+    return verdict.decision is _runtime_setup_replay.RecreationDecision.recreated
 
 
 async def _compose_runtime_usable_after_restart_failure(

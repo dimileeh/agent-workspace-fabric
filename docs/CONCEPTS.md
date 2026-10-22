@@ -921,7 +921,11 @@ are recovering on their own (#936):
    steps 1 and 2): a companion whose environment the optional companion
    env-secret refresh rewrote, since `--no-recreate` would never apply it, and,
    on the first resume after a restart park, the dependencies still unsettled at
-   the last dependency-wait timeout.
+   the last dependency-wait timeout. If this call fails, the old agent is never
+   treated as usable, however healthy the old stack looks: it has neither the
+   refreshed auth overlays and env nor a new identity to replay setup for, so the
+   failure counts as a failed restart below. Only when the agent identity
+   verifiably changed anyway does the resume continue as for step 2.
 
 Required companion secrets are still prechecked before any compose call. An exited dependency on a compose.yml
 rendered before the healthcheck budget rule starts with its stored 60 retries; if
@@ -930,7 +934,8 @@ running and waits with the full budget.
 
 **Repeated failures are surfaced, never looped.** Each failed restart (compose
 error, dependency wait timeout or a required companion secret precheck) whose
-runtime is not usable records `workspace.monitor_runtime_restart_failed`. The
+runtime is not usable, and every failed agent recreate that left the old agent
+in place, records `workspace.monitor_runtime_restart_failed`. The
 consecutive failures are counted from these events, so a worker or control-plane
 restart does not reset the count. The next restart waits until 60 s after the
 first consecutive failure and 120 s after the second, so a transient error cannot

@@ -1034,11 +1034,15 @@ class TestExecutorCoverageEdgesPart002:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Compose restart failures must not skip monitor when the stack is still running."""
+        """Compose restart failures must not skip monitor when the stack is still running.
+
+        Only the dependency up may fail: a failed agent recreate is a counted
+        restart failure however usable the old stack looks (PR #1097).
+        """
         _patch_compose_runtime_inspect(monkeypatch, stack_state="running")
 
         class _FailingCompose:
-            """Compose stub that raises on ensure_project_up."""
+            """Compose stub whose dependency up fails and agent recreate succeeds."""
 
             async def ensure_project_up(
                 self,
@@ -1055,7 +1059,9 @@ class TestExecutorCoverageEdgesPart002:
             ) -> None:
                 """Raise or record a compose restart for the test."""
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services, no_recreate, no_deps
+                del services, no_recreate, no_deps
+                if force_recreate:
+                    return
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
