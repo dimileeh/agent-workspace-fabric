@@ -169,6 +169,9 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
         viewer_comment_bodies=tuple(viewer_bodies),
         superseded_viewer_comments=superseded,
         conversation_digest=_conversation_digest(comment_nodes),
+        conversation_digest_before_reply=_conversation_digest(comment_nodes[:-1])
+        if comment_nodes and comment_nodes[-1].get("viewerDidAuthor") is True
+        else "",
     )
 
 

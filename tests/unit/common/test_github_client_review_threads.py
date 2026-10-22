@@ -271,6 +271,30 @@ async def test_audit_fingerprints_the_whole_thread_conversation() -> None:
     assert len(changed) == 3 and original not in changed
 
 
+async def _digest_before_reply(comments: list[dict[str, object]]) -> str:
+    fake = FakeCommandRunner()
+    fake.queue_result(
+        stdout=_audit_page([_audit_thread("PRRT_test_a", comments=comments)], cursor=None)
+    )
+    audit = await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)
+    return audit.threads[0].conversation_digest_before_reply
+
+
+async def test_audit_fingerprints_the_conversation_awfs_newest_reply_followed() -> None:
+    feedback = {"body": "P1: crash on None", "viewerDidAuthor": False}
+    reply = {"body": "<!-- ack -->", "viewerDidAuthor": True}
+
+    # The conversation as it stood when AWF's newest reply landed: the thread's
+    # digest without that reply, as long as nothing followed it.
+    assert await _digest_before_reply([feedback, reply]) == await _conversation_digest([feedback])
+    edited = {"body": "P1: crash on None and on empty input", "viewerDidAuthor": False}
+    assert await _digest_before_reply([edited, reply]) != await _conversation_digest([feedback])
+    # No reply of AWF's identity is the newest comment: nothing to fingerprint.
+    assert await _digest_before_reply([feedback]) == ""
+    newer = {"body": "still", "viewerDidAuthor": False}
+    assert await _digest_before_reply([feedback, reply, newer]) == ""
+
+
 async def test_audit_supersedes_a_reply_posted_before_feedback_was_edited() -> None:
     fake = FakeCommandRunner()
     thread = _audit_thread(

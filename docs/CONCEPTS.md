@@ -484,7 +484,9 @@ into each such thread — never the directive text — and the gate passes once
 every AWF resolution carries a marker. An acknowledgement answers only the
 conversation that was flagged: a reopen seen by the gate, or a new or edited
 comment, drops the flag and any acknowledgement not yet posted, so the current
-resolution needs its own `ACK-THREAD`.
+resolution needs its own `ACK-THREAD`. The gate re-audits after posting, and the
+reply counts only while the conversation it followed is the acknowledged one, so
+an edit landing between the audit and the reply is never certified.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
 comment carrying the marker; the resolution audit is reported unsupported, so

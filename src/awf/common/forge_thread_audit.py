@@ -20,6 +20,9 @@ class AuditedReviewThread:
     feedback, not the current one.
     ``conversation_digest`` fingerprints every comment (author side and body, in
     order), so a new or edited comment shows up as a changed conversation.
+    ``conversation_digest_before_reply`` is that digest without the thread's newest
+    comment when the token's identity authored it (``""`` otherwise): the
+    conversation that reply followed, as the thread reads now.
     """
 
     thread_id: str
@@ -29,6 +32,7 @@ class AuditedReviewThread:
     viewer_comment_bodies: tuple[str, ...] = ()
     superseded_viewer_comments: int = 0
     conversation_digest: str = ""
+    conversation_digest_before_reply: str = ""
 
     @property
     def current_viewer_comment_bodies(self) -> tuple[str, ...]:

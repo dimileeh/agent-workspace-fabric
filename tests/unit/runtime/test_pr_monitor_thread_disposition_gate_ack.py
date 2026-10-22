@@ -73,8 +73,10 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
     """One thread resolved by AWF's identity with no AWF marker in it.
 
     Replies AWF posts are served back on later audits (``visible_replies``) until
-    a test deletes them; ``resolved`` / ``conversation`` let a test reopen the
-    thread or change its conversation.
+    a test deletes them, and join the thread's conversation as on the forge;
+    ``resolved`` / ``conversation`` let a test reopen the thread or change its
+    feedback, ``edit_during_reply`` edits it while a reply is in flight, and
+    ``reaudit_error`` fails the first audit after the next reply.
     """
 
     def __init__(self, runner: FakeCommandRunner, *, reply_error: ForgeClientError | None = None):
@@ -83,11 +85,17 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
         self.visible_replies: list[str] = []
         self.resolved = True
         self.conversation = "conversation-1"
+        self.edit_during_reply: str | None = None
+        self.reaudit_error: ForgeClientError | None = None
+        self._armed_audit_error: ForgeClientError | None = None
 
     async def fetch_review_thread_audit(
         self, *, repo: RepoRef, pr_number: int
     ) -> ReviewThreadAudit:
         del repo, pr_number
+        if self._armed_audit_error is not None:
+            error, self._armed_audit_error = self._armed_audit_error, None
+            raise error
         return ReviewThreadAudit(
             supported=True,
             viewer_login="awf-operator",
@@ -98,7 +106,12 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
                     is_outdated=False,
                     resolved_by="awf-operator" if self.resolved else None,
                     viewer_comment_bodies=tuple(self.visible_replies),
-                    conversation_digest=self.conversation,
+                    conversation_digest="|".join([self.conversation, *self.visible_replies]),
+                    conversation_digest_before_reply="|".join(
+                        [self.conversation, *self.visible_replies[:-1]]
+                    )
+                    if self.visible_replies
+                    else "",
                 ),
             ),
         )
@@ -106,6 +119,9 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         if self.reply_error is not None:
             raise self.reply_error
+        if self.edit_during_reply is not None:
+            self.conversation, self.edit_during_reply = self.edit_during_reply, None
+        self._armed_audit_error, self.reaudit_error = self.reaudit_error, None
         self.visible_replies.append(body)
         return await super().reply_to_thread(thread_id=thread_id, body=body)
 
@@ -324,6 +340,68 @@ async def test_acknowledgement_of_a_conversation_that_moved_on_is_dropped_not_po
     passed = await _gate(runner, workspace_id, state)
     assert passed.blocker is None
     assert len(gh.thread_replies) == 1
+
+
+async def test_acknowledgement_posted_after_an_unseen_edit_is_not_accepted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    # The reviewer edits the feedback after the gate's audit, before the reply
+    # lands: the reply then follows feedback the operator never acknowledged.
+    gh.edit_during_reply = "conversation-1-edited"
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert blocked.count_rows is None
+    assert len(gh.thread_replies) == 1
+    # Posted after the edit, the reply looks current by time; later audits still
+    # refuse it, and the saved reply id keeps it from being posted again.
+    again = await _gate(runner, workspace_id, state)
+    assert again.blocker is not None and _SILENT in again.blocker
+    assert len(gh.thread_replies) == 1
+
+    # A guide acknowledging the edited conversation certifies it with its own reply.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert passed.count_rows is not None
+    assert dict(passed.count_rows)["operator acknowledged"] == 1
+    assert len(gh.thread_replies) == 2
+
+
+async def test_acknowledgement_is_unverified_until_a_re_audit_confirms_it(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.reaudit_error = GitHubClientError(
+        operation="gh api graphql", returncode=1, stderr="HTTP 502"
+    )
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    # The reply landed, but nothing proved it followed the acknowledged
+    # conversation: fail closed for this run.
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert len(gh.thread_replies) == 1
+
+    # The next audit proves it: no new guide, no second reply.
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert len(gh.thread_replies) == 1
+    assert _disposition_unverified_key(_SILENT) not in state.threads_addressed_ids
 
 
 async def test_delayed_guide_after_reopen_cannot_acknowledge_the_old_resolution(

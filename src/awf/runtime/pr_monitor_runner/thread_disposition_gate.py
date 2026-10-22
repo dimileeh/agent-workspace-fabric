@@ -16,7 +16,8 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   ``REVIEW_THREAD_DISPOSITION_UNVERIFIED`` listing the ids — never a workspace
   failure. An operator guide naming a flagged id acknowledges it; this gate then
   posts the acknowledgement (with its marker) into the thread itself, only while
-  the thread keeps the conversation that was flagged.
+  the thread keeps the conversation that was flagged, and the marker counts only
+  while that conversation is what the reply followed.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -176,9 +177,18 @@ async def review_thread_disposition_gate(
         disposition_class: DispositionClass | None = disposition_marker_class(
             _current_disposition_bodies(thread), thread_id=thread.thread_id
         )
+        if disposition_class == "operator_acknowledged" and not _acknowledgement_followed(
+            state, thread
+        ):
+            disposition_class = None
         if disposition_class is None:
             disposition_class = await _post_operator_acknowledgement(
-                self, state=state, thread=thread, workspace_id=workspace_id
+                self,
+                state=state,
+                thread=thread,
+                workspace_id=workspace_id,
+                repo=repo,
+                pr_number=pr_number,
             )
         if (
             disposition_class is None
@@ -413,8 +423,14 @@ async def _post_operator_acknowledgement(
     state: MonitorState,
     thread: AuditedReviewThread,
     workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
 ) -> DispositionClass | None:
-    """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified."""
+    """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified.
+
+    The audit can be stale by the time the reply lands, so it counts only once a
+    re-audit shows the reply following the acknowledged conversation.
+    """
     thread_id = thread.thread_id
     disposition = read_item_disposition(state, thread_id)
     if disposition is None or disposition.disposition_class != "operator_acknowledged":
@@ -445,7 +461,42 @@ async def _post_operator_acknowledgement(
         )
         return None
     record_item_disposition(state, replace(disposition, reply_comment_id=reply_id))
+    try:
+        audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
+    except ForgeClientError as exc:
+        _log.warning(
+            "monitor.operator_acknowledgement_reaudit_failed",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+            forge_reason_code=exc.reason_code,
+        )
+        return None
+    posted = next((t for t in audit.threads if t.thread_id == thread_id), None)
+    if (
+        posted is None
+        or disposition_marker_class(_current_disposition_bodies(posted), thread_id=thread_id)
+        != "operator_acknowledged"
+        or not _acknowledgement_followed(state, posted)
+    ):
+        return None
     return "operator_acknowledged"
+
+
+def _acknowledgement_followed(state: MonitorState, thread: AuditedReviewThread) -> bool:
+    """True when the thread's newest reply follows the conversation the guide acknowledged.
+
+    A feedback edit that lands after the gate's audit but before the reply keeps
+    the reply current by time, yet changes the conversation it followed: the
+    acknowledgement then answers nothing the operator saw.
+    """
+    disposition = read_item_disposition(state, thread.thread_id)
+    return (
+        disposition is not None
+        and disposition.disposition_class == "operator_acknowledged"
+        and disposition.conversation_digest is not None
+        and disposition.conversation_digest == thread.conversation_digest_before_reply
+    )
 
 
 def _supersede_acknowledgement(state: MonitorState, thread_id: str, *, workspace_id: str) -> None:
