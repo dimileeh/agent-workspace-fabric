@@ -159,6 +159,21 @@ _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
 )
 _HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred", "operator_acknowledged"})
 
+# ``__awf_disposition_retired__:<thread id>:<conversation digest>``
+# (``awf.runtime.monitor_state_keys``) is the tombstone of a posted disposition
+# reply that a reopen or a changed conversation retired (#1018): while the
+# thread's newest marker still follows that conversation it certifies nothing.
+# On a moved head the code-dependent record does not cross, so the tombstone is
+# the successor's only evidence that the historical marker answers an earlier
+# resolution episode -- left behind, a silent re-resolve of the unchanged
+# conversation by the shared forge identity would let the stale marker certify
+# the thread again. It records thread history rather than code and only ever
+# makes the gate stricter, so it crosses regardless of head continuity. The
+# digest is AWF's own SHA-256 hex of the conversation (empty when the reply was
+# not the thread's newest comment), and the thread id must be a verdict-key form.
+_DISPOSITION_RETIRED_PREFIX = "__awf_disposition_retired__:"
+_CONVERSATION_DIGEST_RE = re.compile(r"^(?:[0-9a-f]{64})?$")
+
 # ``__awf_review_thread_disposition_baseline__`` (``awf.runtime.monitor_state_keys``)
 # is the disposition gate's one-time legacy baseline: the unmarked AWF
 # resolutions its first run exempted, and the proof that first run happened
@@ -250,6 +265,7 @@ def seedable_monitor_state(
             _is_verdict_entry(key, value, head_continuity=head_continuity)
             or _is_copied_marker(key, value)
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
+            or _is_disposition_retired_tombstone(key)
             or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
@@ -326,6 +342,16 @@ def _is_seedable_disposition(key: str, value: str, *, head_continuity: bool) -> 
     if disposition_class in _HEAD_INDEPENDENT_DISPOSITION_CLASSES:
         return True
     return head_continuity and disposition_class in _HEAD_DEPENDENT_DISPOSITION_CLASSES
+
+
+def _is_disposition_retired_tombstone(key: str) -> bool:
+    if not key.startswith(_DISPOSITION_RETIRED_PREFIX):
+        return False
+    thread_id, _, digest = key[len(_DISPOSITION_RETIRED_PREFIX) :].rpartition(":")
+    return (
+        _VERDICT_KEY_RE.match(thread_id) is not None
+        and _CONVERSATION_DIGEST_RE.match(digest) is not None
+    )
 
 
 def _is_copied_marker(key: str, value: str) -> bool:

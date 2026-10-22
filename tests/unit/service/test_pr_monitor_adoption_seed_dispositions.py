@@ -131,3 +131,52 @@ def test_disposition_gate_baseline_conversations_cross_verbatim(
     assert seedable_monitor_state(
         {_BASELINE_CONVERSATIONS: record}, head_continuity=head_continuity
     ) == {_BASELINE_CONVERSATIONS: record}
+
+
+_RETIRED = "__awf_disposition_retired__:"
+_DIGEST = "d" * 64
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{_RETIRED}PRRT_test_reopened:{_DIGEST}",
+        f"{_RETIRED}bb:owner/repo#7:42:{_DIGEST}",
+        # A reply that was not the thread's newest comment followed no digest.
+        f"{_RETIRED}PRRT_test_reopened:",
+    ],
+)
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_retired_disposition_tombstones_cross_regardless_of_head(
+    key: str, head_continuity: bool
+) -> None:
+    """A retired reply's tombstone follows the PR, even when its record does not.
+
+    On a moved head the code-dependent record is dropped, so the tombstone is all
+    that tells the successor's gate the thread's historical marker answers an
+    earlier resolution episode. Left behind, a silent re-resolve of the unchanged
+    conversation would let that stale marker certify the thread again.
+    """
+    previous = {
+        "PRRT_test_reopened": "fix_committed",
+        f"{_PREFIX}PRRT_test_reopened": _disposition(
+            "PRRT_test_reopened", "fixed", "fix_committed"
+        ),
+        key: "retired",
+    }
+
+    assert seedable_monitor_state(previous, head_continuity=head_continuity)[key] == "retired"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        f"{_RETIRED}PRRT_test_reopened",  # no conversation digest at all
+        f"{_RETIRED}PRRT_test_reopened:not-a-digest",
+        f"{_RETIRED}__awf_notify__:x:{_DIGEST}",
+        f"{_RETIRED}:{_DIGEST}",
+        _RETIRED,
+    ],
+)
+def test_malformed_retired_disposition_tombstones_never_cross(key: str) -> None:
+    assert seedable_monitor_state({key: "retired"}, head_continuity=True) == {}
