@@ -158,3 +158,10 @@ def _disposition_unverified_key(thread_id: str) -> str:
     the flag clears once the thread carries a marker.
     """
     return f"__awf_disposition_unverified__:{thread_id}"
+
+
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the summary of the
+# current review-thread audit outage (#1018). The disposition gate records its
+# ``REVIEW_THREAD_AUDIT_UNAVAILABLE`` audit event once per outage, not once per
+# poll, and clears the key on the next successful audit.
+_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY = "__awf_review_thread_audit_unavailable__"

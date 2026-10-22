@@ -516,3 +516,73 @@ async def test_gate_bitbucket_unsupported_keeps_cert_text(
     assert "is ready to merge" in gh.comments[0]
     assert "1. Inline comments resolved.\n" in gh.comments[0]
     assert "AWF dispositions" not in gh.comments[0]
+
+
+async def test_audit_unavailable_notifies_once_across_polls_with_varying_errors(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A persistent audit outage must not post a new public PR comment every poll.
+
+    Forge error text varies per request (request ids, addresses), so it stays out
+    of the NotifyHuman message that keys the notification dedupe; it lands in the
+    audit evidence, which is recorded once per outage.
+    """
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        error=GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="GraphQL: Could not resolve to a node (request req-AAA111)",
+        ),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    state = MonitorState()
+
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    gh.error = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr="GraphQL: Could not resolve to a node (request req-BBB222)",
+    )
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+
+    assert len(gh.comments) == 1
+    assert "REVIEW_THREAD_AUDIT_UNAVAILABLE" in gh.comments[0]
+    assert "req-AAA111" not in gh.comments[0]
+    events = await _audit_events(factory, workspace_id)
+    assert len(events) == 1
+    assert "req-AAA111" in events[0]["evidence"]["error_message"]
+
+    # A successful audit ends the outage; a later one is recorded again.
+    gh.error = None
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    gh.error = GitHubClientError(
+        operation="gh api graphql", returncode=1, stderr="GraphQL: Could not resolve (req-CCC)"
+    )
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    assert len(await _audit_events(factory, workspace_id)) == 2
+
+
+async def test_feature_merge_waits_on_transient_audit_fault(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    class _TransientAuditMergeClient(_AuditMergeClient):
+        async def fetch_review_thread_audit(
+            self, *, repo: RepoRef, pr_number: int
+        ) -> ReviewThreadAudit:
+            del repo, pr_number
+            raise GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502")
+
+    gh = _TransientAuditMergeClient(ReviewThreadAudit(supported=True))
+
+    terminal, state, sleep_fn, _ = await _execute_merge(factory=factory, tmp_path=tmp_path, gh=gh)
+
+    assert terminal is False
+    assert gh.merge_calls == []
+    assert gh.comments == []
+    assert sleep_fn.calls  # backed off before the next poll
+    assert (
+        state.threads_addressed_ids["__awf_forge_transient_retry_count:review_thread_audit"] == "1"
+    )

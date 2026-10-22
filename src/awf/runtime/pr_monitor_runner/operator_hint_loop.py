@@ -32,9 +32,13 @@ from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
 )
+from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
+    _operator_hint_review_thread_id_candidates,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition import acknowledge_unverified_threads
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
@@ -77,6 +81,14 @@ async def handle_operator_hint_action(
     finish_if_pr_terminal_after_cleanup_error: _FinishIfPrTerminalAfterCleanupError,
 ) -> bool:
     """Run one operator-hint repair cycle; return True iff the monitor is terminal."""
+    # #1018: a guide naming threads the disposition gate flagged acknowledges them
+    # on intake, whatever the agent later answers for the rest of the directive;
+    # the gate then posts the acknowledgement marker into each such thread.
+    acknowledge_unverified_threads(
+        state,
+        _operator_hint_review_thread_id_candidates(action.hint.directive or ""),
+        operation_id=action.hint.operation_id,
+    )
     operation = await self._begin_monitor_operation(
         workspace_id=workspace_id,
         operation_type=OperationType.comment_repair,

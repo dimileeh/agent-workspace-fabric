@@ -22,10 +22,20 @@ from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import _disposition_unverified_key
-from awf.runtime.pr_monitor import MonitorState, OperatorHint
+from awf.runtime.operator_hints import mark_operator_hint_needs_human
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    OperatorHint,
+    PRStatus,
+)
+from awf.runtime.pr_monitor_actions import AddressOperatorHint
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint,
 )
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
@@ -120,9 +130,66 @@ def _guide(directive: str) -> OperatorHint:
     )
 
 
+async def _consume_guide(
+    runner: Any,
+    workspace_id: str,
+    state: MonitorState,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    directive: str = _DIRECTIVE,
+    agent_outcome: str = "processed",
+) -> None:
+    """Run one operator-hint action whose agent cycle ends ``agent_outcome``.
+
+    The coding-agent cycle is replaced: the acknowledgement must not depend on
+    what the agent answered for the rest of the directive.
+    """
+    hint = _guide(directive)
+    state.pending_operator_hint = hint
+
+    async def _cycle(**_kwargs: object) -> _GitPushResult:
+        if agent_outcome == "needs_human":
+            mark_operator_hint_needs_human(state, "the agent could not act on the directive")
+        else:
+            _finalize_processed_operator_hint(state, hint=hint)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _cycle)
+    await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:acme/widgets.git",
+        repo=_REPO,
+        pr_number=42,
+        status=_green_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=Path("/tmp/compose.yml"),
+        monitor_log=None,
+    )
+
+
+def _green_status() -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+
+@pytest.mark.parametrize("agent_outcome", ["processed", "needs_human"])
 async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_outcome: str,
 ) -> None:
     gh = _SilentAuditForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
@@ -132,7 +199,8 @@ async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
     assert blocked.blocker is not None and _SILENT in blocked.blocker
     assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
 
-    _finalize_processed_operator_hint(state, hint=_guide(_DIRECTIVE))
+    # The guide is the acknowledgement, whatever its agent run answered.
+    await _consume_guide(runner, workspace_id, state, monkeypatch, agent_outcome=agent_outcome)
     ack = read_item_disposition(state, _SILENT)
     assert ack is not None and ack.disposition_class == "operator_acknowledged"
     assert _disposition_unverified_key(_SILENT) not in state.threads_addressed_ids
@@ -161,6 +229,7 @@ async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
 async def test_acknowledgement_reply_failure_keeps_the_thread_blocked(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gh = _SilentAuditForge(
         FakeCommandRunner(),
@@ -169,7 +238,7 @@ async def test_acknowledgement_reply_failure_keeps_the_thread_blocked(
     workspace_id, runner = await _runner(factory, tmp_path, gh)
     state = MonitorState()
     await _gate(runner, workspace_id, state)
-    _finalize_processed_operator_hint(state, hint=_guide(_DIRECTIVE))
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
 
     result = await _gate(runner, workspace_id, state)
 
@@ -184,12 +253,13 @@ async def test_acknowledgement_reply_failure_keeps_the_thread_blocked(
 async def test_guide_naming_unflagged_thread_records_nothing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gh = _SilentAuditForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
     state = MonitorState()
 
-    _finalize_processed_operator_hint(state, hint=_guide(_DIRECTIVE))
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
     assert read_item_disposition(state, _SILENT) is None
 
     result = await _gate(runner, workspace_id, state)

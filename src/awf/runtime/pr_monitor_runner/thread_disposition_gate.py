@@ -28,7 +28,10 @@ from typing import Any
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _disposition_unverified_key
+from awf.runtime.monitor_state_keys import (
+    _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
+    _disposition_unverified_key,
+)
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
@@ -88,9 +91,11 @@ async def review_thread_disposition_gate(
             self,
             workspace_id=workspace_id,
             pr_number=pr_number,
+            state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,
             monitor_log=monitor_log,
+            summary=f"forge error {exc.reason_code}",
             detail=_redact_and_truncate_forge_error(str(exc)),
             forge_reason_code=exc.reason_code,
         )
@@ -99,6 +104,7 @@ async def review_thread_disposition_gate(
         state=state,
         context=_AUDIT_CONTEXT,
     )
+    state.threads_addressed_ids.pop(_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY, None)
     if not audit.supported:
         _log.info(
             "monitor.review_thread_audit_unsupported_forge",
@@ -109,14 +115,17 @@ async def review_thread_disposition_gate(
         return DispositionGateResult()
     viewer = (audit.viewer_login or "").strip().casefold()
     if not viewer:
+        missing_login = "the forge did not report AWF's own login"
         return await _audit_unavailable(
             self,
             workspace_id=workspace_id,
             pr_number=pr_number,
+            state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,
             monitor_log=monitor_log,
-            detail="the forge did not report AWF's own login",
+            summary=missing_login,
+            detail=missing_login,
         )
     counts: Counter[str] = Counter()
     unverified: list[str] = []
@@ -211,29 +220,48 @@ async def _audit_unavailable(
     *,
     workspace_id: str,
     pr_number: int,
+    state: MonitorState,
     base_branch: str,
     remote_branch: str,
     monitor_log: WorkspaceLogSink | None,
+    summary: str,
     detail: str,
     forge_reason_code: str | None = None,
 ) -> DispositionGateResult:
-    """Fail closed: no cert (or merge) without a complete thread enumeration."""
-    await self._record_pr_monitor_audit_event(
+    """Fail closed: no cert (or merge) without a complete thread enumeration.
+
+    The NotifyHuman text carries only the stable ``summary``: it keys the
+    once-per-(head, reason) notification dedupe, and raw forge errors vary per
+    request (request ids, addresses), so including them would post a new public
+    comment every poll of an outage. The redacted ``detail`` goes to the log and
+    to an audit event recorded once per outage.
+    """
+    _log.warning(
+        "monitor.review_thread_audit_unavailable",
         workspace_id=workspace_id,
-        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
-        action=_AUDIT_ACTION,
-        outcome="failed",
-        reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
         pr_number=pr_number,
-        status=None,
-        base_branch=base_branch,
-        remote_branch=remote_branch,
-        monitor_log=monitor_log,
-        evidence={"error_message": detail, "forge_reason_code": forge_reason_code},
+        reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+        forge_reason_code=forge_reason_code,
+        detail=detail,
     )
+    if state.threads_addressed_ids.get(_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY) != summary:
+        state.mark_addressed(_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY, summary)
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+            action=_AUDIT_ACTION,
+            outcome="failed",
+            reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+            pr_number=pr_number,
+            status=None,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+            evidence={"error_message": detail, "forge_reason_code": forge_reason_code},
+        )
     return DispositionGateResult(
         blocker=(
             f"{REVIEW_THREAD_AUDIT_UNAVAILABLE}: AWF could not enumerate this PR's review "
-            f"threads to verify thread dispositions ({detail})."
+            f"threads to verify thread dispositions ({summary})."
         )
     )

@@ -434,12 +434,14 @@ operator's own account. Threads resolved by any other login are that person's
 or bot's disposition and never block. A failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
 ids (never a workspace failure); a failed enumeration is
-`REVIEW_THREAD_AUDIT_UNAVAILABLE`. The certificate's first gate line shows
+`REVIEW_THREAD_AUDIT_UNAVAILABLE`, whose public text stays stable across an
+outage (the raw forge error goes to the log and one audit event per outage). The certificate's first gate line shows
 counts per disposition class and "resolved by others".
 
 An operator acknowledges flagged threads with the ordinary guide path
 (`awf workspace guide <id> --directive 'Acknowledge <thread id>: …'`). Only
-flagged ids are acknowledged; AWF then posts an `operator_acknowledged` reply
+flagged ids are acknowledged, on intake of the guide and whatever its agent run
+answers; AWF then posts an `operator_acknowledged` reply
 into each such thread — never the directive text — and the gate passes once
 every AWF resolution carries a marker.
 

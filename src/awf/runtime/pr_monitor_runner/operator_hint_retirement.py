@@ -31,7 +31,6 @@ from awf.runtime.pr_monitor_runner.operator_hint_parsing import (
     _operator_hint_review_thread_id_candidates,
 )
 from awf.runtime.pr_monitor_runner.operator_hint_timeout_retry import clear_timeout_retry
-from awf.runtime.pr_monitor_runner.thread_disposition import acknowledge_unverified_threads
 
 
 def _finalize_processed_operator_hint(
@@ -188,11 +187,6 @@ def _mark_referenced_needs_human_feedback_answered(
             _operator_decision_issued_at_key(thread_id),
             _operator_ruling_issued_at(hint),
         )
-    # #1018: a guide naming threads the disposition gate flagged acknowledges
-    # them; the gate then posts the acknowledgement marker into each thread.
-    acknowledge_unverified_threads(
-        state, _operator_hint_review_thread_id_candidates(text), operation_id=hint.operation_id
-    )
 
 
 def _operator_ruling_issued_at(hint: OperatorHint) -> str:

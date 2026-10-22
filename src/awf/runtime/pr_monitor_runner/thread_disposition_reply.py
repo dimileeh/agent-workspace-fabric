@@ -142,10 +142,9 @@ def _disposition_for_resolve(
     disposition = read_item_disposition(state, thread_id)
     if disposition is not None or verdict != "defer" or thread is None:
         return disposition
-    issue_url = _deferred_issue_url(state, thread)
-    if issue_url is None:
-        return None
-    attach_issue_url(state, thread_id, issue_url)
+    # Outdated hygiene resolves a ``defer`` only once its filed-issue marker exists;
+    # should that ever not hold, the empty URL fails closed as EVIDENCE_MISSING.
+    attach_issue_url(state, thread_id, _deferred_issue_url(state, thread) or "")
     return read_item_disposition(state, thread_id)
 
 
