@@ -507,6 +507,11 @@ def test_references_are_not_bindings(text: str) -> None:
     "text",
     [
         "record = other;",
+        "(record) = other;",
+        "((record)) ||= other;",
+        "(record)++;",
+        "--(record);",
+        "for ((record) of [other]) {}",
         "record += 1;",
         "record ??= other;",
         "record++;",

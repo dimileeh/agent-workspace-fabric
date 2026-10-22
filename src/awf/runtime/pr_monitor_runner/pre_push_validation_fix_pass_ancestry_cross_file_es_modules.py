@@ -879,8 +879,9 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
 
     Read in the module that *defines* a callee: an ES export is a live
     binding, so ``export function record`` followed by ``[record] = [other]``
-    (or ``({ record } = o)``, ``for (record of xs)``, ``record++``, or an
-    assignment inside any function) leaves importers calling something other
+    (or ``(record) = other``, ``({ record } = o)``, ``for (record of xs)``,
+    ``record++``, or an assignment inside any function) leaves importers
+    calling something other
     than the edited definition. File-wide and over-inclusive like
     ``_es_rebound_names``: an inner variable of the same name that is assigned
     also counts, which only fails the callee closed. A declaration initializer
@@ -891,8 +892,14 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
     assigned: set[str] = set()
     for index, token in enumerate(tokens):
         if token.kind == "ident" and not _is_reference_position(tokens, index):
-            before = _token_at(tokens, index - 1)
-            after = _token_at(tokens, index + 1)
+            # A parenthesized target is still the binding: ``((record)) = other``.
+            start, end = index, index
+            while _is(_token_at(tokens, start - 1), "punct", "(") and _is(
+                _token_at(tokens, end + 1), "punct", ")"
+            ):
+                start, end = start - 1, end + 1
+            before = _token_at(tokens, start - 1)
+            after = _token_at(tokens, end + 1)
             operator = _is(after, "punct") and after.value in _ASSIGNMENT_OPERATORS
             if (
                 (operator and _ident_value(before) not in _VARIABLE_KEYWORDS)
