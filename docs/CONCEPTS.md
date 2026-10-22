@@ -913,6 +913,44 @@ have a PR but no Compose metadata; AWF rejects Remonitor with
 `WORKSPACE_REMONITOR_METADATA_MISSING`, and the operator should use Retry so a
 replacement attempt can reprovision the runtime and reattach the existing PR.
 
+### Runtime setup replay on resume
+
+Restart recovery, `remonitor` (`failed -> monitoring_pr`) and `guide` on a
+monitor-origin block (`blocked -> monitoring_pr`) all resume through the same
+monitor handoff, which brings the local runtime back with `compose up`. A new
+agent container has lost anything the profile's `setup` phase installed inside
+it, such as a tool under `/tmp`. AWF therefore reads the agent container's
+identity (container id and `State.StartedAt`) before and after the `up`. When
+the identity changed, or there was no agent container before (a runtime
+released on block or failure), AWF replays the profile's `setup` and `pre_agent`
+phases before the monitor loop, its pre-push validation or any agent run
+continues. Both agent-service recoveries replay setup the same way after they
+recreate the agent: the monitor's whole-project recreate and the executor's
+agent-service recreate.
+
+The decision is based on identity, never on the `force_recreate` flag. If the
+identity cannot be read, or the Docker probe times out
+(`RUNTIME_IDENTITY_PROBE_TIMEOUT`), AWF replays setup: the blocked-resume
+env-health probe only checks that validate executables resolve, so it cannot
+prove that packages setup installed survived. Each recreation gets at most one replay and one
+`workspace.runtime_setup_replayed` event (`RUNTIME_SETUP_REPLAYED`). Like
+first-run setup, the replay repairs a poisoned mirror `core.hooksPath` before
+and after the phases, and recovers a missing `HEAD` after an exec cleanup
+failure; on a PR-monitor workspace that recovery rebuilds on the PR's pushed
+head, not on `base_commit`.
+
+A failed replay is not retried in place and carries `RUNTIME_SETUP_REPLAY_FAILED`
+with the failing command, its redacted output tail and, for an ownership-repair,
+mirror hooks-path or exec-cleanup failure, the underlying `cause_reason_code`.
+Because every monitor resume recreates the runtime, a failed replay on the PR
+monitor side (restart recovery, remonitor, guide, or the monitor's agent-service
+recovery) does not fail the workspace: it parks it in `blocked`
+(`block_type=resume_setup_failure`, a monitor-origin `block_resume_phase`) with a
+`workspace.runtime_setup_replay_failed` event, keeping the worktree, its commits
+and the stack. A later `guide` resumes `blocked -> monitoring_pr` and replays
+setup again. The pre-PR executor agent-service recovery still fails the
+workspace. Hosted workspaces have no local `compose up` and are unchanged.
+
 ### Operator guidance (`guide`/`instruct`)
 
 `remonitor` recovers a *lost* monitor; to **steer a live one**, use the

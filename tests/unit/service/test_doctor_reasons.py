@@ -243,3 +243,18 @@ def test_expected_claude_overlay_fallback_is_deliberately_not_cataloged() -> Non
     # posture. Documenting it as a fault would turn a supported platform choice
     # into a standing false alarm, so it must stay out of the catalog (#874).
     assert "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" not in _REASON_TEXT
+
+
+@pytest.mark.unit
+def test_runtime_setup_replay_failed_has_doctor_guidance() -> None:
+    """Verify a failed setup replay after a runtime recreate maps to operator guidance."""
+    code = "RUNTIME_SETUP_REPLAY_FAILED"
+    reason = _REASON_TEXT[code]
+
+    assert "setup" in reason.message
+    # A failed PR-monitor replay parks the workspace blocked; guide resumes it.
+    assert "blocked" in reason.action
+    assert "guide" in reason.action
+    assert reason.likely_cause
+    assert reason.related_command == "awf workspace logs <workspace_id>"
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"

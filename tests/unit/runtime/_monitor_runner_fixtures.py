@@ -403,6 +403,7 @@ def make_runner(
     workspace_profile: WorkspaceProfile | None = None,
     gh: Any | None = None,
     now: Callable[[], datetime] | None = None,
+    validation: Any | None = None,
 ) -> PullRequestMonitorRunner:
     """Construct a PullRequestMonitorRunner wired for integration-style unit tests."""
     kwargs: dict = {
@@ -440,4 +441,6 @@ def make_runner(
         kwargs["post_merge_target_reconciler"] = post_merge_target_reconciler
     if now is not None:
         kwargs["now"] = now
+    if validation is not None:
+        kwargs["validation"] = validation
     return PullRequestMonitorRunner(**kwargs)

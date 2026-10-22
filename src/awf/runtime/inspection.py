@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 
@@ -142,7 +143,14 @@ async def _run(args: list[str]) -> _ProcessResult:
             stdout="",
             stderr=f"{args[0]} executable is not available: {exc}",
         )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await proc.communicate()
+    except asyncio.CancelledError:
+        # A caller-imposed timeout (``asyncio.wait_for``) cancels us here; kill
+        # the Docker CLI so a wedged daemon call does not outlive its caller.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise
     assert proc.returncode is not None
     return _ProcessResult(
         returncode=proc.returncode,
