@@ -650,7 +650,6 @@ async def _resolve_addressed_outdated_threads(
     clears a stale requeue (and addressed state) before continuing so AddressComments
     owns the retry rather than NotifyHuman-looping (PRRT_kwDOSJAM6s6dffOX).
     """
-    del repo  # repo is recovered from the neutral thread_id by the forge client
     # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
     # the (continuous-monitor) in-memory case resolves without a git call and the
     # branch-evidence seed below naturally skips the now-seeded threads.
@@ -733,9 +732,11 @@ async def _resolve_addressed_outdated_threads(
             remote_branch=remote_branch,
             thread=preferred,
             monitor_log=monitor_log,
+            repo=repo,
         )
         if disposition is None:
-            # Parked (#1018). Persist now for the same reason as the permanent-fault
+            # Parked, or its feedback moved on before the reply (#1018). Persist
+            # now (any reply id too) for the same reason as the permanent-fault
             # downgrade below: a transient ``_execute`` fault skips ``_persist_state``.
             await self._persist_state(workspace_id, state)
             continue

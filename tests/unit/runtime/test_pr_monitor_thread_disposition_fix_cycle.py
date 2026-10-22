@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
@@ -32,6 +33,7 @@ from awf.runtime.monitor_state_keys import (
     _item_disposition_key,
 )
 from awf.runtime.pr_monitor import (
+    AddressComments,
     CheckState,
     MergeableState,
     MergeStateStatus,
@@ -40,6 +42,7 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReviewThread,
+    ReviewThreadComment,
     _review_thread_body_hash,
     decide,
 )
@@ -131,6 +134,7 @@ async def _run_cycle(
     state: MonitorState | None = None,
     operation_id: str | None = None,
     before_cycle: Callable[[Any, str], Awaitable[None]] | None = None,
+    settle_threads: tuple[ReviewThread, ...] = (),
 ) -> tuple[str, MonitorState, Any]:
     workspace_id = await seed_monitoring_workspace(factory)
     worktrees_root = tmp_path / "worktrees"
@@ -161,7 +165,7 @@ async def _run_cycle(
         return verdict
 
     async def _settle(**_kwargs: object) -> PRStatus:
-        return _status(_START)
+        return _status(_START, settle_threads)
 
     async def _push(**_kwargs: object) -> _GitPushResult:
         return _GitPushResult(pushed=pushed, failed=False, returncode=0)
@@ -886,6 +890,201 @@ async def test_fix_cycle_reply_reason_never_mentions(
     assert len(replies) == 1
     assert "@" not in replies[0][1]
     assert "alice" in replies[0][1]
+
+
+_ASK = "please guard None payloads"
+
+
+def _commented_thread(thread_id: str, *bodies: str) -> ReviewThread:
+    """The thread as ``fetch_pr_status`` lists it: its outside comments, oldest first."""
+    return replace(
+        _thread(thread_id, bodies[0]),
+        comments=tuple(
+            ReviewThreadComment(comment_id=f"c{index}", body=body, author="review-bot")
+            for index, body in enumerate(bodies, start=1)
+        ),
+    )
+
+
+def _serve_live_thread(
+    gh: OrderedForge,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_id: str,
+    bodies: tuple[str, ...],
+    *,
+    supported: bool = True,
+    error: GitHubClientError | None = None,
+) -> list[int]:
+    """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited."""
+    audited: list[int] = []
+
+    async def _audit(*, repo: RepoRef, pr_number: int) -> ReviewThreadAudit:
+        del repo
+        audited.append(pr_number)
+        if error is not None:
+            raise error
+        live = AuditedReviewThread(
+            thread_id=thread_id,
+            is_resolved=False,
+            is_outdated=False,
+            resolved_by=None,
+            external_comment_bodies=bodies,
+        )
+        return ReviewThreadAudit(supported=supported, viewer_login="awf-test-bot", threads=(live,))
+
+    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
+    return audited
+
+
+@pytest.mark.parametrize(
+    "live",
+    [(_ASK, "and cover empty payloads too"), ("please guard None and empty payloads",)],
+    ids=["reply-added", "edited"],
+)
+async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live: tuple[str, ...],
+) -> None:
+    # PRRT_kwDOSJAM6s6vaQrr: feedback added or edited after the listed snapshot but
+    # before the reply lands sits before the reply, so once resolved the gate would
+    # read the reply as its answer. The live thread is re-read after the reply: the
+    # resolve is skipped and the reply retired (saved at once, even for a record
+    # with no conversation snapshot), so the re-triage its changed body triggers
+    # answers that feedback with a fresh reply instead of reusing the stale one.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_feedback_moved"
+    thread = _commented_thread(tid, _ASK)
+    audited = _serve_live_thread(gh, monkeypatch, tid, live)
+
+    workspace_id, state, result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert audited == [42]
+    assert result.failed is False and result.pushed is True
+    assert state.threads_addressed_ids[tid] == "false_positive"
+    assert not [
+        e
+        for e in await _resolution_events(factory, workspace_id)
+        if e["action"] == "resolve_thread"
+    ]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    for kept in (
+        read_item_disposition(state, tid),
+        read_item_disposition(_load_state(None, ws), tid),
+    ):
+        assert kept is not None and kept.reply_comment_id is None
+        assert kept.reason == "the reviewed code already handles this case"
+    moved = _commented_thread(tid, *live)
+    action = decide(_status(_PUSHED, (moved,)), state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [tid]
+
+    sync_item_disposition(
+        state, tid, VerdictResult(verdict="false_positive", reason="still handled"), thread=moved
+    )
+    runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
+    replied = await reply_before_resolve(
+        runner,
+        workspace_id=workspace_id,
+        pr_number=42,
+        thread_id=tid,
+        state=state,
+        action="resolve_thread",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        thread=moved,
+        repo=_REPO,
+    )
+
+    assert replied is not None and replied.reply_comment_id == "reply-2"
+    assert "still handled" in gh.replies()[-1][1]
+    assert audited == [42, 42]
+
+
+@pytest.mark.parametrize("supported", [True, False], ids=["unchanged", "unsupported-forge"])
+async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supported: bool,
+) -> None:
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_feedback_unchanged"
+    thread = _commented_thread(tid, _ASK)
+    # An unsupported audit proves nothing, whatever it lists.
+    bodies = (_ASK,) if supported else (_ASK, "unverifiable")
+    audited = _serve_live_thread(gh, monkeypatch, tid, bodies, supported=supported)
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    assert audited == [42]
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and (recorded.reply_comment_id, recorded.resolved) == (
+        "reply-1",
+        True,
+    )
+
+
+async def test_fix_cycle_parks_when_the_thread_cannot_be_re_read_after_the_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_feedback_unreadable"
+    thread = _commented_thread(tid, _ASK)
+    fault = GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502")
+    _serve_live_thread(gh, monkeypatch, tid, (_ASK,), error=fault)
+
+    workspace_id, state, result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert result.failed is False
+    assert state.threads_addressed_ids[tid] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
+    assert reason.startswith("REVIEW_THREAD_AUDIT_UNAVAILABLE:")
+    parked = [
+        e
+        for e in await _resolution_events(factory, workspace_id)
+        if e["action"] == "resolve_thread"
+    ]
+    assert [(e["outcome"], e["reason_code"]) for e in parked] == [
+        ("needs_human", "REVIEW_THREAD_AUDIT_UNAVAILABLE")
+    ]
+    assert parked[0]["evidence"]["disposition"]["reply_comment_id"] == "reply-1"
+    assert parked[0]["evidence"]["forge_reason_code"] == fault.reason_code
 
 
 @pytest.mark.parametrize("db_fault", [True, False], ids=["db-fault", "row-gone"])

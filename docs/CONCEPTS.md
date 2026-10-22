@@ -342,7 +342,9 @@ When meaningful bot or human feedback appears, AWF:
 6. Pushes the accumulated fix commits.
 7. Posts one in-thread disposition reply per thread (machine marker, class, fix
    commit / reason / issue link), then resolves it; a thread whose reply cannot
-   be posted stays open and is parked `needs_human`.
+   be posted stays open and is parked `needs_human`. A fresh reply is checked
+   against the live thread first: feedback added or edited since the thread was
+   listed retires the reply and leaves the thread open for re-triage.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final

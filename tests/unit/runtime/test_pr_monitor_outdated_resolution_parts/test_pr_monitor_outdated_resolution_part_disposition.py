@@ -19,10 +19,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge_errors import ForgeClientError
-from awf.common.github_client import GitHubClientError
+from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
-from awf.runtime.pr_monitor import MonitorState, _review_thread_body_hash
+from awf.runtime.pr_monitor import (
+    AddressComments,
+    MonitorConfig,
+    MonitorState,
+    _mark_review_thread_addressed,
+    _review_thread_body_hash,
+    decide,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.thread_disposition import (
@@ -376,6 +384,64 @@ async def test_outdated_resolve_retry_reuses_recorded_reply_without_reposting(
     assert [event[0] for event in gh.events] == ["reply", "resolve_failed", "resolve"]
     assert len(gh.replies()) == 1
     assert len(persisted) == 1  # no new reply -> nothing extra to persist
+
+
+async def test_outdated_reply_after_unseen_feedback_leaves_the_thread_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6vaQrr: a reviewer reply that lands after this poll listed the
+    # thread but before AWF's reply sits before that reply, where the gate would
+    # read it as answered once resolved. The re-read after the reply sees it: no
+    # resolve, the reply is retired, and the closed verdict's stale body re-enters
+    # repair as fresh outdated feedback.
+    gh = OrderedForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    tid = "PRRT_test_outdated_moved"
+    addressed_at = datetime(2026, 10, 1, tzinfo=UTC)
+    listed = _outdated_thread_with_comment(tid, comment_at=addressed_at)
+    followed_up = _outdated_thread_with_reply(
+        tid,
+        addressed_comment_id="c1",
+        addressed_at=addressed_at,
+        reply_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+
+    async def _audit(*, repo: RepoRef, pr_number: int) -> ReviewThreadAudit:
+        del repo, pr_number
+        live = AuditedReviewThread(
+            thread_id=tid,
+            is_resolved=False,
+            is_outdated=True,
+            resolved_by=None,
+            external_comment_bodies=tuple(c.body for c in followed_up.comments),
+        )
+        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot", threads=(live,))
+
+    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
+    state = MonitorState()
+    _mark_review_thread_addressed(state, listed, "false_positive")
+    seed_resolvable_disposition(state, tid, "false_positive")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(listed),
+        state=state,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert state.threads_addressed_ids[tid] == "false_positive"
+    assert await _events(factory, workspace_id) == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+    assert ws is not None
+    saved = read_item_disposition(_load_state(None, ws), tid)
+    assert saved is not None and saved.reply_comment_id is None
+    action = decide(_status_with_outdated(followed_up), state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [tid]
 
 
 async def test_legacy_captured_defer_without_disposition_replies_with_reason_and_issue(

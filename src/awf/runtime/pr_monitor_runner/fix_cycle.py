@@ -1105,6 +1105,8 @@ async def _run_fix_cycle(
         workspace_id=workspace_id,
         pr_number=pr_number,
     )
+    # The settle feed's copy of each thread: its reply is checked against it.
+    listed_threads = {t.thread_id: t for t in settle_feed or ()}
     for tid in threads_to_resolve:
         if tid in stale_thread_ids:
             continue
@@ -1125,14 +1127,17 @@ async def _run_fix_cycle(
             action="resolve_thread",
             base_branch=base_branch,
             remote_branch=remote_branch,
+            thread=listed_threads.get(tid),
             operation_id=operation_id,
             operation_type=operation_type,
             monitor_log=monitor_log,
             source_head_sha=pushed_head_sha,
+            repo=repo,
         )
         if disposition is None:
-            # #1018: parked needs_human — never resolve without the reply. Persist
-            # only this park now: a later transient ``_execute`` fault skips
+            # #1018: parked needs_human, or its feedback moved on before the reply
+            # landed — never resolve without the reply. Persist only this park
+            # now: a later transient ``_execute`` fault skips
             # ``_persist_state`` and would reload the resolvable verdict, so the
             # reply could be re-posted. A full flush would leak the other threads'
             # unconfirmed verdicts (#305).

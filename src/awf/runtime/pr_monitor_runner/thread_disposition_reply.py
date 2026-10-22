@@ -4,7 +4,9 @@ Both resolve sites — the fix-cycle resolve loop and outdated-thread hygiene �
 call :func:`reply_before_resolve` immediately before ``resolve_thread``. It posts
 the thread's disposition reply (see :mod:`thread_disposition`) and returns the
 replied record, or parks the thread ``needs_human`` with a reason code and
-returns ``None``; the caller then must NOT resolve.
+returns ``None``; the caller then must NOT resolve. It also returns ``None``
+when the thread's feedback moved on before a fresh reply landed: that reply
+answers older feedback, so the thread stays open for ``decide()`` to re-triage.
 
 Parking is per thread and never fails the workspace: it records state, a log
 line and an audit event, and ``decide()`` turns the parked thread into
@@ -20,6 +22,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.forge_errors import ForgeClientError
+from awf.common.github_client import RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.feedback_policy import review_thread_body_state_key
 from awf.runtime.logs import WorkspaceLogSink
@@ -38,6 +41,7 @@ from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_err
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from awf.runtime.pr_monitor_runner.thread_disposition import (
+    REVIEW_THREAD_AUDIT_UNAVAILABLE,
     THREAD_DISPOSITION_EVIDENCE_MISSING,
     THREAD_DISPOSITION_REASON_MISSING,
     THREAD_DISPOSITION_REPLY_FAILED,
@@ -77,8 +81,14 @@ async def reply_before_resolve(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
     source_head_sha: str | None = None,
+    repo: RepoRef | None = None,
 ) -> ThreadDisposition | None:
-    """Post the thread's disposition reply; ``None`` means parked — do NOT resolve."""
+    """Post the thread's disposition reply; ``None`` means do NOT resolve.
+
+    ``thread`` is the thread as the monitor listed it. With ``repo`` too, a fresh
+    reply is checked against the live thread before it is returned
+    (:func:`_feedback_moved_before_reply`).
+    """
     verdict = state.threads_addressed_ids.get(thread_id)
     disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
     if disposition is not None and disposition.answers_resolution:
@@ -147,8 +157,8 @@ async def reply_before_resolve(
             exc.reason_code,
         )
         return None
-    replied = replace(disposition, reply_comment_id=reply_id)
-    record_item_disposition(state, replied)
+    disposition = replace(disposition, reply_comment_id=reply_id)
+    record_item_disposition(state, disposition)
     await _persist_posted_disposition(
         self, workspace_id=workspace_id, state=state, item_id=thread_id
     )
@@ -157,10 +167,70 @@ async def reply_before_resolve(
         workspace_id=workspace_id,
         pr_number=pr_number,
         thread_id=thread_id,
-        disposition_class=replied.disposition_class,
+        disposition_class=disposition.disposition_class,
         reply_comment_id=reply_id,
     )
-    return replied
+    if repo is None or thread is None:
+        return disposition
+    try:
+        moved = await _feedback_moved_before_reply(
+            self, repo=repo, pr_number=pr_number, thread=thread
+        )
+    except ForgeClientError as exc:
+        await _park(
+            REVIEW_THREAD_AUDIT_UNAVAILABLE,
+            "AWF could not re-read this review thread after posting its disposition "
+            f"reply ({_redact_and_truncate_forge_error(str(exc))}) to confirm no "
+            "feedback arrived first, so it left the thread open",
+            exc.reason_code,
+        )
+        return None
+    if moved:
+        # Feedback added or edited after the listed snapshot sits before the
+        # reply, where the gate would read the reply as its answer
+        # (PRRT_kwDOSJAM6s6vaQrr). The reply is retired, so no later resolve
+        # reuses it, and the thread is left open: its changed body re-enters
+        # AddressComments, whose re-triage answers that feedback afresh.
+        retire_item_disposition(state, disposition)
+        await _persist_posted_disposition(
+            self, workspace_id=workspace_id, state=state, item_id=thread_id
+        )
+        _log.info(
+            "monitor.thread_disposition_feedback_moved",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=thread_id,
+            reply_comment_id=reply_id,
+            reason_code="REVIEW_THREAD_FEEDBACK_AFTER_DECISION",
+        )
+        return None
+    return disposition
+
+
+async def _feedback_moved_before_reply(
+    self: Any,
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    thread: ReviewThread,
+) -> bool:
+    """True when the live thread's outside feedback is no longer ``thread``'s.
+
+    Runs once a fresh reply has landed, so anything that arrived before the
+    reply shows up here; anything later follows the reply, which the gate
+    already refuses as its answer. Outside comments are compared as
+    ``fetch_pr_status`` lists them. Only a provable difference counts: an
+    unsupported audit, a thread missing from it, or a snapshot without
+    comments is no evidence of new feedback.
+    """
+    audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
+    if not audit.supported or not thread.comments:
+        return False
+    listed = tuple(comment.body for comment in thread.comments)
+    return any(
+        audited.thread_id == thread.thread_id and audited.external_comment_bodies != listed
+        for audited in audit.threads
+    )
 
 
 async def _with_item_commit_recorded_this_cycle(
