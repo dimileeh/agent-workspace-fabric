@@ -22,6 +22,7 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_event_payload,
 )
 from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.monitor_resume_restart_escalation import remember_unrecorded_failure
 from awf.control.executor.monitor_resume_runtime import DependencyWaitTimeoutError
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
@@ -304,38 +305,43 @@ async def _record_monitor_runtime_restart_failed(
     error: ComposeOperationError,
     event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
 ) -> None:
-    """Persist an audit event when compose restart fails during monitor resume handoff."""
+    """Persist an audit event when compose restart fails during monitor resume handoff.
+
+    The event counts toward the restart-failure streak, so a failed write keeps it
+    in memory: escalation still counts it and the next restart attempt retries it.
+    """
+    event: dict[str, Any] = {
+        "event_type": MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+        "reason_code": event_reason_code,
+        "payload": {
+            "compose_project_name": compose_project,
+            "compose_file_path": compose_file_path,
+            "operation": error.operation,
+            "returncode": error.returncode,
+            "stderr": redact_audit_text(error.stderr, limit=1000),
+            "reason_code": error.reason_code,
+            MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True,
+            **(
+                {
+                    MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY: list(
+                        error.unsettled_services
+                    )
+                }
+                if isinstance(error, DependencyWaitTimeoutError)
+                else {}
+            ),
+        },
+    }
     try:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
                 return
-            await repo.add_event(
-                ws,
-                event_type=MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
-                reason_code=event_reason_code,
-                payload={
-                    "compose_project_name": compose_project,
-                    "compose_file_path": compose_file_path,
-                    "operation": error.operation,
-                    "returncode": error.returncode,
-                    "stderr": redact_audit_text(error.stderr, limit=1000),
-                    "reason_code": error.reason_code,
-                    MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True,
-                    **(
-                        {
-                            MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY: list(
-                                error.unsettled_services
-                            )
-                        }
-                        if isinstance(error, DependencyWaitTimeoutError)
-                        else {}
-                    ),
-                },
-            )
+            await repo.add_event(ws, **event)
             await session.commit()
     except Exception:
+        remember_unrecorded_failure(self, workspace_id=workspace_id, event=event)
         _log.exception(
             "executor.monitor_runtime_restart_failed_record_failed",
             workspace_id=workspace_id,
