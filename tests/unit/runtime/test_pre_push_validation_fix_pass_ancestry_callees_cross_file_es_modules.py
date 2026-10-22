@@ -203,6 +203,27 @@ async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> No
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "module",
+    [
+        # An exported generator declaration is a head too (PRRT_kwDOSJAM6s6vL9Ae).
+        "export function* record(value: number) {\n  return value + 1;\n}\n",
+        "export async function* record(value: number) {\n  return value + 1;\n}\n",
+        "export function *record(value: number) {\n  return value + 1;\n}\n",
+        "export function * record(value: number) {\n  return value + 1;\n}\n",
+    ],
+)
+async def test_a_fix_to_an_exported_generator_is_evidence(module: str) -> None:
+    caller = _caller("import { record } from './telemetry';")
+    probe = _EsProbe(
+        files={_CALLER: caller, _TELEMETRY: module},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY)},
+    )
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
 async def test_a_fix_to_an_overloaded_implementation_is_evidence() -> None:
     """Body-less overload signatures are not heads of their own (PRRT_kwDOSJAM6s6vL0nj)."""
     module = (

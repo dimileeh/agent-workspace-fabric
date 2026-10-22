@@ -137,14 +137,16 @@ _DEFINITION_NAME_LINE_RE = re.compile(
     rf"(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
     # Optional ``export`` so ``export function helper`` / ``export async function``
     # count as definition heads (body-only repairs stay FIXED-with-evidence), as
-    # does a named ``export default function`` (PRRT_kwDOSJAM6s6vLRfG).
-    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
+    # does a named ``export default function`` (PRRT_kwDOSJAM6s6vLRfG). An
+    # optional generator ``*`` keeps ``export function* helper`` a head too
+    # (PRRT_kwDOSJAM6s6vL9Ae).
+    rf"|(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
     rf"|class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|" + _ASSIGNMENT_DEFINITION_HEAD + r")"
 )
 _ENCLOSING_DEFINITION_RE = re.compile(
     rf"^[ \t]*(?:async[ \t]+)?def[ \t]+({_JS_IDENT})\s*\("
-    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function[ \t]+({_JS_IDENT})\s*\("
+    rf"|^[ \t]*(?:export[ \t]+(?:default[ \t]+)?)?(?:async[ \t]+)?function(?:[ \t]*\*[ \t]*|[ \t]+)({_JS_IDENT})\s*\("
     rf"|^[ \t]*class[ \t]+({_JS_IDENT}){_IDENT_END}"
     r"|^[ \t]*" + _ASSIGNMENT_DEFINITION_HEAD
 )
