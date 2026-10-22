@@ -1,0 +1,146 @@
+"""GitHub in-thread reply + exhaustive review-thread resolution audit (#1018).
+
+These are plain async functions bound onto :class:`~awf.common.github_client.GitHubClient`
+as methods (``reply_to_thread = github_client_threads.reply_to_thread``), so the
+client module stays under the first-party file-size guardrail while ``GitHubClient``
+still satisfies the ``ForgeClient`` Protocol structurally. ``GitHubClientError`` is
+imported inside each function because ``github_client`` imports this module at load
+time.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
+from awf.common.github_client_parsing import _clean_optional_str, _connection_nodes, _dig
+from awf.common.github_graphql import (
+    _GQL_ADD_REVIEW_THREAD_REPLY,
+    _GQL_REVIEW_THREAD_AUDIT,
+    _GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
+)
+from awf.common.github_retry import RetryPolicy
+
+if TYPE_CHECKING:
+    from awf.common.github_client import GitHubClient, RepoRef
+
+
+async def reply_to_thread(self: GitHubClient, *, thread_id: str, body: str) -> str:
+    """Post ``body`` inside review thread ``thread_id``; return the new comment id.
+
+    A mutation, so ``RetryPolicy.NEVER``: a blind transport retry could post the
+    disposition twice. Callers treat any failure as "not replied" and never resolve.
+    """
+    from awf.common.github_client import GitHubClientError
+
+    payload = await self._graphql(
+        query=_GQL_ADD_REVIEW_THREAD_REPLY,
+        variables={"threadId": thread_id, "body": body},
+        retry_policy=RetryPolicy.NEVER,
+    )
+    comment = _dig(payload, "data", "addPullRequestReviewThreadReply", "comment") or {}
+    database_id = comment.get("databaseId")
+    comment_id = (
+        str(database_id) if database_id is not None else _clean_optional_str(comment.get("id"))
+    )
+    if not comment_id:
+        raise GitHubClientError(
+            operation="reply_to_thread",
+            returncode=0,
+            stderr="addPullRequestReviewThreadReply returned no comment id",
+        )
+    return comment_id
+
+
+async def fetch_review_thread_audit(
+    self: GitHubClient,
+    *,
+    repo: RepoRef,
+    pr_number: int,
+) -> ReviewThreadAudit:
+    """Enumerate EVERY review thread (resolved included) with exhaustive pagination.
+
+    Fails closed (``GitHubClientError``) when a page claims ``hasNextPage`` without
+    a cursor, so the gate can never certify a PR from a truncated list.
+    """
+    from awf.common.github_client import GitHubClientError
+
+    threads: list[AuditedReviewThread] = []
+    viewer_login: str | None = None
+    cursor: str | None = None
+    while True:
+        variables: dict[str, Any] = {"owner": repo.owner, "repo": repo.name, "number": pr_number}
+        if cursor is not None:
+            variables["cursor"] = cursor
+        payload = await self._graphql(
+            query=_GQL_REVIEW_THREAD_AUDIT,
+            variables=variables,
+            retry_policy=RetryPolicy.READ,
+        )
+        viewer_login = viewer_login or _clean_optional_str(_dig(payload, "data", "viewer", "login"))
+        pr = _dig(payload, "data", "repository", "pullRequest")
+        if pr is None:
+            raise GitHubClientError(
+                operation="fetch_review_thread_audit",
+                returncode=0,
+                stderr=f"PR {repo.slug()}#{pr_number} not found",
+            )
+        connection = pr.get("reviewThreads")
+        for node in _connection_nodes(connection):
+            thread = await _audited_thread(self, node)
+            if thread is not None:
+                threads.append(thread)
+        cursor = _next_cursor(connection, operation="fetch_review_thread_audit")
+        if cursor is None:
+            return ReviewThreadAudit(
+                supported=True,
+                viewer_login=viewer_login,
+                threads=tuple(threads),
+            )
+
+
+def _next_cursor(connection: Any, *, operation: str) -> str | None:
+    """Return the next page cursor, ``None`` on the last page; fail closed otherwise."""
+    from awf.common.github_client import GitHubClientError
+
+    if _dig(connection, "pageInfo", "hasNextPage") is not True:
+        return None
+    cursor = _clean_optional_str(_dig(connection, "pageInfo", "endCursor"))
+    if cursor is None:
+        raise GitHubClientError(
+            operation=operation,
+            returncode=0,
+            stderr=f"{operation}: hasNextPage was true without an endCursor",
+        )
+    return cursor
+
+
+async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedReviewThread | None:
+    """Build one audited thread, following its comment pages for viewer bodies."""
+    thread_id = _clean_optional_str(node.get("id"))
+    if thread_id is None:
+        return None
+    comments = node.get("comments")
+    comment_nodes = _connection_nodes(comments)
+    cursor = _next_cursor(comments, operation="fetch_review_thread_audit comments")
+    while cursor is not None:
+        payload = await self._graphql(
+            query=_GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
+            variables={"threadId": thread_id, "cursor": cursor},
+            retry_policy=RetryPolicy.READ,
+        )
+        page = _dig(payload, "data", "node", "comments")
+        comment_nodes.extend(_connection_nodes(page))
+        cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
+    return AuditedReviewThread(
+        thread_id=thread_id,
+        is_resolved=node.get("isResolved") is True,
+        is_outdated=node.get("isOutdated") is True,
+        resolved_by=_clean_optional_str(_dig(node, "resolvedBy", "login")),
+        viewer_comment_bodies=tuple(
+            body
+            for comment in comment_nodes
+            if comment.get("viewerDidAuthor") is True
+            and isinstance(body := comment.get("body"), str)
+        ),
+    )

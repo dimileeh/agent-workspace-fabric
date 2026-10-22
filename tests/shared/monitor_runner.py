@@ -4,14 +4,37 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
+from awf.common.commands import AsyncCommandRunner
+from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.node.compose_manager import ComposeTeardownResult
 
 
 class DefaultMergeMethodGitHubClient(GitHubClient):
-    """GitHub client test double that keeps legacy merge queues stable."""
+    """GitHub client test double that keeps legacy merge queues stable.
+
+    It also records disposition replies and serves a clean review-thread audit
+    (#1018) so runner tests keep stable ``FakeCommandRunner`` queues.
+    """
+
+    def __init__(self, runner: AsyncCommandRunner, **kwargs: Any) -> None:
+        super().__init__(runner, **kwargs)
+        self.thread_replies: list[tuple[str, str]] = []
+
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        """Record the disposition reply instead of shelling ``gh``."""
+        self.thread_replies.append((thread_id, body))
+        return f"reply-{len(self.thread_replies)}"
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int
+    ) -> ReviewThreadAudit:
+        """A clean audit (no AWF-resolved threads) for tests that do not exercise the gate."""
+        del repo, pr_number
+        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot")
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return all legacy repository merge methods for older runner tests."""

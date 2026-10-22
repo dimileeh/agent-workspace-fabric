@@ -51,6 +51,7 @@ from typing import Protocol, cast, runtime_checkable
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import ForgeKind
 from awf.runtime.pr_monitor import CheckFailureLogResult, CheckTiming, PRStatus
@@ -162,6 +163,25 @@ class ForgeClient(Protocol):
 
     async def resolve_thread(self, *, thread_id: str) -> None:
         """Resolve a review thread by node ID."""
+        ...
+
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        """Post ``body`` as a reply inside review thread ``thread_id``; return its id.
+
+        The PR monitor posts its disposition reply here before every resolve
+        (#1018). Callers own the body; the forge adds no mention syntax.
+        """
+        ...
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int
+    ) -> ReviewThreadAudit:
+        """Enumerate every review thread, resolved ones included, plus AWF's own login.
+
+        Exhaustive (fails closed on a truncated page) so the READY_TO_MERGE gate
+        can verify each AWF resolution carries its disposition marker (#1018).
+        ``supported=False`` means the forge cannot attribute resolutions yet.
+        """
         ...
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
