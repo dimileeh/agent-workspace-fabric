@@ -899,26 +899,119 @@ def test_definition_heads_skip_body_less_function_overload_signatures() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("text", "end_line", "expected"),
+    ("text", "span"),
     [
-        # A ``;`` ends a variable; a statement after it on the line is another.
-        ("export const record = (v) => v; const other = () => {\n  v;\n};\n", 3, True),
-        # A variable's own ``}`` does not end it; its ``;`` does, past the span.
-        ("export const record = () => {\n  v;\n};\nother();\n", 3, False),
+        # A ``;`` ends a variable; a statement after it on the line shares it.
+        ("export const record = (v) => v; const other = () => {\n  v;\n};\n", None),
+        # A variable's own ``}`` does not end it; its ``;`` does.
+        ("export const record = () => {\n  v;\n};\nother();\n", (1, 3)),
         # A declaration's body ``}`` ends it.
-        ("export function record() { v; } function other() {\n  v;\n}\n", 3, True),
-        ("export class record { v = 1 } other(() => {\n  v;\n});\n", 3, True),
-        # A ``}`` closing a return type that the body's ``{`` continues does not.
-        ("function record(): { a: 1 } {\n  v;\n}\n", 3, False),
-        # Tokens past the span's last line are not in it.
-        ("function record() {\n  v;\n}\nfunction other() {}\n", 3, False),
+        ("export function record() { v; } function other() {\n  v;\n}\n", None),
+        ("export class record { v = 1 } other(() => {\n  v;\n});\n", None),
+        # A ``}`` closing a return type is not the body's.
+        ("function record(): { a: 1 } {\n  v;\n}\n", (1, 3)),
+        ("function record() {\n  v;\n}\nfunction other() {}\n", (1, 3)),
+        # Bracket depth, never indentation: an ASI-ended arrow does not take
+        # the indented statement below it, nor a dedented body line leave it.
+        ("export const record = (v) => v + 1\n  other()\n", (1, 1)),
+        ("export const record = (v) =>\n  v + 1;\n", (1, 2)),
+        ("export function record() {\nv;\n}\n  other();\n", (1, 3)),
+        ("export function record() {\n  const s = `\n}\n`;\n}\nother();\n", (1, 5)),
+        # Type parameters, annotations and return types may hold ``,`` / ``{``.
+        ("export const record = <K, V = Row[K]>(v: V): Map<K, V> => {\n  v;\n};\n", (1, 3)),
+        ("export const record: Recorder<A, B> = (v) => {\n  v;\n};\n", (1, 3)),
+        ("export class record extends Base<{ a: 1 }> implements I {\n  v = 1;\n}\n", (1, 3)),
+        ("export function record<K, V = Row<K>>(v: V): Promise<{ a: 1 }> {\n  v;\n}\n", (1, 3)),
+        ("export class record<T extends (x: T) => void> {\n}\n", (1, 2)),
+        ("export async function* record() {\n  v;\n};\nother();\n", (1, 3)),
+        # A statement before the definition on its first line shares it.
+        ("other(); export function record() {\n  v;\n}\n", None),
+        # Automatic semicolon insertion ends a declarator only where it must.
+        ("export const record = async () => await\nother();\n", (1, 2)),
+        ("export const record = () => a\n  + b;\n", (1, 2)),
+        ("export const record = () => fn\n(x);\n", (1, 2)),
+        ("export const record = () => tag\n`x`;\n", (1, 2)),
+        ("export const record = () => value\n  as Fn;\n", (1, 2)),
+        ("export const record = () => 1\n'use strict';\n", (1, 1)),
+        ("export const record = () => 1", (1, 1)),
+        ("{\n  const record = () => 1\n}\n", (2, 2)),
+        ("export const record = class {\n  v = 1;\n};\n", (1, 3)),
+        ("export const record = async function* () {\n  v;\n};\n", (1, 3)),
+        ("export const record = v => v;\n", (1, 1)),
+        # Unbounded or ambiguous ends fail closed.
+        ("export const record = () => 1, other = () => {\n  v;\n};\n", None),
+        ("export const record = () => {}\n(other)();\n", None),
+        ("export const record = () => {}\n`x`;\n", None),
+        ("export const record = () => make\n{\n  v;\n}\n", None),
+        ("export const record = () => other\n++v;\n", None),
+        ("export const record = () => count++\nother();\n", None),
+        ("interface Sink {\n  record(v: string): void;\n}\n", None),
+        ("export function record(): { a: 1 }\nother();\n", None),
+        ("export function record()\n", None),
+        ("export function record {\n}\n", None),
+        ("export const record = <T>>(v) => v;\n", None),
+        ("export function record<T", None),
+        ("export function record<T = A>=B>() {\n}\n", None),
+        ("{\n  function record<T\n}\n", None),
+        ("export class record extends Base", None),
+        ("export class record extends Base = {\n}\n", None),
+        ("export enum record {\n  A,\n}\n", None),
+        ("export namespace record {\n  v;\n}\n", None),
+        # Types that cannot be placed, or a value that is no callable.
+        ("export const record: Map<K, V>= () => 1;\n", None),
+        ("export const record: A> = () => 1;\n", None),
+        ("export let record: A, other = () => 1;\n", None),
+        ("{\n  let record: T\n}\n", None),
+        ("export let record!: Recorder;\n", None),
+        ("export const record = <T;\n", None),
+        ("export const record = (make)();\n", None),
+        ("export const record = make();\n", None),
     ],
 )
-def test_span_holds_another_statement_finds_the_definition_end(
-    text: str, end_line: int, expected: bool
-) -> None:
-    """The span may not reach past its definition (PRRT_kwDOSJAM6s6vQABw)."""
+def test_definition_span_follows_bracket_depth(text: str, span: tuple[int, int] | None) -> None:
+    """A definition's span runs from its head to its own end (PRRT_kwDOSJAM6s6vQABw)."""
     tokens = _tokens(text)
-    head = es._es_definition_heads(tokens, "record")[0]
 
-    assert es._es_span_holds_another_statement(tokens, head, end_line) is expected
+    assert es._es_definition_span(tokens, es._es_definition_heads(tokens, "record")[0]) == span
+
+
+@pytest.mark.unit
+def test_methods_and_object_members_span_their_own_body() -> None:
+    text = (
+        "class Box {\n"
+        "  static async record(v) {\n"
+        "    v;\n"
+        "  }\n"
+        "}\n"
+        "const api = {\n"
+        "  record(v) { v; }, other: 1,\n"
+        "  record(v) {\n"
+        "    v;\n"
+        "  },\n"
+        "};\n"
+    )
+    tokens = _tokens(text)
+    spans = [
+        es._es_definition_span(tokens, head) for head in es._es_definition_heads(tokens, "record")
+    ]
+
+    assert spans == [(2, 4), None, (8, 10)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "span"),
+    [
+        ("export function record() {\n  v;\n}\nclass Box {\n  record() {}\n}\n", (1, 3)),
+        # A nested head inside the module head's own span, or none at module scope.
+        ("export function record() {\n  function record() {}\n}\n", None),
+        ("if (ok) {\n  function record() {}\n}\n", None),
+        ("function record() {}\nfunction record() {}\n", None),
+        ("export const record = () => 1, x = 2;\n", None),
+        ("const other = 1;\n", None),
+    ],
+)
+def test_module_definition_span_needs_one_module_head(
+    text: str, span: tuple[int, int] | None
+) -> None:
+    assert es._es_module_definition_span(_tokens(text), "record") == span

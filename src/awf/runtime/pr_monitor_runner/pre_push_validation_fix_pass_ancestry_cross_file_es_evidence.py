@@ -116,17 +116,10 @@ class _EsModuleReader:
             )
         return self._parsed[path]
 
-    async def definition_heads(self, path: str, name: str) -> list[_es._EsToken]:
-        """The tokens heading a definition of ``name`` in ``path``; none when unreadable."""
+    async def definition_span(self, path: str, name: str) -> tuple[int, int] | None:
+        """``path``'s bracket-depth span of its one module-scope ``name``; None when unreadable."""
         parsed = await self.parsed(path)
-        return [] if parsed is None else _es._es_definition_heads(parsed[2], name)
-
-    async def span_holds_another_statement(
-        self, path: str, head: _es._EsToken, end_line: int
-    ) -> bool:
-        """True when ``path``'s span for ``head`` reaches past its definition; True when unreadable."""
-        parsed = await self.parsed(path)
-        return parsed is None or _es._es_span_holds_another_statement(parsed[2], head, end_line)
+        return None if parsed is None else _es._es_module_definition_span(parsed[2], name)
 
     async def lookup(self, module: str, name: str, *, hops: int) -> _Lookup:
         """Where ``module``'s export ``name`` is defined, following ``hops`` re-exports.
@@ -222,7 +215,8 @@ async def _es_module_commit_range_changes_callee_definition(
     Each callee ref at ``item_line`` is resolved at ``left`` through the call
     site's ES-module bindings to one ``(path, local_name)``. That path must be
     one of the range's changed files (other than ``item_path``), the range's
-    diff must overlap the definition's span there, and the *corrected* caller
+    diff must overlap the definition's bracket-depth span there (see
+    ``_es_definition_span``), and the *corrected* caller
     must still reach the same definition at ``right`` — at the moved path when
     the range renamed it — where the definition must still exist. That last
     read replaces the Python path's rename and survival rules: it fails closed
@@ -243,9 +237,6 @@ async def _es_module_commit_range_changes_callee_definition(
     )
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file import (
         _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS,
-        _callee_definition_survives_at_right,
-        _diff_adds_decorators_above_span,
-        _importable_definition_spans_for_names,
         _path_diff_text_in_commit_range,
     )
 
@@ -297,24 +288,13 @@ async def _es_module_commit_range_changes_callee_definition(
         if target is None or target[0] not in candidates:
             continue
         path, local_name = target
-        text = await at_left.text(path)
-        bare_names = frozenset({local_name})
-        spans = _importable_definition_spans_for_names(
-            text or "", frozenset(), path=path, bare_names=bare_names
-        )
-        # The line-based span scan cannot see brackets, so the file must hold
-        # exactly one head for the name at depth 0, and it must be the only
-        # head inside the one span found. A nested head outside that span (an
-        # unrelated ``Box.record``) cannot be what the overlapping edit changed.
-        # Nor may the span run past the definition's own end into another
-        # statement, whose edit would overlap it (PRRT_kwDOSJAM6s6vQABw).
-        heads = await at_left.definition_heads(path, local_name)
-        module_heads = [head for head in heads if head.depth == 0]
-        if not (
-            len(spans) == 1
-            and len(module_heads) == 1
-            and [head for head in heads if spans[0][0] <= head.line <= spans[0][1]] == module_heads
-        ) or await at_left.span_holds_another_statement(path, module_heads[0], spans[0][1]):
+        # The span comes from bracket depth, never indentation: the head to the
+        # ``}`` closing its body or the end of its declarator, alone on its
+        # first and last lines, as the one module-scope head of the name
+        # (PRRT_kwDOSJAM6s6vQABw). A pure insert counts only strictly inside
+        # it, and a decorator-shaped insert above it is no part of it.
+        span = await at_left.definition_span(path, local_name)
+        if span is None:
             continue
         diff_text = await _path_diff_text_in_commit_range(
             self,
@@ -324,26 +304,14 @@ async def _es_module_commit_range_changes_callee_definition(
             path=path,
             rename_path=rename_map.get(path),
         )
-        if diff_text is None or not any(
-            _diff_hunk_overlaps_line_span(diff_text, start, end, file_text=text)
-            or _diff_adds_decorators_above_span(diff_text, start)
-            for start, end in spans
-        ):
+        if diff_text is None or not _diff_hunk_overlaps_line_span(diff_text, *span):
             continue
         moved = rename_map.get(path) or path
         if await _es_caller_still_reaches(
             at_right, caller=caller_after, qualifier=qualifier, name=name
         ) != (moved, local_name):
             continue
-        if await _callee_definition_survives_at_right(
-            self,
-            worktree_path=worktree_path,
-            right=right,
-            path=moved,
-            names=frozenset(),
-            bare_names=bare_names,
-            enclosed_by={},
-        ):
+        if await at_right.definition_span(moved, local_name) is not None:
             return True
     return False
 

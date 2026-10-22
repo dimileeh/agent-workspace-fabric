@@ -18,6 +18,9 @@ import pytest
 from awf.runtime.pr_monitor_runner import (
     pre_push_validation_fix_pass_ancestry_cross_file as cross_file,
 )
+from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass_ancestry_cross_file_es_evidence as es_evidence,
+)
 from tests.unit.runtime._pre_push_ancestry_cross_file_helpers import _LEFT, _RIGHT
 
 _CALLER = "src/app/ingest.ts"
@@ -973,6 +976,74 @@ async def test_a_definition_ending_with_its_span_still_accepts(definition: str) 
     probe.files[_TELEMETRY] = definition
 
     assert await _accepted(probe)
+
+
+def _hunk(path: str, header: str, *lines: str) -> str:
+    """A ``-U0`` diff of ``path`` with one hunk ``header`` and its ``lines``."""
+    return f"--- a/{path}\n+++ b/{path}\n@@ {header} @@\n" + "".join(f"{line}\n" for line in lines)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("definition", "diff"),
+    [
+        # An indented insert after a one-line arrow's ``;`` follows the definition.
+        (
+            "export const record = (value: number) => value + 1;\nother();\n",
+            _hunk(_TELEMETRY, "-1,0 +2", "+  console.log(value);"),
+        ),
+        # An ASI-ended arrow does not reach the indented statement below it.
+        (
+            "export const record = (value: number) => value + 1\n  other()\n",
+            _hunk(_TELEMETRY, "-2 +2", "-  other()", "+  another()"),
+        ),
+        # A decorator-shaped insert above a function is no part of it.
+        (_RECORD_DEFINITION, _hunk(_TELEMETRY, "-0,0 +1", "+@trace")),
+    ],
+)
+async def test_an_edit_outside_the_bracket_span_is_not_evidence(definition: str, diff: str) -> None:
+    """Spans come from bracket depth, never indentation (PRRT_kwDOSJAM6s6vQABw)."""
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    probe.files[_TELEMETRY] = definition
+    probe.diffs[_TELEMETRY] = diff
+
+    assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_a_pure_insert_inside_the_bracket_span_is_evidence() -> None:
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    probe.diffs[_TELEMETRY] = _hunk(_TELEMETRY, "-1,0 +2", "+console.log(value);")
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_a_definition_surviving_only_inside_a_literal_fails_closed() -> None:
+    """At ``right`` the definition must still be a real head, not text in a template."""
+    survivor = "export { record };\nconst doc = `\nfunction record(value: number) {\n}\n`;\n"
+    probe = _telemetry_probe(
+        _caller("import { record } from './telemetry';"), right={_TELEMETRY: survivor}
+    )
+
+    assert not await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_the_module_reader_reads_each_text_once() -> None:
+    probe = _telemetry_probe(_caller("import { record } from './telemetry';"))
+    shows: list[list[str]] = []
+    run = probe._deps.runner.run
+
+    async def counting_run(cmd: list[str], **kwargs: object):
+        shows.extend([cmd] if "show" in cmd else [])
+        return await run(cmd, **kwargs)
+
+    probe._deps.runner.run = counting_run
+    reader = es_evidence._EsModuleReader(probe, worktree_path=Path("/tmp/ws"), ref=_LEFT)
+
+    assert await reader.text(_TELEMETRY) == await reader.text(_TELEMETRY) == _RECORD_DEFINITION
+    assert len(shows) == 1
 
 
 @pytest.mark.unit

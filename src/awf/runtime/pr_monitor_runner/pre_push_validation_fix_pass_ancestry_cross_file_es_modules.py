@@ -1067,43 +1067,324 @@ def _es_overload_signature(tokens: tuple[_EsToken, ...], index: int) -> bool:
     return False
 
 
-# Punctuators that continue a type after its ``}`` (``(): { a: 1 } {``,
-# ``Promise<{ a: 1 }>``), so that ``}`` does not end the declaration.
-_TYPE_CONTINUATION_PUNCTUATORS = frozenset({"{", ">", "|", "&", "[", ","})
+# Words that may lead a definition's statement or class member, before its name;
+# an ``enum`` / ``namespace`` / ``module`` is led there to be refused as a whole.
+_DEFINITION_MODIFIERS = frozenset(
+    {
+        "abstract",
+        "accessor",
+        "async",
+        "await",
+        "class",
+        "const",
+        "declare",
+        "default",
+        "enum",
+        "export",
+        "function",
+        "get",
+        "let",
+        "module",
+        "namespace",
+        "override",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "set",
+        "static",
+        "using",
+        "var",
+    }
+)
+# Words after which a ``{`` opens a type or heritage, not a body (``): v is {``).
+_TYPE_PREFIX_WORDS = frozenset(
+    {"asserts", "class", "extends", "implements", "infer", "is", "keyof", "readonly", "typeof"}
+)
+# Operator words that continue an expression past a line break.
+_CONTINUING_WORDS = frozenset({"as", "in", "instanceof", "satisfies"})
+# How each angle punctuator moves a type-argument count; ``>=`` and its
+# compound forms would split a ``>`` from an ``=`` and fail closed instead.
+_ANGLE_DELTA = {"<": 1, ">": -1, ">>": -2, ">>>": -3}
+_SPLIT_ANGLE_PUNCTUATORS = frozenset({">=", ">>=", ">>>="})
 
 
-def _es_span_holds_another_statement(
-    tokens: tuple[_EsToken, ...], head: _EsToken, end_line: int
-) -> bool:
-    """True when a statement after the one ``head`` opens starts by ``end_line``.
+def _es_closer(tokens: tuple[_EsToken, ...], open_index: int) -> int:
+    """The index of the closer matching the opener at ``open_index``.
 
-    The line-based span cannot see a definition end mid-line, so it swallows
-    whatever follows on that line and below it
-    (``export const record = (v) => v; const other = () => {``). The
-    definition ends at a ``;`` at the head's depth or, unless it is a
-    variable, at the ``}`` closing its body; any token at that depth after
-    the end and within the span is another statement. A ``}`` closing a type
-    that no type punctuator continues also reads as the end, which only fails
-    it closed.
+    The tokenizer only yields balanced text and emits an opener and its closer
+    at the same depth, with everything between them deeper.
     """
-    start = next(index for index, token in enumerate(tokens) if token is head)
-    variable = _ident_value(_token_at(tokens, start - 1)) in _VARIABLE_KEYWORDS
-    ended = False
-    for index in range(start + 1, len(tokens)):
-        token = tokens[index]
-        if token.line > end_line:
-            return False
-        if token.depth != head.depth:
+    index = open_index + 1
+    while tokens[index].depth != tokens[open_index].depth:
+        index += 1
+    return index
+
+
+def _es_ends_type(token: _EsToken) -> bool:
+    """True when ``token`` may end a type or heritage, so a ``{`` after it opens a body."""
+    if token.kind == "punct":
+        return token.value in (")", "]", "}", ">")
+    return token.kind != "ident" or token.value not in _TYPE_PREFIX_WORDS
+
+
+def _es_type_end(
+    tokens: tuple[_EsToken, ...], index: int, stops: frozenset[str], *, commas: bool = False
+) -> int | None:
+    """The index of the first ``stops`` punctuator (or ``;``) ending the type at ``index``.
+
+    The type runs at ``tokens[index]``'s depth, where ``<`` / ``>`` nest type
+    arguments; a ``{`` in ``stops`` ends it only after a token that may end a
+    type, so an object type is skipped. A top-level ``,`` (unless ``commas``),
+    a ``>=`` that splits a closing ``>``, a closer, a line break before a word
+    that would start a new statement, and the end of the text all fail closed.
+    """
+    depth = tokens[index - 1].depth
+    angle = 0
+    for offset in range(index, len(tokens)):
+        token = tokens[offset]
+        if token.depth < depth or (
+            token.kind == "punct" and token.value in _SPLIT_ANGLE_PUNCTUATORS
+        ):
+            return None
+        if token.depth > depth:
             continue
-        if ended:
-            return True
-        after = _token_at(tokens, index + 1)
-        ended = _is(token, "punct", ";") or (
-            not variable
-            and _is(token, "punct", "}")
-            and not (_is(after, "punct") and after.value in _TYPE_CONTINUATION_PUNCTUATORS)
-        )
+        if token.kind == "punct" and token.value in _ANGLE_DELTA:
+            angle += _ANGLE_DELTA[token.value]
+            if angle < 0:
+                return None
+            continue
+        if angle:
+            continue
+        previous = tokens[offset - 1]
+        if token.kind == "punct" and token.value in stops | {";"}:
+            if token.value != "{" or _es_ends_type(previous):
+                return offset
+        elif (_is(token, "punct", ",") and not commas) or (
+            token.newline_before
+            and token.kind == "ident"
+            and token.value not in ("extends", "implements")
+            and _es_ends_type(previous)
+        ):
+            return None
+    return None
+
+
+def _es_after_type_parameters(tokens: tuple[_EsToken, ...], index: int) -> int | None:
+    """The index after the ``<...>`` at ``index``, ``index`` itself when none opens there."""
+    if not _is(_token_at(tokens, index), "punct", "<"):
+        return index
+    angle = 0
+    for offset in range(index, len(tokens)):
+        token = tokens[offset]
+        if token.depth < tokens[index].depth or token.value in _SPLIT_ANGLE_PUNCTUATORS:
+            return None
+        if token.depth == tokens[index].depth and token.kind == "punct":
+            angle += _ANGLE_DELTA.get(token.value, 0)
+            if token.value == ";" or angle < 0:
+                return None
+            if angle == 0:
+                return offset + 1
+    return None
+
+
+def _es_body_close(tokens: tuple[_EsToken, ...], index: int, *, heritage: bool) -> int | None:
+    """The index of the ``}`` closing the body of the definition named at ``index``.
+
+    A function or method reads optional type parameters, its parameter list
+    and an optional return type; a class (``heritage``) reads type parameters,
+    ``extends`` and ``implements`` up to its body. The body is the first ``{``
+    at the head's depth that follows a token able to end that header; a header
+    reaching a ``;`` first (an overload or abstract signature), or anything
+    else this reader cannot place, has no body here and fails closed.
+    """
+    stops = frozenset({"{", "="})
+    if heritage:
+        body = _es_type_end(tokens, index + 1, stops, commas=True)
+    else:
+        params = _es_after_type_parameters(tokens, index + 1)
+        if params is None or not _is(_token_at(tokens, params), "punct", "("):
+            return None
+        after = _token_at(tokens, _es_closer(tokens, params) + 1)
+        if _is(after, "punct", "{"):
+            body = _es_closer(tokens, params) + 1
+        elif _is(after, "punct", ":"):
+            body = _es_type_end(tokens, _es_closer(tokens, params) + 2, stops)
+        else:
+            return None
+    if body is None or not _is(tokens[body], "punct", "{"):
+        return None
+    return _es_closer(tokens, body)
+
+
+def _es_line_break_ends(previous: _EsToken, token: _EsToken) -> bool | None:
+    """Whether a line break between ``previous`` and ``token`` ends the statement.
+
+    True where automatic semicolon insertion applies — ``previous`` ends an
+    operand and ``token`` cannot continue it (a word other than an operator
+    word, or a literal) — False where the expression continues, and None where
+    the reading depends on more than these two tokens: a ``(`` / ``[`` /
+    template after a ``}`` that may close an arrow body or a function
+    expression, a ``{`` / ``++`` / ``--`` / ``!`` / ``~`` / ``@`` / ``...``
+    starting the line, or a postfix ``++`` / ``--`` / ``!`` before the break.
+    """
+    if previous.kind == "punct":
+        if previous.value in ("++", "--", "!"):
+            return None
+        if previous.value not in (")", "]", "}"):
+            return False
+    elif previous.kind == "ident" and previous.value in _masking._JS_REGEX_PREFIX_KEYWORDS:
+        return False
+    if token.kind == "ident":
+        return token.value not in _CONTINUING_WORDS
+    if token.kind == "template" or (token.kind == "punct" and token.value in ("(", "[")):
+        return None if _is(previous, "punct", "}") else False
+    if token.kind != "punct":
+        return True
+    if token.value in ("{", "++", "--", "!", "~", "@", "..."):
+        return None
     return False
+
+
+def _es_expression_end(tokens: tuple[_EsToken, ...], index: int) -> int | None:
+    """The index of the last token of the expression statement running from ``index``.
+
+    It ends at a ``;`` at its depth, before a line break automatic semicolon
+    insertion ends it at (see ``_es_line_break_ends``), before a closer of the
+    enclosing block, or at the end of the text. A ``,`` at its depth starts
+    another declarator, and an ambiguous line break cannot be placed; both
+    fail closed.
+    """
+    depth = tokens[index - 1].depth
+    for offset in range(index, len(tokens)):
+        token = tokens[offset]
+        if token.depth < depth:
+            return offset - 1
+        if token.depth > depth:
+            continue
+        if token.newline_before:
+            ends = _es_line_break_ends(tokens[offset - 1], token)
+            if ends is None:
+                return None
+            if ends:
+                return offset - 1
+        if _is(token, "punct", ";"):
+            return offset
+        if _is(token, "punct", ","):
+            return None
+    return len(tokens) - 1
+
+
+def _es_variable_end(tokens: tuple[_EsToken, ...], index: int) -> int | None:
+    """The index of the last token of the variable declarator named at ``index``.
+
+    An optional definite-assignment ``!`` and type annotation, then an
+    initializer that must be callable-shaped — a ``function`` or ``class``
+    expression, or an arrow — since any other value (``make()``) is no
+    definition this reader can place. A generic arrow's type parameters and
+    an arrow's return type are types, so a ``,`` or ``{`` in them is not the
+    declarator's own; the rest is an expression statement
+    (``_es_expression_end``).
+    """
+    offset = index + 1
+    if _is(_token_at(tokens, offset), "punct", "!"):
+        offset += 1
+    if _is(_token_at(tokens, offset), "punct", ":"):
+        found = _es_type_end(tokens, offset + 1, frozenset({"="}))
+        if found is None:
+            return None
+        offset = found
+    if not _is(_token_at(tokens, offset), "punct", "="):
+        return None
+    offset += 1
+    following = _token_at(tokens, offset + 1)
+    if _is(_token_at(tokens, offset), "ident", "async") and (
+        _is(following, "punct") or _is(following, "ident", "function")
+    ):
+        offset += 1
+    found = _es_after_type_parameters(tokens, offset)
+    if found is None:
+        return None
+    first = _token_at(tokens, found)
+    if _is(first, "punct", "("):
+        arrow = _es_closer(tokens, found) + 1
+        if _is(_token_at(tokens, arrow), "punct", ":"):
+            arrow = _es_type_end(tokens, arrow + 1, frozenset({"=>"})) or arrow
+        if not _is(_token_at(tokens, arrow), "punct", "=>"):
+            return None
+        found = arrow
+    elif _ident_value(first) not in ("function", "class") and not (
+        _is(first, "ident") and _is(_token_at(tokens, found + 1), "punct", "=>")
+    ):
+        return None
+    return _es_expression_end(tokens, found + 1)
+
+
+def _es_definition_span(tokens: tuple[_EsToken, ...], head: _EsToken) -> tuple[int, int] | None:
+    """``(first_line, last_line)`` of the definition ``head`` names, read from bracket depth.
+
+    Never from indentation, which says nothing about where JS/TS code ends
+    (PRRT_kwDOSJAM6s6vQABw). The span opens at the definition's first
+    modifier (``export``, ``async``, ``static``, ...) and closes at the ``}``
+    closing a function, class, method or object-method body, or at the end of
+    a variable's declarator — a ``;``, or a line break automatic semicolon
+    insertion ends it at — with a trailing ``;`` (or a member's ``,``) kept.
+    A statement sharing the first or last line, a declarator list, an enum
+    or namespace, and every end this reader cannot place fail closed (None),
+    since a diff hunk on a shared line may change either statement.
+    """
+    index = next(offset for offset, token in enumerate(tokens) if token is head)
+    start = index
+    while (
+        start > 0
+        and not tokens[start].newline_before
+        and tokens[start - 1].depth == head.depth
+        and (
+            _ident_value(tokens[start - 1]) in _DEFINITION_MODIFIERS
+            or _is(tokens[start - 1], "punct", "*")
+        )
+    ):
+        start -= 1
+    if start > 0 and not tokens[start].newline_before:
+        return None
+    leading = {token.value for token in tokens[start:index] if token.kind == "ident"}
+    end: int | None
+    if leading & _VARIABLE_KEYWORDS:
+        end = _es_variable_end(tokens, index)
+    elif "class" in leading:
+        end = _es_body_close(tokens, index, heritage=True)
+    elif "function" in leading or _es_signature_head(tokens, index):
+        end = _es_body_close(tokens, index, heritage=False)
+    else:
+        return None
+    if end is None:
+        return None
+    after = _token_at(tokens, end + 1)
+    if _is(after, "punct") and after.value in (";", ",") and not _is(tokens[end], "punct", ";"):
+        end += 1
+    after = _token_at(tokens, end + 1)
+    if after is not None and not after.newline_before:
+        return None
+    return tokens[start].line, tokens[end].line
+
+
+def _es_module_definition_span(tokens: tuple[_EsToken, ...], name: str) -> tuple[int, int] | None:
+    """The span of the one module-scope definition of ``name``, or None.
+
+    The file must hold exactly one head for the name at depth 0, its span
+    must be placeable (``_es_definition_span``), and no other head of the
+    name — a nested ``function record`` in its own body included — may share
+    the span's lines, so an edit there is unambiguously an edit to the one
+    definition importers reach.
+    """
+    heads = _es_definition_heads(tokens, name)
+    module_heads = [head for head in heads if head.depth == 0]
+    if len(module_heads) != 1:
+        return None
+    span = _es_definition_span(tokens, module_heads[0])
+    if span is None or [head for head in heads if span[0] <= head.line <= span[1]] != module_heads:
+        return None
+    return span
 
 
 def _es_chained_member_refs(tokens: tuple[_EsToken, ...], line: int) -> frozenset[tuple[str, str]]:
