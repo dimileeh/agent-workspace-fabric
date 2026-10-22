@@ -109,6 +109,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 from awf.runtime.pr_monitor_runner.thread_disposition import attach_item_commits
 from awf.runtime.pr_monitor_runner.thread_disposition_reply import (
     persist_parked_thread,
+    record_resolve_landed,
     reply_before_resolve,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -1332,6 +1333,10 @@ async def _run_fix_cycle(
                 },
             )
         else:
+            # #1018: a reopen of this thread now retires its reply, never reuses it.
+            await record_resolve_landed(
+                self, workspace_id=workspace_id, state=state, disposition=disposition
+            )
             # The resolve landed: clear any stale ``resolve_thread`` retry count so a
             # recovered transient blip never accumulates toward the bounded budget.
             await self._clear_forge_transient_retry_state_on_success(

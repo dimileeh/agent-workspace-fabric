@@ -597,6 +597,81 @@ async def test_a_reopen_only_a_poll_lists_retires_the_bound_reply(
     assert read_item_disposition(state, _FRESH) == unbound
 
 
+@pytest.mark.parametrize("seen_by", ["poll", "audit"])
+async def test_a_reopen_retires_a_reply_whose_resolve_landed_before_any_audit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    seen_by: str,
+) -> None:
+    # PRRT_kwDOSJAM6s6vZ4nJ: AWF replied and its resolve landed, but no gate audit
+    # bound the reply yet (an outdated thread resolved while CI is pending). The
+    # reviewer reopens the unchanged thread and the shared identity resolves it
+    # again: the landed resolve is what the reopen ended, so its reply is retired.
+    state = settled_baseline_state()
+    landed = ThreadDisposition(
+        item_id=_SILENT,
+        disposition_class="fixed",
+        verdict="fix_committed",
+        commits=("c" * 40,),
+        reply_comment_id="reply-1",
+        resolved=True,
+    )
+    record_item_disposition(state, landed)
+    resolved = replace(
+        _thread(_SILENT, bodies=(_marker("fixed", _SILENT),)),
+        conversation_digest="feedback|reply-1",
+        conversation_digest_before_reply="feedback",
+    )
+    audit = ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(resolved,))
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    if seen_by == "poll":
+        listed = ReviewThread(
+            thread_id=_SILENT, path="widgets/core.py", line=1, body_excerpt="x", author="bot"
+        )
+        assert retire_reopened_dispositions(
+            state,
+            replace(_green_status(), outdated_unresolved_inline_threads=(listed,)),
+            workspace_id=workspace_id,
+        ) == [_SILENT]
+    else:
+        gh.audit = replace(audit, threads=(replace(resolved, is_resolved=False, resolved_by=None),))
+        assert (await _gate(runner, workspace_id, state)).blocker is None
+    retired = read_item_disposition(state, _SILENT)
+    assert retired is not None
+    assert (retired.reply_comment_id, retired.resolved) == (None, False)
+
+    gh.audit = audit
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+
+
+async def test_an_audit_binds_a_landed_resolve_it_sees_standing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    state = settled_baseline_state()
+    resolved, audit = _certified_fixed_thread(state)
+    landed = read_item_disposition(state, _SILENT)
+    assert landed is not None
+    record_item_disposition(state, replace(landed, resolved=True))
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    certified = await _gate(runner, workspace_id, state)
+
+    assert certified.blocker is None and certified.count_rows is not None
+    assert dict(certified.count_rows)["fixed"] == 1
+    bound = read_item_disposition(state, _SILENT)
+    assert bound is not None
+    assert (bound.reply_comment_id, bound.resolved, bound.conversation_digest) == (
+        "reply-1",
+        True,
+        resolved.conversation_digest_before_reply,
+    )
+
+
 async def test_gate_rejects_a_marker_older_than_the_shared_identitys_own_feedback(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

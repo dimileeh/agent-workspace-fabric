@@ -124,6 +124,9 @@ class ThreadDisposition:
     # acknowledgement's flagged one; any other's, once a gate audit saw its reply
     # resolved. It holds only while that conversation stays resolved (#1018).
     conversation_digest: str | None = None
+    # AWF's own resolve on this reply landed: unlike a failed resolve's reply, it
+    # is never reused once the thread is seen open again (PRRT_kwDOSJAM6s6vZ4nJ).
+    resolved: bool = False
 
     @property
     def is_bound(self) -> bool:
@@ -136,6 +139,16 @@ class ThreadDisposition:
         return self.conversation_digest is not None or (
             self.disposition_class == "operator_acknowledged"
         )
+
+    @property
+    def answers_resolution(self) -> bool:
+        """Whether a resolution followed this disposition: bound, or AWF's resolve landed.
+
+        Seeing the thread open again then means that resolution was reopened, so
+        the reply is retired even before any audit bound it. Only a reply whose
+        resolve failed answers none yet; its retry reuses it.
+        """
+        return self.resolved or self.is_bound
 
     def as_payload(self) -> dict[str, object]:
         """Return the JSON-safe record persisted in state and audit evidence."""
@@ -152,6 +165,7 @@ class ThreadDisposition:
             "reply_comment_id": self.reply_comment_id,
             "thread_body_hash": self.thread_body_hash,
             "conversation_digest": self.conversation_digest,
+            "resolved": self.resolved,
         }
 
     @classmethod
@@ -187,6 +201,7 @@ class ThreadDisposition:
             reply_comment_id=_optional_text(raw.get("reply_comment_id")),
             thread_body_hash=_optional_text(raw.get("thread_body_hash")),
             conversation_digest=_optional_text(raw.get("conversation_digest")),
+            resolved=raw.get("resolved") is True,
         )
 
 
@@ -231,13 +246,14 @@ def sync_item_disposition(
     the retried resolve reuses it instead of posting a second reply — unless the
     re-triaged ``thread``'s reviewer conversation changed since the verdict that
     reply answers (its recorded body hash), which the new verdict answers and so
-    is owed its own reply, or an audit already saw that reply resolved (it is
-    bound): the thread was reopened since, which retires it.
+    is owed its own reply, or a resolution already followed that reply (AWF's
+    resolve landed, or an audit bound it): the thread was reopened since, which
+    retires it.
     """
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
     posted = read_item_disposition(state, item_id)
-    if posted is not None and posted.is_bound:
+    if posted is not None and posted.answers_resolution:
         retire_item_disposition(state, posted)
     elif (
         posted is not None
@@ -281,8 +297,8 @@ def retire_item_disposition(
     certifies again, whatever happens to the record. An operator
     acknowledgement is dropped: only a new ``ACK-THREAD`` for the current
     resolution replaces it. Any other record keeps its evidence but loses its
-    reply id and binding, so the thread's next AWF resolve posts a fresh reply.
-    Returns the record left in state.
+    reply id, binding and landed resolve, so the thread's next AWF resolve posts
+    a fresh reply. Returns the record left in state.
     """
     if disposition.reply_comment_id and disposition.conversation_digest is not None:
         state.mark_addressed(
@@ -292,7 +308,7 @@ def retire_item_disposition(
     if disposition.disposition_class == "operator_acknowledged":
         state.threads_addressed_ids.pop(_item_disposition_key(disposition.item_id), None)
         return None
-    retired = replace(disposition, reply_comment_id=None, conversation_digest=None)
+    retired = replace(disposition, reply_comment_id=None, conversation_digest=None, resolved=False)
     record_item_disposition(state, retired)
     return retired
 
@@ -300,17 +316,17 @@ def retire_item_disposition(
 def retire_reopened_dispositions(
     state: MonitorState, status: PRStatus, *, workspace_id: str
 ) -> list[str]:
-    """Retire every bound disposition whose thread ``status`` lists open again.
+    """Retire every disposition a resolution followed whose thread ``status`` lists open.
 
-    An audit saw a bound disposition's reply resolved, so a later poll listing
-    its thread unresolved is a reopen, even if no gate audit runs before the
-    thread is resolved again. A disposition no audit bound yet may be a failed
-    resolve's, whose retry reuses it. Returns the retired item ids.
+    An audit saw a bound disposition's reply resolved, or AWF's own resolve on
+    the reply landed, so a later poll listing its thread unresolved is a reopen,
+    even if no gate audit runs before the thread is resolved again. Only a failed
+    resolve's reply is kept, for its retry to reuse. Returns the retired item ids.
     """
     retired: list[str] = []
     for thread in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
         disposition = read_item_disposition(state, thread.thread_id)
-        if disposition is not None and disposition.is_bound:
+        if disposition is not None and disposition.answers_resolution:
             retire_item_disposition(state, disposition)
             retired.append(thread.thread_id)
     if retired:

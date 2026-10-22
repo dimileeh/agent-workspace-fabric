@@ -72,7 +72,10 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
     record_item_disposition,
 )
-from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_resolve
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import (
+    record_resolve_landed,
+    reply_before_resolve,
+)
 
 # Closed verdicts whose now-OUTDATED threads this hygiene step may always
 # resolve. ``defer`` is intentionally excluded from the set: capture is verified
@@ -865,6 +868,10 @@ async def _resolve_addressed_outdated_threads(
                 },
             )
             continue
+        # #1018: a reopen of this thread now retires its reply, never reuses it.
+        await record_resolve_landed(
+            self, workspace_id=workspace_id, state=state, disposition=disposition
+        )
         # Resolve landed — clear any transient requeue flag from a prior poll so
         # ``decide`` no longer holds this thread at ``NotifyHuman``.
         state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(tid), None)

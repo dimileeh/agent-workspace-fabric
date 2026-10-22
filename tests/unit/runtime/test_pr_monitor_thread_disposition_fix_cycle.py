@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     attach_issue_url,
     read_item_disposition,
     record_item_disposition,
+    retire_reopened_dispositions,
     sync_item_disposition,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_resolve
@@ -421,6 +422,7 @@ async def test_active_thread_resolve_retry_reuses_recorded_reply_without_reposti
     assert tid not in state.threads_addressed_ids
     recorded = read_item_disposition(state, tid)
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
+    assert recorded.resolved is False  # a failed resolve: its retry reuses the reply
 
     gh.resolve_error = None
     await _run_cycle(
@@ -438,6 +440,7 @@ async def test_active_thread_resolve_retry_reuses_recorded_reply_without_reposti
     assert len(gh.replies()) == 1
     recorded = read_item_disposition(state, tid)
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
+    assert recorded.resolved is True
 
 
 async def test_same_conversation_retriage_to_defer_keeps_the_posted_reply(
@@ -922,20 +925,25 @@ async def test_posted_reply_persist_is_best_effort(
     assert recorded is not None and recorded.reply_comment_id == "reply-1"
 
 
+@pytest.mark.parametrize(
+    "resolution",
+    [{"conversation_digest": "seen"}, {"resolved": True}],
+    ids=["audit-bound", "resolve-landed"],
+)
 async def test_re_resolving_a_reopened_thread_posts_a_fresh_reply(
     factory: async_sessionmaker[AsyncSession],
+    resolution: dict[str, Any],
 ) -> None:
-    # A gate audit saw AWF's reply resolved and bound it. Resolving the thread
-    # again means it was reopened since, which retires that reply: the resolve
-    # owes a fresh one, never a silent re-resolve on the old reply.
+    # A gate audit saw AWF's reply resolved and bound it, or AWF's own resolve on
+    # it landed (PRRT_kwDOSJAM6s6vZ4nJ). Resolving the thread again means it was
+    # reopened since, which retires that reply: the resolve owes a fresh one,
+    # never a silent re-resolve on the old reply.
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_reopened"
     state = MonitorState()
     state.mark_addressed(tid, "fix_committed")
     disposition = seed_resolvable_disposition(state, tid, "fix_committed")
-    record_item_disposition(
-        state, replace(disposition, reply_comment_id="reply-0", conversation_digest="seen")
-    )
+    record_item_disposition(state, replace(disposition, reply_comment_id="reply-0", **resolution))
     runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
 
     replied = await reply_before_resolve(
@@ -950,9 +958,68 @@ async def test_re_resolving_a_reopened_thread_posts_a_fresh_reply(
     )
 
     assert replied is not None
-    assert (replied.reply_comment_id, replied.conversation_digest) == ("reply-1", None)
+    assert (replied.reply_comment_id, replied.conversation_digest, replied.resolved) == (
+        "reply-1",
+        None,
+        False,
+    )
     assert len(gh.replies()) == 1
     assert replied.commits == disposition.commits
+
+
+async def test_a_landed_resolve_is_saved_so_a_reopen_owes_a_fresh_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6vZ4nJ: only a failed resolve's reply may be reused. A landed
+    # resolve is recorded on the disposition and saved at once (never with the
+    # cycle's unconfirmed verdicts, #305), so a reopen before any gate audit binds
+    # the reply still retires it and the next resolve answers afresh.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_landed"
+    thread = _thread(tid)
+    state = MonitorState()
+    state.mark_addressed("PRRT_test_unconfirmed", "fix_committed")
+
+    workspace_id, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="fix_committed",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "fix_committed"),
+        thread=thread,
+        state=state,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    reloaded = _load_state(None, ws)
+    saved = read_item_disposition(reloaded, tid)
+    assert saved is not None and (saved.reply_comment_id, saved.resolved) == ("reply-1", True)
+    assert "PRRT_test_unconfirmed" not in reloaded.threads_addressed_ids
+
+    # The reviewer reopens the unchanged thread; the next poll lists it open.
+    assert retire_reopened_dispositions(
+        state, _status(_PUSHED, (thread,)), workspace_id=workspace_id
+    ) == [tid]
+    runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
+    replied = await reply_before_resolve(
+        runner,
+        workspace_id=workspace_id,
+        pr_number=42,
+        thread_id=tid,
+        state=state,
+        action="resolve_thread",
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert replied is not None and replied.reply_comment_id == "reply-2"
+    assert len(gh.replies()) == 2
 
 
 async def test_recorded_item_commit_lookup_fails_closed_on_a_db_fault() -> None:

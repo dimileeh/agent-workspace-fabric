@@ -81,9 +81,10 @@ async def reply_before_resolve(
     """Post the thread's disposition reply; ``None`` means parked — do NOT resolve."""
     verdict = state.threads_addressed_ids.get(thread_id)
     disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
-    if disposition is not None and disposition.is_bound:
-        # An audit saw this disposition's thread resolved; resolving it again
-        # means it was reopened since, which retires the reply: answer afresh.
+    if disposition is not None and disposition.answers_resolution:
+        # A resolution followed this reply (AWF's resolve landed, or an audit saw
+        # it); resolving the thread again means it was reopened since, which
+        # retires the reply: answer afresh (PRRT_kwDOSJAM6s6vZ4nJ).
         disposition = retire_item_disposition(state, disposition)
     if (
         disposition is not None
@@ -194,6 +195,26 @@ async def _with_item_commit_recorded_this_cycle(
         operation_id=operation_id,
     )
     return cited
+
+
+async def record_resolve_landed(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    disposition: ThreadDisposition,
+) -> None:
+    """Record that AWF's resolve on ``disposition``'s reply landed, saved at once.
+
+    Only a failed resolve's reply may be reused by its retry. Once a resolve
+    landed, seeing the thread open again is a reopen that retires the reply,
+    even before a gate audit binds it (PRRT_kwDOSJAM6s6vZ4nJ). Saved narrowly like
+    the posted reply, so a reload before the loop's own flush cannot lose it.
+    """
+    record_item_disposition(state, replace(disposition, resolved=True))
+    await _persist_posted_disposition(
+        self, workspace_id=workspace_id, state=state, item_id=disposition.item_id
+    )
 
 
 async def _persist_posted_disposition(

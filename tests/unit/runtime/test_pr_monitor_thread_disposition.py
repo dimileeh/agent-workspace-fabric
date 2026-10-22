@@ -447,6 +447,7 @@ def test_payload_roundtrip_and_malformed_payload_fails_closed() -> None:
         reply_comment_id="991",
         thread_body_hash="f" * 64,
         conversation_digest="e" * 64,
+        resolved=True,
     )
     payload = d.as_payload()
     assert payload["v"] == 1
@@ -470,6 +471,11 @@ def test_payload_roundtrip_and_malformed_payload_fails_closed() -> None:
     assert lenient.commits == ()
     assert lenient.reason is None
     assert lenient.source == "agent_verdict"
+    # Only an explicit ``true`` records a landed resolve; anything else fails closed
+    # to "not resolved", whose reply a resolve retry may reuse.
+    for raw in ("yes", 1, None):
+        decoded = ThreadDisposition.from_payload({**payload, "resolved": raw})
+        assert decoded is not None and decoded.resolved is False
 
 
 def test_disposition_count_rows_orders_all_classes_and_others() -> None:
@@ -683,13 +689,15 @@ def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
             conversation_digest="flagged",
         ),
         replace(_posted_answering(_thread_with("c-1")), conversation_digest="seen-resolved"),
+        replace(_posted_answering(_thread_with("c-1")), resolved=True),
     ],
-    ids=["acknowledgement", "agent-disposition"],
+    ids=["acknowledgement", "agent-disposition", "resolve-landed"],
 )
 def test_sync_item_disposition_retires_a_reply_a_gate_audit_saw_resolved(
     bound: ThreadDisposition,
 ) -> None:
-    # The record is bound: an audit saw the thread resolved after its reply. A
+    # A resolution followed the record's reply: an audit saw the thread resolved
+    # after it, or AWF's own resolve on it landed (PRRT_kwDOSJAM6s6vZ4nJ). A
     # re-triage means the thread was reopened since, which retires that reply,
     # so the new verdict is owed its own instead of a silent re-resolve.
     state = MonitorState()
@@ -709,7 +717,8 @@ def test_sync_item_disposition_retires_a_reply_a_gate_audit_saw_resolved(
         disposition.reason,
         disposition.reply_comment_id,
         disposition.conversation_digest,
-    ) == ("false_positive", "not reachable", None, None)
+        disposition.resolved,
+    ) == ("false_positive", "not reachable", None, None, False)
 
 
 def test_sync_item_disposition_replaces_a_posted_reply_superseded_by_new_feedback() -> None:

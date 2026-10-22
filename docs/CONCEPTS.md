@@ -476,11 +476,13 @@ an audit shows the thread still resolved by AWF's identity with that conversatio
 before its reply. A reopen, a resolution by someone else, or a new or edited
 comment retires it for good: its marker then certifies nothing — the monitor
 remembers a retired reply by the conversation it followed, whatever later
-happens to the record — so a silent re-resolve blocks. Every poll whose status
-lists a bound reply's thread open again retires it too, as do a re-triage and
-outdated hygiene reaching that thread, so a reopen counts even when no gate
-audit runs before the thread is resolved again. A reply no audit has bound yet
-may be a failed resolve's, whose retry reuses it. A retired acknowledgement is
+happens to the record — so a silent re-resolve blocks. A reply whose AWF
+resolve landed is recorded as such (saved at once), so it is retired by a reopen
+just like a bound one even before any audit binds it. Every poll whose status
+lists such a reply's thread open again retires it too, as do an audit seeing it
+open, a re-triage and outdated hygiene reaching that thread, so a reopen counts
+even when no gate audit runs before the thread is resolved again. Only a failed
+resolve's reply is reused, by its retry. A retired acknowledgement is
 dropped (the current resolution needs its own `ACK-THREAD`); any other
 disposition loses its reply id, so the monitor's next resolve of the thread
 posts a fresh reply instead of resolving on the old one. With no record at all

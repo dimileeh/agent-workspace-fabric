@@ -392,7 +392,9 @@ def _retire_broken_bindings(
     A disposition is bound to the conversation it answers and holds only while
     the thread stays resolved by AWF's identity with that conversation before
     its reply (before nothing, while an acknowledgement is unposted). A reopen,
-    or a new or edited comment, retires it — posted or not. Likewise a reopen
+    or a new or edited comment, retires it — posted or not. One whose AWF resolve
+    landed before any audit bound it holds while that resolution stands, so a
+    reopen retires it too (PRRT_kwDOSJAM6s6vZ4nJ). Likewise a reopen
     ends a flag (a later guide cannot acknowledge it), and a reopen or change of
     a legacy-baseline thread retires its exemption for good.
     """
@@ -410,8 +412,8 @@ def _retire_broken_bindings(
         ):
             retired_legacy.append(thread_id)
         disposition = read_item_disposition(state, thread_id)
-        if disposition is None or not disposition.is_bound:
-            continue  # an agent reply no audit saw resolved yet is not bound
+        if disposition is None or not disposition.answers_resolution:
+            continue  # a reply whose resolve did not land answers no resolution yet
         followed = (
             thread.conversation_digest_before_reply
             if disposition.reply_comment_id
@@ -420,9 +422,9 @@ def _retire_broken_bindings(
         if (
             thread.is_resolved
             and (thread.resolved_by or "").strip().casefold() == viewer
-            and followed == disposition.conversation_digest
+            and (not disposition.is_bound or followed == disposition.conversation_digest)
         ):
-            continue
+            continue  # still standing; an unbound landed resolve is bound on verify
         retire_item_disposition(state, disposition)
         _log.info(
             "monitor.thread_disposition_retired",

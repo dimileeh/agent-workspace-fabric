@@ -24,6 +24,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import MonitorState, _review_thread_body_hash
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
+from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
     sync_item_disposition,
@@ -118,6 +119,19 @@ async def test_outdated_fixed_thread_replies_then_resolves(
     ]
     assert succeeded[0].payload["evidence"]["dispositions"][0]["class"] == "fixed"
     assert succeeded[0].payload["evidence"]["dispositions"][0]["reply_comment_id"] == "reply-1"
+    # The landed resolve is saved on the record: a reopen of this thread seen
+    # before any gate audit retires the reply (PRRT_kwDOSJAM6s6vZ4nJ).
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+    assert ws is not None
+    for recorded in (
+        read_item_disposition(state, tid),
+        read_item_disposition(_load_state(None, ws), tid),
+    ):
+        assert recorded is not None and (recorded.reply_comment_id, recorded.resolved) == (
+            "reply-1",
+            True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -151,6 +165,8 @@ async def test_failed_outdated_resolve_event_records_posted_disposition(
     failed = [e for e in await _events(factory, workspace_id) if e.payload["outcome"] == outcome]
     dispositions = failed[0].payload["evidence"]["dispositions"]
     assert [(d["class"], d["reply_comment_id"]) for d in dispositions] == [("fixed", "reply-1")]
+    recorded = read_item_disposition(state, tid)
+    assert recorded is not None and recorded.resolved is False  # its retry reuses the reply
 
 
 async def test_branch_evidence_seed_replies_citing_matched_commit(
