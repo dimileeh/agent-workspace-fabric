@@ -774,16 +774,42 @@ def _es_direct_member_calls(
     (``tel.record<Result>(``, PRRT_kwDOSJAM6s6vSMVp).
     """
     return frozenset(
-        (tokens[index].value, tokens[index + 2].value)
-        for index in range(len(tokens) - 3)
-        if line in (tokens[index].line, tokens[index + 2].line)
-        and _is(tokens[index], "ident")
-        and not _is_reference_position(tokens, index)
-        and _is(tokens[index + 1], "punct")
-        and tokens[index + 1].value in (".", "?.")
-        and _is(tokens[index + 2], "ident")
-        and _es_called_at(tokens, index + 2, typescript=typescript)
+        (qualifier, name)
+        for qualifier, name in _es_line_calls(tokens, line, typescript=typescript)
+        if qualifier is not None
     )
+
+
+def _es_line_calls(
+    tokens: tuple[_EsToken, ...], line: int, *, typescript: bool = False
+) -> frozenset[tuple[str | None, str]]:
+    """``(receiver, name)`` / ``(None, name)`` refs ``line`` calls directly.
+
+    The token-stream counterpart of the line-based callee scan: an occurrence
+    is on ``line`` when its receiver, its name or its opening ``(`` is, so a
+    call split before its argument list (``record`` then ``(value)``) reads
+    from either line (PRRT_kwDOSJAM6s6vUyD-). A receiver must be bare and a
+    bare name must not head a parameter list; a chained member is no ref.
+    """
+    refs: set[tuple[str | None, str]] = set()
+    for index, token in enumerate(tokens):
+        if token.kind != "ident" or _is_reference_position(tokens, index):
+            continue
+        qualifier: str | None = None
+        callee = index
+        dot = _token_at(tokens, index + 1)
+        if (
+            _is(dot, "punct")
+            and dot.value in (".", "?.")
+            and _is(_token_at(tokens, index + 2), "ident")
+        ):
+            qualifier, callee = token.value, index + 2
+        elif _es_signature_head(tokens, index):
+            continue
+        opener = _es_call_open(tokens, callee, typescript=typescript)
+        if opener is not None and line in (token.line, tokens[callee].line, tokens[opener].line):
+            refs.add((qualifier, tokens[callee].value))
+    return frozenset(refs)
 
 
 def _es_after_type_arguments(tokens: tuple[_EsToken, ...], index: int) -> int:
@@ -815,7 +841,8 @@ def _es_calls(
 
     A bare call is ``name(`` (or ``name?.(``) outside a property position and
     not heading a parameter list; a qualified one is ``qualifier.name(`` on a
-    bare receiver, with either name on ``line``. With ``typescript``, type
+    bare receiver, with either name or its ``(`` on ``line`` (a call split
+    before its argument list, PRRT_kwDOSJAM6s6vUyD-). With ``typescript``, type
     arguments may sit before the ``(`` (``record<Result>(``,
     ``record?.<Result>(``, PRRT_kwDOSJAM6s6vRrub); plain JS reads them as a
     comparison. A correction that drops or renames the call while leaving its
@@ -837,15 +864,14 @@ def _es_calls(
             callee = index + 2
         elif _es_signature_head(tokens, index):
             continue
-        if line not in (token.line, tokens[callee].line):
-            continue
-        if _es_called_at(tokens, callee, typescript=typescript):
+        opener = _es_call_open(tokens, callee, typescript=typescript)
+        if opener is not None and line in (token.line, tokens[callee].line, tokens[opener].line):
             return True
     return False
 
 
-def _es_called_at(tokens: tuple[_EsToken, ...], callee: int, *, typescript: bool) -> bool:
-    """True when the name at ``callee`` is followed by ``(`` or ``?.(``.
+def _es_call_open(tokens: tuple[_EsToken, ...], callee: int, *, typescript: bool) -> int | None:
+    """Index of the ``(`` after the name at ``callee`` (or its ``?.(``), else None.
 
     With ``typescript``, type arguments may sit before the ``(``, after ``?.``
     for an optional call (``record?.<Result>(``).
@@ -859,6 +885,8 @@ def _es_called_at(tokens: tuple[_EsToken, ...], callee: int, *, typescript: bool
         end = _es_after_type_arguments(tokens, start)
         callee = callee if end == start else end - 1
     after = _token_at(tokens, callee + 1)
-    return _is(after, "punct", "(") or (
-        _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "(")
-    )
+    if _is(after, "punct", "("):
+        return callee + 1
+    if _is(after, "punct", "?.") and _is(_token_at(tokens, callee + 2), "punct", "("):
+        return callee + 2
+    return None

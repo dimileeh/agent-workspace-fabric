@@ -181,6 +181,44 @@ async def test_a_fix_in_the_bound_module_is_evidence(import_line: str, call: str
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("import_line", "call"),
+    [
+        ("import { record } from './telemetry';", "record\n    (value)"),
+        ("import * as tel from './telemetry';", "tel.record\n    (value)"),
+        ("import * as tel from './telemetry';", "tel\n    .record\n    (value)"),
+        ("import { record } from './telemetry';", "record<Result>\n    (value)"),
+    ],
+)
+async def test_a_call_split_before_its_argument_list_is_evidence_from_either_line(
+    import_line: str, call: str
+) -> None:
+    """The ``(`` on the next line continues the call (PRRT_kwDOSJAM6s6vUyD-)."""
+    caller = _caller(import_line, call)
+
+    for item_line in range(4, 5 + call.count("\n")):
+        assert await _accepted(_telemetry_probe(caller), item_line=item_line)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("call", "item_line"),
+    [
+        ("other.tel.record\n    (value)", 5),
+        ("other.tel.record\n    (value)", 4),
+        ("record\n    (1) + tel.flush(value)", 5),
+    ],
+)
+async def test_a_split_call_still_fails_closed_on_a_chained_or_other_callee(
+    call: str, item_line: int
+) -> None:
+    """Only a direct call of the bound import counts, whichever line holds its ``(``."""
+    probe = _telemetry_probe(_caller("import * as tel from './telemetry';", call))
+
+    assert not await _accepted(probe, item_line=item_line)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "tail",
     [
         "export function flush() {\n  return other.tel.record(1);\n}\n",

@@ -74,6 +74,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_f
     _es_direct_member_calls as _es_direct_member_calls,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file_es_spans import (
+    _es_line_calls as _es_line_calls,
+)
+from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file_es_spans import (
     _es_line_non_call_names as _es_line_non_call_names,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry_cross_file_es_spans import (

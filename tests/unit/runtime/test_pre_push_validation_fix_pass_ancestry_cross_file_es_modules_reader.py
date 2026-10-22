@@ -966,6 +966,23 @@ def test_es_calls_counts_only_a_call_on_the_given_line() -> None:
     assert not es._es_calls(tokens, "tel", "record", 2)
 
 
+@pytest.mark.unit
+def test_a_call_split_before_its_argument_list_sits_on_each_of_its_lines() -> None:
+    """The ``(`` continuing ``record`` on the next line is part of the call (PRRT_kwDOSJAM6s6vUyD-)."""
+    tokens = _tokens("record\n  (1);\ntel.record\n  ?.(2);\nother.tel.run\n  (3);\n")
+
+    assert es._es_calls(tokens, None, "record", 1)
+    assert es._es_calls(tokens, None, "record", 2)
+    assert es._es_calls(tokens, "tel", "record", 4)
+    assert not es._es_calls(tokens, None, "record", 3)
+    assert es._es_line_calls(tokens, 2) == frozenset({(None, "record")})
+    assert es._es_line_calls(tokens, 4) == frozenset({("tel", "record")})
+    # A chained member and a method head are no direct call.
+    assert es._es_line_calls(tokens, 6) == frozenset()
+    assert es._es_line_calls(_tokens("class A {\n  record\n  (v) {}\n}"), 3) == frozenset()
+    assert es._es_direct_member_calls(tokens, 4) == frozenset({("tel", "record")})
+
+
 # --- anchor lines and definition heads -------------------------------------------
 
 

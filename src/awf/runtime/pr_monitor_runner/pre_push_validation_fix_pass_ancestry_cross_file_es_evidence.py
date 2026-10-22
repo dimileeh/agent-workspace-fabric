@@ -251,16 +251,18 @@ async def _es_module_commit_range_changes_callee_definition(
     # does a bare ref the anchored line also defines or reaches as a member
     # (``record(v) {``, or ``getClient().`` ending the line above). Chained is
     # per occurrence: a direct ``tel.record()`` on the line keeps its pair.
+    # The token stream adds the direct calls the line scan cannot see because
+    # a newline splits the callee from its ``(`` (PRRT_kwDOSJAM6s6vUyD-).
+    typescript = _path_is_typescript(item_path)
     chains = _receiver_chain_segments_from_file_line(item_text, item_line, path=item_path)
     non_calls = _es._es_line_non_call_names(tokens, item_line)
-    direct = _es._es_direct_member_calls(
-        tokens, item_line, typescript=_path_is_typescript(item_path)
-    )
+    direct = _es._es_direct_member_calls(tokens, item_line, typescript=typescript)
     chained = _es._es_chained_member_refs(tokens, item_line) - direct
     refs = [
         (qualifier, name, reached)
         for qualifier, name in sorted(
-            _callee_refs_from_file_line(item_text, item_line, path=item_path),
+            _callee_refs_from_file_line(item_text, item_line, path=item_path)
+            | _es._es_line_calls(tokens, item_line, typescript=typescript),
             key=lambda ref: (ref[0] or "", ref[1]),
         )
         if (qualifier not in chains or (qualifier, name) in direct)
