@@ -350,6 +350,36 @@ async def test_delayed_guide_after_reopen_cannot_acknowledge_the_old_resolution(
     assert gh.thread_replies == []
 
 
+async def test_reopen_retires_an_acknowledgement_not_yet_posted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    # A guide acknowledges the flagged resolution; before the gate posts it, the
+    # reviewer reopens the thread.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.resolved = False
+
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    assert read_item_disposition(state, _SILENT) is None
+
+    # A later silent resolve over the same conversation is not the one acknowledged.
+    gh.resolved = True
+    blocked = await _gate(runner, workspace_id, state)
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert gh.thread_replies == []
+
+    # Only a guide acknowledging the current resolution certifies it.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert len(gh.thread_replies) == 1
+
+
 async def test_guide_naming_unflagged_thread_records_nothing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

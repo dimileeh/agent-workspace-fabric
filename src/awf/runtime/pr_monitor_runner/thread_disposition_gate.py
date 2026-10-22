@@ -155,8 +155,16 @@ async def review_thread_disposition_gate(
             retired.append(thread.thread_id)
             legacy_conversation = None
         if not thread.is_resolved:
-            # A reopen ends the flagged resolution: a later guide cannot acknowledge it.
+            # A reopen ends the flagged resolution: a later guide cannot acknowledge
+            # it, and one already recorded but not yet posted no longer applies.
             state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
+            pending = read_item_disposition(state, thread.thread_id)
+            if (
+                pending is not None
+                and pending.disposition_class == "operator_acknowledged"
+                and not pending.reply_comment_id
+            ):
+                _supersede_acknowledgement(state, thread.thread_id, workspace_id=workspace_id)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
             counts[RESOLVED_BY_OTHERS] += 1  # that person's or bot's own disposition
@@ -420,13 +428,7 @@ async def _post_operator_acknowledgement(
         # The guide acknowledged the conversation the gate flagged; a new or edited
         # comment since then is feedback it never saw, so it is dropped and the
         # current resolution needs its own acknowledgement.
-        state.threads_addressed_ids.pop(_item_disposition_key(thread_id), None)
-        _log.info(
-            "monitor.operator_acknowledgement_superseded",
-            workspace_id=workspace_id,
-            thread_id=thread_id,
-            reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
-        )
+        _supersede_acknowledgement(state, thread_id, workspace_id=workspace_id)
         return None
     try:
         reply_id = await self._deps.gh.reply_to_thread(
@@ -444,6 +446,17 @@ async def _post_operator_acknowledgement(
         return None
     record_item_disposition(state, replace(disposition, reply_comment_id=reply_id))
     return "operator_acknowledged"
+
+
+def _supersede_acknowledgement(state: MonitorState, thread_id: str, *, workspace_id: str) -> None:
+    """Drop a guide's unposted acknowledgement of a resolution that no longer stands."""
+    state.threads_addressed_ids.pop(_item_disposition_key(thread_id), None)
+    _log.info(
+        "monitor.operator_acknowledgement_superseded",
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
+    )
 
 
 async def _audit_unavailable(

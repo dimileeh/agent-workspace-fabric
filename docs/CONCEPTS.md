@@ -482,8 +482,8 @@ nothing. Only flagged ids are acknowledged, on intake of the guide and whatever
 its agent run answers; AWF then posts an `operator_acknowledged` reply
 into each such thread — never the directive text — and the gate passes once
 every AWF resolution carries a marker. An acknowledgement answers only the
-conversation that was flagged: a reopen seen by the gate drops the flag, and a
-new or edited comment drops an acknowledgement not yet posted, so the current
+conversation that was flagged: a reopen seen by the gate, or a new or edited
+comment, drops the flag and any acknowledgement not yet posted, so the current
 resolution needs its own `ACK-THREAD`.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
