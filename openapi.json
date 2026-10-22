@@ -1,6 +1,23 @@
 {
   "components": {
     "schemas": {
+      "Acknowledgement": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "Acknowledgement",
+        "type": "object"
+      },
       "AdmissionSummaryResponse": {
         "properties": {
           "detail": {
@@ -48,6 +65,98 @@
         ],
         "title": "AgentRuntime",
         "type": "string"
+      },
+      "Binding": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Authorization Generation",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "fence": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Fence",
+            "type": "integer"
+          },
+          "grant_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "namespace": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "preparation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Preparation Id",
+            "type": "string"
+          },
+          "purpose": {
+            "const": "credential",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target": {
+            "maxLength": 256,
+            "title": "Target",
+            "type": "string"
+          },
+          "workspace_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "workspace_id",
+          "preparation_id",
+          "purpose",
+          "target",
+          "expires_at",
+          "identity",
+          "idempotency_key",
+          "grant_id",
+          "revision",
+          "authorization_generation",
+          "fence"
+        ],
+        "title": "Binding",
+        "type": "object"
       },
       "CallbackSubscriptionCreateRequest": {
         "additionalProperties": false,
@@ -2730,6 +2839,194 @@
         "title": "HttpExceptionErrorResponse",
         "type": "object"
       },
+      "Identity": {
+        "additionalProperties": false,
+        "properties": {
+          "boot_epoch": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Boot Epoch",
+            "type": "integer"
+          },
+          "incarnation": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Incarnation",
+            "type": "string"
+          },
+          "owner": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Owner",
+            "type": "string"
+          },
+          "recovery_generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Recovery Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner",
+          "incarnation",
+          "recovery_generation",
+          "boot_epoch"
+        ],
+        "title": "Identity",
+        "type": "object"
+      },
+      "IdentityStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledged": {
+            "title": "Acknowledged",
+            "type": "boolean"
+          },
+          "activation": {
+            "const": "closed",
+            "default": "closed",
+            "title": "Activation",
+            "type": "string"
+          },
+          "boot_epoch": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Boot Epoch",
+            "type": "integer"
+          },
+          "incarnation": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Incarnation",
+            "type": "string"
+          },
+          "owner": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Owner",
+            "type": "string"
+          },
+          "recovery_generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Recovery Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner",
+          "incarnation",
+          "recovery_generation",
+          "boot_epoch",
+          "acknowledged"
+        ],
+        "title": "IdentityStatus",
+        "type": "object"
+      },
+      "Install": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Authorization Generation",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "fence": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Fence",
+            "type": "integer"
+          },
+          "grant_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "material": {
+            "maxLength": 87384,
+            "minLength": 4,
+            "title": "Material",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "preparation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Preparation Id",
+            "type": "string"
+          },
+          "purpose": {
+            "const": "credential",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target": {
+            "maxLength": 256,
+            "title": "Target",
+            "type": "string"
+          },
+          "workspace_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "workspace_id",
+          "preparation_id",
+          "purpose",
+          "target",
+          "expires_at",
+          "identity",
+          "idempotency_key",
+          "grant_id",
+          "revision",
+          "authorization_generation",
+          "fence",
+          "material"
+        ],
+        "title": "Install",
+        "type": "object"
+      },
       "LocalCapacitySourceResponse": {
         "description": "Local runtime capacity origin metadata exposed in saturation responses.",
         "properties": {
@@ -2795,6 +3092,48 @@
           "source"
         ],
         "title": "LocalCapacitySourceResponse",
+        "type": "object"
+      },
+      "MaterialStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "receipt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt Id"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "current",
+              "not_accepted",
+              "revoked",
+              "expired",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "revision",
+          "reason"
+        ],
+        "title": "MaterialStatus",
         "type": "object"
       },
       "MergeCandidateReadinessResponse": {
@@ -3906,6 +4245,57 @@
           "resolved_at"
         ],
         "title": "PolicyFindingResponse",
+        "type": "object"
+      },
+      "Preparation": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "preparation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Preparation Id",
+            "type": "string"
+          },
+          "purpose": {
+            "const": "credential",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 256,
+            "title": "Target",
+            "type": "string"
+          },
+          "workspace_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "workspace_id",
+          "preparation_id",
+          "purpose",
+          "target",
+          "expires_at"
+        ],
+        "title": "Preparation",
         "type": "object"
       },
       "PricingMetadata": {
@@ -6112,6 +6502,113 @@
           "agent_readiness"
         ],
         "title": "ReadyResponse",
+        "type": "object"
+      },
+      "Refresh": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Authorization Generation",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "fence": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Fence",
+            "type": "integer"
+          },
+          "grant_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Grant Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "material": {
+            "maxLength": 87384,
+            "minLength": 4,
+            "title": "Material",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Namespace",
+            "type": "string"
+          },
+          "predecessor": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Predecessor",
+            "type": "string"
+          },
+          "preparation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Preparation Id",
+            "type": "string"
+          },
+          "purpose": {
+            "const": "credential",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target": {
+            "maxLength": 256,
+            "title": "Target",
+            "type": "string"
+          },
+          "workspace_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "workspace_id",
+          "preparation_id",
+          "purpose",
+          "target",
+          "expires_at",
+          "identity",
+          "idempotency_key",
+          "grant_id",
+          "revision",
+          "authorization_generation",
+          "fence",
+          "material",
+          "predecessor"
+        ],
+        "title": "Refresh",
         "type": "object"
       },
       "ReleaseReadinessCheckResponse": {
@@ -13574,7 +14071,7 @@
     }
   },
   "info": {
-    "description": "Isolated Docker execution substrate for AI coding agents. Exposes a REST API and an MCP server over the same underlying control plane.",
+    "description": "Isolated Docker execution substrate for AI coding agents. Exposes a REST API and an MCP server over the same underlying control plane.\n\nProtected hosted-node mode is default-disabled and runtime activation is CLOSED. When enabled, all HTTP routes and WebSocket handshakes except GET /healthz and the authenticated GET /v1/hosted-node/identity bootstrap require exact X-AWF-Expected-Owner, X-AWF-Expected-Incarnation, X-AWF-Expected-Recovery-Generation and X-AWF-Expected-Boot-Epoch headers. These are expectations, never server identity inputs. Existing APIs retain operator bearer authentication; hosted mutations require the separate trusted controller bearer. See docs/contracts/hosted-node-material.md for CLOSED admission and transport requirements.",
     "title": "Agent Workspace Fabric",
     "version": "0.1.0"
   },
@@ -14234,6 +14731,627 @@
         "summary": "List Events",
         "tags": [
           "events"
+        ]
+      }
+    },
+    "/v1/hosted-node/identity": {
+      "get": {
+        "operationId": "identity_v1_hosted_node_identity_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Identity",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/identity/acknowledge": {
+      "post": {
+        "operationId": "acknowledge_v1_hosted_node_identity_acknowledge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Acknowledgement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Acknowledge",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/materials/install": {
+      "post": {
+        "operationId": "install_v1_hosted_node_materials_install_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Install"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaterialStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Install",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/materials/refresh": {
+      "post": {
+        "operationId": "refresh_v1_hosted_node_materials_refresh_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Refresh"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaterialStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Refresh",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/materials/revoke": {
+      "post": {
+        "operationId": "revoke_v1_hosted_node_materials_revoke_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Binding"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaterialStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/materials/status": {
+      "post": {
+        "operationId": "material_status_v1_hosted_node_materials_status_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Binding"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaterialStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Material Status",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/preparations": {
+      "post": {
+        "operationId": "prepare_v1_hosted_node_preparations_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Preparation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Prepare V1 Hosted Node Preparations Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Bearer denied"
+          },
+          "403": {
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Prepare",
+        "tags": [
+          "hosted-node"
         ]
       }
     },
