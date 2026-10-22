@@ -48,15 +48,17 @@ def _settled_resume_dependencies(
     """Report no recovering dependency to the monitor-resume dependency wait.
 
     The wait (#936) inspects the compose project through the Docker CLI before
-    the resume's ``compose up``. Unit tests use fake compose managers, so by
-    default nothing is recovering and the wait returns at once. Tests that
-    exercise the wait patch the seam themselves; Docker-marked tests keep it.
+    the resume's ``compose up``. Unit tests use fake compose managers and no
+    Docker, so by default the runtime reads as unavailable and the wait returns
+    at once without starting anything (an empty stack would mean every declared
+    dependency is absent). Tests that exercise the wait patch the seam
+    themselves; Docker-marked tests keep it.
     """
     if request.node.get_closest_marker("docker") is not None:
         return
 
     async def _inspect(_compose_project: str) -> RuntimeSnapshot:
-        return RuntimeSnapshot(stack_state="stopped", services=[])
+        return RuntimeSnapshot(stack_state="unavailable", reason="no Docker in unit tests")
 
     monkeypatch.setattr(monitor_resume_runtime, "inspect_resume_runtime", _inspect)
 

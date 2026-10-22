@@ -5,7 +5,7 @@ force-recreate the whole compose project. That restarted dependencies still in
 their own crash recovery, such as Postgres replaying its WAL after an unclean
 stop, so the resume could fail and be retried forever. The restart now:
 
-1. starts each exited dependency on its own with ``--no-recreate --no-deps`` and
+1. starts each exited or absent dependency on its own with ``--no-recreate --no-deps`` and
    no ``--wait``, so no compose health gate can fail it on the healthcheck
    retries stored in a container created from an older compose.yml (the normal
    state after a host restart, as every service runs with ``restart: "no"``);
@@ -116,14 +116,23 @@ def _stopped_dependencies(
     declared_services: tuple[str, ...] | None,
     recreate_services: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    """Return dependencies whose container exists but is not running."""
-    return tuple(
-        sorted(
-            service.name
-            for service in _dependency_containers(snapshot, declared_services, recreate_services)
-            if service.state.strip().lower() in _STOPPED_STATES
+    """Return dependencies whose container is not running or, when declared, absent.
+
+    An absent container (a released runtime) would otherwise be created by the
+    ``up --wait`` and gated on the healthcheck retries of an older compose.yml.
+    """
+    containers = _dependency_containers(snapshot, declared_services, recreate_services)
+    stopped = {
+        service.name for service in containers if service.state.strip().lower() in _STOPPED_STATES
+    }
+    if declared_services is not None:
+        present = {service.name for service in containers}
+        stopped.update(
+            name
+            for name in declared_services
+            if name != AGENT_SERVICE_NAME and name not in recreate_services and name not in present
         )
-    )
+    return tuple(sorted(stopped))
 
 
 async def wait_for_recovering_dependencies(

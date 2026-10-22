@@ -149,7 +149,11 @@ async def test_dependency_up_leaves_the_stale_agent_out(
     _install_inspector(
         monkeypatch,
         _ScriptedInspector(
-            _running(_service("postgres", health="healthy"), _service("agent", state="exited"))
+            _running(
+                _service("postgres", health="healthy"),
+                _service("redis", health="healthy"),
+                _service("agent", state="exited"),
+            )
         ),
     )
     compose = _RecordingCompose()
@@ -391,6 +395,62 @@ async def test_stopped_legacy_dependency_gets_the_profile_budget(
 
 
 @pytest.mark.unit
+async def test_absent_legacy_dependency_is_created_outside_the_health_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dependency whose container is gone (released runtime) also gets the profile budget.
+
+    Creating it in the ``up --wait`` would gate it on the legacy ``retries: 60``, so
+    it is created alone without ``--wait``; a one-off container does not count as
+    its container, and a dependency the resume force-recreates is left alone.
+    """
+    absent = RuntimeSnapshot(
+        stack_state="stopped",
+        services=[_service("postgres", state="exited", one_off=True)],
+    )
+    recovering = _running(_service("postgres", health="starting"))
+    healthy = _running(_service("postgres", health="healthy"))
+    inspector = _install_inspector(
+        monkeypatch, _ScriptedInspector(absent, *([recovering] * 121), healthy)
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=900,
+        dependency_services=("agent", "postgres", "redis"),
+        recreate_services=("redis",),
+    )
+
+    assert clock.now == pytest.approx(605.0)
+    assert inspector.calls == 123
+    common = {
+        "project_name": "awf_ws",
+        "compose_file": tmp_path / "compose.yml",
+        "workspace_id": "ws",
+        "compose_up_timeout_seconds": 900,
+    }
+    assert compose.calls[0] == {
+        **common,
+        "wait": False,
+        "no_recreate": True,
+        "no_deps": True,
+        "services": ("postgres",),
+    }
+    assert [call.get("services") for call in compose.calls] == [
+        ("postgres",),
+        ("postgres",),
+        ("agent", "redis"),
+    ]
+
+
+@pytest.mark.unit
 async def test_one_off_and_orphan_containers_are_neither_waited_on_nor_started(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -488,7 +548,10 @@ async def test_usable_runtime_after_dependency_up_failure_still_recreates_the_ag
     dependency_services: tuple[str, ...] | None,
 ) -> None:
     """Auth overlays, env and #1090's setup replay all hinge on the agent recreate."""
-    _install_inspector(monkeypatch, _ScriptedInspector(_running(_service("agent"))))
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(_running(_service("postgres", health="healthy"), _service("agent"))),
+    )
     compose = _RecordingCompose()
     _failing_dependency_up(compose, monkeypatch)
     judged: list[int] = []

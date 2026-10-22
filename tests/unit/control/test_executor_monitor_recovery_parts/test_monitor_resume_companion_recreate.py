@@ -128,6 +128,9 @@ async def test_restart_force_recreates_rewritten_companions_with_the_agent(
                     name="backend", container_id="b", image=None, state="running", health="starting"
                 ),
                 RuntimeService(name="worker", container_id="w", image=None, state="exited"),
+                RuntimeService(
+                    name="postgres", container_id="p", image=None, state="running", health="healthy"
+                ),
                 RuntimeService(name="agent", container_id="a", image=None, state="running"),
             ],
         )
