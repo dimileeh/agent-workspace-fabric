@@ -102,6 +102,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#artifact_oversized](#artifact_oversized)
 
+### AUTHORITY_UNAVAILABLE
+**Problem:** A protected hosted-node operation returned HTTP 503 because authority or material availability could not be verified. Acceptance is unknown, never evidence of nonacceptance.
+**Likely Cause:** The receiver is unavailable, or a database, filesystem or timeout failure prevented a reliable authority check or material operation.
+**Operator Fix:** Restore the protected service's database and private material storage availability, then query material status with the original exact binding. Do not assume a failed response means an install was rejected or issue a replacement grant on that basis.
+**Related Command:** `POST /v1/hosted-node/materials/status` with the controller bearer and expected identity headers.
+**Docs Link:** [Protected node identity and material receiver](contracts/hosted-node-material.md)
+
 ### AWF_SETUP_PLACEHOLDER
 **Problem:** `awf setup` is registered but the first-run setup implementation is not active yet.
 **Likely Cause:** This build contains the stable command surface before the setup checks are implemented.
