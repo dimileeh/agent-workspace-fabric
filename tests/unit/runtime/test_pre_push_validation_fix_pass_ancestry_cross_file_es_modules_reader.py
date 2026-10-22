@@ -152,6 +152,25 @@ def test_a_keyword_named_property_is_followed_by_division() -> None:
 
 
 @pytest.mark.unit
+def test_a_bare_of_outside_a_for_of_head_is_followed_by_division() -> None:
+    text = "const of = 1; const q = of / (record = replacement) / 2;"
+    assert _values(text)[-10:] == ["of", "/", "(", "record", "=", "replacement", ")", "/", "2", ";"]
+    assert es._es_assigned_names(_tokens(text), frozenset({"record"})) == frozenset({"record"})
+    assert _values("x = of! / b / c").count("/") == 2
+    assert _values("for (let i = of / 2; i;) {}").count("/") == 1
+    assert _values("for (x in of / 2 / y) {}").count("/") == 2
+    for text in ("f(a, of / b / c)", "[of / b / c]", "(of / b / c)", "await (of / b / c)"):
+        assert _values(text).count("/") == 2
+    assert _values("a.for (of / b / c)").count("/") == 2
+    # ``of`` after a for-of binding still takes an operand, so a regex may follow it.
+    assert _values("for (const x of /`/.exec(s)) {}")[5:7] == ["", "."]
+    assert _values("for await (const [a] of /`/.exec(s)) {}")[8:10] == ["", "."]
+    assert _values("for (a.b of /`/.exec(s)) {}")[6:8] == ["", "."]
+    # ``for (x of of / ...`` reads either way, so it fails closed.
+    assert es._es_module_tokens("for (x of of / 2 / y) {}", path="src/app.ts") is None
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "text", ["x = a ? b : class {} / 2", "return\nfunction f() {}\n/`/.test(s)"]
 )

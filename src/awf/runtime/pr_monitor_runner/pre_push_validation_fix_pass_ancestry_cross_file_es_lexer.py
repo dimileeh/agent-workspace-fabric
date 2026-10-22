@@ -152,9 +152,7 @@ class _EsLexer:
         if token is None:
             return False
         if token.kind == "ident":
-            return token.value not in _masking._JS_REGEX_PREFIX_KEYWORDS or self.is_member_name(
-                index
-            )
+            return not self.takes_operand(index)
         if token.value == "!":
             return not token.newline_before and self.ends_operand(index - 1)
         if token.value == ")":
@@ -192,9 +190,7 @@ class _EsLexer:
         if prev.kind == "punct":
             return prev.value not in ("]", "++", "--")
         if prev.kind == "ident":
-            return prev.value in _masking._JS_REGEX_PREFIX_KEYWORDS and not self.is_member_name(
-                len(self.tokens) - 1
-            )
+            return self.takes_operand(len(self.tokens) - 1)
         return False
 
     def slash_opens_regex(self) -> bool:
@@ -217,6 +213,44 @@ class _EsLexer:
         ):
             raise _EsLexError
         return True
+
+    def takes_operand(self, index: int) -> bool:
+        """True when ``tokens[index]`` is a keyword taking an operand (``return /re/``).
+
+        A keyword after ``.`` / ``?.`` is a member name. ``of`` is contextual:
+        it takes an operand only as the operator of a ``for (... of`` head;
+        elsewhere it is an identifier (``const of = 1; of / 2``).
+        """
+        token = self.tokens[index]
+        if token.value not in _masking._JS_REGEX_PREFIX_KEYWORDS or self.is_member_name(index):
+            return False
+        return token.value != "of" or self.is_for_of_operator(index)
+
+    def is_for_of_operator(self, index: int) -> bool:
+        """True when the ``of`` at ``tokens[index]`` follows the binding of a ``for`` head.
+
+        The ``of`` must sit directly inside a ``for (`` / ``for await (`` and
+        follow a binding's end: a name, a member name, or a destructuring
+        ``]`` / ``}``. After another bare ``of`` (``for (x of of / y``) either
+        reading holds, so it raises, failing closed.
+        """
+        depth = self.tokens[index].depth
+        opener = index - 1
+        while opener >= 0 and self.tokens[opener].depth >= depth:
+            opener -= 1
+        if opener < 1 or self.tokens[opener].value != "(":
+            return False
+        head = opener - 1
+        if self.tokens[head].value == "await" and head > 0:
+            head -= 1
+        if self.tokens[head].value != "for" or self.is_member_name(head):
+            return False
+        prev = self.tokens[index - 1]
+        if prev.kind == "punct":
+            return prev.value in ("]", "}")
+        if prev.value == "of" and not self.is_member_name(index - 1):
+            raise _EsLexError
+        return not self.takes_operand(index - 1)
 
     def is_member_name(self, index: int) -> bool:
         """True when ``tokens[index]`` follows ``.`` / ``?.``: a property, never a keyword."""
