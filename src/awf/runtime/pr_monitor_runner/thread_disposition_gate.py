@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_thread_audit import AuditedReviewThread
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
@@ -161,7 +162,7 @@ async def review_thread_disposition_gate(
         # Only a marker after the newest feedback dispositions the current
         # conversation; an older one answered feedback that has since moved on.
         disposition_class: DispositionClass | None = disposition_marker_class(
-            thread.current_viewer_comment_bodies, thread_id=thread.thread_id
+            _current_disposition_bodies(thread), thread_id=thread.thread_id
         )
         if disposition_class is None:
             disposition_class = await _post_operator_acknowledgement(
@@ -244,6 +245,22 @@ async def review_thread_disposition_gate(
             evidence={"thread_ids": unverified, "disposition_counts": dict(counts)},
         )
     return DispositionGateResult(blocker=unverified_blocker_message(unverified))
+
+
+def _current_disposition_bodies(thread: AuditedReviewThread) -> tuple[str, ...]:
+    """The viewer bodies after the thread's newest feedback, the operator's own included.
+
+    AWF's identity can be the human operator's account, so their follow-up is
+    viewer-authored too. AWF only posts marker-carrying replies into a thread, so
+    an unmarked viewer comment is that newer feedback: only later bodies count.
+    """
+    bodies = thread.current_viewer_comment_bodies
+    unmarked = [
+        index
+        for index, body in enumerate(bodies)
+        if disposition_marker_class((body,), thread_id=thread.thread_id) is None
+    ]
+    return bodies[unmarked[-1] + 1 :] if unmarked else bodies
 
 
 def _decode_baseline(record: str | None) -> frozenset[str]:

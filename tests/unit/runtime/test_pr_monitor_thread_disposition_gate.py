@@ -449,6 +449,49 @@ async def test_gate_rejects_a_marker_older_than_the_threads_newest_feedback(
     assert events[0]["evidence"]["disposition_counts"] == {"fixed": 1}
 
 
+async def test_gate_rejects_a_marker_older_than_the_shared_identitys_own_feedback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # AWF can run as the operator's own account, so the operator's follow-up in a
+    # dispositioned thread is viewer-authored too. AWF only posts marker replies,
+    # so that unmarked comment is newer feedback: the earlier marker no longer
+    # covers a silent resolution, while a re-triage marker after it does.
+    retriaged = "PRRT_test_retriaged"
+    feedback = {"body": "P1: crash on None", "viewerDidAuthor": False}
+    follow_up = {"body": "also handle the empty list", "viewerDidAuthor": True}
+    threads = [
+        _graphql_thread(
+            _SILENT,
+            [feedback, {"body": _marker("fixed", _SILENT), "viewerDidAuthor": True}, follow_up],
+        ),
+        _graphql_thread(
+            retriaged,
+            [
+                feedback,
+                {"body": _marker("fixed", retriaged), "viewerDidAuthor": True},
+                follow_up,
+                {"body": _marker("false_positive", retriaged), "viewerDidAuthor": True},
+            ],
+        ),
+    ]
+    cmd = FakeCommandRunner()
+    cmd.respond_when(
+        lambda a: any("ReviewThreadDispositionAudit" in arg for arg in a),
+        stdout=_graphql_page(threads, cursor=None),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, _RealAudit(cmd))
+
+    result = await _gate(runner, workspace_id, settled_baseline_state())
+
+    assert result.blocker is not None
+    assert result.blocker.startswith("REVIEW_THREAD_DISPOSITION_UNVERIFIED:")
+    assert _SILENT in result.blocker and retriaged not in result.blocker
+    events = await _audit_events(factory, workspace_id)
+    assert [e["evidence"]["thread_ids"] for e in events] == [[_SILENT]]
+    assert events[0]["evidence"]["disposition_counts"] == {"false_positive": 1}
+
+
 async def test_gate_missing_viewer_login_fails_closed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
