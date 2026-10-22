@@ -228,6 +228,7 @@ async def _es_module_commit_range_changes_callee_definition(
     from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
         _changed_paths_in_commit_range,
         _diff_hunk_overlaps_line_span,
+        _map_review_line_through_diff,
         _normalize_evidence_item_path,
         _rename_map_in_commit_range,
     )
@@ -265,7 +266,7 @@ async def _es_module_commit_range_changes_callee_definition(
     ]
     if not refs:
         return False
-    candidates = [
+    changed_paths = [
         normalized
         for normalized in (
             _normalize_evidence_item_path(changed)
@@ -273,8 +274,11 @@ async def _es_module_commit_range_changes_callee_definition(
                 self, worktree_path=worktree_path, left=left, right=right
             )
         )
-        if normalized and normalized != item_path
-    ][:_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS]
+        if normalized
+    ]
+    candidates = [path for path in changed_paths if path != item_path][
+        :_MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS
+    ]
     if not candidates:
         return False
     rename_map, _name_status_z = await _rename_map_in_commit_range(
@@ -283,6 +287,26 @@ async def _es_module_commit_range_changes_callee_definition(
     at_left = _EsModuleReader(self, worktree_path=worktree_path, ref=left)
     at_right = _EsModuleReader(self, worktree_path=worktree_path, ref=right)
     caller_after = rename_map.get(item_path) or item_path
+    # The anchored occurrence is followed through the caller's own correction,
+    # so another call of the same import elsewhere in the file cannot stand in
+    # for one the correction removed (PRRT_kwDOSJAM6s6vRAzJ).
+    line_after: int | None = item_line
+    if item_path in changed_paths or item_path in rename_map:
+        caller_diff = await _path_diff_text_in_commit_range(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            path=item_path,
+            rename_path=rename_map.get(item_path),
+        )
+        line_after = (
+            None
+            if caller_diff is None or _es_diff_deletes_line(caller_diff, item_line)
+            else _map_review_line_through_diff(item_line, caller_diff)
+        )
+    if line_after is None:
+        return False
     for qualifier, name, reached in refs:
         target = await at_left.target(item_path, *reached)
         if target is None or target[0] not in candidates:
@@ -308,7 +332,7 @@ async def _es_module_commit_range_changes_callee_definition(
             continue
         moved = rename_map.get(path) or path
         if await _es_caller_still_reaches(
-            at_right, caller=caller_after, qualifier=qualifier, name=name
+            at_right, caller=caller_after, line=line_after, qualifier=qualifier, name=name
         ) != (moved, local_name):
             continue
         if await at_right.definition_span(moved, local_name) is not None:
@@ -316,24 +340,39 @@ async def _es_module_commit_range_changes_callee_definition(
     return False
 
 
+def _es_diff_deletes_line(diff_text: str, line: int) -> bool:
+    """True when a pure-deletion hunk of ``diff_text`` removes old line ``line``."""
+    from awf.runtime.pr_monitor_runner.pre_push_validation_fix_pass_ancestry import (
+        _UNIFIED_DIFF_HUNK_HEADER_RE,
+    )
+
+    for match in _UNIFIED_DIFF_HUNK_HEADER_RE.finditer(diff_text):
+        old_start = int(match.group(1))
+        old_count = 1 if match.group(2) is None else int(match.group(2))
+        if match.group(4) == "0" and old_start <= line < old_start + old_count:
+            return True
+    return False
+
+
 async def _es_caller_still_reaches(
-    reader: _EsModuleReader, *, caller: str, qualifier: str | None, name: str
+    reader: _EsModuleReader, *, caller: str, line: int, qualifier: str | None, name: str
 ) -> tuple[str, str] | None:
     """The definition the corrected caller's same ref reaches at ``reader``'s ref.
 
     The anchored occurrence was already held to a non-chained receiver at
-    ``left``; here only the corrected file's bindings matter, since its
-    anchor line is unknown and a chain elsewhere says nothing about it. The
-    corrected file must still call the ref somewhere: a surviving import whose
-    call the correction removed or renamed reaches nothing
-    (PRRT_kwDOSJAM6s6vO2G-).
+    ``left``; here only the corrected file's bindings matter, since a chain
+    elsewhere says nothing about it. ``line`` is the anchor mapped through the
+    caller's correction, and the ref must still be called there: a surviving
+    import whose call the correction removed or renamed reaches nothing
+    (PRRT_kwDOSJAM6s6vO2G-), even when the same import is called on another
+    line (PRRT_kwDOSJAM6s6vRAzJ).
     """
     text = await reader.text(caller)
     call_site = None if text is None else _es_call_site_bindings(text, path=caller)
     if call_site is None:
         return None
     imports, rebound, tokens = call_site
-    if not _es._es_calls(tokens, qualifier, name):
+    if not _es._es_calls(tokens, qualifier, name, line):
         return None
     reached = _es._es_ref_target(imports, rebound, frozenset(), qualifier, name)
     return None if reached is None else await reader.target(caller, *reached)

@@ -785,6 +785,66 @@ async def test_a_corrected_caller_that_still_calls_the_callee_is_evidence(
     assert await _accepted(probe)
 
 
+_IMPORT_RECORD = "import { record } from './telemetry';"
+_AUDIT_HELPER = "export function audit(value: number) {\n  return record(value);\n}\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("caller", "caller_after", "caller_diff"),
+    [
+        # The correction drops the anchored call; an unrelated helper still calls it.
+        (
+            _caller(_IMPORT_RECORD) + _AUDIT_HELPER,
+            _caller(_IMPORT_RECORD, "value") + _AUDIT_HELPER,
+            "@@ -4 +4 @@\n-  return record(value);\n+  return value;\n",
+        ),
+        # The correction deletes the anchored line; the line above it still calls.
+        (
+            _caller(_IMPORT_RECORD).replace("  return", "  record(value);\n  return", 1),
+            _caller(_IMPORT_RECORD, "").replace("  return ;", "  record(value);"),
+            "@@ -5 +4,0 @@\n-  return record(value);\n",
+        ),
+    ],
+)
+async def test_another_surviving_call_does_not_stand_in_for_the_anchored_one(
+    caller: str, caller_after: str, caller_diff: str
+) -> None:
+    """The anchored call is mapped through the correction (PRRT_kwDOSJAM6s6vRAzJ)."""
+    anchor = caller.splitlines().index("  return record(value);") + 1
+    probe = _EsProbe(
+        files={_CALLER: caller, _TELEMETRY: _RECORD_DEFINITION},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY), _CALLER: caller_diff},
+        right={_CALLER: caller_after},
+    )
+
+    assert not await _accepted(probe, item_line=anchor)
+
+
+@pytest.mark.unit
+async def test_a_corrected_caller_is_read_at_the_relocated_anchor() -> None:
+    """Lines inserted above the anchored call move it (PRRT_kwDOSJAM6s6vRAzJ)."""
+    caller_after = _caller(_IMPORT_RECORD).replace("\n\n", "\n// a\n// b\n\n", 1)
+    probe = _EsProbe(
+        files={_CALLER: _caller(_IMPORT_RECORD), _TELEMETRY: _RECORD_DEFINITION},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY), _CALLER: "@@ -1,0 +2,2 @@\n+// a\n+// b\n"},
+        right={_CALLER: caller_after},
+    )
+
+    assert caller_after.splitlines()[5] == "  return record(value);"
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
+async def test_an_unreadable_caller_diff_fails_closed() -> None:
+    probe = _EsProbe(
+        files={_CALLER: _caller(_IMPORT_RECORD), _TELEMETRY: _RECORD_DEFINITION},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY), _CALLER: None},
+    )
+
+    assert not await _accepted(probe)
+
+
 _MOVED = "src/app/metrics.ts"
 
 

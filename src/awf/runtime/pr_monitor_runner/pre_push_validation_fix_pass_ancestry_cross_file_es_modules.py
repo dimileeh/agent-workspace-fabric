@@ -1512,14 +1512,15 @@ def _es_direct_member_calls(tokens: tuple[_EsToken, ...], line: int) -> frozense
     )
 
 
-def _es_calls(tokens: tuple[_EsToken, ...], qualifier: str | None, name: str) -> bool:
-    """True when some occurrence anywhere in ``tokens`` calls ``qualifier.name`` / ``name``.
+def _es_calls(tokens: tuple[_EsToken, ...], qualifier: str | None, name: str, line: int) -> bool:
+    """True when an occurrence on ``line`` calls ``qualifier.name`` / ``name``.
 
     A bare call is ``name(`` (or ``name?.(``) outside a property position and
     not heading a parameter list; a qualified one is ``qualifier.name(`` on a
-    bare receiver. A correction that drops or renames the call while leaving
-    its import in place reaches the definition through no call, so it fails
-    closed (PRRT_kwDOSJAM6s6vO2G-).
+    bare receiver, with either name on ``line``. A correction that drops or
+    renames the call while leaving its import in place reaches the definition
+    through no call, so it fails closed (PRRT_kwDOSJAM6s6vO2G-); so does one
+    whose only surviving call sits on another line (PRRT_kwDOSJAM6s6vRAzJ).
     """
     for index, token in enumerate(tokens):
         if not _is(token, "ident", qualifier or name) or _is_reference_position(tokens, index):
@@ -1535,6 +1536,8 @@ def _es_calls(tokens: tuple[_EsToken, ...], qualifier: str | None, name: str) ->
                 continue
             callee = index + 2
         elif _es_signature_head(tokens, index):
+            continue
+        if line not in (token.line, tokens[callee].line):
             continue
         after = _token_at(tokens, callee + 1)
         if _is(after, "punct", "(") or (

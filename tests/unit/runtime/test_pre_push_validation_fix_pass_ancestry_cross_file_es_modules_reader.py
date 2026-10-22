@@ -821,7 +821,23 @@ def test_es_calls_requires_a_call_of_the_ref(
     text: str, qualifier: str | None, name: str, calls: bool
 ) -> None:
     """A surviving import with no call reaches nothing (PRRT_kwDOSJAM6s6vO2G-)."""
-    assert es._es_calls(_tokens(text), qualifier, name) is calls
+    tokens = _tokens(text)
+    line = next((token.line for token in tokens if token.value == name), 1)
+
+    assert es._es_calls(tokens, qualifier, name, line) is calls
+
+
+@pytest.mark.unit
+def test_es_calls_counts_only_a_call_on_the_given_line() -> None:
+    """A call on another line does not stand in for the anchored one (PRRT_kwDOSJAM6s6vRAzJ)."""
+    tokens = _tokens("const f = record;\nrecord(1);\ntel.\n  record(2);\n")
+
+    assert not es._es_calls(tokens, None, "record", 1)
+    assert es._es_calls(tokens, None, "record", 2)
+    # A qualified call split after its dot sits on both of its lines.
+    assert es._es_calls(tokens, "tel", "record", 3)
+    assert es._es_calls(tokens, "tel", "record", 4)
+    assert not es._es_calls(tokens, "tel", "record", 2)
 
 
 # --- anchor lines and definition heads -------------------------------------------
