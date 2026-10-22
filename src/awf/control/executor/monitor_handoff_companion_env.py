@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 from collections.abc import Callable, Mapping
@@ -246,8 +247,12 @@ def _refresh_optional_companion_env_secrets_for_resume(
     compose_file: Path,
     companion_specs: tuple[WorkspaceCompanionSpec, ...],
     environ: Mapping[str, str],
-) -> None:
-    """Refresh optional companion env-secret targets before compose resume."""
+) -> tuple[str, ...]:
+    """Refresh optional companion env-secret targets before compose resume.
+
+    Returns the services whose environment was rewritten; the resume
+    force-recreates them, since ``--no-recreate`` never applies the new env.
+    """
     missing_targets = _missing_optional_companion_env_secret_targets(
         companion_specs=companion_specs,
         environ=environ,
@@ -257,7 +262,7 @@ def _refresh_optional_companion_env_secrets_for_resume(
         environ=environ,
     )
     if not missing_targets and not present_refs:
-        return
+        return ()
 
     try:
         payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
@@ -267,21 +272,30 @@ def _refresh_optional_companion_env_secrets_for_resume(
             workspace_id=workspace_id,
             compose_file=str(compose_file),
         )
-        return
+        return ()
     except yaml.YAMLError:
         _log.warning(
             "executor.resume_companion_env_secret_refresh_parse_failed",
             workspace_id=workspace_id,
             compose_file=str(compose_file),
         )
-        return
+        return ()
 
     # This best-effort resume repair uses PyYAML, which preserves Compose
     # interpolation via the custom dumper but not comments or block-scalar style.
+    environment_before = _service_environments(payload)
     removed_count = _remove_compose_environment_targets(payload, missing_targets)
     restored_count = _restore_compose_environment_refs(payload, present_refs)
     if removed_count == 0 and restored_count == 0:
-        return
+        return ()
+    environment_after = _service_environments(payload)
+    rewritten = tuple(
+        sorted(
+            name
+            for name in environment_after
+            if environment_after[name] != environment_before.get(name)
+        )
+    )
 
     try:
         _atomic_write_text(
@@ -295,7 +309,7 @@ def _refresh_optional_companion_env_secrets_for_resume(
             workspace_id=workspace_id,
             compose_file=str(compose_file),
         )
-        return
+        return ()
     _log.warning(
         "executor.resume_companion_env_secret_refresh_reformatted",
         workspace_id=workspace_id,
@@ -321,6 +335,19 @@ def _refresh_optional_companion_env_secrets_for_resume(
             compose_file=str(compose_file),
             restored_count=restored_count,
         )
+    return rewritten
+
+
+def _service_environments(payload: object) -> dict[str, object]:
+    """Snapshot each compose service's ``environment`` so rewrites can be diffed."""
+    services = payload.get("services") if isinstance(payload, dict) else None
+    if not isinstance(services, dict):
+        return {}
+    return {
+        str(name): copy.deepcopy(service.get("environment"))
+        for name, service in services.items()
+        if isinstance(service, dict)
+    }
 
 
 def _missing_optional_companion_env_secret_targets(

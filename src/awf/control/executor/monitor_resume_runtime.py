@@ -56,13 +56,16 @@ async def inspect_resume_runtime(compose_project: str) -> RuntimeSnapshot:
 
 
 def _dependency_containers(
-    snapshot: RuntimeSnapshot, declared_services: tuple[str, ...] | None
+    snapshot: RuntimeSnapshot,
+    declared_services: tuple[str, ...] | None,
+    recreate_services: tuple[str, ...] = (),
 ) -> list[RuntimeService]:
-    """Return the containers of declared non-agent services.
+    """Return the containers of declared non-agent services that are not recreated.
 
     ``compose run`` containers and orphans of services no longer in compose.yml
     never settle on their own; ``declared_services`` is ``None`` when compose.yml
-    is unreadable, and then every non-agent service counts.
+    is unreadable, and then every non-agent service counts. Services the resume
+    force-recreates are not worth waiting on or starting first.
     """
     return [
         service
@@ -70,15 +73,18 @@ def _dependency_containers(
         if service.name != AGENT_SERVICE_NAME
         and not service.one_off
         and (declared_services is None or service.name in declared_services)
+        and service.name not in recreate_services
     ]
 
 
 def _recovering_dependencies(
-    snapshot: RuntimeSnapshot, declared_services: tuple[str, ...] | None
+    snapshot: RuntimeSnapshot,
+    declared_services: tuple[str, ...] | None,
+    recreate_services: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Return running dependencies whose health is not settled yet."""
     recovering: dict[str, str] = {}
-    for service in _dependency_containers(snapshot, declared_services):
+    for service in _dependency_containers(snapshot, declared_services, recreate_services):
         if service.state.strip().lower() != "running":
             continue
         health = (service.health or "").strip().lower()
@@ -88,13 +94,15 @@ def _recovering_dependencies(
 
 
 def _stopped_dependencies(
-    snapshot: RuntimeSnapshot, declared_services: tuple[str, ...] | None
+    snapshot: RuntimeSnapshot,
+    declared_services: tuple[str, ...] | None,
+    recreate_services: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """Return dependencies whose container exists but is not running."""
     return tuple(
         sorted(
             service.name
-            for service in _dependency_containers(snapshot, declared_services)
+            for service in _dependency_containers(snapshot, declared_services, recreate_services)
             if service.state.strip().lower() in _STOPPED_STATES
         )
     )
@@ -107,6 +115,7 @@ async def wait_for_recovering_dependencies(
     budget_seconds: int,
     start_stopped: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     declared_services: tuple[str, ...] | None = None,
+    recreate_services: tuple[str, ...] = (),
 ) -> None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
@@ -140,11 +149,11 @@ async def wait_for_recovering_dependencies(
             return
         if start_pending is not None:
             start, start_pending = start_pending, None
-            stopped = _stopped_dependencies(snapshot, declared_services)
+            stopped = _stopped_dependencies(snapshot, declared_services, recreate_services)
             if stopped:
                 await start(stopped)
                 continue
-        recovering = _recovering_dependencies(snapshot, declared_services)
+        recovering = _recovering_dependencies(snapshot, declared_services, recreate_services)
         if not recovering:
             return
         remaining = deadline - _monotonic()
@@ -179,11 +188,15 @@ async def restart_runtime_for_monitor_resume(
     budget_seconds: int,
     dependency_services: tuple[str, ...] | None,
     runtime_usable: Callable[[], Awaitable[bool]] | None = None,
+    recreate_services: tuple[str, ...] = (),
 ) -> ComposeOperationError | None:
-    """Restart the runtime for a monitor resume without recreating any dependency.
+    """Restart the runtime for a monitor resume, recreating only what must change.
 
     ``dependency_services`` lists the compose services that are not the agent;
     ``None`` (unreadable compose file) falls back to bringing up the whole project.
+    ``recreate_services`` are dependencies force-recreated with the agent (env
+    rewritten in compose.yml, or still unsettled when the last attempt gave up);
+    every other dependency is never recreated.
     When the dependency up fails, ``runtime_usable`` decides whether the agent is
     still recreated (auth overlays, env and #1090's setup replay depend on it);
     the tolerated failure is returned so the caller can record it.
@@ -218,13 +231,18 @@ async def restart_runtime_for_monitor_resume(
         budget_seconds=budget_seconds,
         start_stopped=_start_stopped,
         declared_services=dependency_services,
+        recreate_services=recreate_services,
     )
     tolerated: ComposeOperationError | None = None
     try:
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
         else:
-            dependencies = tuple(name for name in dependency_services if name != AGENT_SERVICE_NAME)
+            dependencies = tuple(
+                name
+                for name in dependency_services
+                if name != AGENT_SERVICE_NAME and name not in recreate_services
+            )
             if dependencies:
                 await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
     except ComposeOperationError as exc:
@@ -242,6 +260,9 @@ async def restart_runtime_for_monitor_resume(
         **common,
         force_recreate=True,
         no_deps=True,
-        services=(AGENT_SERVICE_NAME,),
+        services=(
+            AGENT_SERVICE_NAME,
+            *sorted(set(recreate_services) - {AGENT_SERVICE_NAME}),
+        ),
     )
     return tolerated

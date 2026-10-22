@@ -369,7 +369,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     companion_specs=companion_specs,
                     environ=os.environ,
                 )
-                _refresh_optional_companion_env_secrets_for_resume(
+                rewritten_services = _refresh_optional_companion_env_secrets_for_resume(
                     workspace_id=workspace_id,
                     compose_file=compose_file,
                     companion_specs=companion_specs,
@@ -389,6 +389,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                     runtime_usable=lambda: _compose_runtime_usable_after_restart_failure(
                         compose_project, compose_file
                     ),
+                    recreate_services=rewritten_services,
                 )
                 if tolerated_error is not None:
                     await self._record_monitor_runtime_restart_failed(
