@@ -845,11 +845,46 @@ def _parameter_group_names(tokens: tuple[_EsToken, ...], close_index: int) -> se
         open_index -= 1
     if _ident_value(_token_at(tokens, open_index - 1)) in _PARAMETER_EXCLUDING_KEYWORDS:
         return set()
-    return {
-        token.value
-        for offset, token in enumerate(tokens[open_index + 1 : close_index], start=open_index + 1)
-        if token.kind == "ident" and not _is_reference_position(tokens, offset)
-    }
+    return _parameter_pattern_names(tokens, open_index, close_index)
+
+
+def _parameter_pattern_names(
+    tokens: tuple[_EsToken, ...], open_index: int, close_index: int
+) -> set[str]:
+    """Identifiers the binding patterns strictly between ``open_index`` and ``close_index`` bind.
+
+    A ``=`` starts a default and a ``:`` a type annotation, each skipped to the
+    next ``,`` or closer at its depth (a type also to a ``=`` that starts its
+    default), so ``value = record()`` and ``value: typeof record`` bind only
+    ``value``. Inside a ``{`` pattern a ``:`` follows a key, which is not
+    bound, and the renamed binding after it is read. A ``,`` inside type
+    arguments ends a type early, which only over-reports.
+    """
+    openers = {tokens[open_index].depth + 1: "("}
+    skipping: tuple[int, bool] | None = None  # (depth, still a type annotation)
+    names: set[str] = set()
+    for offset in range(open_index + 1, close_index):
+        token = tokens[offset]
+        if skipping is not None:
+            depth, annotation = skipping
+            if token.depth > depth:
+                continue
+            if token.depth == depth and not _is(token, "punct", ","):
+                if annotation and _is(token, "punct", "="):
+                    skipping = (depth, False)
+                continue
+            skipping = None
+        is_object = openers.get(token.depth) == "{"
+        if token.kind == "ident":
+            if not (is_object and _is(_token_at(tokens, offset + 1), "punct", ":")):
+                names.add(token.value)
+        elif _is(token, "punct") and token.value in ("(", "[", "{"):
+            openers[token.depth + 1] = token.value
+        elif _is(token, "punct", "="):
+            skipping = (token.depth, False)
+        elif _is(token, "punct", ":") and not is_object:
+            skipping = (token.depth, True)
+    return names
 
 
 def _es_rebound_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> frozenset[str]:

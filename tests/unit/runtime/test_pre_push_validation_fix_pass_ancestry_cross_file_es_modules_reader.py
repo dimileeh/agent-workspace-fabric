@@ -525,6 +525,12 @@ def test_malformed_exports_make_the_table_unreadable(text: str) -> None:
         "namespace Legacy { import record = Other.record; }",
         "namespace Legacy { export import record = Other.record; }",
         "let first, record",
+        "function f(value = 1, record) {}",
+        "function f(value: Options, record) {}",
+        "function f(value?: Map<K, V> = new Map(), record) {}",
+        "function f({ a: record = 1 }) {}",
+        "function f([value = 1, record]) {}",
+        "const f = ({ value } = {}, ...record) => 1;",
     ],
 )
 def test_binding_positions_rebind_the_name(text: str) -> None:
@@ -549,6 +555,13 @@ def test_binding_positions_rebind_the_name(text: str) -> None:
         "const a = 1\nreturn record, 2",
         "let a\nif (x) record(1)",
         "function f() { let a }\nrecord(1)",
+        # Parameter defaults and types reference, not bind (PRRT_kwDOSJAM6s6vRAzc).
+        "function ingest(value = record()) { return record(); }",
+        "function f(value: typeof record) {}",
+        "function f(value: T = record(), other?: typeof record): void {}",
+        "const f = (value = record) => value;",
+        "function f({ a = record(), b: [c = record] }) {}",
+        "function f({ record: value }) {}",
     ],
 )
 def test_references_are_not_bindings(text: str) -> None:
