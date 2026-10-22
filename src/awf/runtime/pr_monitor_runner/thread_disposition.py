@@ -80,6 +80,9 @@ _LABELS: dict[str, str] = {
     "operator_acknowledged": "operator acknowledged",
     RESOLVED_BY_OTHERS: "resolved by others",
 }
+# An operator acknowledges a flagged thread only with this explicit token; a
+# directive that merely mentions the thread id (to re-check it, say) does not.
+_ACK_THREAD_RE = re.compile(r"(?<![\w-])ACK-THREAD[ \t]+(?P<thread>PRRT_[A-Za-z0-9_-]+)")
 _PAYLOAD_VERSION = 1
 _UNSAFE_URL_CHARACTERS = frozenset('<>"`')
 _BLOCKER_LISTED_IDS = 10
@@ -364,6 +367,13 @@ def disposition_count_rows(counts: Mapping[str, int]) -> tuple[tuple[str, int], 
     )
 
 
+def acknowledged_thread_ids(directive: str) -> tuple[str, ...]:
+    """Thread ids a guide directive acknowledges with ``ACK-THREAD <thread id>``."""
+    return tuple(
+        dict.fromkeys(match.group("thread") for match in _ACK_THREAD_RE.finditer(directive))
+    )
+
+
 def acknowledge_unverified_threads(
     state: MonitorState,
     thread_ids: Sequence[str],
@@ -372,8 +382,9 @@ def acknowledge_unverified_threads(
 ) -> tuple[str, ...]:
     """Record an operator acknowledgement for every *flagged* thread in ``thread_ids``.
 
-    Only threads the disposition gate flagged can be acknowledged; naming any
-    other thread in a guide records nothing. The gate posts the acknowledgement
+    ``thread_ids`` are the guide's explicit ``ACK-THREAD`` tokens
+    (:func:`acknowledged_thread_ids`). Only threads the disposition gate flagged
+    can be acknowledged; acknowledging any other thread records nothing. The gate posts the acknowledgement
     reply (with its marker) into each thread on its next run.
     """
     reason = "An AWF operator guide acknowledged this resolution" + (
@@ -405,7 +416,7 @@ def unverified_blocker_message(thread_ids: Sequence[str]) -> str:
         f"{REVIEW_THREAD_DISPOSITION_UNVERIFIED}: {len(thread_ids)} review thread(s) "
         "resolved by AWF's identity carry no AWF disposition reply: "
     )
-    tail = "; guide the workspace naming each thread id to acknowledge it"
+    tail = "; acknowledge each with a workspace guide directive ACK-THREAD followed by its id"
     listed: list[str] = []
     for thread_id in thread_ids[:_BLOCKER_LISTED_IDS]:
         candidate = ", ".join([*listed, thread_id])

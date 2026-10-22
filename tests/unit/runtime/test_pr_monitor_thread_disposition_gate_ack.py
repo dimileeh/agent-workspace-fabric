@@ -1,8 +1,9 @@
 """Operator acknowledgement of unverified AWF resolutions (#1018).
 
 A thread the disposition gate flags (resolved by AWF's identity, no marker) is
-acknowledged through the existing operator guide path: a guide that names the
-flagged thread id records an ``operator_acknowledged`` disposition, and the next
+acknowledged through the existing operator guide path: a guide carrying an
+explicit ``ACK-THREAD <thread id>`` token for the flagged thread records an
+``operator_acknowledged`` disposition (a bare mention does not), and the next
 gate run posts that acknowledgement — with its marker, without the directive
 text — into the resolved thread, after which the cert can follow.
 """
@@ -36,7 +37,10 @@ from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
-from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    acknowledged_thread_ids,
+    read_item_disposition,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
 )
@@ -53,7 +57,7 @@ pytestmark = pytest.mark.unit
 
 _REPO = RepoRef(owner="acme", name="widgets")
 _SILENT = "PRRT_test_silent_p1"
-_DIRECTIVE = f"Acknowledge {_SILENT}: handled in a follow-up issue, ping @maintainer"
+_DIRECTIVE = f"ACK-THREAD {_SILENT} handled in a follow-up issue, ping @maintainer"
 
 
 @pytest.fixture
@@ -302,3 +306,43 @@ async def test_guide_naming_unflagged_thread_records_nothing(
     result = await _gate(runner, workspace_id, state)
     assert result.blocker is not None
     assert gh.thread_replies == []
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        f"Acknowledge {_SILENT}: handled in a follow-up issue",
+        f"Re-check {_SILENT} and fix it properly",
+        f"ack-thread {_SILENT}",
+        f"NOACK-THREAD {_SILENT}",
+        f"ACK-THREAD: {_SILENT}",
+    ],
+    ids=["acknowledge-word", "plain-mention", "lowercase", "prefixed", "colon"],
+)
+async def test_guide_mentioning_flagged_thread_without_ack_token_records_nothing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    directive: str,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+
+    await _consume_guide(runner, workspace_id, state, monkeypatch, directive=directive)
+
+    assert read_item_disposition(state, _SILENT) is None
+    assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    assert gh.thread_replies == []
+
+
+def test_acknowledged_thread_ids_reads_only_explicit_tokens() -> None:
+    text = (
+        "ACK-THREAD PRRT_test_a\n"
+        "also ACK-THREAD\tPRRT_test_b, and ACK-THREAD PRRT_test_a again; "
+        "see PRRT_test_c, ack-thread PRRT_test_d, XACK-THREAD PRRT_test_e"
+    )
+    assert acknowledged_thread_ids(text) == ("PRRT_test_a", "PRRT_test_b")
+    assert acknowledged_thread_ids("") == ()

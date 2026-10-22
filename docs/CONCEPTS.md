@@ -456,10 +456,11 @@ Once READY_TO_MERGE has been posted for a head, an outage on a later poll at
 that same head is log-only: the cert stands and the monitor waits and re-polls. The certificate's first gate line shows
 counts per disposition class and "resolved by others".
 
-An operator acknowledges flagged threads with the ordinary guide path
-(`awf workspace guide <id> --directive 'Acknowledge <thread id>: …'`). Only
-flagged ids are acknowledged, on intake of the guide and whatever its agent run
-answers; AWF then posts an `operator_acknowledged` reply
+An operator acknowledges flagged threads with the ordinary guide path and an
+explicit token per thread (`awf workspace guide <id> --directive 'ACK-THREAD
+<thread id> …'`); a directive that merely mentions a thread id acknowledges
+nothing. Only flagged ids are acknowledged, on intake of the guide and whatever
+its agent run answers; AWF then posts an `operator_acknowledged` reply
 into each such thread — never the directive text — and the gate passes once
 every AWF resolution carries a marker.
 
