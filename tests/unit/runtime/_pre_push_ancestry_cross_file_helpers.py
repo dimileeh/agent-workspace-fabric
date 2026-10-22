@@ -86,22 +86,29 @@ class _Probe:
         self.diff_paths: list[str] = []
         self._deps = SimpleNamespace(runner=SimpleNamespace(run=self._run))
 
+    def _text(self, ref: str, path: str) -> str | None:
+        if (ref, path) in self.texts:
+            return self.texts[(ref, path)]
+        if ref == _RIGHT:
+            # The accepted candidate is read back on the right to check the
+            # callee survived the correction; unless a case says the
+            # definition went away, the right side still holds it.
+            return self.texts.get((_LEFT, path))
+        return None
+
     async def _run(self, cmd: list[str], **kwargs: object):
         from awf.common.commands import CommandResult
 
         del kwargs
+        if "ls-tree" in cmd:
+            # JS/TS specifier probing: list the pathspecs that exist at the ref.
+            ref = cmd[cmd.index("--") - 1]
+            found = [p for p in cmd[cmd.index("--") + 1 :] if self._text(ref, p) is not None]
+            return CommandResult(returncode=0, stdout="".join(f"{p}\0" for p in found), stderr="")
         if "show" in cmd:
             ref, _, path = cmd[-1].partition(":")
             self.shows.append(path)
-            if (ref, path) in self.texts:
-                text = self.texts[(ref, path)]
-            elif ref == _RIGHT:
-                # The accepted candidate is read back on the right to check the
-                # callee survived the correction; unless a case says the
-                # definition went away, the right side still holds it.
-                text = self.texts.get((_LEFT, path))
-            else:
-                text = None
+            text = self._text(ref, path)
             if text is None:
                 return CommandResult(returncode=128, stdout="", stderr="no such path")
             return CommandResult(returncode=0, stdout=text, stderr="")

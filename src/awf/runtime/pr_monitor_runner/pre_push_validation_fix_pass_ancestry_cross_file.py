@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass_ancestry_cross_file_es_evidence as _es_evidence,
+)
+from awf.runtime.pr_monitor_runner import (
+    pre_push_validation_fix_pass_ancestry_cross_file_es_modules as _es_modules,
+)
+from awf.runtime.pr_monitor_runner import (
     pre_push_validation_fix_pass_ancestry_cross_file_imports as _imports,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
@@ -81,6 +87,13 @@ _module_bound_receiver_names = _imports._module_bound_receiver_names
 _locally_rebound_names_at_line = _imports._locally_rebound_names_at_line
 _global_declared_names = _imports._global_declared_names
 _module_scope_rebound_names = _imports._module_scope_rebound_names
+# JS/TS call sites bind through ES modules instead (issue #1047), read by the
+# two sibling modules and rebound here the same way.
+_JS_TS_CALL_SITE_SUFFIXES = _es_modules._JS_TS_CALL_SITE_SUFFIXES
+_path_is_es_module_source = _es_modules._path_is_es_module_source
+_es_module_commit_range_changes_callee_definition = (
+    _es_evidence._es_module_commit_range_changes_callee_definition
+)
 
 
 def _import_targets_without_locally_rebound(
@@ -779,9 +792,12 @@ async def _commit_range_changes_callee_definition(
     (PRRT_kwDOSJAM6s6q-6LK); the chain's remaining segments extend that root's
     module path, so a sibling module under it is not evidence either, and a
     chain this reader cannot resolve to one module fails closed
-    (PRRT_kwDOSJAM6s6q_M0j). A callee whose
-    binding is unreadable keeps the name-only rule, which is the #1019 shape the
-    gate exists for; a receiver imported by name resolves to that name's own
+    (PRRT_kwDOSJAM6s6q_M0j). A Python callee
+    whose binding is unreadable keeps the name-only rule, which is the #1019
+    shape the gate exists for, and so does a call site in a language with no
+    binding reader; a JS/TS call site never does — it binds through its ES
+    imports or fails closed (issue #1047, see
+    ``_es_module_commit_range_changes_callee_definition``). A receiver imported by name resolves to that name's own
     module or to the importing module's file, not to any sibling under its
     package (PRRT_kwDOSJAM6s6q8MW9). The receiver's binding *kind* is kept too:
     a receiver a plain ``import`` proves to be a module reaches only
@@ -830,6 +846,16 @@ async def _commit_range_changes_callee_definition(
     )
     if not item_text:
         return False
+    if _path_is_es_module_source(normalized_item):
+        return await _es_module_commit_range_changes_callee_definition(
+            self,
+            worktree_path=worktree_path,
+            left=left,
+            right=right,
+            item_path=normalized_item,
+            item_text=item_text,
+            item_line=item_line,
+        )
     # A module-scope rebinding cannot reach a name the anchored function
     # imports itself: that import binds the name for the whole body, so the
     # global is unreachable there (PRRT_kwDOSJAM6s6rAhm2). Read *before* the

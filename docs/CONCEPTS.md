@@ -383,6 +383,27 @@ without it. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
 without a commit.
 
+The correction's last evidence gate is cross-file callee evidence: a fix counts
+when the item's range edits the definition of a function called on the anchored
+line, even though that definition lives in another file. Touching the file is
+not enough. The diff must overlap the definition, and the definition must still
+exist after the correction. The callee is tied to a file through the call site's
+own imports. A Python callee is held to the module its `from` or `import`
+statement names. A JS/TS callee (`.js .jsx .mjs .cjs .ts .tsx .mts .cts`) is
+resolved through ES-module bindings: named, aliased, default and namespace
+imports, relative specifiers probed the way TS/Node probe them (`.js` maps to
+`.ts`, `index` files count), and at most one re-export hop (`export { x } from`,
+`export * from`, or a barrel re-exporting its own import). Type-only imports bind
+nothing. A JS/TS callee the reader cannot resolve to exactly one file fails
+closed: bare packages, path aliases, dynamic `import()`, `require`, deeper or
+ambiguous re-export chains, unparseable files, and a name the file rebinds
+anywhere. It never falls back to matching by name, and the corrected caller has
+to reach the same definition afterwards. Only languages with no binding reader
+keep the name-only match. A name that a scope binds shadows the import for the
+anchored call. In a Python class body, which runs top to bottom, only bindings
+at or before the anchored line count. Every rejection keeps the item's
+`AGENT_FIXED_WITHOUT_EVIDENCE` outcome and parks it as `needs_human`.
+
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
 
