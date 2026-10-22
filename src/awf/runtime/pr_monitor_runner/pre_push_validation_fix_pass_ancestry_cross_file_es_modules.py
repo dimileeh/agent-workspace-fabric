@@ -937,12 +937,17 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
     assigned: set[str] = set()
     for index, token in enumerate(tokens):
         if token.kind == "ident" and not _is_reference_position(tokens, index):
-            # A parenthesized target is still the binding: ``((record)) = other``.
+            # A parenthesized or TS non-null target is still the binding:
+            # ``((record)) = other``, ``record! = other``, ``(record!)! = other``.
             start, end = index, index
-            while _is(_token_at(tokens, start - 1), "punct", "(") and _is(
-                _token_at(tokens, end + 1), "punct", ")"
-            ):
-                start, end = start - 1, end + 1
+            while True:
+                after = _token_at(tokens, end + 1)
+                if _is(after, "punct", "!") and not after.newline_before:
+                    end += 1
+                elif _is(_token_at(tokens, start - 1), "punct", "(") and _is(after, "punct", ")"):
+                    start, end = start - 1, end + 1
+                else:
+                    break
             before = _token_at(tokens, start - 1)
             after = _token_at(tokens, end + 1)
             operator = _is(after, "punct") and after.value in _ASSIGNMENT_OPERATORS

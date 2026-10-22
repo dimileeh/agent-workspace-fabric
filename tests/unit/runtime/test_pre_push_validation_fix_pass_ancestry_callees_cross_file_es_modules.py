@@ -494,6 +494,7 @@ async def test_unresolvable_callees_fail_closed(import_line: str, call: str) -> 
     [
         "[record] = [other];\n",
         "(record) = other;\n",
+        "record! = other;\n",
         "({ record } = overrides);\n",
         "for (record of [other]) {\n}\n",
         "export function setup() {\n  record = other;\n}\n",

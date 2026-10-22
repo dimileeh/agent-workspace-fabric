@@ -576,6 +576,10 @@ def test_references_are_not_bindings(text: str) -> None:
         "for (record of [other]) {}",
         "for (record in table) {}",
         "export function setup() { record = other; }",
+        "record! = other;",
+        "(record!) = other;",
+        "(record)! ??= other;",
+        "record!!++;",
     ],
 )
 def test_assignment_targets_reassign_the_name(text: str) -> None:
@@ -589,6 +593,8 @@ def test_assignment_targets_reassign_the_name(text: str) -> None:
         "export function record() {\n  return record.count === 1;\n}",
         "const total = record(1) + record.size;",
         "if (record == null || record != other) {}",
+        "if (record! != other || record!== other) {}",
+        "const total = record!(1);\nrecord\n!other;",
         "const f = () => record;",
         "export { record };\nexport default record;",
         "client.record = other;",
