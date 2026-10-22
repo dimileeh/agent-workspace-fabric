@@ -485,9 +485,14 @@ every AWF resolution carries a marker. An acknowledgement answers only the
 conversation that was flagged: a new or edited comment drops the flag and any
 acknowledgement not yet posted, and a reopen seen by the gate drops the flag and
 the acknowledgement even once posted (its reply's marker then certifies nothing),
-so the current resolution needs its own `ACK-THREAD`. The gate re-audits after posting, and the
-reply counts only while the conversation it followed is the acknowledged one, so
-an edit landing between the audit and the reply is never certified.
+so the current resolution needs its own `ACK-THREAD`. Those acknowledgement replies are
+the gate's only writes: it posts them all first, then decides on ONE complete audit
+taken after the last of them — never on the snapshot they were posted from. A reply
+counts only while the conversation it followed is the acknowledged one, so an edit
+landing between the audit and the reply is never certified, and an acknowledgement
+posted in a cycle that its final audit does not certify (edited, reopened, gone, or
+the audit failed) keeps that cycle from certifying. Flags bind the conversation that
+final audit saw.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
 comment carrying the marker; the resolution audit is reported unsupported, so

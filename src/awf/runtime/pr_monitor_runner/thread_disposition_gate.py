@@ -18,6 +18,9 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   posts the acknowledgement (with its marker) into the thread itself, only while
   the thread keeps the conversation that was flagged, and the marker counts only
   while that conversation is what the reply followed.
+* Those replies are the gate's only writes. They all come first; the decision
+  then rests on ONE complete audit taken after the last of them, and an
+  acknowledgement it does not certify keeps this cycle from certifying.
 * An unresolved thread is ``decide()``'s to handle, so one the status it acted on
   never listed (opened or reopened since), or listed with other outside comments
   (replied to or edited since), re-polls instead of passing.
@@ -120,39 +123,6 @@ async def review_thread_disposition_gate(
         context=_AUDIT_CONTEXT,
     )
     state.threads_addressed_ids.pop(_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY, None)
-    return await _verify_audit(
-        self,
-        audit,
-        workspace_id=workspace_id,
-        repo=repo,
-        pr_number=pr_number,
-        status=status,
-        state=state,
-        base_branch=base_branch,
-        remote_branch=remote_branch,
-        monitor_log=monitor_log,
-    )
-
-
-async def _verify_audit(
-    self: Any,
-    audit: ReviewThreadAudit,
-    *,
-    workspace_id: str,
-    repo: RepoRef,
-    pr_number: int,
-    status: PRStatus,
-    state: MonitorState,
-    base_branch: str,
-    remote_branch: str,
-    monitor_log: WorkspaceLogSink | None,
-) -> DispositionGateResult:
-    """Check every thread of one complete ``audit``.
-
-    Success needs one audit to pass every thread. An acknowledgement's re-audit
-    checks only its own thread, so after posting any the gate runs again on the
-    last re-audit, the one that followed every reply (PRRT_kwDOSJAM6s6vW9qA).
-    """
     if not audit.supported:
         _log.info(
             "monitor.review_thread_audit_unsupported_forge",
@@ -175,6 +145,61 @@ async def _verify_audit(
             summary=missing_login,
             detail=missing_login,
         )
+    posted = await _post_acknowledgements(
+        self, audit, viewer=viewer, state=state, workspace_id=workspace_id
+    )
+    if posted:
+        # The decision rests on ONE complete audit taken after the cycle's last
+        # write, never on the snapshot the replies were posted from
+        # (PRRT_kwDOSJAM6s6vW9qA).
+        try:
+            audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
+        except ForgeClientError as exc:
+            # Nothing proves the replies followed the acknowledged conversations:
+            # no cert this cycle. The next audit can still confirm them.
+            _log.warning(
+                "monitor.review_thread_final_audit_failed",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                thread_ids=posted,
+                reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+                forge_reason_code=exc.reason_code,
+            )
+            return DispositionGateResult(blocker=unverified_blocker_message(posted))
+    return await _verify_audit(
+        self,
+        audit,
+        viewer=viewer,
+        posted=posted,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        status=status,
+        state=state,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+    )
+
+
+async def _verify_audit(
+    self: Any,
+    audit: ReviewThreadAudit,
+    *,
+    viewer: str,
+    posted: list[str],
+    workspace_id: str,
+    pr_number: int,
+    status: PRStatus,
+    state: MonitorState,
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+) -> DispositionGateResult:
+    """Decide on the cycle's final ``audit``: no forge write happens after it.
+
+    An acknowledgement ``posted`` this cycle that this audit does not certify
+    (edited, reopened or gone since) keeps the cycle from certifying.
+    """
     baseline_record = state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY)
     legacy_baseline = _decode_baseline(baseline_record)
     legacy_conversations = _decode_baseline_conversations(
@@ -189,10 +214,9 @@ async def _verify_audit(
     for listed in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
         decided.setdefault(listed.thread_id, set()).add(tuple(c.body for c in listed.comments))
     undecided: list[str] = []  # unresolved feedback ``decide()`` never saw
-    # The conversation each unverified flag binds to (an acknowledgement's re-audit
-    # can move it on).
-    digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
-    reaudits: list[ReviewThreadAudit] = []  # one per acknowledgement posted, in order
+    certified: set[str] = set()
+    # The resolved conversation each unverified flag binds to.
+    digests: dict[str, str] = {}
     for thread in audit.threads:
         legacy_conversation = legacy_conversations.get(thread.thread_id)
         if legacy_conversation is not None and (
@@ -221,6 +245,7 @@ async def _verify_audit(
         if (thread.resolved_by or "").strip().casefold() != viewer:
             counts[RESOLVED_BY_OTHERS] += 1  # that person's or bot's own disposition
             continue
+        digests[thread.thread_id] = thread.conversation_digest
         if disposition_marker_class(thread.viewer_comment_bodies, thread_id=thread.thread_id):
             marked.add(thread.thread_id)
         # Only a marker after the newest feedback dispositions the current
@@ -232,17 +257,6 @@ async def _verify_audit(
             state, thread
         ):
             disposition_class = None
-        if disposition_class is None:
-            disposition_class = await _post_operator_acknowledgement(
-                self,
-                state=state,
-                thread=thread,
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                digests=digests,
-                reaudits=reaudits,
-            )
         if (
             disposition_class is None
             and legacy_conversation is not None
@@ -255,6 +269,7 @@ async def _verify_audit(
             unverified.append(thread.thread_id)
             continue
         counts[disposition_class] += 1
+        certified.add(thread.thread_id)
         state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
     if retired:
         _retire_legacy_exemptions(
@@ -285,6 +300,8 @@ async def _verify_audit(
         )
         counts[LEGACY_BASELINE] += len(legacy)
         unverified = [tid for tid in unverified if tid not in legacy]
+    # Reopened or gone since its reply: this audit does not hold what it was bound to.
+    unverified += [tid for tid in posted if tid not in certified and tid not in unverified]
     if not unverified:
         if undecided:
             # Opened, reopened, replied to, or edited after ``status`` was fetched:
@@ -298,22 +315,6 @@ async def _verify_audit(
                 reason_code="REVIEW_THREAD_FEEDBACK_AFTER_DECISION",
             )
             return DispositionGateResult(retry=True)
-        if reaudits:
-            # This run read the other threads from ``audit``, before the replies:
-            # certify only what the audit after the last one shows. A posted reply
-            # is recorded, so no acknowledgement posts twice and the re-check ends.
-            return await _verify_audit(
-                self,
-                reaudits[-1],
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                monitor_log=monitor_log,
-            )
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
     newly_flagged = [
         thread_id
@@ -321,9 +322,10 @@ async def _verify_audit(
         if not state.threads_addressed_ids.get(_disposition_unverified_key(thread_id))
     ]
     for thread_id in unverified:
-        state.mark_addressed(
-            _disposition_unverified_key(thread_id), unverified_flag(digests[thread_id])
-        )
+        if thread_id in digests:  # only a standing resolution can be acknowledged
+            state.mark_addressed(
+                _disposition_unverified_key(thread_id), unverified_flag(digests[thread_id])
+            )
     _log.warning(
         "monitor.review_thread_disposition_unverified",
         workspace_id=workspace_id,
@@ -497,84 +499,53 @@ async def review_thread_audit_fault(
     )
 
 
-async def _post_operator_acknowledgement(
+async def _post_acknowledgements(
     self: Any,
+    audit: ReviewThreadAudit,
     *,
+    viewer: str,
     state: MonitorState,
-    thread: AuditedReviewThread,
     workspace_id: str,
-    repo: RepoRef,
-    pr_number: int,
-    digests: dict[str, str],
-    reaudits: list[ReviewThreadAudit],
-) -> DispositionClass | None:
-    """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified.
+) -> list[str]:
+    """Post every pending guide acknowledgement whose flagged resolution ``audit`` shows.
 
-    The audit can be stale by the time the reply lands, so it counts only once a
-    re-audit shows the thread still resolved and the reply following the
-    acknowledged conversation. A re-audit that refuses it rebinds the thread's
-    ``digests`` entry to the conversation it saw, so the unverified flag — and an
-    immediate re-acknowledgement of it — answers the thread as it now reads. The
-    re-audit is appended to ``reaudits`` for the gate's final check.
+    These replies are the gate's only forge writes. Each answers only the
+    conversation that was flagged: one that has moved on since is dropped, not
+    posted, and the current resolution needs its own acknowledgement. Returns the
+    thread ids replied to.
     """
-    thread_id = thread.thread_id
-    disposition = read_item_disposition(state, thread_id)
-    if disposition is None or disposition.disposition_class != "operator_acknowledged":
-        return None
-    if disposition.reply_comment_id:
-        # Posted on an earlier run, yet this audit (fetched after it) finds no
-        # marker: the reply was deleted or edited away. The saved id only prevents
-        # a duplicate post, it is not evidence; a new guide re-acknowledges.
-        return None
-    if disposition.conversation_digest != thread.conversation_digest:
-        # The guide acknowledged the conversation the gate flagged; a new or edited
-        # comment since then is feedback it never saw, so it is dropped and the
-        # current resolution needs its own acknowledgement.
-        _supersede_acknowledgement(state, thread_id, workspace_id=workspace_id)
-        return None
-    try:
-        reply_id = await self._deps.gh.reply_to_thread(
-            thread_id=thread_id,
-            body=render_disposition_reply(disposition),
-        )
-    except ForgeClientError as exc:
-        _log.warning(
-            "monitor.operator_acknowledgement_reply_failed",
-            workspace_id=workspace_id,
-            thread_id=thread_id,
-            reason_code=THREAD_DISPOSITION_REPLY_FAILED,
-            forge_reason_code=exc.reason_code,
-        )
-        return None
-    record_item_disposition(state, replace(disposition, reply_comment_id=reply_id))
-    try:
-        audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
-    except ForgeClientError as exc:
-        _log.warning(
-            "monitor.operator_acknowledgement_reaudit_failed",
-            workspace_id=workspace_id,
-            thread_id=thread_id,
-            reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
-            forge_reason_code=exc.reason_code,
-        )
-        return None
-    reaudits.append(audit)
-    posted = next((t for t in audit.threads if t.thread_id == thread_id), None)
-    if posted is not None:
-        digests[thread_id] = posted.conversation_digest
-        if not posted.is_resolved:
-            # Reopened meanwhile: the acknowledged resolution is gone, so the reply
-            # just posted must not certify a later silent re-resolve either.
+    posted: list[str] = []
+    for thread in audit.threads:
+        thread_id = thread.thread_id
+        disposition = read_item_disposition(state, thread_id)
+        if (
+            disposition is None
+            or disposition.disposition_class != "operator_acknowledged"
+            or disposition.reply_comment_id
+            or not thread.is_resolved
+            or (thread.resolved_by or "").strip().casefold() != viewer
+        ):
+            continue
+        if disposition.conversation_digest != thread.conversation_digest:
             _supersede_acknowledgement(state, thread_id, workspace_id=workspace_id)
-    if (
-        posted is None
-        or not posted.is_resolved  # reopened meanwhile: the acknowledged resolution is gone
-        or disposition_marker_class(_current_disposition_bodies(posted), thread_id=thread_id)
-        != "operator_acknowledged"
-        or not _acknowledgement_followed(state, posted)
-    ):
-        return None
-    return "operator_acknowledged"
+            continue
+        try:
+            reply_id = await self._deps.gh.reply_to_thread(
+                thread_id=thread_id,
+                body=render_disposition_reply(disposition),
+            )
+        except ForgeClientError as exc:
+            _log.warning(
+                "monitor.operator_acknowledgement_reply_failed",
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                reason_code=THREAD_DISPOSITION_REPLY_FAILED,
+                forge_reason_code=exc.reason_code,
+            )
+            continue
+        record_item_disposition(state, replace(disposition, reply_comment_id=reply_id))
+        posted.append(thread_id)
+    return posted
 
 
 def _acknowledgement_followed(state: MonitorState, thread: AuditedReviewThread) -> bool:

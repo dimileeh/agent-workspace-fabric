@@ -136,7 +136,7 @@ class _TwoSilentAuditForge(DefaultMergeMethodGitHubClient):
 
     Replies join their thread's conversation as on the forge; ``edit_on_reply``
     maps a thread to the one whose feedback a reviewer edits while AWF's reply
-    to it is in flight.
+    to it is in flight. ``audits`` counts the audits served.
     """
 
     def __init__(self, runner: FakeCommandRunner):
@@ -144,11 +144,13 @@ class _TwoSilentAuditForge(DefaultMergeMethodGitHubClient):
         self.conversations = {_SILENT: "conversation-1", _SECOND: "conversation-2"}
         self.visible_replies: dict[str, list[str]] = {_SILENT: [], _SECOND: []}
         self.edit_on_reply: dict[str, str] = {}
+        self.audits = 0
 
     async def fetch_review_thread_audit(
         self, *, repo: RepoRef, pr_number: int
     ) -> ReviewThreadAudit:
         del repo, pr_number
+        self.audits += 1
         return ReviewThreadAudit(
             supported=True,
             viewer_login="awf-operator",
@@ -447,10 +449,10 @@ async def test_acknowledgements_count_only_on_the_audit_after_every_reply(
         monkeypatch,
         directive=f"ACK-THREAD {_SILENT} ACK-THREAD {_SECOND}",
     )
-    # The first reply's re-audit passes; the reviewer then edits that thread's
-    # feedback while the second reply is in flight, which only the second
-    # re-audit sees (PRRT_kwDOSJAM6s6vW9qA).
+    # The reviewer edits the first thread's feedback while the second reply is
+    # in flight, after the first reply landed (PRRT_kwDOSJAM6s6vW9qA).
     gh.edit_on_reply[_SECOND] = _SILENT
+    audits_before = gh.audits
 
     blocked = await _gate(runner, workspace_id, state)
 
@@ -458,6 +460,8 @@ async def test_acknowledgements_count_only_on_the_audit_after_every_reply(
     assert _SECOND not in blocked.blocker
     assert blocked.count_rows is None
     assert [thread_id for thread_id, _ in gh.thread_replies] == [_SILENT, _SECOND]
+    # One audit before the replies, and ONE complete audit after the last of them.
+    assert gh.audits - audits_before == 2
 
     # A guide acknowledging the edited conversation certifies both on the audit
     # after its reply; the second thread's reply is not posted again.
@@ -469,6 +473,41 @@ async def test_acknowledgements_count_only_on_the_audit_after_every_reply(
     assert passed.count_rows is not None
     assert dict(passed.count_rows)["operator acknowledged"] == 2
     assert len(gh.thread_replies) == 3
+
+
+async def test_flags_bind_the_conversation_the_audit_after_the_last_reply_saw(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _TwoSilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    flagged = await _gate(runner, workspace_id, state)
+    assert flagged.blocker is not None
+    assert _SILENT in flagged.blocker and _SECOND in flagged.blocker
+    await _consume_guide(
+        runner, workspace_id, state, monkeypatch, directive=f"ACK-THREAD {_SECOND}"
+    )
+    # A reviewer edits the still-flagged thread's feedback while AWF's reply to
+    # the acknowledged one is in flight. The cycle decides on the audit after
+    # that reply only, so the new flag answers the edited conversation.
+    gh.edit_on_reply[_SECOND] = _SILENT
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert _SECOND not in blocked.blocker
+
+    # One guide acknowledging what the operator was shown certifies it.
+    await _consume_guide(
+        runner, workspace_id, state, monkeypatch, directive=f"ACK-THREAD {_SILENT}"
+    )
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert passed.count_rows is not None
+    assert dict(passed.count_rows)["operator acknowledged"] == 2
+    assert [thread_id for thread_id, _ in gh.thread_replies] == [_SECOND, _SILENT]
 
 
 async def test_re_acknowledgement_right_after_a_rejected_reply_binds_the_re_audited_thread(
