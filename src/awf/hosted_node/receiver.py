@@ -262,11 +262,22 @@ class Receiver:
                 grant = await self.grant(session, prep, value)
                 row = await session.get(Receipt, slot)
                 assert grant is not None and row is not None
+                # Publication ran outside the owner lock; another grant may now
+                # hold preparation authority, even if its install is still pending.
+                fence, generation = (
+                    await session.execute(
+                        select(
+                            func.max(Grant.fence), func.max(Grant.authorization_generation)
+                        ).where(Grant.preparation == prep.id)
+                    )
+                ).one()
                 if (
                     not grant.revoked
                     and row.state == "pending"
                     and grant.pending == slot
                     and grant.fence == value.fence
+                    and value.fence == fence
+                    and value.authorization_generation == generation
                     and value.expires_at > datetime.now(UTC)
                 ):
                     grant.current, grant.pending = slot, None
