@@ -64,6 +64,33 @@ def test_callee_refs_keep_tsx_generic_arrow_heads_unmasked() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "line",
+    [
+        # A child tag after a text node or a closing tag is never a generic arrow.
+        "    return <div>see <a extends b>helper()</a></div>;",
+        "    return <div><a extends b>helper()</a></div>;",
+        "    return <div>return <a , b>helper()</a></div>;",
+        # A JSX child on its own line keeps its text blanked (fail closed).
+        "      <a extends b>helper()</a>",
+        # Outside an expression start (``foo <T,`` is a comparison) it stays a tag.
+        "    foo <a extends b>helper()</a>;",
+    ],
+)
+def test_callee_refs_mask_tsx_child_tags_shaped_like_generic_heads(line: str) -> None:
+    """Generic-arrow heads count only where an expression starts (PRRT_kwDOSJAM6s6vMe0Y)."""
+    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset()
+
+
+@pytest.mark.unit
+def test_callee_refs_keep_tsx_async_generic_arrow_heads_unmasked() -> None:
+    line = "  const run = async <T,>(value: T) => helper(value);"
+    assert callees._callee_refs_from_anchor_line(line, path="src/mod.tsx") == frozenset(
+        {(None, "helper")}
+    )
+
+
+@pytest.mark.unit
 def test_callee_refs_mask_jsx_fragment_text_nodes() -> None:
     """Fragment openers ``<>`` must blank text nodes like named tags.
 

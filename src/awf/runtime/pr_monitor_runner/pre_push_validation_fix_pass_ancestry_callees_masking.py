@@ -405,10 +405,13 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str, *, tsx: bool = False) -> str
     chars = list(line)
     n = len(line)
     i = 0
+    in_children = False
     while i < n:
-        if tsx and _TSX_GENERIC_ARROW_RE.match(line, i):
+        # A ``<`` ending a text node opens a child tag, never a generic arrow.
+        if tsx and not in_children and _tsx_generic_arrow_head_at(line, i):
             i += 1
             continue
+        in_children = False
         # Named/close/comment tags, or fragment opener ``<>`` (next is ``>``).
         if line[i] == "<" and i + 1 < n and (line[i + 1].isalpha() or line[i + 1] in "/!>"):
             # Advance through the tag to its closing ``>`` (strings already blank).
@@ -432,6 +435,26 @@ def _mask_jsx_text_nodes_for_callee_scan(line: str, *, tsx: bool = False) -> str
                     continue
                 chars[i] = _mask_char_preserving_splitlines_separators(line[i])
                 i += 1
+            in_children = True
             continue
         i += 1
     return "".join(chars)
+
+
+def _tsx_generic_arrow_head_at(line: str, index: int) -> bool:
+    """True when ``line[index]`` opens a TSX generic-arrow head, not a JSX tag.
+
+    Like the ES lexer's ``expression_may_start()`` gate, the head must sit
+    where an expression may start (after ``=``, ``(``, ``return`` ... or
+    ``async``). A ``<`` at line start may be a JSX child on its own line, so it
+    stays a tag (fail closed: its text is blanked) (PRRT_kwDOSJAM6s6vMe0Y).
+    """
+    if not _TSX_GENERIC_ARROW_RE.match(line, index):
+        return False
+    prefix = line[:index].rstrip(" \t")
+    if not prefix:
+        return False
+    if re.search(r"(?<![\w$])async$", prefix):
+        return True
+    # The prefix rule for ``/`` regex openers is the expression-start rule.
+    return _js_slash_can_start_regex(line, index)
