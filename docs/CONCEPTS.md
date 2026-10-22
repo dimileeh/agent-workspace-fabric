@@ -899,8 +899,9 @@ handoff that brings the local runtime back without disturbing dependencies that
 are recovering on their own (#936):
 
 1. **Wait for recovering dependencies.** AWF inspects the compose project. Every
-   running non-agent service whose Docker health is `starting` or `unhealthy` is
-   polled every 5 s until it is healthy. Docker keeps probing an `unhealthy`
+   running non-agent service declared in compose.yml whose Docker health is
+   `starting` or `unhealthy` is polled every 5 s until it is healthy; one-off
+   `compose run` containers and orphans are ignored. Docker keeps probing an `unhealthy`
    container and flips it back on success, so waiting is correct even after the
    container's rendered healthcheck retries ran out. The wait is bounded by the
    stack's startup budget (`docker.startup_timeout_seconds`, or a larger companion
@@ -911,15 +912,18 @@ are recovering on their own (#936):
    lets the compose call surface the real error.
 2. **Bring dependencies up without recreating them**
    (`compose up --no-recreate --wait`): exited or absent containers are started
-   or created; a running one is never recreated.
+   or created; a running one is never recreated. If this exits non-zero but the
+   runtime is still usable, the failure is recorded and step 3 still runs.
 3. **Recreate only the agent** (`compose up --force-recreate --no-deps --wait agent`).
    The per-workspace auth overlay mounts are bound only when the container is
-   created, and the setup replay below keys off the agent's new identity.
+   created, and the setup replay below keys off the agent's new identity. Two
+   kinds of dependency are force-recreated in the same call (and skipped in
+   steps 1 and 2): a companion whose environment the optional companion
+   env-secret refresh rewrote, since `--no-recreate` would never apply it, and,
+   on the first resume after a restart park, the dependencies still unsettled at
+   the last dependency-wait timeout.
 
-Trade-off: the resume's optional companion env-secret refresh rewrites the
-companion's compose entry, but a running companion is not recreated, so the
-refreshed value reaches it on its next creation. Required companion secrets are
-still prechecked before any compose call. An exited dependency on a compose.yml
+Required companion secrets are still prechecked before any compose call. An exited dependency on a compose.yml
 rendered before the healthcheck budget rule starts with its stored 60 retries; if
 its recovery outlasts them, that resume fails once and the next one finds it
 running and waits with the full budget.
@@ -928,7 +932,9 @@ running and waits with the full budget.
 error, dependency wait timeout or a required companion secret precheck) whose
 runtime is not usable records `workspace.monitor_runtime_restart_failed`. The
 consecutive failures are counted from these events, so a worker or control-plane
-restart does not reset the count. After 3 in a row the workspace is parked in
+restart does not reset the count. The next restart waits until 60 s after the
+first consecutive failure and 120 s after the second, so a transient error cannot
+use every attempt in seconds. After 3 in a row the workspace is parked in
 `blocked` (`block_type=monitor_runtime_restart_failure`, block reason
 `MONITOR_RUNTIME_RESTART_EXHAUSTED`, a monitor-origin `block_resume_phase`) with a
 `workspace.monitor_runtime_restart_exhausted` event carrying the count and the last
