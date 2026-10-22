@@ -53,6 +53,7 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _initial_review_grace_wall_started_value_from_datetime as _initial_review_grace_wall_started_value_from_datetime,
 )
+from awf.runtime.monitor_state_keys import _item_disposition_key
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_done_key as _non_check_reviewer_settle_done_key,
 )
@@ -366,6 +367,7 @@ def _clear_addressed_state_by_id(
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_agent_failed_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+    state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None
     )

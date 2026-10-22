@@ -137,3 +137,24 @@ def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime)
     if started_dt.tzinfo is None:
         started_dt = started_dt.replace(tzinfo=UTC)
     return _initial_review_grace_wall_started_value(started_dt.timestamp())
+
+
+def _item_disposition_key(item_id: str) -> str:
+    """Build state key holding a review item's disposition record (#1018).
+
+    The JSON sidecar records the disposition class, the agent's reason, the fix
+    commit(s), the tracking-issue URL and — once posted — the id of AWF's
+    in-thread disposition reply. A resolve is only ever issued after that reply,
+    so the record is both the reply's input and its audit evidence.
+    """
+    return f"__awf_item_disposition__:{item_id}"
+
+
+def _disposition_unverified_key(thread_id: str) -> str:
+    """Build state key flagging a thread the READY_TO_MERGE audit could not verify.
+
+    Set when a thread resolved by AWF's own identity carries no AWF disposition
+    marker (#1018). Only flagged threads can be acknowledged by an operator guide;
+    the flag clears once the thread carries a marker.
+    """
+    return f"__awf_disposition_unverified__:{thread_id}"

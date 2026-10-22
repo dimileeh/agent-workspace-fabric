@@ -1,0 +1,412 @@
+"""Durable, attributable review-thread dispositions (#1018).
+
+AWF never resolves a review thread silently. Before every resolve the monitor
+posts ONE concise reply inside the thread whose first line is a stable machine
+marker::
+
+    <!-- AWF:thread-disposition:v1 class=<class> thread=<thread id> -->
+
+followed by the disposition: the fix commit(s) for ``fixed``, the agent's own
+reason for ``false_positive`` / ``deferred`` (plus the tracking issue), the
+matched branch commit for ``fixed_branch_evidence`` and the guide operation for
+``operator_acknowledged``. The thread id binds the marker to its thread, so a
+copy pasted anywhere else is not evidence.
+
+This module is the pure half: the per-item record persisted in
+``MonitorState.threads_addressed_ids`` (``_item_disposition_key``), the checks
+that decide whether a reply can be posted at all, the reply renderer and the
+marker parser the READY_TO_MERGE gate uses. The I/O lives in
+``thread_disposition_reply`` (reply-before-resolve) and
+``thread_disposition_gate`` (cert / merge gate).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Literal, cast, get_args
+
+from awf.common.redaction import redact_secrets
+from awf.runtime.monitor_prompts import _redact_and_escape_markdown_inline
+from awf.runtime.monitor_state_keys import _disposition_unverified_key, _item_disposition_key
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
+    ItemCommitProvenance,
+    chain_from_state,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    MonitorVerdictResult,
+    VerdictResult,
+)
+
+# A FALSE POSITIVE / DEFER disposition has no reason to publish, so the thread
+# is parked ``needs_human`` instead of being resolved without one.
+THREAD_DISPOSITION_REASON_MISSING = "THREAD_DISPOSITION_REASON_MISSING"
+# A FIXED disposition has no fix commit (or a DEFER no tracking issue) to cite.
+THREAD_DISPOSITION_EVIDENCE_MISSING = "THREAD_DISPOSITION_EVIDENCE_MISSING"
+# The forge rejected the in-thread disposition reply; the thread stays open.
+THREAD_DISPOSITION_REPLY_FAILED = "THREAD_DISPOSITION_REPLY_FAILED"
+# READY_TO_MERGE / merge refused: AWF-resolved threads carry no disposition marker.
+REVIEW_THREAD_DISPOSITION_UNVERIFIED = "REVIEW_THREAD_DISPOSITION_UNVERIFIED"
+# The forge could not enumerate the PR's review threads for that verification.
+REVIEW_THREAD_AUDIT_UNAVAILABLE = "REVIEW_THREAD_AUDIT_UNAVAILABLE"
+
+DispositionClass = Literal[
+    "fixed",
+    "fixed_branch_evidence",
+    "false_positive",
+    "deferred",
+    "operator_acknowledged",
+]
+DISPOSITION_CLASSES: tuple[DispositionClass, ...] = get_args(DispositionClass)
+RESOLVED_BY_OTHERS = "resolved_by_others"
+
+_VERDICT_CLASS: dict[str, DispositionClass] = {
+    "fix_committed": "fixed",
+    "false_positive": "false_positive",
+    "defer": "deferred",
+}
+_MARKER = "<!-- AWF:thread-disposition:v1 class={cls} thread={thread} -->"
+_MARKER_RE = re.compile(
+    r"<!-- AWF:thread-disposition:v1 class=(?P<cls>[a-z_]+) thread=(?P<thread>\S+) -->"
+)
+_LABELS: dict[str, str] = {
+    "fixed": "fixed",
+    "fixed_branch_evidence": "fixed (branch evidence)",
+    "false_positive": "false positive",
+    "deferred": "deferred",
+    "operator_acknowledged": "operator acknowledged",
+    RESOLVED_BY_OTHERS: "resolved by others",
+}
+_PAYLOAD_VERSION = 1
+_UNSAFE_URL_CHARACTERS = frozenset('<>"`')
+_BLOCKER_LISTED_IDS = 10
+_BLOCKER_MAX_CHARS = 480
+
+
+@dataclass(frozen=True)
+class ThreadDisposition:
+    """What AWF publishes in a review thread before resolving it."""
+
+    item_id: str
+    disposition_class: DispositionClass
+    verdict: str | None
+    reason: str | None = None
+    commits: tuple[str, ...] = ()
+    commit_base: str | None = None
+    issue_url: str | None = None
+    source: str = "agent_verdict"
+    reply_comment_id: str | None = None
+
+    def as_payload(self) -> dict[str, object]:
+        """Return the JSON-safe record persisted in state and audit evidence."""
+        return {
+            "v": _PAYLOAD_VERSION,
+            "item_id": self.item_id,
+            "class": self.disposition_class,
+            "verdict": self.verdict,
+            "reason": self.reason,
+            "commits": list(self.commits),
+            "commit_base": self.commit_base,
+            "issue_url": self.issue_url,
+            "source": self.source,
+            "reply_comment_id": self.reply_comment_id,
+        }
+
+    @classmethod
+    def from_payload(cls, raw: object) -> ThreadDisposition | None:
+        """Decode a persisted record; anything malformed reads as "no disposition".
+
+        Failing closed matters: a missing record parks the thread instead of
+        resolving it, which is the safe direction.
+        """
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                return None
+        if not isinstance(raw, Mapping):
+            return None
+        item_id = _optional_text(raw.get("item_id"))
+        disposition_class = raw.get("class")
+        if item_id is None or disposition_class not in DISPOSITION_CLASSES:
+            return None
+        commits = raw.get("commits")
+        return cls(
+            item_id=item_id,
+            disposition_class=cast(DispositionClass, disposition_class),
+            verdict=_optional_text(raw.get("verdict")),
+            reason=_optional_text(raw.get("reason")),
+            commits=tuple(c for c in commits if isinstance(c, str) and c.strip())
+            if isinstance(commits, list)
+            else (),
+            commit_base=_optional_text(raw.get("commit_base")),
+            issue_url=_optional_text(raw.get("issue_url")),
+            source=_optional_text(raw.get("source")) or "agent_verdict",
+            reply_comment_id=_optional_text(raw.get("reply_comment_id")),
+        )
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def read_item_disposition(state: MonitorState, item_id: str) -> ThreadDisposition | None:
+    """Return the persisted disposition for ``item_id`` (``None`` when absent)."""
+    return ThreadDisposition.from_payload(
+        state.threads_addressed_ids.get(_item_disposition_key(item_id))
+    )
+
+
+def record_item_disposition(state: MonitorState, disposition: ThreadDisposition) -> None:
+    """Persist ``disposition`` under its item's reserved state key."""
+    state.mark_addressed(
+        _item_disposition_key(disposition.item_id),
+        json.dumps(disposition.as_payload(), sort_keys=True),
+    )
+
+
+def sync_item_disposition(
+    state: MonitorState,
+    item_id: str,
+    result: VerdictResult | MonitorVerdictResult,
+) -> None:
+    """Record (or clear) the disposition an item's latest verdict will publish.
+
+    Called at verdict time, before the result is narrowed to a bare verdict, so
+    the agent's FALSE POSITIVE / DEFER reason survives to the reply. FIXED cites
+    the item's own #935 provenance commit; a hosted run, which has no local
+    chain, cites the head the hosted agent pushed. A FIXED whose commit is not
+    known yet stays pending until :func:`attach_item_commits` runs before push.
+    Any other verdict clears the record so a stale disposition can never be
+    published for a re-triaged item.
+    """
+    from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
+
+    disposition_class = _VERDICT_CLASS.get(result.verdict)
+    if disposition_class is None:
+        state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
+        return
+    commits: tuple[str, ...] = ()
+    commit_base: str | None = None
+    if disposition_class == "fixed":
+        record = _latest_chain_record(chain_from_state(state), item_id)
+        if record is not None:
+            commits, commit_base = (record.head_sha,), record.item_start_head
+        elif state.hosted_terminal_head_advanced and state.last_push_sha:
+            commits = (state.last_push_sha,)
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=item_id,
+            disposition_class=disposition_class,
+            verdict=result.verdict,
+            reason=_sanitize_verdict_reason(result.reason),
+            commits=commits,
+            commit_base=commit_base,
+        ),
+    )
+
+
+def _latest_chain_record(
+    chain: Sequence[ItemCommitProvenance], item_id: str
+) -> ItemCommitProvenance | None:
+    for record in reversed(chain):
+        if record.item_id == item_id:
+            return record
+    return None
+
+
+def attach_item_commits(state: MonitorState, chain: Sequence[ItemCommitProvenance]) -> None:
+    """Fill every still-pending FIXED disposition from the commit-time chain.
+
+    Runs after push and before the published chain is cleared, so a FIXED item
+    whose HEAD probe was settled late still cites its own commit.
+    """
+    latest = {record.item_id: record for record in chain}  # later records win
+    for item_id, record in latest.items():
+        disposition = read_item_disposition(state, item_id)
+        if disposition is None or disposition.disposition_class != "fixed" or disposition.commits:
+            continue
+        record_item_disposition(
+            state,
+            replace(disposition, commits=(record.head_sha,), commit_base=record.item_start_head),
+        )
+
+
+def attach_issue_url(state: MonitorState, item_id: str, issue_url: str) -> None:
+    """Record the DEFER tracking issue on the item's disposition.
+
+    A legacy / in-flight defer recorded before #1018 has no disposition yet; it
+    is rebuilt from the agent's stashed defer reason so the reply can still cite
+    it (a reasonless one then parks rather than resolving).
+    """
+    from awf.runtime.pr_monitor_runner.helpers import _defer_reason_state_key
+    from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
+
+    disposition = read_item_disposition(state, item_id)
+    if disposition is None or disposition.disposition_class != "deferred":
+        disposition = ThreadDisposition(
+            item_id=item_id,
+            disposition_class="deferred",
+            verdict="defer",
+            reason=_sanitize_verdict_reason(
+                state.threads_addressed_ids.get(_defer_reason_state_key(item_id))
+            ),
+            source="legacy_defer",
+        )
+    record_item_disposition(state, replace(disposition, issue_url=issue_url))
+
+
+def copy_item_disposition(state: MonitorState, *, from_id: str, to_id: str) -> None:
+    """Copy a comment-keyed disposition onto the thread its verdict is promoted to."""
+    source = read_item_disposition(state, from_id)
+    if source is None:
+        return
+    record_item_disposition(state, replace(source, item_id=to_id, reply_comment_id=None))
+
+
+def disposition_problem(disposition: ThreadDisposition | None, verdict: str | None) -> str | None:
+    """Return the park reason code when ``disposition`` cannot answer ``verdict``.
+
+    ``None`` means the reply can be posted. Missing means: no record, a record for
+    a different verdict, FALSE POSITIVE / DEFER without a reason, FIXED without a
+    commit, or DEFER without a tracking issue.
+    """
+    expected = _VERDICT_CLASS.get(verdict or "")
+    missing = (
+        THREAD_DISPOSITION_EVIDENCE_MISSING
+        if verdict == "fix_committed"
+        else THREAD_DISPOSITION_REASON_MISSING
+    )
+    if disposition is None or expected is None or disposition.verdict != verdict:
+        return missing
+    if expected == "fixed":
+        if disposition.disposition_class not in ("fixed", "fixed_branch_evidence"):
+            return missing
+        return None if disposition.commits else THREAD_DISPOSITION_EVIDENCE_MISSING
+    if disposition.disposition_class != expected:
+        return missing
+    if not disposition.reason:
+        return THREAD_DISPOSITION_REASON_MISSING
+    if expected == "deferred" and not disposition.issue_url:
+        return THREAD_DISPOSITION_EVIDENCE_MISSING
+    return None
+
+
+def render_disposition_reply(disposition: ThreadDisposition) -> str:
+    """Render the two-line, mention-free, marker-carrying disposition reply."""
+    marker = _MARKER.format(cls=disposition.disposition_class, thread=disposition.item_id)
+    reason = _redact_and_escape_markdown_inline(disposition.reason) if disposition.reason else ""
+    commits = ", ".join(_redact_and_escape_markdown_inline(sha) for sha in disposition.commits)
+    commit_noun = "commit" if len(disposition.commits) == 1 else "commits"
+    label = _LABELS[disposition.disposition_class]
+    if disposition.disposition_class == "fixed":
+        line = f"**AWF disposition: {label}** in {commit_noun} {commits}." + (
+            f" {reason}" if reason else ""
+        )
+    elif disposition.disposition_class == "fixed_branch_evidence":
+        line = (
+            f"**AWF disposition: {label}.** The branch already contains matching fix "
+            f"{commit_noun} {commits}."
+        )
+    elif disposition.disposition_class == "deferred":
+        line = (
+            f"**AWF disposition: {label}.** Reason: {reason} "
+            f"Tracked in {_safe_url(disposition.issue_url)}."
+        )
+    elif disposition.disposition_class == "operator_acknowledged":
+        line = f"**AWF disposition: {label}.** {reason}"
+    else:
+        line = f"**AWF disposition: {label}.** Reason: {reason}"
+    return f"{marker}\n{line}"
+
+
+def _safe_url(url: str | None) -> str:
+    """Publish only a plain https link with no mention or markup-breaking text."""
+    candidate = redact_secrets(url or "").strip()
+    if (
+        not candidate.startswith("https://")
+        or any(ch.isspace() for ch in candidate)
+        or _UNSAFE_URL_CHARACTERS.intersection(candidate)
+    ):
+        return "(issue link unavailable)"
+    return candidate.replace("@", "%40")
+
+
+def disposition_marker_class(bodies: Sequence[str], *, thread_id: str) -> DispositionClass | None:
+    """Return the class of the first valid AWF marker naming ``thread_id``.
+
+    A marker naming another thread, or carrying an unknown class, is no evidence.
+    Callers pass only comments AWF's own identity authored.
+    """
+    for body in bodies:
+        for match in _MARKER_RE.finditer(body):
+            if match.group("thread") == thread_id and match.group("cls") in DISPOSITION_CLASSES:
+                return cast(DispositionClass, match.group("cls"))
+    return None
+
+
+def disposition_count_rows(counts: Mapping[str, int]) -> tuple[tuple[str, int], ...]:
+    """Cert line-1 rows: every disposition class in order, then others' resolutions."""
+    return tuple(
+        (_LABELS[key], int(counts.get(key, 0)))
+        for key in (*DISPOSITION_CLASSES, RESOLVED_BY_OTHERS)
+    )
+
+
+def acknowledge_unverified_threads(
+    state: MonitorState,
+    thread_ids: Sequence[str],
+    *,
+    operation_id: str | None,
+) -> tuple[str, ...]:
+    """Record an operator acknowledgement for every *flagged* thread in ``thread_ids``.
+
+    Only threads the disposition gate flagged can be acknowledged; naming any
+    other thread in a guide records nothing. The gate posts the acknowledgement
+    reply (with its marker) into each thread on its next run.
+    """
+    reason = "An AWF operator guide acknowledged this resolution" + (
+        f" (operation {operation_id})" if operation_id else ""
+    )
+    acknowledged: list[str] = []
+    for thread_id in dict.fromkeys(thread_ids):
+        flag_key = _disposition_unverified_key(thread_id)
+        if not state.threads_addressed_ids.get(flag_key):
+            continue
+        record_item_disposition(
+            state,
+            ThreadDisposition(
+                item_id=thread_id,
+                disposition_class="operator_acknowledged",
+                verdict=None,
+                reason=reason,
+                source="operator_guide",
+            ),
+        )
+        state.threads_addressed_ids.pop(flag_key, None)
+        acknowledged.append(thread_id)
+    return tuple(acknowledged)
+
+
+def unverified_blocker_message(thread_ids: Sequence[str]) -> str:
+    """Reason-coded NotifyHuman text listing the unverified thread ids (bounded)."""
+    head = (
+        f"{REVIEW_THREAD_DISPOSITION_UNVERIFIED}: {len(thread_ids)} review thread(s) "
+        "resolved by AWF's identity carry no AWF disposition reply: "
+    )
+    tail = "; guide the workspace naming each thread id to acknowledge it"
+    listed: list[str] = []
+    for thread_id in thread_ids[:_BLOCKER_LISTED_IDS]:
+        candidate = ", ".join([*listed, thread_id])
+        if len(head) + len(candidate) + len(tail) + len(" (+NNNN more)") > _BLOCKER_MAX_CHARS:
+            break
+        listed.append(thread_id)
+    remaining = len(thread_ids) - len(listed)
+    more = f" (+{remaining} more)" if remaining else ""
+    return f"{head}{', '.join(listed)}{more}{tail}"
