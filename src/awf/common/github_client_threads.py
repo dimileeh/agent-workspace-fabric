@@ -145,11 +145,13 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
     superseded = 0
     latest_edit: datetime | None = None
     for comment in comment_nodes:  # oldest first
+        # AWF never edits its replies, so any edit (the shared operator identity's
+        # own follow-up included) is reworded feedback.
+        edited_at = _parse_github_datetime(comment.get("lastEditedAt"))
+        if edited_at is not None and (latest_edit is None or edited_at > latest_edit):
+            latest_edit = edited_at
         if comment.get("viewerDidAuthor") is not True:
             superseded = len(viewer_bodies)  # newer feedback outdates earlier replies
-            edited_at = _parse_github_datetime(comment.get("lastEditedAt"))
-            if edited_at is not None and (latest_edit is None or edited_at > latest_edit):
-                latest_edit = edited_at
         elif isinstance(body := comment.get("body"), str):
             viewer_bodies.append(body)
             viewer_posted_at.append(_parse_github_datetime(comment.get("createdAt")))

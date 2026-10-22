@@ -311,6 +311,45 @@ async def test_audit_supersedes_a_reply_posted_before_feedback_was_edited() -> N
     assert "createdAt" in query and "lastEditedAt" in query
 
 
+async def test_audit_supersedes_a_reply_posted_before_the_shared_identity_edited_feedback() -> None:
+    # AWF can run as the operator's own account and never edits its own replies, so
+    # an edited viewer comment is the operator rewording their follow-up: a reply
+    # posted before that edit answered the old text, one posted after it stands.
+    fake = FakeCommandRunner()
+    thread = _audit_thread(
+        "PRRT_test_a",
+        comments=[
+            {
+                "body": "P1: crash on None",
+                "viewerDidAuthor": False,
+                "createdAt": "2026-10-22T10:00:00Z",
+            },
+            {
+                "body": "also handle the empty list — and None keys",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T10:30:00Z",
+                "lastEditedAt": "2026-10-22T12:00:00Z",
+            },
+            {
+                "body": "<!-- stale disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T11:00:00Z",
+            },
+            {
+                "body": "<!-- disposition -->",
+                "viewerDidAuthor": True,
+                "createdAt": "2026-10-22T13:00:00Z",
+            },
+        ],
+    )
+    fake.queue_result(stdout=_audit_page([thread], cursor=None))
+
+    audited = (await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)).threads
+
+    assert audited[0].superseded_viewer_comments == 2
+    assert audited[0].current_viewer_comment_bodies == ("<!-- disposition -->",)
+
+
 async def test_audit_keeps_a_reply_posted_after_the_feedback_edit() -> None:
     fake = FakeCommandRunner()
     thread = _audit_thread(

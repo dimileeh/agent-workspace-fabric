@@ -16,7 +16,7 @@ class AuditedReviewThread:
     ``viewer_comment_bodies`` holds the raw markdown of comments the token's own
     identity authored (only those can carry AWF's disposition marker), oldest first.
     The first ``superseded_viewer_comments`` of them predate the thread's newest
-    comment by anyone else (or the newest edit to one), so they answered earlier
+    comment by anyone else (or the newest edit to any comment), so they answered earlier
     feedback, not the current one.
     ``conversation_digest`` fingerprints every comment (author side and body, in
     order), so a new or edited comment shows up as a changed conversation.
