@@ -564,6 +564,35 @@ async def test_gate_bitbucket_unsupported_keeps_cert_text(
     assert "AWF dispositions" not in gh.comments[0]
 
 
+async def test_audit_outage_after_ready_cert_at_head_is_log_only(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Once READY_TO_MERGE is posted for a head, an audit outage there only logs.
+
+    The cert was earned on a complete audit at this head. A later poll that cannot
+    re-enumerate the threads must not contradict it with a blocker comment or move
+    the workspace's attention; it waits and re-polls.
+    """
+    gh = _AuditForge(FakeCommandRunner())
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    state = MonitorState()
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    assert len(gh.comments) == 1 and "is ready to merge" in gh.comments[0]
+    attention = await _attention(factory, workspace_id)
+    slept = len(runner._deps.sleep.calls)
+
+    gh.error = GitHubClientError(
+        operation="gh api graphql", returncode=1, stderr="GraphQL: Could not resolve to a node"
+    )
+    terminal = await _execute(runner, workspace_id, NotifyHuman(), state)
+
+    assert terminal is False
+    assert len(gh.comments) == 1  # no REVIEW_THREAD_AUDIT_UNAVAILABLE comment
+    assert await _attention(factory, workspace_id) == attention
+    assert len(runner._deps.sleep.calls) == slept + 1  # one poll interval, no hot loop
+
+
 async def test_audit_unavailable_notifies_once_across_polls_with_varying_errors(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

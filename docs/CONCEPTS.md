@@ -451,7 +451,9 @@ or bot's disposition and never block. A failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
 ids (never a workspace failure); a failed enumeration is
 `REVIEW_THREAD_AUDIT_UNAVAILABLE`, whose public text stays stable across an
-outage (the raw forge error goes to the log and one audit event per outage). The certificate's first gate line shows
+outage (the raw forge error goes to the log and one audit event per outage).
+Once READY_TO_MERGE has been posted for a head, an outage on a later poll at
+that same head is log-only: the cert stands and the monitor waits and re-polls. The certificate's first gate line shows
 counts per disposition class and "resolved by others".
 
 An operator acknowledges flagged threads with the ordinary guide path

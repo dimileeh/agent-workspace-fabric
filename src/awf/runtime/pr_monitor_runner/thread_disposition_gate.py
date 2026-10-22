@@ -61,6 +61,7 @@ class DispositionGateResult:
     retry: bool = False  # transient audit fault: re-poll
     blocker: str | None = None  # NotifyHuman message (reason-coded)
     count_rows: tuple[tuple[str, int], ...] | None = None  # cert line 1; None = unsupported
+    audit_unavailable: bool = False  # ``blocker`` is REVIEW_THREAD_AUDIT_UNAVAILABLE
 
 
 async def review_thread_disposition_gate(
@@ -298,5 +299,6 @@ async def _audit_unavailable(
         blocker=(
             f"{REVIEW_THREAD_AUDIT_UNAVAILABLE}: AWF could not enumerate this PR's review "
             f"threads to verify thread dispositions ({summary})."
-        )
+        ),
+        audit_unavailable=True,
     )

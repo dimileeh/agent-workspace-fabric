@@ -34,8 +34,11 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_manual_ready_handoff,
     _non_check_reviewer_settle_decision,
     _non_check_reviewer_settle_wait_operation_context,
+    _notification_key,
     _notify_human_reason,
 )
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.thread_disposition import REVIEW_THREAD_AUDIT_UNAVAILABLE
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
 )
@@ -231,6 +234,18 @@ async def handle_notify_human_action(
         )
         if gate.retry:
             return False
+        if gate.audit_unavailable and _ready_cert_posted_at_head(state, status.head_sha):
+            # The cert at this head was earned on a complete audit; an outage on a
+            # later poll only logs and waits, never contradicts it publicly.
+            _log.warning(
+                "monitor.review_thread_audit_unavailable_after_ready_cert",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                head_sha=status.head_sha[:10],
+                reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+            )
+            await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
         if gate.blocker is not None:
             action = NotifyHuman(message=gate.blocker)
             manual_ready_handoff = False
@@ -356,3 +371,12 @@ async def handle_notify_human_action(
         },
     )
     return False
+
+
+def _ready_cert_posted_at_head(state: MonitorState, head_sha: str) -> bool:
+    """Whether a READY_TO_MERGE cert was already posted for ``head_sha``."""
+    cert_key = _notification_key(head_sha=head_sha, blocker_reason=None)
+    return any(
+        value == "notified" and (key == cert_key or key.startswith(f"{cert_key}:"))
+        for key, value in state.threads_addressed_ids.items()
+    )
