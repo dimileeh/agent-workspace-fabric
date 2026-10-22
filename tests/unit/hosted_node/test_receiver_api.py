@@ -127,6 +127,32 @@ async def test_exact_binding_and_revoke_before_install(hosted):
         assert response.status_code == 404
 
 
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("prior", ["absent", "installed", "revoked"])
+async def test_missing_receipt_status_preserves_no_receipt_and_revocation(hosted, expired, prior):
+    client, _, _ = hosted
+    binding = await prepare(hosted)
+    if prior == "installed":
+        response = await client.post(
+            "/v1/hosted-node/materials/install", json={**binding, "material": "YQ=="}
+        )
+        assert response.json()["status"] == "current"
+    elif prior == "revoked":
+        response = await client.post("/v1/hosted-node/materials/revoke", json=binding)
+        assert response.json()["status"] == "revoked"
+    missing = {**binding, "idempotency_key": "never-received"}
+    if expired:
+        missing["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    response = await client.post("/v1/hosted-node/materials/status", json=missing)
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "revoked" if prior == "revoked" else "not_accepted",
+        "reason": "GRANT_REVOKED" if prior == "revoked" else "NO_RECEIPT",
+        "receipt_id": None,
+        "revision": binding["revision"],
+    }
+
+
 async def test_lost_response_reconciles_committed_receipt(hosted, monkeypatch):
     client, receiver, _ = hosted
     binding = await prepare(hosted)

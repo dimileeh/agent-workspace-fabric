@@ -306,14 +306,11 @@ class Receiver:
             result = {"receipt_id": slot, "revision": value.revision}
             if grant and grant.revoked:
                 return MaterialStatus(**result, status="revoked", reason="GRANT_REVOKED")
-            if value.expires_at <= datetime.now(UTC) or (
-                row is not None and row.state == "expired"
-            ):
-                if row is not None:
-                    row.state = "expired"
-                return MaterialStatus(**result, status="expired", reason="EXPIRY")
             if row is None:
                 return MaterialStatus(**result, status="not_accepted", reason="NO_RECEIPT")
+            if value.expires_at <= datetime.now(UTC) or row.state == "expired":
+                row.state = "expired"
+                return MaterialStatus(**result, status="expired", reason="EXPIRY")
             if row.state != "installed":
                 return MaterialStatus(
                     **result, status="unavailable", reason="INSTALLATION_UNCERTAIN"
