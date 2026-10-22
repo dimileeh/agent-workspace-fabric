@@ -1014,6 +1014,36 @@ def test_an_earlier_plain_except_handler_still_evaluates_its_type() -> None:
 
 
 @pytest.mark.unit
+def test_no_except_handler_type_runs_before_a_try_else_anchor() -> None:
+    """A ``try`` / ``else`` runs only when the ``try`` body raised nothing.
+
+    No handler was matched, so no handler's type expression was evaluated and
+    a ``:=`` there has not bound ``validate`` before ``result = validate()``
+    runs — for ``except`` and ``except*`` alike (PRRT_kwDOSJAM6s6vRFRc). A
+    ``finally`` anchor may still follow any handler, so it keeps them.
+    """
+    try_else = (
+        "class C:\n"
+        "    try:\n"
+        "        before = 1\n"
+        "    except (validate := ValueError) as caught:\n"
+        "        skipped = 1\n"
+        "    else:\n"
+        "        result = validate()\n"
+    )
+    try_star_else = try_else.replace("except (", "except* (")
+    try_finally = try_else.replace("    else:\n", "    finally:\n")
+
+    assert cross_file._locally_rebound_names_at_line(try_else, 7, path=_CALLER) == frozenset(
+        {"before", "result"}
+    )
+    assert cross_file._locally_rebound_names_at_line(try_star_else, 7, path=_CALLER) == frozenset(
+        {"before", "result"}
+    )
+    assert "validate" in cross_file._locally_rebound_names_at_line(try_finally, 7, path=_CALLER)
+
+
+@pytest.mark.unit
 def test_a_compound_header_target_binds_only_after_its_expression_runs() -> None:
     """A ``with`` / ``for`` / ``except`` target is bound after its header's expression.
 

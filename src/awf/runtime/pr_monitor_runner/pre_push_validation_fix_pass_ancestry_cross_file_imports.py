@@ -651,7 +651,9 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
     whose ``else`` holds the anchor drops its body, and in a plain ``try`` an
     ``except`` handler before the one holding the anchor drops its body and
     ``as`` name but keeps its type expression, which matching evaluated — the
-    ``try`` body may have run part way first, so it is kept. ``finally`` may
+    ``try`` body may have run part way first, so it is kept. An ``else``
+    holding the anchor runs only when nothing was raised, so no handler — not
+    even its type expression — has run (PRRT_kwDOSJAM6s6vRFRc). ``finally`` may
     follow any handler, and ``except*`` handlers are not exclusive at all —
     one exception group may run each in turn — so there every handler up to
     the anchor is kept whole (PRRT_kwDOSJAM6s6vQAB7). A ``case`` below the
@@ -686,10 +688,12 @@ def _compound_through_line(statement: ast.stmt, line: int, *, first_pass: bool) 
     if isinstance(trimmed, ast.If) and _arm_holds_line(trimmed.orelse, line):
         trimmed.body = []
     if isinstance(trimmed, (ast.Try, ast.TryStar)):
-        exclusive = type(trimmed) is ast.Try and not _arm_holds_line(trimmed.finalbody, line)
+        in_finally = _arm_holds_line(trimmed.finalbody, line)
+        in_else = not in_finally and _arm_holds_line(trimmed.orelse, line)
+        exclusive = type(trimmed) is ast.Try and not in_finally
         handlers = []
         for handler in trimmed.handlers:
-            if handler.lineno > line:
+            if in_else or handler.lineno > line:
                 continue
             handler = copy.copy(handler)
             if exclusive and line > (handler.end_lineno or handler.lineno):
