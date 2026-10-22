@@ -108,6 +108,10 @@ _companions_with_set_env_secrets_for_resume = (
 _companions_with_stale_optional_env_secret_targets_for_resume = (
     _companion_env._companions_with_stale_optional_env_secret_targets_for_resume
 )
+_pending_companion_recreates_for_resume = _companion_env._pending_companion_recreates_for_resume
+_clear_pending_companion_recreates_for_resume = (
+    _companion_env._clear_pending_companion_recreates_for_resume
+)
 CompanionEnvSecretPrecheckError = _companion_env.CompanionEnvSecretPrecheckError
 _precheck_required_companion_env_secrets_for_resume = (
     _companion_env._precheck_required_companion_env_secrets_for_resume

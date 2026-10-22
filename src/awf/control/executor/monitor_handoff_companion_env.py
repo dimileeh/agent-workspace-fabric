@@ -297,7 +297,20 @@ def _refresh_optional_companion_env_secrets_for_resume(
         )
     )
 
+    # Record the pending recreate before compose.yml drops the evidence: once a
+    # target is omitted, only this marker tells a later resume that a companion
+    # whose recreate failed still runs with the old env.
+    pending = set(
+        _pending_companion_recreates_for_resume(
+            workspace_id=workspace_id, compose_file=compose_file
+        )
+    )
     try:
+        _atomic_write_text(
+            _pending_companion_recreates_path(compose_file),
+            "".join(f"{name}\n" for name in sorted(pending | set(rewritten))),
+            encoding="utf-8",
+        )
         _atomic_write_text(
             compose_file,
             _safe_dump_compose_payload_for_resume(payload),
@@ -336,6 +349,43 @@ def _refresh_optional_companion_env_secrets_for_resume(
             restored_count=restored_count,
         )
     return rewritten
+
+
+def _pending_companion_recreates_path(compose_file: Path) -> Path:
+    return compose_file.with_name(f".{compose_file.name}.pending-recreate")
+
+
+def _pending_companion_recreates_for_resume(
+    *, workspace_id: str, compose_file: Path
+) -> tuple[str, ...]:
+    """Return companions whose env the refresh rewrote but no resume has recreated yet."""
+    try:
+        text = _pending_companion_recreates_path(compose_file).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_pending_recreate_read_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return ()
+    return tuple(sorted({line.strip() for line in text.splitlines() if line.strip()}))
+
+
+def _clear_pending_companion_recreates_for_resume(*, workspace_id: str, compose_file: Path) -> None:
+    """Drop the marker once the resume recreated the pending companions.
+
+    A marker that cannot be removed only makes the next resume recreate them again.
+    """
+    try:
+        _pending_companion_recreates_path(compose_file).unlink(missing_ok=True)
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_pending_recreate_clear_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
 
 
 def _service_environments(payload: object) -> dict[str, object]:

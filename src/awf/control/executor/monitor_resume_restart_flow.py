@@ -61,10 +61,14 @@ async def _restart_compose_runtime_for_monitor_resume(
         # every companion with a set env secret is recreated to pick it up.
         # A removed optional source is recreated only while compose.yml still
         # carries it (the refresh could not persist the removal), so
-        # ``${SOURCE:-}`` clears the revoked value.
+        # ``${SOURCE:-}`` clears the revoked value, or while a persisted rewrite
+        # is still pending because an earlier recreate failed.
         secret_companions = {
             name
             for name in (
+                *_monitor_handoff._pending_companion_recreates_for_resume(
+                    workspace_id=workspace_id, compose_file=compose_file
+                ),
                 *_monitor_handoff._companions_with_set_env_secrets_for_resume(
                     companion_specs=companion_specs,
                     environ=os.environ,
@@ -96,6 +100,10 @@ async def _restart_compose_runtime_for_monitor_resume(
             recreate_services=tuple(
                 sorted(set(rewritten_services) | secret_companions | set(unsettled_services))
             ),
+        )
+        # The companion recreate runs first and raises on failure, so it succeeded.
+        _monitor_handoff._clear_pending_companion_recreates_for_resume(
+            workspace_id=workspace_id, compose_file=compose_file
         )
         if tolerated_error is not None:
             await self._record_monitor_runtime_restart_failed(

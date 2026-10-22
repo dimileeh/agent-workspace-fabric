@@ -18,6 +18,7 @@ from awf.adapters import registry as _registry  # noqa: F401 — populate regist
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import monitor_handoff, monitor_resume_runtime
 from awf.node.companion_services import WorkspaceCompanionSpec, companion_specs_from_task_policy
+from awf.node.compose_manager import ComposeOperationError
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
@@ -425,3 +426,109 @@ def test_companions_still_carrying_an_unset_optional_target_are_reported(
     unparsable = tmp_path / "unparsable.yml"
     unparsable.write_text("services: [\n", encoding="utf-8")
     assert _stale(unparsable, {}) == ()
+
+
+class _CompanionRecreateFailsOnce(_RecordingCompose):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def ensure_project_up(self, **kwargs: Any) -> None:
+        await super().ensure_project_up(**kwargs)
+        companion = kwargs.get("services") != ("agent",)
+        if kwargs.get("force_recreate") and companion and not self.failed:
+            self.failed = True
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr="recreate failed",
+                reason_code="COMPOSE_UP_FAILED",
+            )
+
+
+@pytest.mark.unit
+async def test_resume_retries_a_companion_recreate_that_failed_after_its_env_was_rewritten(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(_COMPOSE, encoding="utf-8")
+    ws_id = await _seed_monitoring_pr(
+        factory,
+        compose_file_path=str(compose_file),
+        task_policy={
+            "companions": [
+                {
+                    "name": "backend",
+                    "repo_url": "git@github.com:x/backend.git",
+                    "environment_secrets": {
+                        "OPTIONAL_TOKEN": {
+                            "provider": "env",
+                            "kind": "env",
+                            "value_from": "OPTIONAL_TOKEN_SOURCE",
+                            "required": False,
+                        }
+                    },
+                }
+            ]
+        },
+    )
+    monkeypatch.delenv("OPTIONAL_TOKEN_SOURCE", raising=False)
+    compose = _CompanionRecreateFailsOnce()
+
+    def _executor() -> Any:
+        return _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=compose,
+            pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+        )
+
+    # The refresh persists the omission, then the companion recreate fails.
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is None
+    assert "OPTIONAL_TOKEN" not in compose_file.read_text(encoding="utf-8")
+
+    # A replacement executor still recreates ``backend``: compose.yml no longer
+    # shows the omission, but the running container keeps the revoked value.
+    compose.calls.clear()
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
+
+    # Once recreated, the omitted target is the steady state again.
+    compose.calls.clear()
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("agent",)]
+
+
+@pytest.mark.unit
+def test_pending_companion_recreates_tolerate_an_unreadable_or_stuck_marker(
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    marker = monitor_handoff._companion_env._pending_companion_recreates_path(compose_file)
+    assert (
+        monitor_handoff._pending_companion_recreates_for_resume(
+            workspace_id="ws", compose_file=compose_file
+        )
+        == ()
+    )
+
+    # An unreadable marker cannot name the services, so it reports none.
+    marker.mkdir()
+    assert (
+        monitor_handoff._pending_companion_recreates_for_resume(
+            workspace_id="ws", compose_file=compose_file
+        )
+        == ()
+    )
+    # A marker that cannot be removed is kept, so the next resume recreates again.
+    monitor_handoff._clear_pending_companion_recreates_for_resume(
+        workspace_id="ws", compose_file=compose_file
+    )
+    assert marker.is_dir()
