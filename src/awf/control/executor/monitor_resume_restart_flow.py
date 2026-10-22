@@ -59,11 +59,19 @@ async def _restart_compose_runtime_for_monitor_resume(
         requirements = _monitor_handoff._compose_runtime_requirements_from_file(compose_file)
         # A rotated secret leaves the ``${SOURCE}`` placeholder unchanged, so
         # every companion with a set env secret is recreated to pick it up.
+        # A removed optional source is recreated too: if the refresh could not
+        # persist its removal, ``${SOURCE:-}`` still clears the revoked value.
         secret_companions = {
             name
-            for name in _monitor_handoff._companions_with_set_env_secrets_for_resume(
-                companion_specs=companion_specs,
-                environ=os.environ,
+            for name in (
+                *_monitor_handoff._companions_with_set_env_secrets_for_resume(
+                    companion_specs=companion_specs,
+                    environ=os.environ,
+                ),
+                *_monitor_handoff._missing_optional_companion_env_secret_targets(
+                    companion_specs=companion_specs,
+                    environ=os.environ,
+                ),
             )
             if requirements is None or name in requirements.service_names
         }
