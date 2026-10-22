@@ -197,6 +197,22 @@ async def test_a_fix_to_a_directly_exported_arrow_is_evidence(module: str) -> No
 
 
 @pytest.mark.unit
+async def test_a_fix_to_an_overloaded_implementation_is_evidence() -> None:
+    """Body-less overload signatures are not heads of their own (PRRT_kwDOSJAM6s6vL0nj)."""
+    module = (
+        "export function record(value: string): number;\n"
+        "export function record<T extends number>(value: T): Promise<T>;\n"
+        "export function record(value: unknown) {\n  return value + 1;\n}\n"
+    )
+    probe = _EsProbe(
+        files={_CALLER: _caller("import { record } from './telemetry';"), _TELEMETRY: module},
+        diffs={_TELEMETRY: _body_edit(_TELEMETRY, line=4)},
+    )
+
+    assert await _accepted(probe)
+
+
+@pytest.mark.unit
 async def test_each_callee_on_the_line_is_held_to_its_own_definition() -> None:
     """Two callees from one module: the edited one carries the evidence."""
     caller = _caller("import { flush, record } from './telemetry';", "flush(value) + record(value)")

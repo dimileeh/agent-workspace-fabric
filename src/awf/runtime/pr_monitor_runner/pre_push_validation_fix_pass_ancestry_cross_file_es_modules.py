@@ -996,9 +996,30 @@ def _es_definition_heads(tokens: tuple[_EsToken, ...], name: str) -> list[_EsTok
         before = _token_at(tokens, index - 1)
         if _is(before, "punct", "*") and _is(_token_at(tokens, index - 2), "ident", "function"):
             before = _token_at(tokens, index - 2)
+        if _ident_value(before) == "function" and _es_overload_signature(tokens, index):
+            continue
         if _ident_value(before) in _DECLARING_KEYWORDS or _es_signature_head(tokens, index):
             heads.append(token)
     return heads
+
+
+def _es_overload_signature(tokens: tuple[_EsToken, ...], index: int) -> bool:
+    """True when the ``function`` named at ``index`` is a body-less TS signature.
+
+    An overload (``function record(v: string): void;``) ends at a ``;`` before
+    any ``{`` at its own depth; parameters nest deeper and a return type holds
+    no ``;`` there, so an implementation reaches its body's ``{`` first. A
+    ``{`` in type parameters or an object return type also reads as a body,
+    and a signature ending without a ``;`` keeps its head too; each only
+    fails closed.
+    """
+    depth = tokens[index].depth
+    for token in tokens[index + 1 :]:
+        if token.depth < depth:
+            break
+        if token.depth == depth and _is(token, "punct") and token.value in ("{", ";"):
+            return token.value == ";"
+    return False
 
 
 def _es_chained_member_refs(tokens: tuple[_EsToken, ...]) -> frozenset[tuple[str, str]]:

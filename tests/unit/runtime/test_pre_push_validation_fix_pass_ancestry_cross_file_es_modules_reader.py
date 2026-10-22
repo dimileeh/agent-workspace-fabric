@@ -779,3 +779,28 @@ def test_definition_heads_cover_declarations_and_signatures_at_any_depth() -> No
     assert [(token.line, token.depth) for token in heads] == [(1, 0), (6, 1), (9, 1), (10, 0)]
     assert es._es_definition_heads(_tokens(text), "gen")[0].line == 4
     assert es._es_definition_heads(_tokens(text), "missing") == []
+
+
+@pytest.mark.unit
+def test_definition_heads_skip_body_less_function_overload_signatures() -> None:
+    text = (
+        "export function record(v: string): void;\n"
+        "declare function record<T extends { a: 1 }>(v: T): void;\n"
+        "export function record(v: number): { a: number; b: number } {\n"
+        "  return { a: v, b: v };\n"
+        "}\n"
+        "interface Sink {\n"
+        "  record(v: string): void;\n"
+        "}\n"
+    )
+    heads = es._es_definition_heads(_tokens(text), "record")
+
+    # A ``{`` before the ``;`` keeps the head, so the object-typed overload on
+    # line 2 stays and the check still fails it closed; method signatures stay too.
+    assert [(token.line, token.depth) for token in heads] == [(2, 0), (3, 0), (7, 1)]
+    # A signature without its ``;`` — closing its block or ending the file — stays.
+    unterminated = "if (ok) { function record(v: string): void }\nfunction record(v: number): void"
+    assert [token.line for token in es._es_definition_heads(_tokens(unterminated), "record")] == [
+        1,
+        2,
+    ]
