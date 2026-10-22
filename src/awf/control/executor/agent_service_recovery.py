@@ -22,21 +22,29 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
+from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.git_ops import GIT_AGENT_WRITABILITY_FAILED_REASON_CODE
+from awf.control.executor.missing_head_recovery import recover_missing_head_after_cleanup_failure
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.types import _PlanningRunFailure
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import companion_specs_from_task_policy
 from awf.node.compose_manager import ComposeOperationError
+from awf.node.git_manager import verify_head_object_exists
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
+from awf.runtime.ownership import EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME
 from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _AGENT_SERVICE_TIMEOUT_REASON_CODES = frozenset({AGENT_IDLE_TIMEOUT, AGENT_TIMEOUT})
 AGENT_SERVICE_RECOVERY_ABORTED = "AGENT_SERVICE_RECOVERY_ABORTED"
 _AGENT_SERVICE_RESTART_ATTEMPTS = 2
+_EXECUTOR_RECOVERY_TRIGGER = "executor_agent_service_recovery"
+_SETUP_REPLAY_CLEANUP_FAILURE_STAGE = "runtime_setup_replay_cleanup_failure"
 _BeforeMarkFailed = Callable[..., None | Awaitable[None]]
 _RecoveryCallbackResult = bool | str
 
@@ -325,6 +333,7 @@ async def _run_agent_callable_with_service_recovery_locked(
                 model=model,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                profile=profile,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
                 before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
@@ -375,6 +384,7 @@ async def _run_agent_callable_with_service_recovery_locked(
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                profile=profile,
                 execution_owner_id=execution_owner_id,
                 before_mark_failed=before_mark_failed,
                 before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
@@ -432,6 +442,7 @@ async def _run_agent_callable_with_service_recovery_locked(
                 service_healthy=service_healthy,
                 restart_attempts=restart_attempts,
                 compose_up_timeout_seconds=restart_compose_up_timeout_seconds,
+                profile=profile,
                 # A cleanup failure that followed a watchdog timeout masks it:
                 # the adapter tears the exec stack down before raising the
                 # agent's own error, so ``exc.reason_code`` is only
@@ -547,6 +558,7 @@ async def _restart_after_conformance_timeout_failure(
     model: str | None,
     restart_attempts: int,
     compose_up_timeout_seconds: int,
+    profile: WorkspaceProfile,
     execution_owner_id: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
     before_mark_failed_marks_workspace: bool = False,
@@ -588,6 +600,7 @@ async def _restart_after_conformance_timeout_failure(
         service_healthy=service_healthy,
         restart_attempts=restart_attempts,
         compose_up_timeout_seconds=compose_up_timeout_seconds,
+        profile=profile,
         source_reason_code=source_reason_code,
         execution_owner_id=execution_owner_id,
         before_mark_failed=before_mark_failed,
@@ -659,6 +672,7 @@ async def _restart_agent_service_or_mark_unhealthy(
     service_healthy: bool | None,
     restart_attempts: int,
     compose_up_timeout_seconds: int,
+    profile: WorkspaceProfile,
     source_reason_code: str | None = None,
     execution_owner_id: str | None = None,
     before_mark_failed: _BeforeMarkFailed | None = None,
@@ -695,6 +709,7 @@ async def _restart_agent_service_or_mark_unhealthy(
     ):
         return restart_attempts, False
     restart_attempts += 1
+    identity_before = await _runtime_setup_replay.capture_agent_container_identity(compose_project)
     try:
         await self._compose.ensure_project_up(
             project_name=compose_project,
@@ -733,7 +748,141 @@ async def _restart_agent_service_or_mark_unhealthy(
         owner_id=execution_owner_id,
     ):
         return restart_attempts, False
-    return restart_attempts, True
+    replayed = await _replay_setup_after_agent_service_restart(
+        self,
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        profile=profile,
+        identity_before=identity_before,
+        recovery_details={
+            "reason_code": AGENT_SERVICE_UNHEALTHY,
+            "source_reason_code": source_reason_code or exc.reason_code,
+            "service_healthy": service_healthy,
+            "restart_attempts": restart_attempts,
+        },
+        execution_owner_id=execution_owner_id,
+        before_mark_failed=before_mark_failed,
+        before_mark_failed_marks_workspace=before_mark_failed_marks_workspace,
+        expected_status=expected_status,
+        failure_from_status=failure_from_status,
+    )
+    return restart_attempts, replayed
+
+
+async def _replay_setup_after_agent_service_restart(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: WorkspaceProfile,
+    identity_before: _runtime_setup_replay.AgentIdentityObservation,
+    recovery_details: dict[str, Any],
+    execution_owner_id: str | None,
+    before_mark_failed: _BeforeMarkFailed | None,
+    before_mark_failed_marks_workspace: bool,
+    expected_status: WorkspaceStatus,
+    failure_from_status: WorkspaceStatus,
+) -> bool:
+    """Replay setup when the restart recreated the agent container (#787).
+
+    Returns ``True`` when the agent may be retried. A failed replay follows
+    ``_mark_agent_service_unhealthy``'s terminal convention with
+    ``RUNTIME_SETUP_REPLAY_FAILED`` and the agent is not retried.
+    """
+    identity_after = await _runtime_setup_replay.capture_agent_container_identity(compose_project)
+    verdict = _runtime_setup_replay.runtime_recreation_decision(identity_before, identity_after)
+    if verdict.decision is _runtime_setup_replay.RecreationDecision.unchanged:
+        return True
+    worktree_path = _executor_worktree_path(self, workspace_id)
+    if worktree_path is None:
+        outcome = _runtime_setup_replay.SetupReplayOutcome(
+            ok=False,
+            replayed=False,
+            reason_code=RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="runtime setup replay failed: workspace worktree path is unavailable",
+            details={"trigger": _EXECUTOR_RECOVERY_TRIGGER, "basis": verdict.basis},
+        )
+    else:
+        outcome = await _runtime_setup_replay.replay_setup_if_recreated(
+            session_factory=self._session_factory,
+            validation=self._validation,
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            worktree_path=worktree_path,
+            before=identity_before,
+            after=identity_after,
+            trigger=_EXECUTOR_RECOVERY_TRIGGER,
+            ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            recover_missing_head=partial(
+                _recover_head_after_setup_replay_cleanup_failure,
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                from_status=failure_from_status,
+            ),
+        )
+    if outcome.ok:
+        return True
+    if not await self._recheck_status(
+        workspace_id,
+        expected=expected_status,
+        action="agent_service_setup_replay_failed",
+        owner_id=execution_owner_id,
+    ):
+        return False
+    details = {**(outcome.details or {}), "agent_service_recovery": recovery_details}
+    if before_mark_failed is not None:
+        await _run_before_mark_failed(
+            before_mark_failed,
+            reason_code=outcome.reason_code,
+            details=details,
+        )
+        if before_mark_failed_marks_workspace:
+            return False
+    await self._mark_failed(
+        workspace_id=workspace_id,
+        from_status=failure_from_status,
+        failure_reason=outcome.failure_reason or FailureReason.infrastructure_failure,
+        message=outcome.message or "runtime setup replay failed",
+        reason_code=outcome.reason_code,
+        details=details,
+    )
+    return False
+
+
+async def _recover_head_after_setup_replay_cleanup_failure(
+    self: Any,
+    exc: ComposeExecCleanupError,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    from_status: WorkspaceStatus,
+) -> bool:
+    """Missing-HEAD recovery for a replay exec cleanup failure, as ``execution_flow`` does."""
+    async with self._session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:  # pragma: no cover - the status recheck ran just before
+            return False
+        base_commit = workspace.base_commit
+        branch_name = workspace.branch_name or f"awf/{workspace_id}"
+        task_tag = workspace.task_tag
+    return await recover_missing_head_after_cleanup_failure(
+        exc,
+        executor=self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        base_commit=base_commit,
+        branch_name=branch_name,
+        task_tag=task_tag,
+        stage=_SETUP_REPLAY_CLEANUP_FAILURE_STAGE,
+        verify_head_object_exists_fn=verify_head_object_exists,
+        from_status=from_status,
+    )
 
 
 async def _mark_agent_service_unhealthy(

@@ -18,8 +18,10 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_event_payload,
 )
 from awf.control.executor.metadata import _metadata_int
+from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.models import RUNTIME_TOOLCHAIN_UNAVAILABLE
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_RETRY,
@@ -130,6 +132,18 @@ async def _record_setup_dependency_network_events(
     workspace_id: str,
     result: ValidationResult,
 ) -> None:
+    await record_setup_dependency_network_events(
+        self._session_factory, workspace_id=workspace_id, result=result
+    )
+
+
+async def record_setup_dependency_network_events(
+    session_factory: Any,
+    *,
+    workspace_id: str,
+    result: ValidationResult,
+) -> None:
+    """Persist dependency-network retry/exhausted events carried by setup ``result``."""
     event_specs: list[tuple[str, str, dict[str, Any]]] = []
     commands = getattr(result, "commands", None)
     if not commands:
@@ -166,7 +180,7 @@ async def _record_setup_dependency_network_events(
     if not event_specs:
         return
 
-    async with self._session_factory() as session:
+    async with session_factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.get(workspace_id)
         if workspace is None:  # pragma: no cover - destroyed mid-flight
@@ -273,4 +287,44 @@ async def _record_runtime_toolchain_findings_safe(
             workspace_id=workspace_id,
             reason_code=getattr(exc, "reason_code", None),
             error=redact_secrets(str(exc))[:1000],
+        )
+
+
+async def _record_monitor_runtime_restart_failed(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file_path: str,
+    error: ComposeOperationError,
+    event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
+) -> None:
+    """Persist an audit event when compose restart fails during monitor resume handoff."""
+    try:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+                return
+            await repo.add_event(
+                ws,
+                event_type="workspace.monitor_runtime_restart_failed",
+                reason_code=event_reason_code,
+                payload={
+                    "compose_project_name": compose_project,
+                    "compose_file_path": compose_file_path,
+                    "operation": error.operation,
+                    "returncode": error.returncode,
+                    "stderr": error.stderr[:1000],
+                    "reason_code": error.reason_code,
+                },
+            )
+            await session.commit()
+    except Exception:
+        _log.exception(
+            "executor.monitor_runtime_restart_failed_record_failed",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            compose_file_path=compose_file_path,
+            reason_code=error.reason_code,
         )

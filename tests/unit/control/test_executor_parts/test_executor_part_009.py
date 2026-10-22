@@ -389,6 +389,7 @@ async def test_restart_agent_service_returns_false_when_restart_failure_goes_sta
         service_healthy=False,
         restart_attempts=0,
         compose_up_timeout_seconds=30,
+        profile=WorkspaceProfile(name="test"),
     )
 
     assert (restart_attempts, restarted) == (1, False)
@@ -433,6 +434,7 @@ async def test_restart_agent_service_returns_false_when_recovery_status_goes_sta
         service_healthy=False,
         restart_attempts=0,
         compose_up_timeout_seconds=30,
+        profile=WorkspaceProfile(name="test"),
     )
 
     assert (restart_attempts, restarted) == (1, False)

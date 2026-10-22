@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -21,6 +22,7 @@ from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
 from awf.control.quality_gates import (
     QualityGateViolation,
@@ -52,6 +54,9 @@ from awf.runtime.ownership import (
 from awf.runtime.pr_monitor_runner.agent_service_recovery_timeout_salvage import (
     _masked_agent_timeout_reason_code,
     _record_timeout_rerun_floor,
+)
+from awf.runtime.pr_monitor_runner.agent_service_setup_replay import (
+    replay_setup_after_monitor_agent_service_restart,
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _HEAD_OBJECT_MISSING_RECOVERED_REASON,
@@ -1094,6 +1099,7 @@ async def _restart_monitor_agent_service_or_fail(
         self,
         workspace_id=workspace_id,
     )
+    identity_before = await _runtime_setup_replay.capture_agent_container_identity(compose_project)
     try:
         await manager.ensure_project_up(
             project_name=compose_project,
@@ -1127,7 +1133,58 @@ async def _restart_monitor_agent_service_or_fail(
         service_healthy=service_healthy,
         restart_attempts=restart_attempts,
     )
+    await replay_setup_after_monitor_agent_service_restart(
+        self,
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        identity_before=identity_before,
+        recovery_details=_agent_service_recovery_source_details(
+            source_reason_code=exc.reason_code,
+            service_healthy=service_healthy,
+            restart_attempts=restart_attempts,
+        ),
+        recover_missing_head=partial(
+            _recover_monitor_head_after_setup_replay_cleanup_failure,
+            self,
+            workspace_id=workspace_id,
+        ),
+    )
+    # Setup replay can outlast the monitor lease, so re-fence before the caller's
+    # timeout-floor bookkeeping can commit edits for a superseded monitor.
+    await _raise_if_monitor_agent_service_recovery_was_superseded(
+        self,
+        workspace_id=workspace_id,
+        source_reason_code=exc.reason_code,
+        service_healthy=service_healthy,
+        restart_attempts=restart_attempts,
+    )
     return restart_attempts
+
+
+async def _recover_monitor_head_after_setup_replay_cleanup_failure(
+    self: Any,
+    exc: ComposeExecCleanupError,
+    *,
+    workspace_id: str,
+) -> bool:
+    """Missing-HEAD recovery for a replay exec cleanup failure, anchored on the PR head."""
+    try:
+        await _repair_monitor_git_after_recoverable_agent_cleanup_failure(
+            self,
+            workspace_id=workspace_id,
+            operation_start_head=None,
+            command_evidence=None,
+        )
+    except (_MonitorHeadObjectMissingError, _MonitorMirrorHooksPathRepairFailedError) as error:
+        _log.warning(
+            "monitor.agent_service_setup_replay_head_recovery_failed",
+            workspace_id=workspace_id,
+            reason_code=error.reason_code,
+            cleanup_reason_code=exc.reason_code,
+        )
+        return False
+    return True
 
 
 async def _raise_if_monitor_agent_service_recovery_was_superseded(
