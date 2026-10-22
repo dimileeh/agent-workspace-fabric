@@ -327,7 +327,9 @@ When meaningful bot or human feedback appears, AWF:
 4. Re-polls GitHub.
 5. Repeats if more new comments arrived.
 6. Pushes the accumulated fix commits.
-7. Resolves fixed GitHub review threads.
+7. Posts one in-thread disposition reply per thread (machine marker, class, fix
+   commit / reason / issue link), then resolves it; a thread whose reply cannot
+   be posted stays open and is parked `needs_human`.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
@@ -381,10 +383,69 @@ its push. On the operator-hint path it is an ordinary parked hint with nothing
 to push. The rollback paths that need that baseline still refuse to park
 without it. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
-without a commit.
+without a commit, after the disposition reply carrying the agent's reason is posted.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
+
+### Review-thread dispositions
+
+AWF never resolves a review thread silently (#1018). Immediately before every
+resolve — fix-cycle FIXED / FALSE POSITIVE / DEFER, outdated-thread hygiene, and
+branch-evidence seeding alike — it posts exactly one concise reply inside the
+thread. Its first line is a stable machine marker that names the thread, so a
+copy pasted into another thread is no evidence:
+
+```text
+<!-- AWF:thread-disposition:v1 class=<class> thread=<thread id> -->
+```
+
+| Class | Reply carries |
+| --- | --- |
+| `fixed` | the item's fix commit sha(s) (its #935 provenance commit) |
+| `fixed_branch_evidence` | the branch commit an outdated thread's evidence grep matched |
+| `false_positive` | the agent's one-line reason (required by the prompt) |
+| `deferred` | the agent's reason and the tracking-issue link |
+| `operator_acknowledged` | a fixed acknowledgement sentence and the guide operation id |
+
+Reason text is redacted and markdown-escaped: replies never contain `@`, so no
+bot or human is summoned, and a pasted marker cannot be forged. The record
+(class, reason, commits, issue URL, reply comment id) is kept per item in
+monitor state and copied into the resolve audit event's evidence. The thread is
+resolved only after the reply succeeded; otherwise it stays open and is parked
+`needs_human` — the workspace keeps monitoring and pushed commits stay pushed:
+
+- `THREAD_DISPOSITION_REASON_MISSING` — FALSE POSITIVE / DEFER without a reason;
+- `THREAD_DISPOSITION_EVIDENCE_MISSING` — FIXED without a commit, DEFER without
+  an issue;
+- `THREAD_DISPOSITION_REPLY_FAILED` — the forge rejected the reply (never retried
+  blindly, since a retry could post twice).
+
+DEFER no longer posts a separate top-level PR comment: the in-thread reply is
+the explanation. Outdated hygiene persists a newly posted reply id before
+resolving, so a transient resolve retry never posts twice.
+
+Before READY_TO_MERGE (release monitors) and before merging (feature
+monitors), AWF re-enumerates every review thread with exhaustive pagination,
+failing closed on a truncated page. Every thread resolved by AWF's own forge
+identity must carry the marker in a comment that identity authored — the
+marker, not the login, is the evidence, because that identity can be the
+operator's own account. Threads resolved by any other login are that person's
+or bot's disposition and never block. A failing thread is
+`NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
+ids (never a workspace failure); a failed enumeration is
+`REVIEW_THREAD_AUDIT_UNAVAILABLE`. The certificate's first gate line shows
+counts per disposition class and "resolved by others".
+
+An operator acknowledges flagged threads with the ordinary guide path
+(`awf workspace guide <id> --directive 'Acknowledge <thread id>: …'`). Only
+flagged ids are acknowledged; AWF then posts an `operator_acknowledged` reply
+into each such thread — never the directive text — and the gate passes once
+every AWF resolution carries a marker.
+
+On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
+comment carrying the marker; the resolution audit is reported unsupported, so
+the Bitbucket certificate keeps its original text.
 
 ### Auto-merge (opt-in, default off)
 
