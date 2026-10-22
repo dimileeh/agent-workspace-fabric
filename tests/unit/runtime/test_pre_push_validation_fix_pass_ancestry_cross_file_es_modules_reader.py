@@ -580,6 +580,23 @@ def test_references_are_not_bindings(text: str) -> None:
         "(record!) = other;",
         "(record)! ??= other;",
         "record!!++;",
+        # TS assertions and their combinations stay the binding
+        # (PRRT_kwDOSJAM6s6vQACC), under every assignment operator.
+        "(record as any) = other;",
+        "(record satisfies Recorder) = other;",
+        "record as any = other;",
+        "(<any>record) = other;",
+        "(<Map<K, V>>record) = other;",
+        "((record as unknown as Recorder)!) += other;",
+        "((record!) as Recorder)! >>>= 1;",
+        "(record as Map<K, V>) ||= other;",
+        "record as Map<K, Set<V>>= other;",
+        "(record as () => void) = other;",
+        "(record as (value: number) => void) = other;",
+        "(record as any)++;",
+        "--(record satisfies Counter)!;",
+        "for ((record as any) of [other]) {}",
+        "for (record! in table) {}",
     ],
 )
 def test_assignment_targets_reassign_the_name(text: str) -> None:
@@ -601,6 +618,12 @@ def test_assignment_targets_reassign_the_name(text: str) -> None:
         "const a = [record];\nconst b = { record };",
         "function f() { const { record } = handlers; }",
         "for (const [record] of pairs) {}",
+        "const a = record as any;\nconst b = <any>record;",
+        "if ((record as any) == other || (record satisfies T) === other) {}",
+        "call(record as T, other = 1);",
+        "const c = (record as Recorder)(1);",
+        "other > record;\nif (a > record) {}\na;\nb > record;",
+        "const d = record as Recorder",
     ],
 )
 def test_references_are_not_assignments(text: str) -> None:

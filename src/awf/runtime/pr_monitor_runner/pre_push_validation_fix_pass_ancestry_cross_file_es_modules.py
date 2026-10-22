@@ -919,6 +919,90 @@ def _destructuring_target_names(tokens: tuple[_EsToken, ...], close_index: int) 
     }
 
 
+# Words a type asserted on an assignment target stops at: another assertion,
+# or the ``of`` / ``in`` of a ``for`` head.
+_TARGET_TYPE_STOP_WORDS = frozenset({"as", "in", "instanceof", "of", "satisfies"})
+_TARGET_TYPE_PUNCTUATORS = frozenset(
+    {".", "|", "&", "=>", "(", ")", "[", "]", "{", "}", "?", ":", "<", ">", ">>", ">>>"}
+)
+
+
+def _es_asserted_type_end(tokens: tuple[_EsToken, ...], index: int) -> tuple[int, bool]:
+    """The last index of the type after the ``as`` / ``satisfies`` at ``index``, and a split flag.
+
+    The type runs over every token nested deeper than the keyword and, at its
+    depth, over words, literals and type punctuators, with ``<`` / ``>``
+    counted so a ``,`` inside type arguments stays in it. The flag is True when
+    a ``>=`` / ``>>=`` / ``>>>=`` closes those arguments: its ``=`` then
+    assigns to the asserted target (``record as Set<Set<V>>= other``).
+    """
+    depth = tokens[index].depth
+    angle = 0
+    end = index
+    for offset in range(index + 1, len(tokens)):
+        token = tokens[offset]
+        if token.depth > depth:
+            end = offset
+            continue
+        if token.depth < depth:
+            break
+        if token.kind == "punct":
+            if angle and token.value in _SPLIT_ANGLE_PUNCTUATORS:
+                return end, True
+            if token.value not in _TARGET_TYPE_PUNCTUATORS and not (angle and token.value == ","):
+                break
+            angle = max(0, angle + _ANGLE_DELTA.get(token.value, 0))
+        elif token.kind == "ident" and token.value in _TARGET_TYPE_STOP_WORDS:
+            break
+        end = offset
+    return end, False
+
+
+def _es_angle_assertion_start(tokens: tuple[_EsToken, ...], close: int) -> int | None:
+    """The index of the ``<`` opening a ``<T>`` assertion whose ``>`` is at ``close``."""
+    depth = tokens[close].depth
+    count = 0
+    for offset in range(close, -1, -1):
+        token = tokens[offset]
+        if token.depth < depth or _is(token, "punct", ";"):
+            return None
+        if token.depth == depth and token.kind == "punct":
+            count -= _ANGLE_DELTA.get(token.value, 0)
+            if count == 0:
+                return offset
+    return None
+
+
+def _es_target_extent(tokens: tuple[_EsToken, ...], index: int) -> tuple[int, int, bool]:
+    """The widest ``(start, end)`` around ``tokens[index]`` that is still that binding, and a flag.
+
+    A TS non-null ``!``, an ``as`` / ``satisfies`` assertion, a prefix
+    ``<T>`` assertion and enclosing parentheses all leave the binding the
+    assignment target, in any combination (``((record as T)!) = other``,
+    PRRT_kwDOSJAM6s6vQACC). The flag is ``_es_asserted_type_end``'s split.
+    """
+    start = end = index
+    while True:
+        before, after = _token_at(tokens, start - 1), _token_at(tokens, end + 1)
+        opener = (
+            _es_angle_assertion_start(tokens, start - 1)
+            if _is(before, "punct") and before.value in (">", ">>", ">>>")
+            else None
+        )
+        if _is(after, "punct", "!") and not after.newline_before:
+            end += 1
+        elif _ident_value(after) in ("as", "satisfies"):
+            end, split = _es_asserted_type_end(tokens, end + 1)
+            if split:
+                return start, end, True
+        elif opener is not None:
+            start = opener
+        elif _is(before, "punct", "(") and _is(after, "punct", ")"):
+            start, end = start - 1, end + 1
+        else:
+            return start, end, False
+
+
 def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> frozenset[str]:
     """The ``names`` the file assigns to anywhere, not counting their declarations.
 
@@ -926,8 +1010,9 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
     binding, so ``export function record`` followed by ``[record] = [other]``
     (or ``(record) = other``, ``({ record } = o)``, ``for (record of xs)``,
     ``record++``, or an assignment inside any function) leaves importers
-    calling something other
-    than the edited definition. File-wide and over-inclusive like
+    calling something other than the edited definition. The target may be
+    wrapped in parentheses and TS assertions under any assignment operator
+    (``_es_target_extent``). File-wide and over-inclusive like
     ``_es_rebound_names``: an inner variable of the same name that is assigned
     also counts, which only fails the callee closed. A declaration initializer
     (``const record = ...``) and a declaration pattern are not assignments.
@@ -937,22 +1022,13 @@ def _es_assigned_names(tokens: tuple[_EsToken, ...], names: frozenset[str]) -> f
     assigned: set[str] = set()
     for index, token in enumerate(tokens):
         if token.kind == "ident" and not _is_reference_position(tokens, index):
-            # A parenthesized or TS non-null target is still the binding:
-            # ``((record)) = other``, ``record! = other``, ``(record!)! = other``.
-            start, end = index, index
-            while True:
-                after = _token_at(tokens, end + 1)
-                if _is(after, "punct", "!") and not after.newline_before:
-                    end += 1
-                elif _is(_token_at(tokens, start - 1), "punct", "(") and _is(after, "punct", ")"):
-                    start, end = start - 1, end + 1
-                else:
-                    break
+            start, end, split = _es_target_extent(tokens, index)
             before = _token_at(tokens, start - 1)
             after = _token_at(tokens, end + 1)
             operator = _is(after, "punct") and after.value in _ASSIGNMENT_OPERATORS
             if (
-                (operator and _ident_value(before) not in _VARIABLE_KEYWORDS)
+                split
+                or (operator and _ident_value(before) not in _VARIABLE_KEYWORDS)
                 or any(
                     _is(near, "punct") and near.value in ("++", "--") for near in (before, after)
                 )
