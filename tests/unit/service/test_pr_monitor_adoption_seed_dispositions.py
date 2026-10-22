@@ -94,3 +94,22 @@ def test_feedback_dispositions_cross_regardless_of_head(
 )
 def test_malformed_disposition_sidecars_never_cross(key: str, value: str) -> None:
     assert seedable_monitor_state({key: value}, head_continuity=True) == {}
+
+
+_BASELINE = "__awf_review_thread_disposition_baseline__"
+
+
+@pytest.mark.parametrize("record", ['["PRRT_test_legacy"]', "[]", "{not json", ""])
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_disposition_gate_baseline_crosses_verbatim(record: str, head_continuity: bool) -> None:
+    """The gate's first-run legacy baseline follows the PR, not the workspace.
+
+    Left behind, the successor's first gate run would re-take it and grandfather
+    every unmarked AWF resolution -- including threads the predecessor already
+    flagged ``REVIEW_THREAD_DISPOSITION_UNVERIFIED``. It records thread history,
+    not code, so it crosses on any head; a malformed or empty record crosses too,
+    because the gate reads it fail-closed (first run done, nothing exempt).
+    """
+    assert seedable_monitor_state({_BASELINE: record}, head_continuity=head_continuity) == {
+        _BASELINE: record
+    }

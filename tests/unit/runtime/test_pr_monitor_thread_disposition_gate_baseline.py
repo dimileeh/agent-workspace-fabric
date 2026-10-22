@@ -38,6 +38,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
 )
+from awf.service.pr_monitor_adoption_seed import seedable_monitor_state
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -261,3 +262,31 @@ async def test_malformed_baseline_exempts_nothing_and_is_never_re_taken(
     assert result.blocker is not None and _LEGACY in result.blocker
     assert state.threads_addressed_ids[_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY] == record
     assert await _baseline_events(factory, workspace_id) == []
+
+
+async def test_re_adopted_successor_keeps_the_predecessor_baseline(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LEGACY),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    predecessor = MonitorState()
+    await _gate(runner, workspace_id, predecessor)
+    gh.threads = (*gh.threads, _thread(_LATER))
+    flagged = await _gate(runner, workspace_id, predecessor)
+    assert flagged.blocker is not None and _LATER in flagged.blocker
+
+    successor_id, successor_runner = await _runner(factory, tmp_path, gh)
+    successor = MonitorState()
+    for key, value in seedable_monitor_state(
+        predecessor.threads_addressed_ids, head_continuity=False
+    ).items():
+        successor.mark_addressed(key, value)
+
+    result = await _gate(successor_runner, successor_id, successor)
+
+    # The successor does not re-take the first run: the predecessor's flagged
+    # thread still blocks, and only the predecessor's legacy thread is exempt.
+    assert result.blocker is not None
+    assert _LATER in result.blocker and _LEGACY not in result.blocker
+    assert await _baseline_events(factory, successor_id) == []

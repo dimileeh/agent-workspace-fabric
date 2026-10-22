@@ -158,6 +158,18 @@ _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
     {"fixed", "fixed_branch_evidence", "false_positive"}
 )
 _HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred", "operator_acknowledged"})
+
+# ``__awf_review_thread_disposition_baseline__`` (``awf.runtime.monitor_state_keys``)
+# is the disposition gate's one-time legacy baseline: the unmarked AWF
+# resolutions its first run exempted, and the proof that first run happened
+# (#1018). It belongs to the PR, not the workspace. Left behind, the successor's
+# first gate run re-takes it and grandfathers every unmarked AWF resolution --
+# including the threads the predecessor already flagged
+# ``REVIEW_THREAD_DISPOSITION_UNVERIFIED``. It records thread history rather than
+# code, so it crosses regardless of head continuity, and it crosses verbatim:
+# the gate reads a malformed or empty record fail-closed (first run done,
+# nothing exempt), whereas dropping it would fail open.
+_DISPOSITION_BASELINE_KEY = "__awf_review_thread_disposition_baseline__"
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
@@ -235,6 +247,7 @@ def seedable_monitor_state(
             _is_verdict_entry(key, value, head_continuity=head_continuity)
             or _is_copied_marker(key, value)
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
+            or key == _DISPOSITION_BASELINE_KEY
         )
     }
     return dict(
