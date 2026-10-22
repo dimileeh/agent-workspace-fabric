@@ -564,3 +564,76 @@ async def test_failures_recorded_before_the_streak_rule_do_not_count(
 
     assert await _streak(factory, ws_id) == 1
     assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
+
+
+def _fail_the_next_streak_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = monitor_resume_restart_escalation.consecutive_restart_failures
+
+    async def _count(*args: Any) -> int:
+        monkeypatch.setattr(
+            monitor_resume_restart_escalation, "consecutive_restart_failures", original
+        )
+        raise OperationalError("select", {}, Exception("connection reset"))
+
+    monkeypatch.setattr(monitor_resume_restart_escalation, "consecutive_restart_failures", _count)
+
+
+@pytest.mark.unit
+async def test_failures_before_an_unrecorded_recovery_do_not_count(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A usable restart whose ``recovered`` write fails still closes the streak."""
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    compose.fail = False
+    _fail_the_next_streak_count(monkeypatch)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE) == []
+
+    compose.fail = True
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value
+
+    # A genuine new streak after the recovery still parks at the limit.
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    assert await _status(factory, ws_id) == WorkspaceStatus.blocked.value
+    exhausted = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE)
+    assert exhausted[0].payload is not None
+    assert exhausted[0].payload["consecutive_failures"] == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT
+
+
+@pytest.mark.unit
+async def test_next_usable_restart_persists_an_unrecorded_recovery(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    compose.fail = False
+    _fail_the_next_streak_count(monkeypatch)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    recovered = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE)
+    assert len(recovered) == 1
+    assert await _streak(factory, ws_id) == 0
+    # The boundary is durable: a fresh worker's executor starts from zero too.
+    compose.fail = True
+    restarted = _executor(fake, factory, tmp_path, compose)
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
+        assert await restarted.resume_pr_monitor_handoff(ws_id) is None
+    assert await _status(factory, ws_id) == WorkspaceStatus.monitoring_pr.value

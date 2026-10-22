@@ -10,11 +10,14 @@ in a row the workspace is parked in ``blocked`` (monitor-origin, so ``guide``
 resumes it) with ``MONITOR_RUNTIME_RESTART_EXHAUSTED``, the count and the last
 redacted compose error. It is never failed. A usable restart writes a
 ``recovered`` boundary, and the ``exhausted`` event is a boundary too, so a
-guided resume starts a fresh streak.
+guided resume starts a fresh streak. When the ``recovered`` write fails, the
+executor remembers the restart time, counts only later failures, and retries the
+write on the next usable restart.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -48,24 +51,37 @@ _STREAK_EVENT_TYPES: Final = (
 _STREAK_QUERY_LIMIT: Final[int] = 50
 
 
-async def consecutive_restart_failures(session: AsyncSession, workspace_id: str) -> int:
+def _unpersisted_recoveries(self: Any) -> dict[str, datetime]:
+    """Usable-restart times, per workspace, whose ``recovered`` event is not yet stored."""
+    recoveries: dict[str, datetime] | None = getattr(self, "_restart_streak_recovered_at", None)
+    if recoveries is None:
+        recoveries = {}
+        self._restart_streak_recovered_at = recoveries
+    return recoveries
+
+
+async def consecutive_restart_failures(
+    session: AsyncSession, workspace_id: str, since: datetime | None = None
+) -> int:
     """Count the newest ``monitor_runtime_restart_failed`` events since the last boundary.
 
     Boundaries are a ``recovered`` or ``exhausted`` event, and a failure event
     recorded before the streak rule (no streak marker), so historic failures that
     were followed by unrecorded successful resumes never inflate a new streak.
+    ``since`` is a usable restart whose ``recovered`` event could not be stored;
+    failures at or before it are not counted.
     """
+    query = select(WorkspaceEvent.event_type, WorkspaceEvent.payload).where(
+        WorkspaceEvent.workspace_id == workspace_id,
+        WorkspaceEvent.event_type.in_(_STREAK_EVENT_TYPES),
+    )
+    if since is not None:
+        query = query.where(WorkspaceEvent.occurred_at > since)
     rows = await session.execute(
-        select(WorkspaceEvent.event_type, WorkspaceEvent.payload)
-        .where(
-            WorkspaceEvent.workspace_id == workspace_id,
-            WorkspaceEvent.event_type.in_(_STREAK_EVENT_TYPES),
-        )
-        .order_by(
+        query.order_by(
             WorkspaceEvent.occurred_at.desc(),
             WorkspaceEvent.event_order.desc().nulls_last(),
-        )
-        .limit(_STREAK_QUERY_LIMIT)
+        ).limit(_STREAK_QUERY_LIMIT)
     )
     count = 0
     for event_type, payload in rows.tuples():
@@ -92,7 +108,9 @@ async def escalate_monitor_resume_restart_failure(
     """
     try:
         async with self._session_factory() as session:
-            failures = await consecutive_restart_failures(session, workspace_id)
+            failures = await consecutive_restart_failures(
+                session, workspace_id, _unpersisted_recoveries(self).get(workspace_id)
+            )
     except SQLAlchemyError:
         _log.exception(
             "executor.resume_restart_failure_count_failed",
@@ -200,10 +218,12 @@ async def _park_blocked(
 
 async def reset_monitor_resume_restart_streak(self: Any, *, workspace_id: str) -> None:
     """Close an open failure streak after a usable restart; a no-op without one."""
+    recoveries = _unpersisted_recoveries(self)
     try:
         async with self._session_factory() as session:
             failures = await consecutive_restart_failures(session, workspace_id)
             if failures == 0:
+                recoveries.pop(workspace_id, None)
                 return
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -216,13 +236,15 @@ async def reset_monitor_resume_restart_streak(self: Any, *, workspace_id: str) -
             )
             await session.commit()
     except SQLAlchemyError:
-        # Never block a resume whose runtime is usable; the stale streak only
-        # makes a later park happen sooner, and a guide resets it.
+        # Never block a resume whose runtime is usable. Later failures count
+        # only after this restart, and the next usable restart retries the write.
+        recoveries[workspace_id] = datetime.now(UTC)
         _log.exception(
             "executor.resume_restart_streak_reset_failed",
             workspace_id=workspace_id,
         )
         return
+    recoveries.pop(workspace_id, None)
     _log.info(
         "executor.resume_restart_streak_reset",
         workspace_id=workspace_id,
