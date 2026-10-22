@@ -1005,11 +1005,39 @@ def test_names_an_anchor_line_does_not_call_bare_are_reported() -> None:
     assert es._es_line_non_call_names(tokens, 2) == frozenset({"record"})
     assert es._es_line_non_call_names(tokens, 3) == frozenset({"flush"})
     assert es._es_line_non_call_names(tokens, 4) == frozenset({"size"})
-    # ``pick(3) :`` reads as a signature head too, which only fails it closed.
-    assert es._es_line_non_call_names(tokens, 7) == frozenset({"send", "pick"})
+    # ``pick(3) :`` closes the ternary, so ``pick`` stays a bare call.
+    assert es._es_line_non_call_names(tokens, 7) == frozenset({"send"})
     assert es._es_line_non_call_names(tokens, 9) == frozenset({"b", "c"})
     assert es._es_line_non_call_names(tokens, 10) == frozenset({"go"})
     assert es._es_line_non_call_names(tokens, 1) == frozenset()
+
+
+@pytest.mark.unit
+def test_a_call_in_a_ternary_consequent_is_no_signature_head() -> None:
+    """A ternary ``:`` after a call is not a return type (PRRT_kwDOSJAM6s6vU-6p)."""
+    text = (
+        "const a = ok ? record(1) : fallback;\n"
+        "const b = x ? y ? record(2) : z : w;\n"
+        "const c = f(ok ? (1) : 2, n ? record(3) : 4);\n"
+        "class C {\n"
+        "  v = ok ? 1 : 2\n"
+        "  opt?: number\n"
+        "  maybe?(): void\n"
+        "  bare?; record(v): void {}\n"
+        "}\n"
+        "const o = { k: ok ? 1 : 2, record(v): number { return v; } };\n"
+    )
+    tokens = _tokens(text)
+
+    for line in (1, 2, 3):
+        assert "record" not in es._es_line_non_call_names(tokens, line)
+        assert (None, "record") in es._es_line_calls(tokens, line)
+    assert es._es_line_non_call_names(tokens, 8) == frozenset({"record"})
+    assert "record" in es._es_line_non_call_names(tokens, 10)
+    heads = es._es_definition_heads(tokens, "record")
+    assert [token.line for token in heads] == [8, 10]
+    # With no ``?`` open back to the start of the file, ``:`` stays a return type.
+    assert es._es_line_non_call_names(_tokens("record(v): void;"), 1) == frozenset({"record"})
 
 
 @pytest.mark.unit

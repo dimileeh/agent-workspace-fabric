@@ -320,8 +320,8 @@ def _es_signature_head(tokens: tuple[_EsToken, ...], index: int) -> bool:
     ``name( ... )`` followed by ``{``, ``:`` or ``=>`` is a method, accessor,
     object-literal method or interface signature (``record(v: number) {``,
     ``get size() {``, ``flush(): void;``), type parameters included
-    (``record<T>(v: T) {``). A call followed by a ternary ``:`` also reads as
-    one, which only fails it closed.
+    (``record<T>(v: T) {``). A ``:`` closing a ternary the name sits in
+    (``ok ? record(v) : fallback``) leaves it a call (``_es_ternary_consequent``).
     """
     open_index = _es_after_type_parameters(tokens, index + 1)
     opener = None if open_index is None else _token_at(tokens, open_index)
@@ -331,7 +331,31 @@ def _es_signature_head(tokens: tuple[_EsToken, ...], index: int) -> bool:
     while not (tokens[close].depth == opener.depth and _is(tokens[close], "punct", ")")):
         close += 1
     after = _token_at(tokens, close + 1)
-    return _is(after, "punct") and after.value in ("=>", "{", ":")
+    if _is(after, "punct", ":"):
+        return not _es_ternary_consequent(tokens, index)
+    return _is(after, "punct") and after.value in ("=>", "{")
+
+
+def _es_ternary_consequent(tokens: tuple[_EsToken, ...], index: int) -> bool:
+    """True when the token at ``index`` follows a ternary ``?`` its ``:`` has not closed.
+
+    Reads back at the token's depth to its enclosing opener or a ``;``: each
+    ``:`` closes one earlier ``?``, so an optional member's ``?:`` and a
+    finished ternary (``x = a ? b : c`` before a method) balance out, while
+    ``ok ? record(v)`` leaves one open.
+    """
+    depth = tokens[index].depth
+    pending = 0
+    for token in reversed(tokens[:index]):
+        if token.depth < depth or _is(token, "punct", ";"):
+            return False
+        if token.depth == depth and _is(token, "punct", ":"):
+            pending += 1
+        elif token.depth == depth and _is(token, "punct", "?"):
+            if not pending:
+                return True
+            pending -= 1
+    return False
 
 
 def _es_line_non_call_names(tokens: tuple[_EsToken, ...], line: int) -> frozenset[str]:
