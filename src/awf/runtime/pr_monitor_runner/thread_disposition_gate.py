@@ -73,31 +73,29 @@ async def review_thread_disposition_gate(
     base_branch: str,
     remote_branch: str,
     monitor_log: WorkspaceLogSink | None,
+    defer_forge_errors: bool = False,
 ) -> DispositionGateResult:
-    """Verify every AWF-resolved thread carries a disposition marker."""
+    """Verify every AWF-resolved thread carries a disposition marker.
+
+    ``defer_forge_errors`` re-raises an audit fetch fault instead of backing off:
+    the merge loop re-audits under ``serialized_merge`` and must not sleep while
+    holding the lock, so it passes the fault to :func:`review_thread_audit_fault`
+    after release.
+    """
     try:
         audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
     except ForgeClientError as exc:
-        if await self._wait_after_transient_forge_error(
-            exc,
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            context=_AUDIT_CONTEXT,
-            state=state,
-            monitor_log=monitor_log,
-        ):
-            return DispositionGateResult(retry=True)
-        return await _audit_unavailable(
+        if defer_forge_errors:
+            raise
+        return await review_thread_audit_fault(
             self,
+            exc,
             workspace_id=workspace_id,
             pr_number=pr_number,
             state=state,
             base_branch=base_branch,
             remote_branch=remote_branch,
             monitor_log=monitor_log,
-            summary=f"forge error {exc.reason_code}",
-            detail=_redact_and_truncate_forge_error(str(exc)),
-            forge_reason_code=exc.reason_code,
         )
     await self._clear_forge_transient_retry_state_on_success(
         workspace_id=workspace_id,
@@ -181,6 +179,41 @@ async def review_thread_disposition_gate(
             evidence={"thread_ids": unverified, "disposition_counts": dict(counts)},
         )
     return DispositionGateResult(blocker=unverified_blocker_message(unverified))
+
+
+async def review_thread_audit_fault(
+    self: Any,
+    exc: ForgeClientError,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    state: MonitorState,
+    base_branch: str,
+    remote_branch: str,
+    monitor_log: WorkspaceLogSink | None,
+) -> DispositionGateResult:
+    """Back off on a transient audit fault (retry); fail closed on a permanent one."""
+    if await self._wait_after_transient_forge_error(
+        exc,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context=_AUDIT_CONTEXT,
+        state=state,
+        monitor_log=monitor_log,
+    ):
+        return DispositionGateResult(retry=True)
+    return await _audit_unavailable(
+        self,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        state=state,
+        base_branch=base_branch,
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+        summary=f"forge error {exc.reason_code}",
+        detail=_redact_and_truncate_forge_error(str(exc)),
+        forge_reason_code=exc.reason_code,
+    )
 
 
 async def _post_operator_acknowledgement(
