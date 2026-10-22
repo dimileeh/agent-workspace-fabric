@@ -202,6 +202,15 @@ def test_marker_class_requires_matching_thread_id() -> None:
     )
 
 
+def test_marker_class_prefers_the_newest_marker_in_the_thread() -> None:
+    # Bodies arrive oldest-first; a re-triage after fresh feedback posts a second
+    # marker, and the resolution the gate certifies is the latest disposition.
+    stale = "<!-- AWF:thread-disposition:v1 class=false_positive thread=PRRT_test_a -->"
+    final = "<!-- AWF:thread-disposition:v1 class=fixed thread=PRRT_test_a -->"
+    other = "<!-- AWF:thread-disposition:v1 class=deferred thread=PRRT_other -->"
+    assert disposition_marker_class([stale, final, other], thread_id="PRRT_test_a") == "fixed"
+
+
 def _fp(reason: str | None = "reason") -> ThreadDisposition:
     return ThreadDisposition(
         item_id="t", disposition_class="false_positive", verdict="false_positive", reason=reason

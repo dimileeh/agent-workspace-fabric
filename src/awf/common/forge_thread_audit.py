@@ -14,7 +14,7 @@ class AuditedReviewThread:
     """One review thread as the disposition gate needs it, resolved ones included.
 
     ``viewer_comment_bodies`` holds the raw markdown of comments the token's own
-    identity authored (only those can carry AWF's disposition marker).
+    identity authored (only those can carry AWF's disposition marker), oldest first.
     """
 
     thread_id: str

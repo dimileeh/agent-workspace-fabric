@@ -355,12 +355,14 @@ def _safe_url(url: str | None) -> str:
 
 
 def disposition_marker_class(bodies: Sequence[str], *, thread_id: str) -> DispositionClass | None:
-    """Return the class of the first valid AWF marker naming ``thread_id``.
+    """Return the class of the newest valid AWF marker naming ``thread_id``.
 
+    ``bodies`` are oldest-first; a re-triage can post a second marker into the
+    same thread, and the latest one is the disposition the resolution reflects.
     A marker naming another thread, or carrying an unknown class, is no evidence.
     Callers pass only comments AWF's own identity authored.
     """
-    for body in bodies:
+    for body in reversed(bodies):
         for match in _MARKER_RE.finditer(body):
             if match.group("thread") == thread_id and match.group("cls") in DISPOSITION_CLASSES:
                 return cast(DispositionClass, match.group("cls"))
