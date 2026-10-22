@@ -5,7 +5,9 @@ acknowledged through the existing operator guide path: a guide carrying an
 explicit ``ACK-THREAD <thread id>`` token for the flagged thread records an
 ``operator_acknowledged`` disposition (a bare mention does not), and the next
 gate run posts that acknowledgement — with its marker, without the directive
-text — into the resolved thread, after which the cert can follow.
+text — into the resolved thread, after which the cert can follow. The
+acknowledgement is bound to the conversation the gate flagged: a reopen or any
+new / edited comment retires it, so it never certifies a later resolution.
 """
 
 from __future__ import annotations
@@ -71,13 +73,16 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
     """One thread resolved by AWF's identity with no AWF marker in it.
 
     Replies AWF posts are served back on later audits (``visible_replies``) until
-    a test deletes them.
+    a test deletes them; ``resolved`` / ``conversation`` let a test reopen the
+    thread or change its conversation.
     """
 
     def __init__(self, runner: FakeCommandRunner, *, reply_error: ForgeClientError | None = None):
         super().__init__(runner)
         self.reply_error = reply_error
         self.visible_replies: list[str] = []
+        self.resolved = True
+        self.conversation = "conversation-1"
 
     async def fetch_review_thread_audit(
         self, *, repo: RepoRef, pr_number: int
@@ -89,10 +94,11 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
             threads=(
                 AuditedReviewThread(
                     thread_id=_SILENT,
-                    is_resolved=True,
+                    is_resolved=self.resolved,
                     is_outdated=False,
-                    resolved_by="awf-operator",
+                    resolved_by="awf-operator" if self.resolved else None,
                     viewer_comment_bodies=tuple(self.visible_replies),
+                    conversation_digest=self.conversation,
                 ),
             ),
         )
@@ -290,6 +296,58 @@ async def test_acknowledgement_reply_failure_keeps_the_thread_blocked(
     assert gh.thread_replies == []
     ack = read_item_disposition(state, _SILENT)
     assert ack is not None and ack.reply_comment_id is None
+
+
+async def test_acknowledgement_of_a_conversation_that_moved_on_is_dropped_not_posted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    # A guide acknowledges the flagged resolution; before the gate posts it, the
+    # thread is reopened with new feedback and silently resolved again.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.conversation = "conversation-2"
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert gh.thread_replies == []
+    assert read_item_disposition(state, _SILENT) is None
+    assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
+
+    # Only a guide acknowledging the current resolution certifies it.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    passed = await _gate(runner, workspace_id, state)
+    assert passed.blocker is None
+    assert len(gh.thread_replies) == 1
+
+
+async def test_delayed_guide_after_reopen_cannot_acknowledge_the_old_resolution(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    gh.resolved = False  # the reviewer reopened the thread
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    assert _disposition_unverified_key(_SILENT) not in state.threads_addressed_ids
+
+    # A guide written against the old blocker arrives late; the thread is then
+    # silently resolved again over the same conversation.
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.resolved = True
+
+    assert read_item_disposition(state, _SILENT) is None
+    blocked = await _gate(runner, workspace_id, state)
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert gh.thread_replies == []
 
 
 async def test_guide_naming_unflagged_thread_records_nothing(

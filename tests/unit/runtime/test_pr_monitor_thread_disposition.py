@@ -57,6 +57,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     render_disposition_reply,
     sync_item_disposition,
     unverified_blocker_message,
+    unverified_flag,
 )
 
 pytestmark = pytest.mark.unit
@@ -445,6 +446,7 @@ def test_payload_roundtrip_and_malformed_payload_fails_closed() -> None:
         source="agent_verdict",
         reply_comment_id="991",
         thread_body_hash="f" * 64,
+        conversation_digest="e" * 64,
     )
     payload = d.as_payload()
     assert payload["v"] == 1
@@ -485,7 +487,7 @@ def test_disposition_count_rows_orders_all_classes_and_others() -> None:
 def test_acknowledge_unverified_threads_only_touches_flagged_ids() -> None:
     state = MonitorState()
     state.mark_addressed(
-        _disposition_unverified_key("PRRT_test_flagged"), REVIEW_THREAD_DISPOSITION_UNVERIFIED
+        _disposition_unverified_key("PRRT_test_flagged"), unverified_flag("conversation-1")
     )
     acknowledged = acknowledge_unverified_threads(
         state,
@@ -499,6 +501,7 @@ def test_acknowledge_unverified_threads_only_touches_flagged_ids() -> None:
     assert ack.disposition_class == "operator_acknowledged"
     assert ack.source == "operator_guide"
     assert ack.reason is not None and "op_test_1" in ack.reason
+    assert ack.conversation_digest == "conversation-1"  # bound to the flagged conversation
     assert read_item_disposition(state, "PRRT_test_unflagged") is None
 
     state.mark_addressed(
@@ -509,6 +512,7 @@ def test_acknowledge_unverified_threads_only_touches_flagged_ids() -> None:
     )
     no_op = read_item_disposition(state, "PRRT_test_two")
     assert no_op is not None and no_op.reason is not None and "operation" not in no_op.reason
+    assert no_op.conversation_digest is None  # a flag without its conversation binds none
 
 
 def test_unverified_blocker_message_lists_ten_ids_and_counts_rest() -> None:

@@ -115,6 +115,8 @@ class ThreadDisposition:
     source: str = "agent_verdict"
     reply_comment_id: str | None = None
     thread_body_hash: str | None = None
+    # An operator acknowledgement's audited conversation: it answers only that one.
+    conversation_digest: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         """Return the JSON-safe record persisted in state and audit evidence."""
@@ -130,6 +132,7 @@ class ThreadDisposition:
             "source": self.source,
             "reply_comment_id": self.reply_comment_id,
             "thread_body_hash": self.thread_body_hash,
+            "conversation_digest": self.conversation_digest,
         }
 
     @classmethod
@@ -164,6 +167,7 @@ class ThreadDisposition:
             source=_optional_text(raw.get("source")) or "agent_verdict",
             reply_comment_id=_optional_text(raw.get("reply_comment_id")),
             thread_body_hash=_optional_text(raw.get("thread_body_hash")),
+            conversation_digest=_optional_text(raw.get("conversation_digest")),
         )
 
 
@@ -434,6 +438,11 @@ def acknowledged_thread_ids(directive: str) -> tuple[str, ...]:
     )
 
 
+def unverified_flag(conversation_digest: str) -> str:
+    """The unverified-flag value: the reason code bound to the audited conversation."""
+    return f"{REVIEW_THREAD_DISPOSITION_UNVERIFIED}:{conversation_digest}"
+
+
 def acknowledge_unverified_threads(
     state: MonitorState,
     thread_ids: Sequence[str],
@@ -444,9 +453,10 @@ def acknowledge_unverified_threads(
 
     ``thread_ids`` are the guide's explicit ``ACK-THREAD`` tokens
     (:func:`acknowledged_thread_ids`). Only threads the disposition gate flagged
-    can be acknowledged; acknowledging any other thread records nothing. The gate
-    posts the acknowledgement reply (with its marker) into each thread on its next
-    run.
+    can be acknowledged; acknowledging any other thread records nothing. Each
+    acknowledgement is bound to the conversation its flag was raised for
+    (:func:`unverified_flag`). The gate posts the acknowledgement reply (with its
+    marker) into each thread on its next run, while that conversation stands.
     """
     reason = "An AWF operator guide acknowledged this resolution" + (
         f" (operation {operation_id})" if operation_id else ""
@@ -454,7 +464,8 @@ def acknowledge_unverified_threads(
     acknowledged: list[str] = []
     for thread_id in dict.fromkeys(thread_ids):
         flag_key = _disposition_unverified_key(thread_id)
-        if not state.threads_addressed_ids.get(flag_key):
+        flag = state.threads_addressed_ids.get(flag_key)
+        if not flag:
             continue
         record_item_disposition(
             state,
@@ -464,6 +475,7 @@ def acknowledge_unverified_threads(
                 verdict=None,
                 reason=reason,
                 source="operator_guide",
+                conversation_digest=flag.partition(":")[2],
             ),
         )
         state.threads_addressed_ids.pop(flag_key, None)

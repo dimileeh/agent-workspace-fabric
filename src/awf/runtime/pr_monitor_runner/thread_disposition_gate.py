@@ -15,7 +15,8 @@ after the thread's newest feedback (an older marker answered earlier feedback).
 * A failing thread turns into ``NotifyHuman`` with
   ``REVIEW_THREAD_DISPOSITION_UNVERIFIED`` listing the ids — never a workspace
   failure. An operator guide naming a flagged id acknowledges it; this gate then
-  posts the acknowledgement (with its marker) into the thread itself.
+  posts the acknowledgement (with its marker) into the thread itself, only while
+  the thread keeps the conversation that was flagged.
 
 ``decide()`` stays pure; this runs at the runner level only.
 """
@@ -56,6 +57,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     record_item_disposition,
     render_disposition_reply,
     unverified_blocker_message,
+    unverified_flag,
 )
 
 _AUDIT_CONTEXT = "review_thread_audit"
@@ -153,6 +155,8 @@ async def review_thread_disposition_gate(
             retired.append(thread.thread_id)
             legacy_conversation = None
         if not thread.is_resolved:
+            # A reopen ends the flagged resolution: a later guide cannot acknowledge it.
+            state.threads_addressed_ids.pop(_disposition_unverified_key(thread.thread_id), None)
             continue
         if (thread.resolved_by or "").strip().casefold() != viewer:
             counts[RESOLVED_BY_OTHERS] += 1  # that person's or bot's own disposition
@@ -166,7 +170,7 @@ async def review_thread_disposition_gate(
         )
         if disposition_class is None:
             disposition_class = await _post_operator_acknowledgement(
-                self, state=state, thread_id=thread.thread_id, workspace_id=workspace_id
+                self, state=state, thread=thread, workspace_id=workspace_id
             )
         if (
             disposition_class is None
@@ -189,6 +193,7 @@ async def review_thread_disposition_gate(
             workspace_id=workspace_id,
             pr_number=pr_number,
         )
+    digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
     if baseline_record is None:
         # A thread this monitor recorded a disposition for (or that carries an
         # AWF marker) was handled after the rollout, so its unmarked resolution
@@ -198,7 +203,6 @@ async def review_thread_disposition_gate(
             for tid in unverified
             if tid not in marked and _item_disposition_key(tid) not in state.threads_addressed_ids
         ]
-        digests = {thread.thread_id: thread.conversation_digest for thread in audit.threads}
         await _record_legacy_baseline(
             self,
             workspace_id=workspace_id,
@@ -220,7 +224,7 @@ async def review_thread_disposition_gate(
     ]
     for thread_id in unverified:
         state.mark_addressed(
-            _disposition_unverified_key(thread_id), REVIEW_THREAD_DISPOSITION_UNVERIFIED
+            _disposition_unverified_key(thread_id), unverified_flag(digests[thread_id])
         )
     _log.warning(
         "monitor.review_thread_disposition_unverified",
@@ -399,10 +403,11 @@ async def _post_operator_acknowledgement(
     self: Any,
     *,
     state: MonitorState,
-    thread_id: str,
+    thread: AuditedReviewThread,
     workspace_id: str,
 ) -> DispositionClass | None:
     """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified."""
+    thread_id = thread.thread_id
     disposition = read_item_disposition(state, thread_id)
     if disposition is None or disposition.disposition_class != "operator_acknowledged":
         return None
@@ -410,6 +415,18 @@ async def _post_operator_acknowledgement(
         # Posted on an earlier run, yet this audit (fetched after it) finds no
         # marker: the reply was deleted or edited away. The saved id only prevents
         # a duplicate post, it is not evidence; a new guide re-acknowledges.
+        return None
+    if disposition.conversation_digest != thread.conversation_digest:
+        # The guide acknowledged the conversation the gate flagged; a new or edited
+        # comment since then is feedback it never saw, so it is dropped and the
+        # current resolution needs its own acknowledgement.
+        state.threads_addressed_ids.pop(_item_disposition_key(thread_id), None)
+        _log.info(
+            "monitor.operator_acknowledgement_superseded",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
+        )
         return None
     try:
         reply_id = await self._deps.gh.reply_to_thread(
