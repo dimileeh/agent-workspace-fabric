@@ -43,8 +43,10 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
+    acknowledge_unverified_threads,
     read_item_disposition,
     record_item_disposition,
+    retire_reopened_dispositions,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
@@ -505,6 +507,94 @@ async def test_reopen_retires_a_certified_disposition_so_a_silent_re_resolve_blo
 
     assert blocked.blocker is not None and _SILENT in blocked.blocker
     assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
+
+
+def _certified_fixed_thread(state: MonitorState) -> tuple[AuditedReviewThread, ReviewThreadAudit]:
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=_SILENT,
+            disposition_class="fixed",
+            verdict="fix_committed",
+            commits=("c" * 40,),
+            reply_comment_id="reply-1",
+        ),
+    )
+    resolved = replace(
+        _thread(_SILENT, bodies=(_marker("fixed", _SILENT),)),
+        conversation_digest="feedback|reply-1",
+        conversation_digest_before_reply="feedback",
+    )
+    return resolved, ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(resolved,))
+
+
+async def test_a_retired_reply_never_certifies_once_its_thread_has_no_record(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    state = settled_baseline_state()
+    resolved, audit = _certified_fixed_thread(state)
+    reopened = replace(audit, threads=(replace(resolved, is_resolved=False, resolved_by=None),))
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    gh.audit = reopened
+    await _gate(runner, workspace_id, state)  # the reopen retires the FIXED reply
+    gh.audit = audit
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    # The operator acknowledges the silent re-resolve, but the thread reopens
+    # before the acknowledgement is posted: no record is left for it at all.
+    assert acknowledge_unverified_threads(state, [_SILENT], operation_id="op_1") == (_SILENT,)
+    gh.audit = reopened
+    await _gate(runner, workspace_id, state)
+    assert read_item_disposition(state, _SILENT) is None
+
+    gh.audit = audit
+    blocked = await _gate(runner, workspace_id, state)
+
+    # The retired FIXED reply is still the newest marker; it certifies nothing.
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert gh.thread_replies == []
+
+
+async def test_a_reopen_only_a_poll_lists_retires_the_bound_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    state = settled_baseline_state()
+    _, audit = _certified_fixed_thread(state)
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    assert (await _gate(runner, workspace_id, state)).blocker is None
+    # A poll lists the thread open again while no gate runs (a NotifyHuman or
+    # WaitForCI window); the shared identity then resolves it silently.
+    listed = ReviewThread(
+        thread_id=_SILENT, path="widgets/core.py", line=1, body_excerpt="x", author="bot"
+    )
+
+    assert retire_reopened_dispositions(
+        state,
+        replace(_green_status(), unresolved_inline_threads=(listed,)),
+        workspace_id=workspace_id,
+    ) == [_SILENT]
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    # A disposition no audit has bound yet may be a failed resolve's: it stays.
+    unbound = ThreadDisposition(
+        item_id=_FRESH, disposition_class="fixed", verdict="fix_committed", reply_comment_id="r"
+    )
+    record_item_disposition(state, unbound)
+    outdated = replace(listed, thread_id=_FRESH)
+    assert (
+        retire_reopened_dispositions(
+            state,
+            replace(_green_status(), outdated_unresolved_inline_threads=(outdated,)),
+            workspace_id=workspace_id,
+        )
+        == []
+    )
+    assert read_item_disposition(state, _FRESH) == unbound
 
 
 async def test_gate_rejects_a_marker_older_than_the_shared_identitys_own_feedback(

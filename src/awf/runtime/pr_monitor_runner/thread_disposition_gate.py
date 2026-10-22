@@ -46,6 +46,7 @@ from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
+    _disposition_retired_key,
     _disposition_unverified_key,
     _item_disposition_key,
 )
@@ -355,12 +356,19 @@ def _disposition_holds(
     breaks, so a record left must be the posted reply of that marker's class. The
     first audit to see a posted reply resolved binds it to the conversation it
     followed. With no record at all (a re-adopted PR whose record did not cross)
-    the marker is the evidence, except an acknowledgement: only its record
-    proves the operator acknowledged this conversation.
+    the marker is the evidence — unless it is a reply this monitor retired, or an
+    acknowledgement: only its record proves the operator acknowledged this
+    conversation.
     """
     disposition = read_item_disposition(state, thread.thread_id)
     if disposition is None:
-        return disposition_class != "operator_acknowledged"
+        retired = _disposition_retired_key(
+            thread.thread_id, thread.conversation_digest_before_reply
+        )
+        return (
+            disposition_class != "operator_acknowledged"
+            and retired not in state.threads_addressed_ids
+        )
     if disposition.disposition_class != disposition_class or not disposition.reply_comment_id:
         return False  # retired or never posted: the marker is an older reply's
     if disposition.conversation_digest is None:

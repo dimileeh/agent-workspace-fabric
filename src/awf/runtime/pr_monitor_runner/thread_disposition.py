@@ -38,8 +38,12 @@ from awf.runtime.monitor_prompts import (
     RESOLVED_BY_OTHERS_LABEL,
     _redact_and_escape_markdown_inline,
 )
-from awf.runtime.monitor_state_keys import _disposition_unverified_key, _item_disposition_key
-from awf.runtime.pr_monitor import MonitorState, ReviewThread
+from awf.runtime.monitor_state_keys import (
+    _disposition_retired_key,
+    _disposition_unverified_key,
+    _item_disposition_key,
+)
+from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewThread
 from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     ItemCommitProvenance,
     chain_from_state,
@@ -48,6 +52,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
     MonitorVerdictResult,
     VerdictResult,
 )
+from awf.runtime.pr_monitor_runner.logging import _log
 
 # A FALSE POSITIVE / DEFER disposition has no reason to publish, so the thread
 # is parked ``needs_human`` instead of being resolved without one.
@@ -232,10 +237,11 @@ def sync_item_disposition(
     from awf.runtime.pr_monitor_runner.helpers_verdict import _sanitize_verdict_reason
 
     posted = read_item_disposition(state, item_id)
-    if (
+    if posted is not None and posted.is_bound:
+        retire_item_disposition(state, posted)
+    elif (
         posted is not None
         and posted.reply_comment_id
-        and not posted.is_bound
         and not _feedback_follows_reply(thread, posted)
     ):
         return
@@ -270,17 +276,51 @@ def retire_item_disposition(
 ) -> ThreadDisposition | None:
     """Retire ``disposition``: its thread reopened, or its conversation moved on.
 
-    Its reply, posted or not, answers nothing current any more. An operator
+    Its reply, posted or not, answers nothing current any more. A posted bound
+    reply is remembered by the conversation it followed, so its marker never
+    certifies again, whatever happens to the record. An operator
     acknowledgement is dropped: only a new ``ACK-THREAD`` for the current
     resolution replaces it. Any other record keeps its evidence but loses its
-    reply id and binding, so the old marker certifies nothing and the thread's
-    next AWF resolve posts a fresh reply. Returns the record left in state.
+    reply id and binding, so the thread's next AWF resolve posts a fresh reply.
+    Returns the record left in state.
     """
+    if disposition.reply_comment_id and disposition.conversation_digest is not None:
+        state.mark_addressed(
+            _disposition_retired_key(disposition.item_id, disposition.conversation_digest),
+            "retired",
+        )
     if disposition.disposition_class == "operator_acknowledged":
         state.threads_addressed_ids.pop(_item_disposition_key(disposition.item_id), None)
         return None
     retired = replace(disposition, reply_comment_id=None, conversation_digest=None)
     record_item_disposition(state, retired)
+    return retired
+
+
+def retire_reopened_dispositions(
+    state: MonitorState, status: PRStatus, *, workspace_id: str
+) -> list[str]:
+    """Retire every bound disposition whose thread ``status`` lists open again.
+
+    An audit saw a bound disposition's reply resolved, so a later poll listing
+    its thread unresolved is a reopen, even if no gate audit runs before the
+    thread is resolved again. A disposition no audit bound yet may be a failed
+    resolve's, whose retry reuses it. Returns the retired item ids.
+    """
+    retired: list[str] = []
+    for thread in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
+        disposition = read_item_disposition(state, thread.thread_id)
+        if disposition is not None and disposition.is_bound:
+            retire_item_disposition(state, disposition)
+            retired.append(thread.thread_id)
+    if retired:
+        _log.info(
+            "monitor.thread_disposition_retired",
+            workspace_id=workspace_id,
+            pr_number=status.number,
+            thread_ids=retired,
+            reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
+        )
     return retired
 
 

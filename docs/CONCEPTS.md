@@ -457,13 +457,17 @@ is bound to the conversation it answers — an acknowledgement to the flagged on
 any other once a gate audit first sees its reply resolved — and holds only while
 an audit shows the thread still resolved by AWF's identity with that conversation
 before its reply. A reopen, a resolution by someone else, or a new or edited
-comment retires it for good: its marker then certifies nothing, so a silent
-re-resolve blocks. A retired acknowledgement is dropped (the current resolution
-needs its own `ACK-THREAD`); any other disposition loses its reply id, so the
-monitor's next resolve of the thread — a re-triage or outdated hygiene, both of
-which also treat a bound reply's thread being open again as a reopen — posts a
-fresh reply instead of resolving on the old one. With no record at all (a
-re-adopted PR whose record did not cross), an agent's marker is still the
+comment retires it for good: its marker then certifies nothing — the monitor
+remembers a retired reply by the conversation it followed, whatever later
+happens to the record — so a silent re-resolve blocks. Every poll whose status
+lists a bound reply's thread open again retires it too, as do a re-triage and
+outdated hygiene reaching that thread, so a reopen counts even when no gate
+audit runs before the thread is resolved again. A reply no audit has bound yet
+may be a failed resolve's, whose retry reuses it. A retired acknowledgement is
+dropped (the current resolution needs its own `ACK-THREAD`); any other
+disposition loses its reply id, so the monitor's next resolve of the thread
+posts a fresh reply instead of resolving on the old one. With no record at all
+(a re-adopted PR whose record did not cross), an agent's marker is still the
 evidence. A
 failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
