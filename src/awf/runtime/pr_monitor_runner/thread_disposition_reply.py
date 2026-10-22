@@ -1,0 +1,205 @@
+"""Reply-before-resolve: AWF's in-thread disposition precedes every resolve (#1018).
+
+Both resolve sites — the fix-cycle resolve loop and outdated-thread hygiene —
+call :func:`reply_before_resolve` immediately before ``resolve_thread``. It posts
+the thread's disposition reply (see :mod:`thread_disposition`) and returns the
+replied record, or parks the thread ``needs_human`` with a reason code and
+returns ``None``; the caller then must NOT resolve.
+
+Parking is per thread and never fails the workspace: it records state, a log
+line and an audit event, and ``decide()`` turns the parked thread into
+``NotifyHuman`` through the ordinary ``needs_human`` merge block. It only ever
+runs after the fix cycle's push, so accepted commits stay published.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+from awf.common.forge_errors import ForgeClientError
+from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
+from awf.runtime.pr_monitor import MonitorState, ReviewThread
+from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
+from awf.runtime.pr_monitor_runner.fix_cycle_deferred import _deferred_issue_url
+from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    THREAD_DISPOSITION_EVIDENCE_MISSING,
+    THREAD_DISPOSITION_REASON_MISSING,
+    THREAD_DISPOSITION_REPLY_FAILED,
+    ThreadDisposition,
+    attach_issue_url,
+    disposition_problem,
+    read_item_disposition,
+    record_item_disposition,
+    render_disposition_reply,
+)
+
+_PROBLEM_DETAIL = {
+    THREAD_DISPOSITION_REASON_MISSING: (
+        "AWF did not resolve this review thread: its FALSE POSITIVE or DEFER "
+        "disposition has no reason to post in the thread"
+    ),
+    THREAD_DISPOSITION_EVIDENCE_MISSING: (
+        "AWF did not resolve this review thread: its disposition has no fix commit "
+        "(FIXED) or tracking issue (DEFER) to cite in the thread"
+    ),
+}
+
+
+async def reply_before_resolve(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    thread_id: str,
+    state: MonitorState,
+    action: str,
+    base_branch: str | None,
+    remote_branch: str | None,
+    thread: ReviewThread | None = None,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
+    source_head_sha: str | None = None,
+) -> ThreadDisposition | None:
+    """Post the thread's disposition reply; ``None`` means parked — do NOT resolve."""
+    verdict = state.threads_addressed_ids.get(thread_id)
+    disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
+    problem = disposition_problem(disposition, verdict)
+
+    async def _park(reason_code: str, detail: str, forge_reason_code: str | None = None) -> None:
+        await _park_thread(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=thread_id,
+            state=state,
+            action=action,
+            reason_code=reason_code,
+            detail=detail,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            source_head_sha=source_head_sha,
+            disposition=disposition,
+            forge_reason_code=forge_reason_code,
+        )
+
+    if disposition is None or problem is not None:
+        reason_code = problem or THREAD_DISPOSITION_REASON_MISSING
+        await _park(reason_code, _PROBLEM_DETAIL[reason_code])
+        return None
+    if disposition.reply_comment_id:
+        # Replied on an earlier attempt whose resolve did not land: never double-post.
+        return disposition
+    try:
+        reply_id = await self._deps.gh.reply_to_thread(
+            thread_id=thread_id,
+            body=render_disposition_reply(disposition),
+        )
+    except ForgeClientError as exc:
+        # Any forge fault — transient or not — parks: the mutation is never
+        # blindly retried (it could double-post) and the thread is never resolved
+        # without its reply. An operator guide re-triages it.
+        await _park(
+            THREAD_DISPOSITION_REPLY_FAILED,
+            "AWF could not post the disposition reply in this review thread "
+            f"({_redact_and_truncate_forge_error(str(exc))}), so it left the thread open",
+            exc.reason_code,
+        )
+        return None
+    replied = replace(disposition, reply_comment_id=reply_id)
+    record_item_disposition(state, replied)
+    _log.info(
+        "monitor.thread_disposition_replied",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        thread_id=thread_id,
+        disposition_class=replied.disposition_class,
+        reply_comment_id=reply_id,
+    )
+    return replied
+
+
+def _disposition_for_resolve(
+    state: MonitorState,
+    thread_id: str,
+    verdict: str | None,
+    thread: ReviewThread | None,
+) -> ThreadDisposition | None:
+    """The thread's disposition; a legacy captured DEFER is rebuilt from its records.
+
+    A ``defer`` captured before #1018 has its agent reason and filed-issue marker
+    in state but no disposition record. With the thread at hand its issue URL is
+    recoverable, so it is replied to and resolved instead of being parked.
+    """
+    disposition = read_item_disposition(state, thread_id)
+    if disposition is not None or verdict != "defer" or thread is None:
+        return disposition
+    issue_url = _deferred_issue_url(state, thread)
+    if issue_url is None:
+        return None
+    attach_issue_url(state, thread_id, issue_url)
+    return read_item_disposition(state, thread_id)
+
+
+async def _park_thread(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    thread_id: str,
+    state: MonitorState,
+    action: str,
+    reason_code: str,
+    detail: str,
+    base_branch: str | None,
+    remote_branch: str | None,
+    operation_id: str | None,
+    operation_type: str | None,
+    monitor_log: WorkspaceLogSink | None,
+    source_head_sha: str | None,
+    disposition: ThreadDisposition | None,
+    forge_reason_code: str | None = None,
+) -> None:
+    """Keep the thread open and hand it to a human with a reason code."""
+    state.mark_addressed(thread_id, "needs_human")
+    state.mark_addressed(_needs_human_reason_state_key(thread_id), f"{reason_code}: {detail}")
+    # ``needs_human`` blocks merge on its own; a stale requeue flag would linger.
+    state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(thread_id), None)
+    _log.warning(
+        "monitor.thread_disposition_parked",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        thread_id=thread_id,
+        reason_code=reason_code,
+        forge_reason_code=forge_reason_code,
+    )
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+        action=action,
+        outcome="needs_human",
+        reason_code=reason_code,
+        pr_number=pr_number,
+        status=None,
+        base_branch=base_branch or "",
+        remote_branch=remote_branch,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        monitor_log=monitor_log,
+        source_head_sha=source_head_sha,
+        evidence={
+            "thread_ids": [thread_id],
+            "resolved_thread_count": 0,
+            "needs_human_thread_count": 1,
+            "forge_reason_code": forge_reason_code,
+            "disposition": disposition.as_payload() if disposition is not None else None,
+        },
+    )

@@ -39,6 +39,7 @@ from awf.runtime.release_pr_monitor import build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.service.gc import WorkspaceGCWorktreeRemoveResult
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -49,6 +50,12 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
     thread_node,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 @pytest.fixture

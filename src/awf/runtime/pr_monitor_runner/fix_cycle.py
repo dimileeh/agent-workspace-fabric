@@ -107,6 +107,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition import attach_item_commits
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_resolve
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryAuthError,
@@ -1111,6 +1112,23 @@ async def _run_fix_cycle(
         # could proceed past unaddressed feedback (the #305 failure mode).
         if state.threads_addressed_ids.get(tid) not in _RESOLVABLE_THREAD_VERDICTS:
             continue
+        disposition = await reply_before_resolve(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=tid,
+            state=state,
+            action="resolve_thread",
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            source_head_sha=pushed_head_sha,
+        )
+        if disposition is None:
+            continue  # #1018: parked needs_human — never resolve without the reply.
+        dispositions = [disposition.as_payload()]
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)
         except ForgeClientError as exc:
@@ -1170,6 +1188,7 @@ async def _run_fix_cycle(
                         "resolved_thread_count": 0,
                         "requeued_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": dispositions,
                     },
                 )
                 continue
@@ -1211,6 +1230,7 @@ async def _run_fix_cycle(
                         "resolved_thread_count": 0,
                         "needs_human_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": dispositions,
                     },
                 )
                 continue
@@ -1260,6 +1280,7 @@ async def _run_fix_cycle(
                         "resolved_thread_count": 0,
                         "needs_human_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": dispositions,
                     },
                 )
                 continue
@@ -1297,6 +1318,7 @@ async def _run_fix_cycle(
                     "resolved_thread_count": 0,
                     "failed_thread_count": 1,
                     "error_message": str(exc),
+                    "dispositions": dispositions,
                 },
             )
         else:
@@ -1324,6 +1346,7 @@ async def _run_fix_cycle(
                 evidence={
                     "thread_ids": [tid],
                     "resolved_thread_count": 1,
+                    "dispositions": dispositions,
                 },
             )
     return await _return_failed_fix_cycle_result(push_result)

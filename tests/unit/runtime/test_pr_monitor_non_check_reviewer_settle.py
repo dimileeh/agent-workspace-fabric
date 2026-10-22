@@ -39,6 +39,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _normalize_non_check_reviewer_logins,
 )
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -47,6 +48,13 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
     thread_node,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
+
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
 

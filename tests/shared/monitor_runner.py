@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.node.compose_manager import ComposeTeardownResult
+from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner import comments as _comments
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
+    MonitorVerdictResult,
+    VerdictResult,
+)
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    read_item_disposition,
+    record_item_disposition,
+)
 
 
 class DefaultMergeMethodGitHubClient(GitHubClient):
@@ -89,3 +102,29 @@ def mock_completed_compose_manager(
         "awf.runtime.pr_monitor_runner.lifecycle.ComposeManager",
         new=_FakeComposeManager,
     ), calls
+
+
+def supply_fixed_item_commit(monkeypatch: pytest.MonkeyPatch, sha: str = "c" * 40) -> None:
+    """Give FIXED dispositions the commit a real worktree's #935 probe records.
+
+    Runner tests that drive the real verdict path without a git worktree never
+    record item commit provenance, which is where a FIXED disposition gets the
+    commit its reply cites — so the thread would (correctly) park as
+    ``THREAD_DISPOSITION_EVIDENCE_MISSING``. Suites that test other behaviour use
+    this to supply that commit; the reply-before-resolve path itself stays real.
+    """
+    real_sync = _comments.sync_item_disposition
+
+    def _sync(
+        state: MonitorState, item_id: str, result: VerdictResult | MonitorVerdictResult
+    ) -> None:
+        real_sync(state, item_id, result)
+        disposition = read_item_disposition(state, item_id)
+        if (
+            disposition is not None
+            and disposition.disposition_class == "fixed"
+            and not disposition.commits
+        ):
+            record_item_disposition(state, replace(disposition, commits=(sha,)))
+
+    monkeypatch.setattr(_comments, "sync_item_disposition", _sync)

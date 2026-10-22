@@ -47,7 +47,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -55,6 +55,12 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     pr_payload,
     seed_monitoring_workspace,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 class _BitbucketResolveThreadClient(DefaultMergeMethodGitHubClient):
@@ -684,7 +690,10 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "requeued"
-    assert resolution_events[0].payload["evidence"] == {
+    evidence = dict(resolution_events[0].payload["evidence"])
+    # #1018: the resolve audit carries the reply-before-resolve disposition.
+    assert evidence.pop("dispositions")[0]["class"] == "fixed"
+    assert evidence == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "requeued_thread_count": 1,
@@ -783,7 +792,10 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "requeued"
-    assert resolution_events[0].payload["evidence"] == {
+    evidence = dict(resolution_events[0].payload["evidence"])
+    # #1018: the resolve audit carries the reply-before-resolve disposition.
+    assert evidence.pop("dispositions")[0]["class"] == "fixed"
+    assert evidence == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "requeued_thread_count": 1,
@@ -882,7 +894,10 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "failed"
     assert resolution_events[0].payload["reason_code"] == BITBUCKET_API_ERROR
-    assert resolution_events[0].payload["evidence"] == {
+    evidence = dict(resolution_events[0].payload["evidence"])
+    # #1018: the resolve audit carries the reply-before-resolve disposition.
+    assert evidence.pop("dispositions")[0]["class"] == "fixed"
+    assert evidence == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "failed_thread_count": 1,
