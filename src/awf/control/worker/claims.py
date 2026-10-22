@@ -1171,8 +1171,7 @@ async def _monitor_recovery_terminal_finalize_status(
                 return OperationStatus.succeeded, None, None
             if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
                 return OperationStatus.succeeded, None, None
-            # A monitor-resume setup replay parks the row in ``blocked`` instead of
-            # failing it; keep its replay failure rather than reporting a cancellation.
+            # Setup replay parks the row in ``blocked``; keep its failure, not a cancel.
             if ws.status == WorkspaceStatus.failed.value or (
                 ws.status == WorkspaceStatus.blocked.value
                 and ws.block_reason_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
