@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client import RepoRef
 from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -39,7 +39,7 @@ from awf.runtime.release_pr_monitor import build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.service.gc import WorkspaceGCWorktreeRemoveResult
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import supply_fixed_item_commit
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -1294,7 +1294,8 @@ async def test_release_monitor_factory_uses_manual_merge_contract(
         session_factory=factory,
         runner=cmd,
         adapter=adapter,
-        gh=GitHubClient(cmd),
+        # #1018: the cert's thread audit must not consume the scripted queue.
+        gh=DefaultMergeMethodGitHubClient(cmd),
         validation=ValidationRunner(runner=cmd, artifacts_dir=tmp_path / "artifacts"),
         worktrees_root=tmp_path / "worktrees",
         poll_interval_seconds=60,

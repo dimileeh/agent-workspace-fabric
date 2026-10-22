@@ -486,7 +486,7 @@ def test_acknowledge_unverified_threads_only_touches_flagged_ids() -> None:
 
 
 def test_unverified_blocker_message_lists_ten_ids_and_counts_rest() -> None:
-    ids = [f"PRRT_kwDOtest{i:010d}" for i in range(12)]
+    ids = [f"PRRT_test_long_{i:010d}" for i in range(12)]
     message = unverified_blocker_message(ids)
     assert message.startswith("REVIEW_THREAD_DISPOSITION_UNVERIFIED:")
     assert len(message) <= 480
