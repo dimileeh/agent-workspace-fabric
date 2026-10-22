@@ -599,7 +599,7 @@ def _reconcile_comment_keyed_outdated_verdicts(
             )
             # #1018: the promoted verdict's reason / commit goes with it, so the
             # thread's disposition reply can be posted before it is resolved.
-            copy_item_disposition(state, from_id=resolvable_comment_ids[0], to_id=thread.thread_id)
+            copy_item_disposition(state, from_id=resolvable_comment_ids[0], thread=thread)
 
 
 async def _resolve_addressed_outdated_threads(

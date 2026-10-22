@@ -313,12 +313,24 @@ def attach_issue_url(state: MonitorState, item_id: str, issue_url: str) -> None:
     record_item_disposition(state, replace(disposition, issue_url=issue_url))
 
 
-def copy_item_disposition(state: MonitorState, *, from_id: str, to_id: str) -> None:
-    """Copy a comment-keyed disposition onto the thread its verdict is promoted to."""
+def copy_item_disposition(state: MonitorState, *, from_id: str, thread: ReviewThread) -> None:
+    """Copy a comment-keyed disposition onto the thread its verdict is promoted to.
+
+    The comment-keyed record carries no conversation snapshot, so the copy binds
+    ``thread``'s: feedback after its reply lands then supersedes it on re-triage.
+    """
     source = read_item_disposition(state, from_id)
     if source is None:
         return
-    record_item_disposition(state, replace(source, item_id=to_id, reply_comment_id=None))
+    record_item_disposition(
+        state,
+        replace(
+            source,
+            item_id=thread.thread_id,
+            reply_comment_id=None,
+            thread_body_hash=review_thread_body_hash(thread),
+        ),
+    )
 
 
 def disposition_problem(disposition: ThreadDisposition | None, verdict: str | None) -> str | None:

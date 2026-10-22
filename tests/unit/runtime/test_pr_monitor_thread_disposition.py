@@ -419,13 +419,17 @@ def test_copy_item_disposition_rekeys_item_id() -> None:
             reply_comment_id="stale",
         ),
     )
-    copy_item_disposition(state, from_id="4688598838", to_id="PRRT_test_t")
+    thread = replace(_thread_with("4688598838"), thread_id="PRRT_test_t")
+    copy_item_disposition(state, from_id="4688598838", thread=thread)
     copied = read_item_disposition(state, "PRRT_test_t")
     assert copied is not None
     assert copied.item_id == "PRRT_test_t"
     assert copied.reason == "already guarded"
     assert copied.reply_comment_id is None
-    copy_item_disposition(state, from_id="missing", to_id="PRRT_test_u")
+    # The comment-keyed source has no conversation snapshot; the copy binds the
+    # thread's, so feedback after its reply is posted supersedes it.
+    assert copied.thread_body_hash == review_thread_body_hash(thread)
+    copy_item_disposition(state, from_id="missing", thread=replace(thread, thread_id="PRRT_test_u"))
     assert read_item_disposition(state, "PRRT_test_u") is None
 
 

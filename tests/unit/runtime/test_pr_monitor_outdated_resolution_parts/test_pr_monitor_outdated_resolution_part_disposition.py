@@ -373,6 +373,61 @@ async def test_promoted_comment_keyed_verdict_copies_disposition(
     assert "the payload is validated upstream" in body
 
 
+async def test_promoted_reply_is_superseded_by_feedback_after_failed_resolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # PRRT_kwDOSJAM6s6vTf6l: the comment-keyed verdict recorded no thread body
+    # hash, so the promoted copy binds the conversation it answers. Otherwise a
+    # reviewer reply after a failed resolve reused the stale reply on re-triage.
+    gh = OrderedForge(FakeCommandRunner(), resolve_error=_TRANSIENT)
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    tid = "PRRT_test_promoted_then_feedback"
+    addressed_at = datetime(2026, 9, 30, tzinfo=UTC)
+    state.mark_addressed("4688598838", "false_positive")
+    seed_resolvable_disposition(
+        state, "4688598838", "false_positive", reason="the payload is validated upstream"
+    )
+    thread = _outdated_thread_with_distinct_comment(
+        tid, comment_id="4688598838", comment_at=addressed_at
+    )
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+        wait_on_transient=False,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve_failed"]
+    posted = read_item_disposition(state, tid)
+    assert posted is not None
+    assert posted.reply_comment_id == "reply-1"
+    assert posted.thread_body_hash == _review_thread_body_hash(thread)
+
+    followed_up = _outdated_thread_with_reply(
+        tid,
+        addressed_comment_id="4688598838",
+        addressed_at=addressed_at,
+        reply_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+    sync_item_disposition(
+        state,
+        tid,
+        VerdictResult(verdict="false_positive", reason="the follow-up is out of scope"),
+        thread=followed_up,
+    )
+
+    retriaged = read_item_disposition(state, tid)
+    assert retriaged is not None
+    assert (retriaged.reason, retriaged.reply_comment_id) == (
+        "the follow-up is out of scope",
+        None,
+    )
+
+
 async def test_outdated_false_positive_without_reason_parks(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
