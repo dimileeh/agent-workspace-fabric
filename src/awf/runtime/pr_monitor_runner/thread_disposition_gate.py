@@ -429,7 +429,8 @@ async def _post_operator_acknowledgement(
     """Post a guide's acknowledgement into the resolved thread; ``None`` = still unverified.
 
     The audit can be stale by the time the reply lands, so it counts only once a
-    re-audit shows the reply following the acknowledged conversation.
+    re-audit shows the thread still resolved and the reply following the
+    acknowledged conversation.
     """
     thread_id = thread.thread_id
     disposition = read_item_disposition(state, thread_id)
@@ -475,6 +476,7 @@ async def _post_operator_acknowledgement(
     posted = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if (
         posted is None
+        or not posted.is_resolved  # reopened meanwhile: the acknowledged resolution is gone
         or disposition_marker_class(_current_disposition_bodies(posted), thread_id=thread_id)
         != "operator_acknowledged"
         or not _acknowledgement_followed(state, posted)

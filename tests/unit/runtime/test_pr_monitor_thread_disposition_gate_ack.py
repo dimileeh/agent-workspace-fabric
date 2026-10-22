@@ -75,8 +75,9 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
     Replies AWF posts are served back on later audits (``visible_replies``) until
     a test deletes them, and join the thread's conversation as on the forge;
     ``resolved`` / ``conversation`` let a test reopen the thread or change its
-    feedback, ``edit_during_reply`` edits it while a reply is in flight, and
-    ``reaudit_error`` fails the first audit after the next reply.
+    feedback, ``edit_during_reply`` / ``reopen_during_reply`` edit or reopen it
+    while a reply is in flight, and ``reaudit_error`` fails the first audit after
+    the next reply.
     """
 
     def __init__(self, runner: FakeCommandRunner, *, reply_error: ForgeClientError | None = None):
@@ -86,6 +87,7 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
         self.resolved = True
         self.conversation = "conversation-1"
         self.edit_during_reply: str | None = None
+        self.reopen_during_reply = False
         self.reaudit_error: ForgeClientError | None = None
         self._armed_audit_error: ForgeClientError | None = None
 
@@ -121,6 +123,8 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
             raise self.reply_error
         if self.edit_during_reply is not None:
             self.conversation, self.edit_during_reply = self.edit_during_reply, None
+        if self.reopen_during_reply:
+            self.resolved, self.reopen_during_reply = False, False
         self._armed_audit_error, self.reaudit_error = self.reaudit_error, None
         self.visible_replies.append(body)
         return await super().reply_to_thread(thread_id=thread_id, body=body)
@@ -374,6 +378,27 @@ async def test_acknowledgement_posted_after_an_unseen_edit_is_not_accepted(
     assert passed.count_rows is not None
     assert dict(passed.count_rows)["operator acknowledged"] == 1
     assert len(gh.thread_replies) == 2
+
+
+async def test_acknowledgement_is_not_accepted_once_the_re_audit_finds_a_reopen(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    # The reviewer reopens the thread while the reply is in flight: the
+    # acknowledged resolution no longer stands, whatever the reply says.
+    gh.reopen_during_reply = True
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert blocked.count_rows is None
+    assert len(gh.thread_replies) == 1
 
 
 async def test_acknowledgement_is_unverified_until_a_re_audit_confirms_it(
