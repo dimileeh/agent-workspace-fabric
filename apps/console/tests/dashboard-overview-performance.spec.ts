@@ -240,15 +240,11 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   page,
 }) => {
   const overviewRequests: Array<string | null> = [];
-  let noteFirstPageRequest: (() => void) | null = null;
+  let noteRetainedRefresh: (() => void) | null = null;
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
-    onRequest: (cursor) => {
-      overviewRequests.push(cursor);
-      if (cursor === null) {
-        noteFirstPageRequest?.();
-      }
-    },
+    onRequest: (cursor) => overviewRequests.push(cursor),
+    onBatchRequest: () => noteRetainedRefresh?.(),
   });
 
   await page.goto("/");
@@ -286,13 +282,15 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
   const scrollTopBeforeRefresh = await list.evaluate((element) => element.scrollTop);
 
-  // Open the 5.5 s window on a routine poll. Under shared CI CPUs the setup
-  // above can end exactly as a poll fires; a window opened then also holds the
-  // next poll one pollMs later and counts two.
+  // Open the 5.5 s window when a routine first-page load settles. The poll
+  // timer starts only after loadOverview() settles, and the retained-window
+  // batch refresh is the last request that load starts. Anchoring on the
+  // first-page request start instead lets slow response processing under
+  // shared CI CPUs push the next poll past the window.
   await new Promise<void>((resolve) => {
-    noteFirstPageRequest = resolve;
+    noteRetainedRefresh = resolve;
   });
-  noteFirstPageRequest = null;
+  noteRetainedRefresh = null;
   const requestsAfterHistory = overviewRequests.length;
   await page.waitForTimeout(5_500);
   expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
