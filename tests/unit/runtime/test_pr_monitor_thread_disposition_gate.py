@@ -840,6 +840,62 @@ async def test_a_reply_retired_before_its_conversation_was_read_never_certifies(
     assert blocked.blocker is not None and _SILENT in blocked.blocker
 
 
+@pytest.mark.parametrize("cleared_by", ["needs_human", "rollback"])
+async def test_an_unconfirmed_reply_retired_by_a_moved_head_adoption_never_certifies(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    cleared_by: str,
+) -> None:
+    # PRRT_kwDOSJAM6s6vdUKv: a moved-head adoption strips a still-unconfirmed reply
+    # from its record. Once the successor's re-triage clears that record, a silent
+    # re-resolve by the shared identity must not let the predecessor's marker, which
+    # cites code the new head may have reverted, certify the thread.
+    from awf.runtime.pr_monitor_runner.helpers import _clear_addressed_state_by_id
+
+    predecessor = MonitorState()
+    predecessor.mark_addressed(_SILENT, "fix_committed")
+    record_item_disposition(
+        predecessor,
+        ThreadDisposition(
+            item_id=_SILENT,
+            disposition_class="fixed",
+            verdict="fix_committed",
+            commits=("c" * 40,),
+            reply_comment_id="reply-1",
+            reread_pending=True,
+        ),
+    )
+    adopted = settled_baseline_state()
+    for key, value in seedable_monitor_state(
+        predecessor.threads_addressed_ids, head_continuity=False
+    ).items():
+        adopted.mark_addressed(key, value)
+    if cleared_by == "needs_human":
+        listed = ReviewThread(
+            thread_id=_SILENT, path="widgets/core.py", line=1, body_excerpt="x", author="bot"
+        )
+        sync_item_disposition(
+            adopted, _SILENT, VerdictResult(verdict="needs_human", reason="ask"), thread=listed
+        )
+    else:
+        _clear_addressed_state_by_id(adopted, _SILENT)
+    assert read_item_disposition(adopted, _SILENT) is None
+    resolved = replace(
+        _thread(_SILENT, bodies=(_marker("fixed", _SILENT),)),
+        conversation_digest="a" * 64,
+        conversation_digest_before_reply="b" * 64,
+    )
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(resolved,)),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    blocked = await _gate(runner, workspace_id, adopted)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+
+
 async def test_an_audit_binds_a_landed_resolve_it_sees_standing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

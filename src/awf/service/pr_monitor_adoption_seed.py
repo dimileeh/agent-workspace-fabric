@@ -363,14 +363,26 @@ def _retire_unconfirmed_replies(seeded: dict[str, str]) -> dict[str, str]:
     ``sync_item_disposition`` keeps a posted reply for an unchanged thread, so
     ``reply_before_resolve`` would resolve on it whatever the successor's
     re-triage now says (PRRT_kwDOSJAM6s6vc3Z0).
+
+    As ``retire_item_disposition`` does, the retired reply is also tombstoned by
+    the conversation it followed (empty when AWF never read it): the successor's
+    re-triage may drop the record, and the tombstone then keeps the marker from
+    certifying the thread on a silent re-resolve (PRRT_kwDOSJAM6s6vdUKv).
     """
     retired = dict(seeded)
     for key, value in seeded.items():
         if not key.startswith(_ITEM_DISPOSITION_PREFIX):
             continue
         record = json.loads(value)
-        if record["class"] in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
-            retired[key] = json.dumps({**record, **_RETIRED_REPLY_FIELDS}, sort_keys=True)
+        if record["class"] not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+            continue
+        retired[key] = json.dumps({**record, **_RETIRED_REPLY_FIELDS}, sort_keys=True)
+        if record.get("reply_comment_id"):
+            followed = record.get("conversation_digest") or record.get("reply_conversation_digest")
+            if not isinstance(followed, str) or _CONVERSATION_DIGEST_RE.match(followed) is None:
+                followed = ""
+            item_id = key[len(_ITEM_DISPOSITION_PREFIX) :]
+            retired[f"{_DISPOSITION_RETIRED_PREFIX}{item_id}:{followed}"] = "retired"
     return retired
 
 

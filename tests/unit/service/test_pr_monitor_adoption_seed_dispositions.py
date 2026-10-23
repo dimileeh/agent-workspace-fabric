@@ -222,6 +222,43 @@ def test_retired_disposition_tombstones_cross_regardless_of_head(
 
 
 @pytest.mark.parametrize(
+    ("followed", "tombstoned"),
+    [
+        ({}, ""),  # never re-read: no marker in the thread certifies without a record
+        ({"reply_conversation_digest": _DIGEST}, _DIGEST),
+        ({"conversation_digest": "e" * 64, "reply_conversation_digest": _DIGEST}, "e" * 64),
+        ({"reply_conversation_digest": "not-a-digest"}, ""),
+        ({"reply_comment_id": None}, None),  # nothing posted, so no marker to retire
+    ],
+    ids=["unread", "read-after-posting", "bound", "malformed", "unposted"],
+)
+@pytest.mark.parametrize(("item_id", "cls", "verdict"), _HEAD_DEPENDENT)
+def test_a_reply_a_moved_head_retires_leaves_a_tombstone(
+    item_id: str,
+    cls: str,
+    verdict: str,
+    followed: dict[str, str | None],
+    tombstoned: str | None,
+) -> None:
+    """A moved head retires the reply as ``retire_item_disposition`` does (PRRT_kwDOSJAM6s6vdUKv).
+
+    The record crosses without its reply, so the successor's re-triage may drop it
+    (NEEDS HUMAN, or a verdict rollback). Only the tombstone of the conversation the
+    reply followed then keeps a silent re-resolve by the shared identity from
+    letting the predecessor's marker certify the thread.
+    """
+    record = {**json.loads(_disposition(item_id, cls, verdict)), "reread_pending": True}
+    previous = {item_id: verdict, f"{_PREFIX}{item_id}": json.dumps({**record, **followed})}
+
+    kept = seedable_monitor_state(previous, head_continuity=True)
+    moved = seedable_monitor_state(previous, head_continuity=False)
+
+    expected = {} if tombstoned is None else {f"{_RETIRED}{item_id}:{tombstoned}": "retired"}
+    assert not any(key.startswith(_RETIRED) for key in kept)
+    assert {key: value for key, value in moved.items() if key.startswith(_RETIRED)} == expected
+
+
+@pytest.mark.parametrize(
     "key",
     [
         f"{_RETIRED}PRRT_test_reopened",  # no conversation digest at all
