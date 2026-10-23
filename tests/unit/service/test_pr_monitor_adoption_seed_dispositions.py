@@ -259,6 +259,42 @@ def test_a_reply_a_moved_head_retires_leaves_a_tombstone(
 
 
 @pytest.mark.parametrize(
+    ("followed", "tombstoned"),
+    [
+        ({}, ""),
+        ({"reply_conversation_digest": _DIGEST}, _DIGEST),
+        ({"conversation_digest": "e" * 64, "reply_conversation_digest": _DIGEST}, "e" * 64),
+        ({"reply_comment_id": None}, None),
+    ],
+    ids=["unread", "read-after-posting", "bound", "unposted"],
+)
+@pytest.mark.parametrize(("item_id", "cls", "verdict"), _HEAD_DEPENDENT)
+def test_a_confirmed_reply_a_moved_head_drops_still_leaves_a_tombstone(
+    item_id: str,
+    cls: str,
+    verdict: str,
+    followed: dict[str, str | None],
+    tombstoned: str | None,
+) -> None:
+    """A confirmed reply's record drops on a moved head, but not its retirement (PRRT_kwDOSJAM6s6vdu03).
+
+    Its marker stays in the thread, and with neither record nor tombstone the
+    successor's gate takes that bare marker as the evidence: a force-push that
+    removed the cited fix would merge the resolved thread without re-triage.
+    """
+    record = {**json.loads(_disposition(item_id, cls, verdict)), **followed}
+    previous = {item_id: verdict, f"{_PREFIX}{item_id}": json.dumps(record)}
+
+    kept = seedable_monitor_state(previous, head_continuity=True)
+    moved = seedable_monitor_state(previous, head_continuity=False)
+
+    expected = {} if tombstoned is None else {f"{_RETIRED}{item_id}:{tombstoned}": "retired"}
+    assert not any(key.startswith(_RETIRED) for key in kept)
+    assert f"{_PREFIX}{item_id}" not in moved
+    assert {key: value for key, value in moved.items() if key.startswith(_RETIRED)} == expected
+
+
+@pytest.mark.parametrize(
     "key",
     [
         f"{_RETIRED}PRRT_test_reopened",  # no conversation digest at all

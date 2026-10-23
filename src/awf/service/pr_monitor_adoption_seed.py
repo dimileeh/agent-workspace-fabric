@@ -299,6 +299,7 @@ def seedable_monitor_state(
     }
     if not head_continuity:
         seeded = _retire_unconfirmed_replies(seeded)
+        seeded.update(_moved_head_reply_tombstones(previous))
     return dict(
         sorted(
             _restore_orphaned_operator_decisions(seeded, head_continuity=head_continuity).items()
@@ -363,11 +364,6 @@ def _retire_unconfirmed_replies(seeded: dict[str, str]) -> dict[str, str]:
     ``sync_item_disposition`` keeps a posted reply for an unchanged thread, so
     ``reply_before_resolve`` would resolve on it whatever the successor's
     re-triage now says (PRRT_kwDOSJAM6s6vc3Z0).
-
-    As ``retire_item_disposition`` does, the retired reply is also tombstoned by
-    the conversation it followed (empty when AWF never read it): the successor's
-    re-triage may drop the record, and the tombstone then keeps the marker from
-    certifying the thread on a silent re-resolve (PRRT_kwDOSJAM6s6vdUKv).
     """
     retired = dict(seeded)
     for key, value in seeded.items():
@@ -377,13 +373,37 @@ def _retire_unconfirmed_replies(seeded: dict[str, str]) -> dict[str, str]:
         if record["class"] not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
             continue
         retired[key] = json.dumps({**record, **_RETIRED_REPLY_FIELDS}, sort_keys=True)
-        if record.get("reply_comment_id"):
-            followed = record.get("conversation_digest") or record.get("reply_conversation_digest")
-            if not isinstance(followed, str) or _CONVERSATION_DIGEST_RE.match(followed) is None:
-                followed = ""
-            item_id = key[len(_ITEM_DISPOSITION_PREFIX) :]
-            retired[f"{_DISPOSITION_RETIRED_PREFIX}{item_id}:{followed}"] = "retired"
     return retired
+
+
+def _moved_head_reply_tombstones(previous: Mapping[str, Any]) -> dict[str, str]:
+    """Tombstone every posted code-dependent reply a moved head retires.
+
+    As ``retire_item_disposition`` does, each is tombstoned by the conversation it
+    followed (empty when AWF never read it). Its marker stays in the thread
+    whether its record crosses retired or, confirmed, is dropped -- and with
+    neither record nor tombstone the successor's gate takes that marker as the
+    evidence, so a silent re-resolve by the shared identity would certify a fix
+    or refutation the moved head may have reverted (PRRT_kwDOSJAM6s6vdUKv,
+    PRRT_kwDOSJAM6s6vdu03).
+    """
+    tombstones: dict[str, str] = {}
+    for key, value in previous.items():
+        if not isinstance(value, str) or not _is_seedable_disposition(
+            key, value, head_continuity=True
+        ):
+            continue
+        record = json.loads(value)
+        if record["class"] not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+            continue
+        if not record.get("reply_comment_id"):
+            continue
+        followed = record.get("conversation_digest") or record.get("reply_conversation_digest")
+        if not isinstance(followed, str) or _CONVERSATION_DIGEST_RE.match(followed) is None:
+            followed = ""
+        item_id = key[len(_ITEM_DISPOSITION_PREFIX) :]
+        tombstones[f"{_DISPOSITION_RETIRED_PREFIX}{item_id}:{followed}"] = "retired"
+    return tombstones
 
 
 def _is_verdict_entry(key: str, value: str, *, head_continuity: bool) -> bool:

@@ -324,7 +324,8 @@ def _disposition_holds(
     breaks, so a record left must be the posted reply of that marker's class, one
     its post-reply re-read confirmed. The first audit to see a posted reply
     resolved binds it to the conversation it followed. With no record at all (a re-adopted PR whose record did not cross)
-    the marker is the evidence — unless it is a reply this monitor retired, or the
+    the marker is the evidence — unless it is a reply this monitor (or a moved-head
+    re-adoption, PRRT_kwDOSJAM6s6vdu03) retired, or the
     thread holds a retired reply whose conversation AWF never read, which could be
     any marker in it (PRRT_kwDOSJAM6s6vc8NC).
     """
