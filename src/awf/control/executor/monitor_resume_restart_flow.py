@@ -75,9 +75,12 @@ async def _restart_compose_runtime_for_monitor_resume(
         pending_recreates = _monitor_handoff._pending_companion_recreates_for_resume(
             workspace_id=workspace_id, compose_file=compose_file
         )
+        # Explicitly targeting a profiled service starts it even when its profile
+        # is disabled, so only active services are force-recreated.
         secret_companions = {
             name
             for name in (
+                *rewritten_services,
                 *pending_recreates,
                 *_monitor_handoff._companions_with_set_env_secrets_for_resume(
                     companion_specs=companion_specs,
@@ -94,9 +97,7 @@ async def _restart_compose_runtime_for_monitor_resume(
         unsettled_services = await dependencies_to_recreate_after_exhaustion(
             self, workspace_id=workspace_id
         )
-        recreate_services = tuple(
-            sorted(set(rewritten_services) | secret_companions | set(unsettled_services))
-        )
+        recreate_services = tuple(sorted(secret_companions | set(unsettled_services)))
         # Recreate the agent and what must change; recovering dependencies are left alone (#936).
         tolerated_error = await restart_runtime_for_monitor_resume(
             self._compose,

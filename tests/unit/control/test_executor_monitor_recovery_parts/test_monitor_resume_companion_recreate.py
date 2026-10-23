@@ -220,6 +220,42 @@ async def test_resume_recreates_the_companions_the_refresh_rewrote(
 
 
 @pytest.mark.unit
+async def test_resume_never_recreates_a_rewritten_companion_outside_the_active_profiles(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        _COMPOSE + "  extra:\n    image: extra\n    profiles: [extra]\n", encoding="utf-8"
+    )
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+
+    def _rewrote(**_kwargs: Any) -> tuple[str, ...]:
+        return ("backend", "extra")
+
+    monkeypatch.setattr(
+        monitor_handoff, "_refresh_optional_companion_env_secrets_for_resume", _rewrote
+    )
+    compose = _RecordingCompose()
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
+    # Explicitly targeting a profiled service starts it even with its profile
+    # disabled, so a rewritten ``extra`` must not be force-recreated.
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
+
+
+@pytest.mark.unit
 def test_companions_with_a_set_env_secret_are_reported_even_when_compose_is_unchanged() -> None:
     specs = companion_specs_from_task_policy(
         {
