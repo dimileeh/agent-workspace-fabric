@@ -14,7 +14,7 @@ guided resume starts a fresh streak. When the ``recovered`` write fails, the
 executor remembers the restart time, counts only later failures, and retries the
 write before the next restart attempt, so a replacement executor sees the boundary.
 A failure event whose write fails is likewise kept in memory: it still counts
-toward the streak and is written before the next restart attempt.
+toward the streak and its backoff, and is written before the next restart attempt.
 """
 
 from __future__ import annotations
@@ -82,9 +82,21 @@ def _unrecorded_failures(self: Any) -> dict[str, list[dict[str, Any]]]:
     return failures
 
 
+def _unrecorded_failed_at(self: Any) -> dict[str, datetime]:
+    """When each workspace's newest unrecorded failure happened; read only while one is kept."""
+    failed_at: dict[str, datetime] | None = getattr(
+        self, "_restart_streak_unrecorded_failed_at", None
+    )
+    if failed_at is None:
+        failed_at = {}
+        self._restart_streak_unrecorded_failed_at = failed_at
+    return failed_at
+
+
 def remember_unrecorded_failure(self: Any, *, workspace_id: str, event: dict[str, Any]) -> None:
     """Keep a failure event whose write failed, as ``add_event`` keyword arguments."""
     _unrecorded_failures(self).setdefault(workspace_id, []).append(event)
+    _unrecorded_failed_at(self)[workspace_id] = _now()
 
 
 async def _persist_unrecorded_failures(self: Any, *, workspace_id: str) -> None:
@@ -207,6 +219,13 @@ async def pace_monitor_resume_restart(self: Any, *, workspace_id: str) -> None:
     except SQLAlchemyError:
         _log.exception("executor.resume_restart_backoff_lookup_failed", workspace_id=workspace_id)
         return
+    # Failures whose write is still failing count here as in escalation, and
+    # the gap runs from whichever failure, stored or not, happened last.
+    pending = _unrecorded_failures(self).get(workspace_id)
+    if pending:
+        failures += len(pending)
+        pending_at = _unrecorded_failed_at(self)[workspace_id]
+        last_failed_at = pending_at if last_failed_at is None else max(last_failed_at, pending_at)
     if failures == 0 or last_failed_at is None:
         return
     backoff = MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS[
