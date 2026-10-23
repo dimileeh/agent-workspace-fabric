@@ -215,10 +215,14 @@ test("1,301-row fleet paints its first page before history and keeps routine wor
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
   await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1301");
 
+  // Locate Close by its attribute, not by role: each role query computes the
+  // accessible name of every node in the 100-card page, and on shared CI CPUs
+  // that harness work alone took about 200 ms of the pane budget. The click
+  // proves the pane opened: the closed panel's button is off-screen and inert.
+  const closeInspector = page.locator('button[aria-label="Close inspector"]');
   const inspectorStartedAt = Date.now();
   await page.getByTestId("workspace-card-ws_perf_0001").click();
-  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
-  await page.getByRole("button", { name: "Close inspector" }).click();
+  await closeInspector.click();
   await expect(page.locator(".fixed.inset-y-0.right-0").first()).toHaveClass(/translate-x-full/);
   const inspectorOpenCloseMs = Date.now() - inspectorStartedAt;
   expect(inspectorOpenCloseMs).toBeLessThan(1_000);
@@ -236,9 +240,15 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   page,
 }) => {
   const overviewRequests: Array<string | null> = [];
+  let noteFirstPageRequest: (() => void) | null = null;
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
-    onRequest: (cursor) => overviewRequests.push(cursor),
+    onRequest: (cursor) => {
+      overviewRequests.push(cursor);
+      if (cursor === null) {
+        noteFirstPageRequest?.();
+      }
+    },
   });
 
   await page.goto("/");
@@ -276,6 +286,13 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
   const scrollTopBeforeRefresh = await list.evaluate((element) => element.scrollTop);
 
+  // Open the 5.5 s window on a routine poll. Under shared CI CPUs the setup
+  // above can end exactly as a poll fires; a window opened then also holds the
+  // next poll one pollMs later and counts two.
+  await new Promise<void>((resolve) => {
+    noteFirstPageRequest = resolve;
+  });
+  noteFirstPageRequest = null;
   const requestsAfterHistory = overviewRequests.length;
   await page.waitForTimeout(5_500);
   expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
@@ -895,13 +912,16 @@ test("scroll traverses bounded history windows in both directions", async ({ pag
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 
+  // Routine first-page polls may interleave on shared CI CPUs; traversal must
+  // request exactly these continuation pages and nothing more.
+  const continuations = () => overviewRequests.filter((cursor) => cursor !== null);
   await scrollTo("bottom");
-  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  await expect.poll(continuations).toEqual([String(PAGE_SIZE)]);
   await scrollTo("bottom");
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
-  await expect.poll(() => overviewRequests).toEqual([null, "100", "200"]);
+  await expect.poll(continuations).toEqual(["100", "200"]);
 
   await scrollTo("later");
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
@@ -915,7 +935,7 @@ test("scroll traverses bounded history windows in both directions", async ({ pag
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
-  expect(overviewRequests).toEqual([null, "100", "200"]);
+  expect(continuations()).toEqual(["100", "200"]);
 });
 
 test("virtualization keeps the viewport covered while crossing a row-window boundary", async ({
@@ -1174,10 +1194,16 @@ test("selecting a visible workspace keeps a boundary viewport covered", async ({
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
   // Wait for the continuation request before asserting the loaded summary so
   // shared CI CPUs do not flake on paint alone after a heavy sibling file.
-  await expect.poll(() => overviewCursors).toEqual([null, String(PAGE_SIZE)]);
+  // Routine first-page polls may interleave; only one continuation is allowed.
+  await expect
+    .poll(() => overviewCursors.filter((cursor) => cursor !== null))
+    .toEqual([String(PAGE_SIZE)]);
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
     .toBeVisible();
 
