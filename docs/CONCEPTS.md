@@ -340,7 +340,16 @@ When meaningful bot or human feedback appears, AWF:
 4. Re-polls GitHub.
 5. Repeats if more new comments arrived.
 6. Pushes the accumulated fix commits.
-7. Resolves fixed GitHub review threads.
+7. Posts one in-thread disposition reply per thread (machine marker, class, fix
+   commit / reason / issue link), then resolves it; a thread whose reply cannot
+   be posted stays open and is parked `needs_human`. A fresh reply is checked
+   against the full live conversation before it first: feedback added or edited
+   since the thread was listed retires the reply and leaves the thread open for
+   re-triage. An unmarked comment by AWF's own account parks the thread
+   `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead: it is the operator's, and the
+   monitor never reads it. The exception is a comment that comes before AWF's
+   previous reply in the thread while that reply is still current, meaning no
+   newer outside comment or edit has superseded it.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
@@ -394,7 +403,7 @@ its push. On the operator-hint path it is an ordinary parked hint with nothing
 to push. The rollback paths that need that baseline still refuse to park
 without it. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
-without a commit.
+without a commit, after the disposition reply carrying the agent's reason is posted.
 
 The correction's last evidence gate is cross-file callee evidence: a fix counts
 when the item's range edits the definition of a function called on the anchored
@@ -415,6 +424,124 @@ closed. Every rejection keeps the item's
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
+
+### Review-thread dispositions
+
+AWF never resolves a review thread silently (#1018). Immediately before every
+resolve — fix-cycle FIXED / FALSE POSITIVE / DEFER, outdated-thread hygiene, and
+branch-evidence seeding alike — it posts exactly one concise reply inside the
+thread. Its first line is a stable machine marker that names the thread, so a
+copy pasted into another thread is no evidence:
+
+```text
+<!-- AWF:thread-disposition:v1 class=<class> thread=<thread id> -->
+```
+
+| Class | Reply carries |
+| --- | --- |
+| `fixed` | the item's fix commit sha(s) (its #935 provenance commit; when the chain no longer holds it, the item commit this cycle durably recorded) |
+| `fixed_branch_evidence` | the branch commit an outdated thread's evidence grep matched |
+| `false_positive` | the agent's one-line reason (required by the prompt) |
+| `deferred` | the agent's reason and the tracking-issue link |
+
+Reason text is redacted and markdown-escaped: replies never contain `@`, so no
+bot or human is summoned, and a pasted marker cannot be forged. The record
+(class, reason, commits, issue URL, reply comment id) is kept per item in
+monitor state and copied into the resolve audit event's evidence. The thread is
+resolved only after the reply succeeded; otherwise it stays open and is parked
+`needs_human` — the workspace keeps monitoring and pushed commits stay pushed:
+
+- `THREAD_DISPOSITION_REASON_MISSING` — FALSE POSITIVE / DEFER without a reason;
+- `THREAD_DISPOSITION_EVIDENCE_MISSING` — FIXED without a commit, DEFER without
+  an issue;
+- `THREAD_DISPOSITION_REPLY_FAILED` — the forge rejected the reply (never retried
+  blindly, since a retry could post twice);
+- `THREAD_DISPOSITION_UNREAD_FEEDBACK` — an unmarked comment by AWF's own account
+  precedes the reply. That account can be the operator's, and
+  `fetch_pr_status` never lists its comments, so the triage never read it. This
+  holds even when newer outside feedback followed it, and even when an earlier AWF
+  reply that such feedback superseded sits in between. The reply is retired.
+
+DEFER no longer posts a separate top-level PR comment: the in-thread reply is
+the explanation. A newly posted reply id is saved durably right after the reply
+(the fix cycle writes only that record, never its unconfirmed verdicts), and a
+record whose reply landed survives every rollback and re-triage of the item, so
+a failed resolve never posts a second reply. Only fresh reviewer feedback in the
+thread drops it, because that feedback is owed its own reply — or a reopen, below.
+
+Before READY_TO_MERGE (release monitors) and before merging (feature
+monitors), AWF re-enumerates every review thread with exhaustive pagination,
+failing closed on a truncated page. Every thread resolved by AWF's own forge
+identity must carry the marker in a comment that identity authored — the
+marker, not the login, is the evidence, because that identity can be the
+operator's own account. The marker must also follow the thread's newest comment
+by anyone else, and be posted after the newest edit to such a comment: an older
+one answered feedback that has since moved on, so a reopened thread resolved
+silently after new or edited feedback blocks. Threads resolved
+by any other login are that person's or bot's disposition and never block.
+
+One invariant governs every disposition the monitor records, posted or not: it
+is bound to the conversation it answers once a gate audit first sees its reply
+resolved, and holds only while an audit shows the thread still resolved by AWF's
+identity with that conversation before its reply. A reopen, a resolution by
+someone else, or a new or edited comment retires it for good: its marker then
+certifies nothing — the monitor
+remembers a retired reply by the conversation it followed, whatever later
+happens to the record — so a silent re-resolve blocks. A reply whose AWF
+resolve landed is recorded as such (saved at once), so it is retired by a reopen
+just like a bound one even before any audit binds it. Every poll whose status
+lists such a reply's thread open again retires it too, as do an audit seeing it
+open, a re-triage and outdated hygiene reaching that thread, so a reopen counts
+even when no gate audit runs before the thread is resolved again. Only a failed
+resolve's reply is reused, by its retry. A retired disposition loses its reply
+id, so the monitor's next resolve of the thread posts a fresh reply instead of
+resolving on the old one. With no record at all
+(a re-adopted PR whose record did not cross), an agent's marker is still the
+evidence. A failing thread is
+`NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
+ids (never a workspace failure); a failed enumeration is
+`REVIEW_THREAD_AUDIT_UNAVAILABLE`, whose public text stays stable across an
+outage (the raw forge error goes to the log and one audit event per outage).
+Once READY_TO_MERGE has been posted for a head, an outage on a later poll at
+that same head is log-only: the cert stands and the monitor waits and re-polls. The certificate's first gate line shows
+counts per disposition class and "resolved by others".
+
+Rollout: a workspace's first gate run records the threads it finds resolved
+by AWF's identity without a marker as a legacy baseline — they predate
+reply-before-resolve — in state and in one audit event with their ids
+(`REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE`). Baseline threads do not block and
+the certificate lists their count separately; every unmarked resolution after
+that first run still blocks. Each exemption is tied to the thread's
+conversation as that first run saw it: once the thread reopens or gains (or
+edits) a comment, the exemption is retired for good, and a later silent
+resolution needs a marker like any other. A PR AWF opens itself (a feature PR, or a release
+PR it creates) has no pre-rollout history, so its handoff settles the baseline
+empty: no first-run exemption, and every unmarked resolution blocks. On a
+reused or adopted PR, a thread the monitor already recorded a disposition for
+(or that carries an AWF marker at all) was handled after the rollout, so no
+baseline ever exempts it.
+
+There is no acknowledgement directive: an operator clears a flagged thread by
+reopening it. The next poll that lists the thread open clears its verdict, so
+`decide()` re-triages it through the normal fix cycle, which posts a fresh
+disposition reply before resolving it. Without this, a FIXED or FALSE POSITIVE
+thread whose comments did not change would never re-enter triage. The flag then
+reads `reopened` until the gate certifies the thread's new disposition. While it
+does, outdated hygiene does not re-seed the thread's verdict from branch
+evidence in the re-triage's place, and that poll step never clears the
+re-triage's own verdict again. The flag crosses a PR re-adoption. The gate itself
+never writes to the forge. It decides on ONE complete audit. Under the merge
+lock that audit fails fast, and so does outdated hygiene's re-read after a fresh
+reply: no transport retry or sleep holds the lock. A fault releases the lock,
+and the monitor retries on the next poll. A reply whose in-lock re-read faulted,
+or was too stale to show that reply (so it could miss feedback before it too),
+is kept but marked unconfirmed, and its thread is requeued. The retry re-reads
+that same reply before resolving on it and never posts a second one, and the
+gate certifies nothing on the reply until a re-read confirms it.
+
+On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
+comment carrying the marker; the resolution audit is reported unsupported, so
+the Bitbucket certificate keeps its original text.
 
 ### Auto-merge (opt-in, default off)
 

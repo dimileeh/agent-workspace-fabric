@@ -33,6 +33,7 @@ fresh monitor must re-derive them from the live PR.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -142,6 +143,78 @@ _VERDICT_KEY_RE = re.compile(
 _OPERATOR_DECISION_PREFIX = "__operator_decision__:"
 _OPERATOR_DECISION_ISSUED_AT_PREFIX = "__operator_decision_at__:"
 _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
+
+# ``__awf_item_disposition__:<item id>`` (``awf.runtime.monitor_state_keys``) is
+# what AWF publishes in a review thread before resolving it, plus the id of the
+# reply once posted (#1018). It follows the verdict it answers, under the same
+# head-continuity rule: without it a seeded resolvable verdict parks for missing
+# evidence, or re-posts a reply the thread already carries. ``fixed`` /
+# ``fixed_branch_evidence`` / ``false_positive`` describe the code at the
+# predecessor's head and cross only with continuity; ``deferred`` judges the
+# feedback and crosses either way. So does a posted reply still ``reread_pending``
+# (PRRT_kwDOSJAM6s6vculv): nothing checked it against the conversation it follows,
+# and with no record the successor's gate would take its marker as the evidence
+# once the shared forge identity resolved the thread. On a moved head it crosses
+# retired, as a reopen leaves it (PRRT_kwDOSJAM6s6vc3Z0): the reply answers code
+# the new head may have reverted, and posted, the successor's re-triage of the
+# unchanged thread would reuse it whatever its new verdict. A record
+# that does not decode to a known class, or names no thread/comment id, stays.
+_ITEM_DISPOSITION_PREFIX = "__awf_item_disposition__:"
+_HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
+    {"fixed", "fixed_branch_evidence", "false_positive"}
+)
+_HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred"})
+# What ``retire_item_disposition`` clears: with no reply id the gate certifies
+# nothing on the marker, and the next verdict replaces the record.
+_RETIRED_REPLY_FIELDS: dict[str, object] = {
+    "reply_comment_id": None,
+    "conversation_digest": None,
+    "resolved": False,
+    "reply_conversation_digest": None,
+    "reread_pending": False,
+}
+
+# ``__awf_disposition_retired__:<thread id>:<conversation digest>``
+# (``awf.runtime.monitor_state_keys``) is the tombstone of a posted disposition
+# reply that a reopen or a changed conversation retired (#1018): while the
+# thread's newest marker still follows that conversation it certifies nothing.
+# On a moved head the code-dependent record does not cross, so the tombstone is
+# the successor's only evidence that the historical marker answers an earlier
+# resolution episode -- left behind, a silent re-resolve of the unchanged
+# conversation by the shared forge identity would let the stale marker certify
+# the thread again. It records thread history rather than code and only ever
+# makes the gate stricter, so it crosses regardless of head continuity. The
+# digest is AWF's own SHA-256 hex of the conversation (empty when AWF never read
+# the conversation the reply followed), and the thread id must be a verdict-key form.
+_DISPOSITION_RETIRED_PREFIX = "__awf_disposition_retired__:"
+_CONVERSATION_DIGEST_RE = re.compile(r"^(?:[0-9a-f]{64})?$")
+
+# ``__awf_disposition_unverified__:<thread id>`` flags a thread the disposition
+# gate found resolved by AWF's identity without a disposition (#1018). The
+# operator clears it by reopening the thread: the poll that lists it open clears
+# its verdict for re-triage and turns the flag ``reopened``, which keeps branch
+# evidence from re-seeding that verdict. Left behind, a flagged thread reopened
+# around the re-adoption keeps its seeded verdict and is never re-triaged. It
+# records thread history rather than code and only makes the successor stricter,
+# so it crosses regardless of head continuity: the gate's reason code or
+# ``reopened``, under a verdict-key thread id.
+_DISPOSITION_UNVERIFIED_PREFIX = "__awf_disposition_unverified__:"
+_DISPOSITION_UNVERIFIED_VALUES = frozenset({"REVIEW_THREAD_DISPOSITION_UNVERIFIED", "reopened"})
+
+# ``__awf_review_thread_disposition_baseline__`` (``awf.runtime.monitor_state_keys``)
+# is the disposition gate's one-time legacy baseline: the unmarked AWF
+# resolutions its first run exempted, and the proof that first run happened
+# (#1018). It belongs to the PR, not the workspace. Left behind, the successor's
+# first gate run re-takes it and grandfathers every unmarked AWF resolution --
+# including the threads the predecessor already flagged
+# ``REVIEW_THREAD_DISPOSITION_UNVERIFIED``. It records thread history rather than
+# code, so it crosses regardless of head continuity, and it crosses verbatim:
+# the gate reads a malformed or empty record fail-closed (first run done,
+# nothing exempt), whereas dropping it would fail open.
+_DISPOSITION_BASELINE_KEY = "__awf_review_thread_disposition_baseline__"
+# ``__awf_review_thread_disposition_baseline_conversations__`` ties each of those
+# exemptions to the conversation it covered, so it crosses verbatim with them.
+_DISPOSITION_BASELINE_CONVERSATIONS_KEY = "__awf_review_thread_disposition_baseline_conversations__"
 _COPIED_MARKER_PREFIXES = (
     "__review_comment_body_hash__:",
     "__review_thread_body_hash__:",
@@ -218,8 +291,15 @@ def seedable_monitor_state(
         and (
             _is_verdict_entry(key, value, head_continuity=head_continuity)
             or _is_copied_marker(key, value)
+            or _is_seedable_disposition(key, value, head_continuity=head_continuity)
+            or _is_disposition_retired_tombstone(key)
+            or _is_disposition_unverified_flag(key, value)
+            or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
+    if not head_continuity:
+        seeded = _retire_unconfirmed_replies(seeded)
+        seeded.update(_moved_head_reply_tombstones(previous))
     return dict(
         sorted(
             _restore_orphaned_operator_decisions(seeded, head_continuity=head_continuity).items()
@@ -275,9 +355,95 @@ def _restore_orphaned_operator_decisions(
     return restored
 
 
+def _retire_unconfirmed_replies(seeded: dict[str, str]) -> dict[str, str]:
+    """Strip the reply from every code-dependent record crossing a moved head.
+
+    Only a ``reread_pending`` record crosses a moved head with a code-dependent
+    class, and its reply cites the predecessor's head. It stays as the gate's
+    evidence that the thread's marker certifies nothing, but not as a reply:
+    ``sync_item_disposition`` keeps a posted reply for an unchanged thread, so
+    ``reply_before_resolve`` would resolve on it whatever the successor's
+    re-triage now says (PRRT_kwDOSJAM6s6vc3Z0).
+    """
+    retired = dict(seeded)
+    for key, value in seeded.items():
+        if not key.startswith(_ITEM_DISPOSITION_PREFIX):
+            continue
+        record = json.loads(value)
+        if record["class"] not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+            continue
+        retired[key] = json.dumps({**record, **_RETIRED_REPLY_FIELDS}, sort_keys=True)
+    return retired
+
+
+def _moved_head_reply_tombstones(previous: Mapping[str, Any]) -> dict[str, str]:
+    """Tombstone every posted code-dependent reply a moved head retires.
+
+    As ``retire_item_disposition`` does, each is tombstoned by the conversation it
+    followed (empty when AWF never read it). Its marker stays in the thread
+    whether its record crosses retired or, confirmed, is dropped -- and with
+    neither record nor tombstone the successor's gate takes that marker as the
+    evidence, so a silent re-resolve by the shared identity would certify a fix
+    or refutation the moved head may have reverted (PRRT_kwDOSJAM6s6vdUKv,
+    PRRT_kwDOSJAM6s6vdu03).
+    """
+    tombstones: dict[str, str] = {}
+    for key, value in previous.items():
+        if not isinstance(value, str) or not _is_seedable_disposition(
+            key, value, head_continuity=True
+        ):
+            continue
+        record = json.loads(value)
+        if record["class"] not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+            continue
+        if not record.get("reply_comment_id"):
+            continue
+        followed = record.get("conversation_digest") or record.get("reply_conversation_digest")
+        if not isinstance(followed, str) or _CONVERSATION_DIGEST_RE.match(followed) is None:
+            followed = ""
+        item_id = key[len(_ITEM_DISPOSITION_PREFIX) :]
+        tombstones[f"{_DISPOSITION_RETIRED_PREFIX}{item_id}:{followed}"] = "retired"
+    return tombstones
+
+
 def _is_verdict_entry(key: str, value: str, *, head_continuity: bool) -> bool:
     seedable = _SEEDABLE_VERDICTS if head_continuity else _HEAD_INDEPENDENT_VERDICTS
     return value in seedable and _VERDICT_KEY_RE.match(key) is not None
+
+
+def _is_seedable_disposition(key: str, value: str, *, head_continuity: bool) -> bool:
+    if not key.startswith(_ITEM_DISPOSITION_PREFIX):
+        return False
+    if _VERDICT_KEY_RE.match(key[len(_ITEM_DISPOSITION_PREFIX) :]) is None:
+        return False
+    try:
+        record = json.loads(value)
+    except ValueError:
+        return False
+    disposition_class = record.get("class") if isinstance(record, dict) else None
+    if disposition_class in _HEAD_INDEPENDENT_DISPOSITION_CLASSES:
+        return True
+    if disposition_class not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+        return False
+    return head_continuity or record.get("reread_pending") is True
+
+
+def _is_disposition_retired_tombstone(key: str) -> bool:
+    if not key.startswith(_DISPOSITION_RETIRED_PREFIX):
+        return False
+    thread_id, _, digest = key[len(_DISPOSITION_RETIRED_PREFIX) :].rpartition(":")
+    return (
+        _VERDICT_KEY_RE.match(thread_id) is not None
+        and _CONVERSATION_DIGEST_RE.match(digest) is not None
+    )
+
+
+def _is_disposition_unverified_flag(key: str, value: str) -> bool:
+    return (
+        key.startswith(_DISPOSITION_UNVERIFIED_PREFIX)
+        and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_UNVERIFIED_PREFIX) :]) is not None
+        and value in _DISPOSITION_UNVERIFIED_VALUES
+    )
 
 
 def _is_copied_marker(key: str, value: str) -> bool:

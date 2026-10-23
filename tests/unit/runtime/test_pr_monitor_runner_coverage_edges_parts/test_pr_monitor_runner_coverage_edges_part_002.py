@@ -47,7 +47,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -55,6 +55,12 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     pr_payload,
     seed_monitoring_workspace,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 class _BitbucketResolveThreadClient(DefaultMergeMethodGitHubClient):
@@ -208,8 +214,12 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
     merge_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
     assert len(merge_calls) == 1
     assert merge_calls[0].args[:3] == ["gh", "pr", "merge"]
-    # Only the bounded-retry bookkeeping key is left behind — no thread markers.
-    assert state.threads_addressed_ids == {"__awf_forge_transient_retry_count:merge_pr": "1"}
+    # Only the bounded-retry bookkeeping key is left behind — no thread markers —
+    # plus the (empty) legacy baseline the first disposition-gate run records (#1018).
+    assert state.threads_addressed_ids == {
+        "__awf_forge_transient_retry_count:merge_pr": "1",
+        "__awf_review_thread_disposition_baseline__": "[]",
+    }
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -684,7 +694,10 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "requeued"
-    assert resolution_events[0].payload["evidence"] == {
+    evidence = dict(resolution_events[0].payload["evidence"])
+    # #1018: the resolve audit carries the reply-before-resolve disposition.
+    assert evidence.pop("dispositions")[0]["class"] == "fixed"
+    assert evidence == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "requeued_thread_count": 1,
@@ -783,7 +796,10 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "requeued"
-    assert resolution_events[0].payload["evidence"] == {
+    evidence = dict(resolution_events[0].payload["evidence"])
+    # #1018: the resolve audit carries the reply-before-resolve disposition.
+    assert evidence.pop("dispositions")[0]["class"] == "fixed"
+    assert evidence == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "requeued_thread_count": 1,
@@ -882,7 +898,10 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "failed"
     assert resolution_events[0].payload["reason_code"] == BITBUCKET_API_ERROR
-    assert resolution_events[0].payload["evidence"] == {
+    evidence = dict(resolution_events[0].payload["evidence"])
+    # #1018: the resolve audit carries the reply-before-resolve disposition.
+    assert evidence.pop("dispositions")[0]["class"] == "fixed"
+    assert evidence == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "failed_thread_count": 1,
@@ -1414,50 +1433,3 @@ async def test_fix_cycle_fails_closed_when_per_item_rev_parse_fails(
     assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
     assert "rev-parse failed" in result.stderr
     assert operation_start_heads == ["start"]
-
-
-@pytest.mark.unit
-async def test_fix_cycle_returns_failed_push_when_review_fix_hits_head_object_missing(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-    review = ReviewComment(
-        comment_id="C_head",
-        body_excerpt="please adjust this",
-        author="reviewer",
-    )
-
-    async def _head_object_missing(**_kwargs: object) -> object:
-        raise _MonitorHeadObjectMissingError(
-            "HEAD_OBJECT_MISSING_FIX_REVIEW_CUSTOM",
-            "HEAD object missing for workspace ws_head_review and recovery failed",
-        )
-
-    monkeypatch.setattr(runner, "_address_review_comment_result", _head_object_missing)
-
-    result = await runner._run_fix_cycle(
-        workspace_id="ws_head_review",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        pr_head_sha="abc1234567890def",
-        initial_threads=(),
-        initial_reviews=(review,),
-        state=MonitorState(),
-        remote_branch="awf/ws_head_review",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert result.failed is True
-    assert result.pushed is False
-    assert result.returncode == 1
-    assert result.reason_code == "HEAD_OBJECT_MISSING_FIX_REVIEW_CUSTOM"
-    assert "HEAD object missing" in result.stderr

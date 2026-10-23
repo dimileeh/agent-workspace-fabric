@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -83,6 +84,7 @@ class _MergeMethodClient:
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
         self.resolved_threads: list[str] = []
+        self.thread_replies: list[tuple[str, str]] = []
         self.fetch_pr_status_calls = 0
         self.expected_repo = _TEST_REPO
         self.expected_pr_number = _TEST_PR_NUMBER
@@ -172,6 +174,19 @@ class _MergeMethodClient:
         if self.resolve_error is not None:
             raise self.resolve_error
 
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        """Record the disposition reply posted before an outdated-hygiene resolve."""
+        self.thread_replies.append((thread_id, body))
+        return f"reply-{len(self.thread_replies)}"
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+    ) -> ReviewThreadAudit:
+        """A clean disposition audit (#1018): no AWF-resolved threads to verify."""
+        assert repo == self.expected_repo
+        assert pr_number == self.expected_pr_number
+        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot")
+
 
 async def _execute_merge(
     *,
@@ -180,6 +195,7 @@ async def _execute_merge(
     gh: _MergeMethodClient,
     base_branch: str = _TEST_DEFAULT_BASE_BRANCH,
     delete_source_branch_on_merge: bool = True,
+    state: MonitorState | None = None,
 ) -> tuple[bool | None, MonitorState, RecordedSleep, str]:
     """Seed a monitored workspace and execute one merge action."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -198,7 +214,7 @@ async def _execute_merge(
         gh=gh,
         delete_source_branch_on_merge=delete_source_branch_on_merge,
     )
-    state = MonitorState()
+    state = state if state is not None else MonitorState()
 
     terminal = await runner._execute(
         action=Merge(),

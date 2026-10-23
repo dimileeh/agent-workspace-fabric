@@ -54,8 +54,10 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor_outdated_resolution_parts._helpers import (
+    _EVIDENCE_SHA,
     _call_resolve,
     _grep_argv,
+    _mark_addressed_with_disposition,
     _outdated_thread,
     _outdated_thread_with_comment,
     _RecordingGitHub,
@@ -92,7 +94,7 @@ async def test_outdated_thread_seeded_from_branch_evidence_is_resolved(
     # The branch head carries the prior instance's fix: address commit; ``%aI`` emits
     # its author time (non-empty => a match). The thread has no reviewer comments,
     # so there is no post-fix activity to compare against and the seed is fix_committed.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     await _call_resolve(
         runner,
@@ -206,7 +208,7 @@ async def test_already_seeded_outdated_thread_skips_branch_evidence_grep(
     )
     state = MonitorState()
     thread = _outdated_thread("PRRT_seeded")
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
@@ -248,7 +250,7 @@ async def test_outdated_thread_with_post_fix_reply_is_not_resolved(
         comment_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
     )
     # The matching fix commit was AUTHORED before the reviewer's reply.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     status = _status_with_outdated(thread)
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
@@ -286,7 +288,7 @@ async def test_outdated_thread_with_pre_fix_comment_is_seeded_and_resolved(
         comment_at=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
     )
     # The matching fix commit was AUTHORED after the reviewer's original finding.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     await _call_resolve(
         runner,
@@ -331,7 +333,7 @@ async def test_outdated_thread_post_fix_guard_uses_author_date_across_rebase(
     # git emits the AUTHOR date (``%aI``) — anchored to the original fix at 09:00,
     # BEFORE the 09:30 reply — even though rebase recovery later rewrote the
     # committer date to 10:00 (after the reply). The guard must see 09:00.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     status = _status_with_outdated(thread)
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
@@ -341,7 +343,7 @@ async def test_outdated_thread_post_fix_guard_uses_author_date_across_rebase(
     # silently resolve over the reply.)
     worktree = tmp_path / "worktrees" / workspace_id
     assert cmd.calls[0].args == _grep_argv(worktree, "PRRT_rebased", "c1")
-    assert "--format=%aI" in cmd.calls[0].args
+    assert "--format=%H %aI" in cmd.calls[0].args
     # Reply postdates the (author-dated) fix → not resolved, merge blocked.
     assert gh.attempts == []
     assert state.threads_addressed_ids["PRRT_rebased"] == "needs_human"
@@ -374,7 +376,7 @@ async def test_outdated_thread_unparseable_fix_commit_time_keeps_seed_baseline(
         comment_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
     )
     # A non-empty but unparseable author date: a match, but no usable ordering.
-    cmd.queue_result(returncode=0, stdout="not-a-timestamp\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} not-a-timestamp\n")
 
     await _call_resolve(
         runner,
@@ -558,7 +560,7 @@ async def test_live_operator_decision_thread_is_not_seeded_from_branch_evidence(
     state.mark_addressed(review_thread_body_state_key(tid), _review_thread_body_hash(thread))
     state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
     # A matching ``fix: address`` commit is on HEAD — it must not be consulted.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     status = _status_with_outdated(thread)
     await _call_resolve(
@@ -612,7 +614,7 @@ async def test_answered_operator_decision_releases_the_outdated_hygiene_exemptio
     state = MonitorState()
     state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
     # The re-queued pass ran and answered the ruling.
-    _mark_review_thread_addressed(state, thread, "fix_committed")
+    _mark_addressed_with_disposition(state, thread, "fix_committed")
 
     assert _operator_decision_key(tid) not in state.threads_addressed_ids
     assert state.threads_addressed_ids[_retired_operator_decision_key(tid)] == (

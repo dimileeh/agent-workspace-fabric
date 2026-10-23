@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _TaskTagUnset,
 )
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.thread_disposition import sync_item_disposition
 
 __all__ = (
     "AgentVerdict",
@@ -252,6 +253,9 @@ async def _address_thread(
     # (PRRT_kwDOSJAM6s6fz-6r).
     if state is not None:
         _sync_agent_failed_reason(state, thread.thread_id, result)
+        # #1018: the reply posted before resolving this thread needs the agent's own
+        # reason (FALSE POSITIVE / DEFER) or the item's commit (FIXED).
+        sync_item_disposition(state, thread.thread_id, result, thread=thread)
     if isinstance(result, MonitorVerdictResult):
         return result.verdict
     # Stash the agent's defer reason so the deferred-capture path can preserve it
@@ -388,6 +392,8 @@ async def _address_review_comment_result(
     # its verdict.
     if state is not None:
         _sync_agent_failed_reason(state, comment.comment_id, result)
+        # #1018: kept so outdated hygiene can copy it onto the promoted thread.
+        sync_item_disposition(state, comment.comment_id, result)
     return result
 
 
@@ -499,6 +505,7 @@ async def _post_human_notification_once(
     preserve_full_blocker_reason: bool = False,
     workspace_id: str | None = None,
     recheck_context: str = "human_notification",
+    disposition_count_rows: Sequence[tuple[str, int]] | None = None,
 ) -> _PostActionPrTerminalState | None:
     """Post a single human-attention PR comment, deduped once per (head, reason).
 
@@ -563,6 +570,8 @@ async def _post_human_notification_once(
         head_sha=status.head_sha,
         blocker_reason=reason,
         items_digest=items_digest,
+        # Only the reasonless cert renders the counts; a blocker body ignores them.
+        disposition_count_rows=None if reason else disposition_count_rows,
     )
     already_notified = state.threads_addressed_ids.get(key) == "notified"
     # Fresh forge read at the notification boundary (#910 follow-up): the
@@ -605,6 +614,7 @@ async def _post_human_notification_once(
             blocker_reason=reason,
             blocker_items=items,
             preserve_full_blocker_reason=preserve_full_blocker_reason,
+            disposition_count_rows=disposition_count_rows,
         ),
     )
     state.mark_addressed(key, "notified")
