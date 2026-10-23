@@ -83,8 +83,40 @@ def test_an_unconfirmed_reply_record_crosses_regardless_of_head(
 
     seeded = seedable_monitor_state(previous, head_continuity=head_continuity)
 
-    assert seeded[key] == unconfirmed
+    assert key in seeded
     assert (item_id in seeded) is head_continuity
+
+
+@pytest.mark.parametrize(("item_id", "cls", "verdict"), _HEAD_DEPENDENT)
+def test_an_unconfirmed_reply_crosses_a_moved_head_only_as_retirement_evidence(
+    item_id: str, cls: str, verdict: str
+) -> None:
+    """A moved head carries the reply's record, never the reply (PRRT_kwDOSJAM6s6vc3Z0).
+
+    The reply cites the predecessor's head, which the moved head may have reverted.
+    Kept posted, the successor's re-triage of the unchanged thread would reuse it
+    whatever its new verdict, so the record crosses retired, as a reopen leaves it:
+    the gate still certifies nothing on the marker, and the new verdict is owed
+    its own reply.
+    """
+    key = f"{_PREFIX}{item_id}"
+    record = {
+        **json.loads(_disposition(item_id, cls, verdict)),
+        "conversation_digest": None,
+        "resolved": False,
+        "reply_conversation_digest": None,
+        "reread_pending": True,
+    }
+    unconfirmed = json.dumps(record, sort_keys=True)
+    previous = {item_id: verdict, key: unconfirmed}
+
+    kept = seedable_monitor_state(previous, head_continuity=True)
+    moved = seedable_monitor_state(previous, head_continuity=False)
+
+    assert kept[key] == unconfirmed
+    assert moved[key] == json.dumps(
+        {**record, "reply_comment_id": None, "reread_pending": False}, sort_keys=True
+    )
 
 
 @pytest.mark.parametrize(("item_id", "cls", "verdict"), _HEAD_INDEPENDENT)

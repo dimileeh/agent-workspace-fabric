@@ -55,6 +55,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     sync_item_disposition,
     unverified_blocker_message,
 )
+from awf.service.pr_monitor_adoption_seed import seedable_monitor_state
 
 pytestmark = pytest.mark.unit
 
@@ -634,6 +635,42 @@ def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
     )
 
     assert read_item_disposition(state, "PRRT_test_a") == posted
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        VerdictResult(verdict="false_positive", reason="not reachable"),
+        VerdictResult(verdict="defer", reason="later"),
+    ],
+    ids=["same-class", "class-change"],
+)
+def test_sync_item_disposition_answers_afresh_after_adoption_onto_a_moved_head(
+    result: VerdictResult,
+) -> None:
+    # PRRT_kwDOSJAM6s6vc3Z0: a predecessor's unconfirmed reply answers the code at a
+    # head the adopted one may have reverted. Its verdict drops for re-triage, and
+    # the unchanged thread's new verdict is owed its own reply, never that one.
+    thread = _thread_with("c-1")
+    predecessor = MonitorState()
+    predecessor.mark_addressed("PRRT_test_a", "false_positive")
+    record_item_disposition(predecessor, replace(_posted_answering(thread), reread_pending=True))
+    adopted = MonitorState()
+    for key, value in seedable_monitor_state(
+        predecessor.threads_addressed_ids, head_continuity=False
+    ).items():
+        adopted.mark_addressed(key, value)
+
+    sync_item_disposition(adopted, "PRRT_test_a", result, thread=thread)
+
+    fresh = read_item_disposition(adopted, "PRRT_test_a")
+    assert fresh is not None
+    assert (fresh.verdict, fresh.reason, fresh.reply_comment_id, fresh.reread_pending) == (
+        result.verdict,
+        result.reason,
+        None,
+        False,
+    )
 
 
 @pytest.mark.parametrize(

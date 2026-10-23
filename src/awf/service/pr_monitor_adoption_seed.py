@@ -154,13 +154,25 @@ _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
 # feedback and crosses either way. So does a posted reply still ``reread_pending``
 # (PRRT_kwDOSJAM6s6vculv): nothing checked it against the conversation it follows,
 # and with no record the successor's gate would take its marker as the evidence
-# once the shared forge identity resolved the thread. A record
+# once the shared forge identity resolved the thread. On a moved head it crosses
+# retired, as a reopen leaves it (PRRT_kwDOSJAM6s6vc3Z0): the reply answers code
+# the new head may have reverted, and posted, the successor's re-triage of the
+# unchanged thread would reuse it whatever its new verdict. A record
 # that does not decode to a known class, or names no thread/comment id, stays.
 _ITEM_DISPOSITION_PREFIX = "__awf_item_disposition__:"
 _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
     {"fixed", "fixed_branch_evidence", "false_positive"}
 )
 _HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred"})
+# What ``retire_item_disposition`` clears: with no reply id the gate certifies
+# nothing on the marker, and the next verdict replaces the record.
+_RETIRED_REPLY_FIELDS: dict[str, object] = {
+    "reply_comment_id": None,
+    "conversation_digest": None,
+    "resolved": False,
+    "reply_conversation_digest": None,
+    "reread_pending": False,
+}
 
 # ``__awf_disposition_retired__:<thread id>:<conversation digest>``
 # (``awf.runtime.monitor_state_keys``) is the tombstone of a posted disposition
@@ -285,6 +297,8 @@ def seedable_monitor_state(
             or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
+    if not head_continuity:
+        seeded = _retire_unconfirmed_replies(seeded)
     return dict(
         sorted(
             _restore_orphaned_operator_decisions(seeded, head_continuity=head_continuity).items()
@@ -338,6 +352,26 @@ def _restore_orphaned_operator_decisions(
         if live_key not in seeded:
             restored[live_key] = value
     return restored
+
+
+def _retire_unconfirmed_replies(seeded: dict[str, str]) -> dict[str, str]:
+    """Strip the reply from every code-dependent record crossing a moved head.
+
+    Only a ``reread_pending`` record crosses a moved head with a code-dependent
+    class, and its reply cites the predecessor's head. It stays as the gate's
+    evidence that the thread's marker certifies nothing, but not as a reply:
+    ``sync_item_disposition`` keeps a posted reply for an unchanged thread, so
+    ``reply_before_resolve`` would resolve on it whatever the successor's
+    re-triage now says (PRRT_kwDOSJAM6s6vc3Z0).
+    """
+    retired = dict(seeded)
+    for key, value in seeded.items():
+        if not key.startswith(_ITEM_DISPOSITION_PREFIX):
+            continue
+        record = json.loads(value)
+        if record["class"] in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+            retired[key] = json.dumps({**record, **_RETIRED_REPLY_FIELDS}, sort_keys=True)
+    return retired
 
 
 def _is_verdict_entry(key: str, value: str, *, head_continuity: bool) -> bool:
