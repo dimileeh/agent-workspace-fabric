@@ -151,7 +151,10 @@ _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
 # evidence, or re-posts a reply the thread already carries. ``fixed`` /
 # ``fixed_branch_evidence`` / ``false_positive`` describe the code at the
 # predecessor's head and cross only with continuity; ``deferred`` judges the
-# feedback and crosses either way. A record
+# feedback and crosses either way. So does a posted reply still ``reread_pending``
+# (PRRT_kwDOSJAM6s6vculv): nothing checked it against the conversation it follows,
+# and with no record the successor's gate would take its marker as the evidence
+# once the shared forge identity resolved the thread. A record
 # that does not decode to a known class, or names no thread/comment id, stays.
 _ITEM_DISPOSITION_PREFIX = "__awf_item_disposition__:"
 _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
@@ -354,7 +357,9 @@ def _is_seedable_disposition(key: str, value: str, *, head_continuity: bool) -> 
     disposition_class = record.get("class") if isinstance(record, dict) else None
     if disposition_class in _HEAD_INDEPENDENT_DISPOSITION_CLASSES:
         return True
-    return head_continuity and disposition_class in _HEAD_DEPENDENT_DISPOSITION_CLASSES
+    if disposition_class not in _HEAD_DEPENDENT_DISPOSITION_CLASSES:
+        return False
+    return head_continuity or record.get("reread_pending") is True
 
 
 def _is_disposition_retired_tombstone(key: str) -> bool:

@@ -65,6 +65,28 @@ def test_code_dependent_dispositions_cross_only_with_head_continuity(
     assert item_id not in moved  # dropped together with the verdict it answers
 
 
+@pytest.mark.parametrize(("item_id", "cls", "verdict"), _HEAD_DEPENDENT)
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_an_unconfirmed_reply_record_crosses_regardless_of_head(
+    item_id: str, cls: str, verdict: str, head_continuity: bool
+) -> None:
+    """A posted reply no re-read checked yet keeps that pending check (PRRT_kwDOSJAM6s6vculv).
+
+    Dropped on a moved head, the successor's gate would take the bare marker as
+    the evidence, so the shared identity's silent resolve could certify a reply
+    nothing checked against unread feedback before it. The verdict still drops.
+    """
+    key = f"{_PREFIX}{item_id}"
+    record = json.loads(_disposition(item_id, cls, verdict))
+    unconfirmed = json.dumps({**record, "reread_pending": True}, sort_keys=True)
+    previous = {item_id: verdict, key: unconfirmed}
+
+    seeded = seedable_monitor_state(previous, head_continuity=head_continuity)
+
+    assert seeded[key] == unconfirmed
+    assert (item_id in seeded) is head_continuity
+
+
 @pytest.mark.parametrize(("item_id", "cls", "verdict"), _HEAD_INDEPENDENT)
 @pytest.mark.parametrize("head_continuity", [True, False])
 def test_feedback_dispositions_cross_regardless_of_head(

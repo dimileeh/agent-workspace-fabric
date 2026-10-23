@@ -353,7 +353,8 @@ async def _requeue_unconfirmed_reply(
     Nothing confirmed the reply followed the listed conversation, so it is kept
     with ``reread_pending``: the next poll's resolve re-reads that same reply
     before resolving on it, never posting a second one whose check this unchecked
-    reply would bound, and the gate certifies nothing on it meanwhile. The requeue
+    reply would bound, and the gate certifies nothing on it meanwhile -- on a
+    re-adopted PR too, whose seed keeps the record on any head. The requeue
     flag blocks this merge, and the merge loop backs off after releasing the lock.
     The verdict stays, so the retry still fires.
     """

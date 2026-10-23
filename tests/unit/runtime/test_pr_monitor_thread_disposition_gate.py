@@ -826,6 +826,31 @@ async def test_an_unconfirmed_reply_never_certifies(
     assert blocked.blocker is not None and _SILENT in blocked.blocker
 
 
+async def test_an_unconfirmed_reply_never_certifies_after_adoption_onto_a_moved_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # PRRT_kwDOSJAM6s6vculv: a moved head drops a code-dependent record, and with no
+    # record the gate takes the marker as the evidence. The shared identity's
+    # silent resolve of a reply no re-read ever checked must still block there.
+    state = settled_baseline_state()
+    _, audit = _certified_fixed_thread(state)
+    posted = read_item_disposition(state, _SILENT)
+    assert posted is not None
+    record_item_disposition(state, replace(posted, reread_pending=True))
+    adopted = MonitorState()
+    for key, value in seedable_monitor_state(
+        state.threads_addressed_ids, head_continuity=False
+    ).items():
+        adopted.mark_addressed(key, value)
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    blocked = await _gate(runner, workspace_id, adopted)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+
+
 async def test_gate_rejects_a_marker_older_than_the_shared_identitys_own_feedback(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
