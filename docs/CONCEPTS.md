@@ -345,9 +345,11 @@ When meaningful bot or human feedback appears, AWF:
    be posted stays open and is parked `needs_human`. A fresh reply is checked
    against the full live conversation before it first: feedback added or edited
    since the thread was listed retires the reply and leaves the thread open for
-   re-triage, and an unmarked comment by AWF's own account since its previous
-   reply in the thread (the operator's, which the monitor never reads) parks the
-   thread `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead.
+   re-triage. An unmarked comment by AWF's own account parks the thread
+   `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead: it is the operator's, and the
+   monitor never reads it. The exception is a comment that comes before AWF's
+   previous reply in the thread while that reply is still current, meaning no
+   newer outside comment or edit has superseded it.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
@@ -457,7 +459,8 @@ resolved only after the reply succeeded; otherwise it stays open and is parked
 - `THREAD_DISPOSITION_UNREAD_FEEDBACK` — an unmarked comment by AWF's own account
   precedes the reply. That account can be the operator's, and
   `fetch_pr_status` never lists its comments, so the triage never read it. This
-  holds even when newer outside feedback followed it; the reply is retired.
+  holds even when newer outside feedback followed it, and even when an earlier AWF
+  reply that such feedback superseded sits in between. The reply is retired.
 
 DEFER no longer posts a separate top-level PR comment: the in-thread reply is
 the explanation. A newly posted reply id is saved durably right after the reply
@@ -527,8 +530,8 @@ POSITIVE thread whose comments did not change would never re-enter triage. The
 gate itself never writes to the forge. It decides on ONE complete audit. Under the
 merge lock that audit fails fast, and so does outdated hygiene's re-read after a
 fresh reply: no transport retry or sleep holds the lock. A fault releases the
-lock, and the monitor retries on the next poll. A reply whose re-read faulted is
-retired and its thread requeued, so the retry posts a fresh reply and re-reads
+lock, and the monitor retries on the next poll. A reply whose in-lock re-read
+faulted is retired and its thread requeued, so the retry posts a fresh reply and re-reads
 that one.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR

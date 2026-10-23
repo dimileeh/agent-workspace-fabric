@@ -294,23 +294,29 @@ def _conversation_moved(thread: ReviewThread, live: AuditedReviewThread) -> str 
     can be the operator's own account, and ``fetch_pr_status`` lists none of its
     comments. AWF only posts marker-carrying replies, so an unmarked one is the
     operator's feedback, which the gate would read the reply as answering. Such a
-    comment since AWF's previous reply in the thread (which itself passed this
-    check, or parked the thread for a human) is ``THREAD_DISPOSITION_UNREAD_FEEDBACK``,
-    whatever outside feedback followed it (PRRT_kwDOSJAM6s6vbU2H). Otherwise
-    outside comments that differ from the listed ones are
+    comment is ``THREAD_DISPOSITION_UNREAD_FEEDBACK`` whatever outside feedback
+    followed it (PRRT_kwDOSJAM6s6vbU2H), unless AWF's previous reply in the thread
+    sits between them and is still current (no newer outside comment or edit): that
+    reply passed this check, or parked the thread for a human, over the same
+    conversation. A previous reply that newer feedback superseded proves nothing:
+    the re-triage behind this reply may answer only that feedback, as after a park
+    that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). Otherwise outside
+    comments that differ from the listed ones are
     ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; a snapshot without comments proves
     no such difference.
     """
     bodies = live.viewer_comment_bodies
-    marked = [
+    marked = {
         index
         for index, body in enumerate(bodies)
         if disposition_marker_class((body,), thread_id=live.thread_id) is not None
-    ]
-    # The newest marker is this reply; the viewer comment right before it is
-    # either AWF's previous reply or the operator's unread feedback.
-    if marked and marked[-1] > 0 and marked[-1] - 1 not in marked:
-        return THREAD_DISPOSITION_UNREAD_FEEDBACK
+    }
+    # The newest marker is this reply; scan back over what precedes it.
+    for index in range(max(marked, default=0) - 1, -1, -1):
+        if index not in marked:
+            return THREAD_DISPOSITION_UNREAD_FEEDBACK
+        if index >= live.superseded_viewer_comments:
+            break  # AWF's previous reply, still current
     listed = tuple(comment.body for comment in thread.comments)
     if listed and live.external_comment_bodies != listed:
         return _FEEDBACK_AFTER_DECISION

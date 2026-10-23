@@ -1060,11 +1060,20 @@ async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
 _OPERATOR_ASK = "also cover empty payloads"
 
 
-@pytest.mark.parametrize("superseded", [0, 1], ids=["right-before-the-reply", "before-outside"])
+@pytest.mark.parametrize(
+    ("viewer_bodies", "superseded"),
+    [
+        ((_OPERATOR_ASK, "reply"), 0),
+        ((_OPERATOR_ASK, "reply"), 1),
+        ((_OPERATOR_ASK, "parked-reply", "reply"), 2),
+    ],
+    ids=["right-before-the-reply", "before-outside-feedback", "before-a-superseded-awf-reply"],
+)
 async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_reply(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    viewer_bodies: tuple[str, ...],
     superseded: int,
 ) -> None:
     # PRRT_kwDOSJAM6s6vbU2H: the operator, under AWF's own account, replies after
@@ -1073,21 +1082,23 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
     # gate would read AWF's reply after it as its answer. The moved check compares
     # the full conversation before the reply, that identity's unmarked comments
     # included, even one newer outside feedback (``superseded``) followed: the
-    # triage read that feedback, never the operator's. The thread is parked for a
-    # human instead of resolved, and the reply retired (saved at once) so its
-    # marker never certifies that feedback.
+    # triage read that feedback, never the operator's. An earlier AWF reply that
+    # such feedback superseded bounds nothing (PRRT_kwDOSJAM6s6vbrwH): the one an
+    # earlier park retired, say, before a reviewer reply re-triaged the thread.
+    # The thread is parked for a human instead of resolved, and the reply retired
+    # (saved at once) so its marker never certifies that feedback.
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_own_identity_feedback"
     thread = _commented_thread(tid, _ASK)
     followed = "f" * 64
-    reply = _MARKER.format(cls="false_positive", tid=tid)
+    marker = _MARKER.format(cls="false_positive", tid=tid)
     _serve_live_thread(
         gh,
         monkeypatch,
         tid,
         (_ASK,),
         before_reply=followed,
-        viewer_bodies=(_OPERATOR_ASK, reply),
+        viewer_bodies=tuple(marker if body.endswith("reply") else body for body in viewer_bodies),
         superseded=superseded,
     )
 
@@ -1132,10 +1143,16 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
     ("viewer_bodies", "superseded", "before_reply"),
     [
         (("earlier-reply", "reply"), 0, "d" * 64),
+        (("earlier-reply", "reply"), 1, "d" * 64),
         ((_OPERATOR_ASK, "earlier-reply", "reply"), 0, "d" * 64),
         (("reply", _OPERATOR_ASK), 0, ""),
     ],
-    ids=["awf-reply-precedes", "awf-reply-followed-the-operator", "reply-not-newest"],
+    ids=[
+        "awf-reply-precedes",
+        "superseded-awf-reply-precedes",
+        "current-awf-reply-followed-the-operator",
+        "reply-not-newest",
+    ],
 )
 async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_the_reply(
     factory: async_sessionmaker[AsyncSession],
@@ -1145,10 +1162,10 @@ async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_
     superseded: int,
     before_reply: str,
 ) -> None:
-    # Only unmarked feedback by AWF's identity since its previous reply is unread:
-    # that earlier reply already passed this check (or parked the thread for a
-    # human) for what precedes it, and a comment after the reply is one the gate
-    # already refuses the reply as answering.
+    # Only unmarked feedback by AWF's identity since its previous reply that is
+    # still current is unread: that earlier reply passed this check (or parked the
+    # thread for a human) over the same conversation, for what precedes it, and a
+    # comment after the reply is one the gate already refuses the reply as answering.
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_own_identity_answered"
     thread = _commented_thread(tid, _ASK)
