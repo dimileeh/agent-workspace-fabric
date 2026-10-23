@@ -215,3 +215,44 @@ async def test_dependent_waits_for_an_unchanged_prerequisite_to_satisfy_its_cond
     # backend is recreated only after the poll that finds postgres healthy.
     assert runtime.inspected_after[:2] == [0, 0]
     assert clock.sleeps == [5.0]
+
+
+@pytest.mark.unit
+async def test_absent_prerequisite_is_started_before_its_recreated_dependent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6vebKx: a released runtime's database starts before the backend."""
+    released = RuntimeSnapshot(
+        stack_state="running", services=[_service("backend"), _service("agent")]
+    )
+    runtime = _Runtime(
+        released,
+        _postgres(health="starting"),
+        _postgres(health="healthy"),
+        _postgres(health="healthy"),
+    )
+    clock = _install(monkeypatch, runtime)
+    recreated: list[str] = []
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        runtime,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=12,
+        dependency_services=("agent", "backend", "postgres"),
+        recreate_services=("backend",),
+        dependency_conditions=_CONDITIONS,
+        on_recreated=recreated.append,
+    )
+
+    start, backend, up, agent = runtime.calls
+    assert start["services"] == ("postgres",)
+    assert start["no_recreate"] and start["no_deps"] and not start["wait"]
+    assert backend["services"] == ("backend",) and backend["force_recreate"]
+    assert up["services"] == ("backend", "postgres") and up["no_recreate"]
+    assert agent["services"] == ("agent",)
+    assert recreated == ["backend"]
+    # backend is recreated only after the poll that finds the started postgres healthy.
+    assert runtime.inspected_after == [0, 1, 1, 2]
+    assert clock.sleeps == [5.0]

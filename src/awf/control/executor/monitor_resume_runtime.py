@@ -6,15 +6,16 @@ their own crash recovery, such as Postgres replaying its WAL after an unclean
 stop, so the resume could fail and be retried forever. The restart now:
 
 1. force-recreates each dependency the resume must recreate (``recreate_services``),
-   a dependent only once the recreated prerequisites it depends on are satisfied,
-   and starts each other exited or absent dependency on its own with
-   ``--no-recreate``, all ``--no-deps`` and without ``--wait``, so no compose
-   health gate can fail them on the healthcheck retries stored in a container
-   created from an older compose.yml (the normal state after a host restart, as
-   every service runs with ``restart: "no"``). Nothing is waited on before every
-   prerequisite is started or recreated, and a stopped dependency starts only
-   once its compose ``depends_on`` prerequisites are satisfied (healthy, exited
-   0, or running, per condition); one whose prerequisite failed is left to step 3;
+   a dependent only once the prerequisites it depends on are satisfied (starting
+   any exited or absent one first), and starts each other exited or absent
+   dependency on its own with ``--no-recreate``, all ``--no-deps`` and without
+   ``--wait``, so no compose health gate can fail them on the healthcheck
+   retries stored in a container created from an older compose.yml (the normal
+   state after a host restart, as every service runs with ``restart: "no"``).
+   Nothing is waited on before every prerequisite is started or recreated, and
+   a stopped dependency starts only once its compose ``depends_on``
+   prerequisites are satisfied (healthy, exited 0, or running, per condition);
+   one whose prerequisite failed is left to step 3;
 2. waits for every running declared dependency (never a ``compose run`` or
    orphan container) whose Docker health is ``starting`` or
    ``unhealthy`` to become healthy, bounded by the stack's startup budget rather
@@ -149,7 +150,7 @@ def _stopped_dependencies(
 
     An absent container (a released runtime) would otherwise be created by the
     ``up --wait`` and gated on the healthcheck retries of an older compose.yml.
-    Services the resume already recreated are never started again.
+    Services the resume already recreated or started are never started again.
     """
     containers = _dependency_containers(snapshot, declared_services)
     stopped = {
@@ -161,6 +162,27 @@ def _stopped_dependencies(
             name for name in declared_services if name != AGENT_SERVICE_NAME and name not in present
         )
     return tuple(sorted(stopped - set(recreated_services)))
+
+
+def _stopped_prerequisites(
+    snapshot: RuntimeSnapshot,
+    declared_services: tuple[str, ...] | None,
+    services: tuple[str, ...],
+    dependency_conditions: Mapping[str, Mapping[str, str]],
+) -> set[str]:
+    """Return the stopped or absent dependencies ``services`` transitively depend on.
+
+    A ``--no-deps`` recreate never starts them, so they start before their dependents.
+    """
+    stopped = set(_stopped_dependencies(snapshot, declared_services, services))
+    found: set[str] = set()
+    frontier = list(services)
+    while frontier:
+        for prerequisite in dependency_conditions.get(frontier.pop(), {}):
+            if prerequisite in stopped and prerequisite not in found:
+                found.add(prerequisite)
+                frontier.append(prerequisite)
+    return found
 
 
 def _prerequisite_progress(
@@ -240,8 +262,8 @@ async def wait_for_recovering_dependencies(
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
     ``start_stopped`` receives the dependencies stopped in the first snapshot,
-    other than the ``recreated_services`` already recreated; once it has started
-    them they are waited on like any other running dependency. With
+    other than the ``recreated_services`` already recreated or started; once it
+    has started them they are waited on like any other running dependency. With
     ``dependency_conditions`` (service -> prerequisite -> compose ``depends_on``
     condition) each one is started only once its prerequisites are satisfied,
     and the wait also covers prerequisites a still-unstarted dependency needs.
@@ -320,6 +342,7 @@ async def _recreate_in_dependency_order(
     recreate: Callable[[str], Awaitable[None]],
     services: tuple[str, ...],
     *,
+    start: Callable[[str], Awaitable[None]],
     compose_project: str,
     workspace_id: str,
     budget_seconds: int,
@@ -330,14 +353,18 @@ async def _recreate_in_dependency_order(
     """Force-recreate ``services``, each after the prerequisites it depends on.
 
     ``--no-deps`` skips every depends_on health gate, so a dependent is recreated
-    only once each prerequisite, recreated here or not, satisfies its condition. The runtime
-    is inspected only when nothing else can be recreated; when it is unreadable,
+    only once each prerequisite, recreated here or not, satisfies its condition.
+    A stopped or absent prerequisite (a released runtime) is started with ``start``
+    first, in the same order, so no dependent is recreated against a missing
+    service; a failed start raises like a failed recreate. The runtime is
+    inspected only when nothing else can be recreated; when it is unreadable,
     or a prerequisite is gone or failed with nothing left to wait on, the rest are
     recreated in depends_on order and the dependency wait and ``up`` take over.
     Raises ``DependencyWaitTimeoutError`` naming the settling prerequisites when
     the budget runs out first.
     """
     pending = set(services)
+    starts: set[str] | None = None
     gated = True
     while pending:
         # A cycle (rejected by compose) cannot block every recreate.
@@ -362,6 +389,13 @@ async def _recreate_in_dependency_order(
             if snapshot is None or snapshot.stack_state in _UNREADABLE_STACK_STATES:
                 gated = False
                 continue
+            if starts is None:
+                starts = _stopped_prerequisites(
+                    snapshot, declared_services, services, dependency_conditions
+                )
+                if starts:
+                    pending.update(starts)
+                    continue
             containers = {
                 service.name: service
                 for service in _dependency_containers(snapshot, declared_services)
@@ -381,7 +415,7 @@ async def _recreate_in_dependency_order(
                 continue
         if ready:
             for name in ready:
-                await recreate(name)
+                await (start if starts and name in starts else recreate)(name)
                 pending.discard(name)
             continue
         remaining = deadline - _monotonic()
@@ -435,6 +469,25 @@ async def restart_runtime_for_monitor_resume(
     }
     deadline = _monotonic() + budget_seconds
     recreated = tuple(sorted(set(recreate_services) - {AGENT_SERVICE_NAME}))
+    started = set(recreated)
+
+    async def _start_stopped(services: tuple[str, ...]) -> None:
+        started.update(services)
+        _log.info(
+            "executor.resume_dependency_start",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            services=list(services),
+        )
+        # One service per call: ``--no-deps`` then skips every depends_on health gate.
+        for service in services:
+            await compose.ensure_project_up(
+                **{**common, "wait": False},
+                no_recreate=True,
+                no_deps=True,
+                services=(service,),
+            )
+
     if recreated:
         _log.info(
             "executor.resume_dependency_recreate",
@@ -457,6 +510,7 @@ async def restart_runtime_for_monitor_resume(
         await _recreate_in_dependency_order(
             _recreate,
             recreated,
+            start=lambda service: _start_stopped((service,)),
             compose_project=compose_project,
             workspace_id=workspace_id,
             budget_seconds=budget_seconds,
@@ -464,25 +518,6 @@ async def restart_runtime_for_monitor_resume(
             declared_services=dependency_services,
             dependency_conditions=dependency_conditions or {},
         )
-
-    started = set(recreated)
-
-    async def _start_stopped(services: tuple[str, ...]) -> None:
-        started.update(services)
-        _log.info(
-            "executor.resume_dependency_start",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            services=list(services),
-        )
-        # One service per call: ``--no-deps`` then skips every depends_on health gate.
-        for service in services:
-            await compose.ensure_project_up(
-                **{**common, "wait": False},
-                no_recreate=True,
-                no_deps=True,
-                services=(service,),
-            )
 
     tolerated: ComposeOperationError | None = None
     try:
@@ -492,7 +527,7 @@ async def restart_runtime_for_monitor_resume(
             budget_seconds=budget_seconds,
             start_stopped=_start_stopped,
             declared_services=dependency_services,
-            recreated_services=recreated,
+            recreated_services=tuple(sorted(started)),
             dependency_conditions=dependency_conditions,
             deadline=deadline,
         )
