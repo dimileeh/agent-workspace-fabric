@@ -291,3 +291,50 @@ async def test_absent_prerequisite_is_started_before_its_recreated_dependent(
     # backend is recreated only after the poll that finds the started postgres healthy.
     assert runtime.inspected_after == [0, 1, 1, 2]
     assert clock.sleeps == [5.0]
+
+
+@pytest.mark.unit
+async def test_absent_prerequisite_behind_a_running_prerequisite_is_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6ve8Lk: the search walks through a running but unsettled api."""
+    released = RuntimeSnapshot(
+        stack_state="running",
+        services=[_service("backend"), _service("api", health="starting"), _service("agent")],
+    )
+    settled = RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            _service("backend"),
+            _service("api", health="healthy"),
+            _service("postgres", health="healthy"),
+            _service("agent"),
+        ],
+    )
+    runtime = _Runtime(released, settled)
+    clock = _install(monkeypatch, runtime)
+    recreated: list[str] = []
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        runtime,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=12,
+        dependency_services=("agent", "api", "backend", "postgres"),
+        recreate_services=("backend",),
+        dependency_conditions={
+            "backend": {"api": "service_healthy"},
+            "api": {"postgres": "service_healthy"},
+        },
+        on_recreated=recreated.append,
+    )
+
+    start, backend = runtime.calls[:2]
+    assert start["services"] == ("postgres",)
+    assert start["no_recreate"] and start["no_deps"]
+    assert backend["services"] == ("backend",) and backend["force_recreate"]
+    assert recreated == ["backend"]
+    # backend is recreated only after the poll that follows the postgres start.
+    assert runtime.inspected_after[:2] == [0, 1]
+    assert clock.sleeps == []

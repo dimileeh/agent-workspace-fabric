@@ -177,16 +177,17 @@ def _stopped_prerequisites(
     """Return the stopped or absent dependencies ``services`` transitively depend on.
 
     A ``--no-deps`` recreate never starts them, so they start before their dependents.
+    The walk passes through running prerequisites, which may wait on a stopped one.
     """
     stopped = set(_stopped_dependencies(snapshot, declared_services, services))
-    found: set[str] = set()
+    visited = set(services)
     frontier = list(services)
     while frontier:
         for prerequisite in dependency_conditions.get(frontier.pop(), {}):
-            if prerequisite in stopped and prerequisite not in found:
-                found.add(prerequisite)
+            if prerequisite not in visited:
+                visited.add(prerequisite)
                 frontier.append(prerequisite)
-    return found
+    return visited & stopped
 
 
 def _prerequisite_progress(
