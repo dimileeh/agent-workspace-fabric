@@ -630,6 +630,62 @@ async def test_resume_clears_the_pending_recreate_once_companions_were_recreated
     assert [call["services"] for call in recreate] == [("agent",)]
 
 
+class _WorkerRecreateFailsOnce(_RecordingCompose):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def ensure_project_up(self, **kwargs: Any) -> None:
+        await super().ensure_project_up(**kwargs)
+        if kwargs.get("services") == ("worker",) and not self.failed:
+            self.failed = True
+            raise ComposeOperationError(
+                operation="up",
+                returncode=1,
+                stdout="",
+                stderr="worker recreate failed",
+                reason_code="COMPOSE_UP_FAILED",
+            )
+
+
+@pytest.mark.unit
+async def test_resume_retires_each_companion_as_soon_as_its_recreate_succeeds(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(_COMPOSE, encoding="utf-8")
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    marker = monitor_handoff._companion_env._pending_companion_recreates_path(compose_file)
+    marker.write_text("backend\nworker\n", encoding="utf-8")
+    compose = _WorkerRecreateFailsOnce()
+
+    def _executor() -> Any:
+        return _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=compose,
+            pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+        )
+
+    # ``backend`` is recreated, then the ``worker`` recreate fails the restart:
+    # only ``worker`` is still pending.
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("backend",), ("worker",)]
+    assert marker.read_text(encoding="utf-8") == "worker\n"
+
+    # The retry never recreates the recovering ``backend`` again (#936).
+    compose.calls.clear()
+    assert await _executor().resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("worker",), ("agent",)]
+    assert not marker.exists()
+
+
 @pytest.mark.unit
 async def test_resume_keeps_pending_recreates_for_companions_it_could_not_recreate(
     fake: FakeCommandRunner,

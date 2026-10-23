@@ -322,7 +322,7 @@ async def restart_runtime_for_monitor_resume(
     dependency_services: tuple[str, ...] | None,
     runtime_usable: Callable[[], Awaitable[bool]] | None = None,
     recreate_services: tuple[str, ...] = (),
-    on_recreated: Callable[[], None] | None = None,
+    on_recreated: Callable[[str], None] | None = None,
     dependency_conditions: Mapping[str, Mapping[str, str]] | None = None,
 ) -> ComposeOperationError | None:
     """Restart the runtime for a monitor resume, recreating only what must change.
@@ -332,9 +332,9 @@ async def restart_runtime_for_monitor_resume(
     ``recreate_services`` are dependencies force-recreated first (env rewritten
     in compose.yml or backed by a set env secret, or still unsettled when the
     last attempt gave up), so nothing waits on them while they hold stale config;
-    a failed recreate raises and is never tolerated, and ``on_recreated`` runs as
-    soon as it succeeds, whatever fails later (never when nothing was recreated). Every other dependency is
-    never recreated. When a dependency start or up fails, ``runtime_usable``
+    a failed recreate raises and is never tolerated, and ``on_recreated`` runs with
+    each service as soon as its own recreate succeeds, whatever fails later (never
+    for a service that was not recreated). Every other dependency is never recreated. When a dependency start or up fails, ``runtime_usable``
     decides whether the agent is still recreated (auth overlays, env and #1090's
     setup replay depend on it); the tolerated failure is returned so the caller
     can record it. A failed agent recreate raises ``AgentRecreateError``.
@@ -363,8 +363,8 @@ async def restart_runtime_for_monitor_resume(
                 no_deps=True,
                 services=(service,),
             )
-        if on_recreated is not None:
-            on_recreated()
+            if on_recreated is not None:
+                on_recreated(service)
 
     started = set(recreated)
 

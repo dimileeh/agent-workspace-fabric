@@ -102,13 +102,18 @@ async def _restart_compose_runtime_for_monitor_resume(
         recreate_services = tuple(sorted(secret_companions | set(unsettled_services)))
         pending_dependency_recreates = unsettled_services
 
-        def _on_recreated() -> None:
+        recreated_services: set[str] = set()
+
+        def _on_recreated(service: str) -> None:
             nonlocal pending_dependency_recreates
-            pending_dependency_recreates = ()
+            recreated_services.add(service)
+            pending_dependency_recreates = tuple(
+                name for name in pending_dependency_recreates if name != service
+            )
             _monitor_handoff._clear_pending_companion_recreates_for_resume(
                 workspace_id=workspace_id,
                 compose_file=compose_file,
-                keep=tuple(name for name in pending_recreates if name not in recreate_services),
+                keep=tuple(name for name in pending_recreates if name not in recreated_services),
             )
 
         # Recreate the agent and what must change; recovering dependencies are left alone (#936).
@@ -130,9 +135,9 @@ async def _restart_compose_runtime_for_monitor_resume(
             dependency_conditions=None
             if requirements is None
             else requirements.dependency_conditions,
-            # Cleared once the companions are recreated, so a later failure never
-            # makes the next resume recreate them again mid-recovery (#936); a
-            # pending companion outside the active services stays pending.
+            # Each companion is retired as soon as its own recreate succeeds, so a
+            # later failure never makes the next resume recreate it again
+            # mid-recovery (#936); a companion not yet recreated stays pending.
             on_recreated=_on_recreated,
         )
         if tolerated_error is not None:
