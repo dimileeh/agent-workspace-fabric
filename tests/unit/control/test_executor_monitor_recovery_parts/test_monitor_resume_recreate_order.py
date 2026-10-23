@@ -185,3 +185,33 @@ async def test_depends_on_cycle_still_recreates_every_service(
     )
 
     assert _recreates(runtime) == [("backend",), ("postgres",), ("agent",)]
+
+
+@pytest.mark.unit
+async def test_dependent_waits_for_an_unchanged_prerequisite_to_satisfy_its_condition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6veMdx: a prerequisite that is not recreated still gates the recreate."""
+    runtime = _Runtime(
+        _postgres(health="starting"), _postgres(health="healthy"), _postgres(health="healthy")
+    )
+    clock = _install(monkeypatch, runtime)
+    recreated: list[str] = []
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        runtime,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=12,
+        dependency_services=("agent", "backend", "postgres"),
+        recreate_services=("backend",),
+        dependency_conditions=_CONDITIONS,
+        on_recreated=recreated.append,
+    )
+
+    assert recreated == ["backend"]
+    assert _recreates(runtime) == [("backend",), ("agent",)]
+    # backend is recreated only after the poll that finds postgres healthy.
+    assert runtime.inspected_after[:2] == [0, 0]
+    assert clock.sleeps == [5.0]

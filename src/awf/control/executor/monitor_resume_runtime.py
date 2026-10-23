@@ -327,10 +327,10 @@ async def _recreate_in_dependency_order(
     declared_services: tuple[str, ...] | None,
     dependency_conditions: Mapping[str, Mapping[str, str]],
 ) -> None:
-    """Force-recreate ``services``, each after the recreated prerequisites it depends on.
+    """Force-recreate ``services``, each after the prerequisites it depends on.
 
     ``--no-deps`` skips every depends_on health gate, so a dependent is recreated
-    only once each prerequisite recreated here satisfies its condition. The runtime
+    only once each prerequisite, recreated here or not, satisfies its condition. The runtime
     is inspected only when nothing else can be recreated; when it is unreadable,
     or a prerequisite is gone or failed with nothing left to wait on, the rest are
     recreated in depends_on order and the dependency wait and ``up`` take over.
@@ -338,7 +338,6 @@ async def _recreate_in_dependency_order(
     the budget runs out first.
     """
     pending = set(services)
-    recreated: set[str] = set()
     gated = True
     while pending:
         # A cycle (rejected by compose) cannot block every recreate.
@@ -347,11 +346,7 @@ async def _recreate_in_dependency_order(
             for name in sorted(pending)
             if not dependency_conditions.get(name, {}).keys() & pending
         ] or sorted(pending)
-        ready = [
-            name
-            for name in unblocked
-            if not gated or not dependency_conditions.get(name, {}).keys() & recreated
-        ]
+        ready = [name for name in unblocked if not gated or not dependency_conditions.get(name)]
         settling: dict[str, str] = {}
         if not ready:
             try:
@@ -376,13 +371,7 @@ async def _recreate_in_dependency_order(
                     name,
                     containers=containers,
                     pending=pending,
-                    dependency_conditions={
-                        name: {
-                            prerequisite: condition
-                            for prerequisite, condition in dependency_conditions[name].items()
-                            if prerequisite in recreated
-                        }
-                    },
+                    dependency_conditions=dependency_conditions,
                 )
                 if can_recreate:
                     ready.append(name)
@@ -394,7 +383,6 @@ async def _recreate_in_dependency_order(
             for name in ready:
                 await recreate(name)
                 pending.discard(name)
-                recreated.add(name)
             continue
         remaining = deadline - _monotonic()
         if remaining <= 0:
