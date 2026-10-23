@@ -22,7 +22,10 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
+from awf.runtime.monitor_state_keys import (
+    _disposition_unverified_key,
+    _outdated_resolve_requeued_key,
+)
 from awf.runtime.pr_monitor import (
     AddressComments,
     MonitorConfig,
@@ -35,6 +38,7 @@ from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import Verdict
 from awf.runtime.pr_monitor_runner.lifecycle import _load_state
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     read_item_disposition,
+    retire_reopened_dispositions,
     sync_item_disposition,
 )
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -454,9 +458,10 @@ async def test_outdated_reply_reread_fails_fast_under_the_merge_lock(
     # PRRT_kwDOSJAM6s6vbU2K: pre-merge hygiene runs under ``serialized_merge``
     # (``wait_on_transient=False``), where the re-read after a fresh reply must not
     # back off in transport. It fails fast, and a fault releases the lock to retry
-    # next poll: the reply is retired, so that retry re-reads a fresh one, and the
-    # requeued thread blocks this merge meanwhile. The outer poll keeps transport
-    # retries, and a fault there still parks the thread for a human.
+    # next poll: the reply is kept but unconfirmed, so that retry re-reads it before
+    # resolving on it (never posting a second one), and the requeued thread blocks
+    # this merge meanwhile. The outer poll keeps transport retries, and a fault
+    # there still parks the thread for a human.
     gh = OrderedForge(FakeCommandRunner())
     workspace_id, runner = await _runner(factory, tmp_path, gh)
     tid = "PRRT_test_outdated_reread"
@@ -497,20 +502,114 @@ async def test_outdated_reply_reread_fails_fast_under_the_merge_lock(
     for kept in (state, _load_state(None, ws)):
         assert kept.threads_addressed_ids[tid] == "fix_committed"
         assert kept.threads_addressed_ids[requeued] == "requeued"
-        retired = read_item_disposition(kept, tid)
-        assert retired is not None and retired.reply_comment_id is None
+        unconfirmed = read_item_disposition(kept, tid)
+        assert unconfirmed is not None
+        assert (unconfirmed.reply_comment_id, unconfirmed.reread_pending) == ("reply-1", True)
     events = await _events(factory, workspace_id)
     assert [(e.payload["outcome"], e.payload["reason_code"]) for e in events] == [
         ("requeued", "REVIEW_THREAD_AUDIT_UNAVAILABLE")
     ]
     assert events[0].payload["evidence"]["forge_reason_code"] == _TRANSIENT.reason_code
 
-    # The next poll, outside the lock, answers with a fresh reply it re-reads.
+    # The next poll, outside the lock, re-reads that reply and resolves on it.
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
 
-    assert [event[0] for event in gh.events] == ["reply", "reply", "resolve"]
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
     assert retries == [False, True]
     assert requeued not in state.threads_addressed_ids
+    confirmed = read_item_disposition(state, tid)
+    assert confirmed is not None
+    assert (confirmed.reply_comment_id, confirmed.reread_pending) == ("reply-1", False)
+
+
+async def test_a_requeued_reply_parks_on_own_identity_feedback_its_re_read_finds(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The operator's unmarked comment under AWF's account precedes a reply whose
+    # in-lock re-read faulted. The next poll's re-read of that same reply finds it
+    # and parks THREAD_DISPOSITION_UNREAD_FEEDBACK. Posting a second reply instead
+    # would let the first, unchecked one bound the unread check.
+    gh = OrderedForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    tid = "PRRT_test_outdated_requeued_unread"
+    calls: list[bool] = []
+
+    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+        del repo, pr_number
+        calls.append(retry)
+        if len(calls) == 1:
+            raise _TRANSIENT
+        live = AuditedReviewThread(
+            thread_id=tid,
+            is_resolved=False,
+            is_outdated=True,
+            resolved_by=None,
+            viewer_comment_bodies=("also cover empty payloads", gh.events[0][2]),
+            conversation_digest_before_reply="f" * 64,
+        )
+        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot", threads=(live,))
+
+    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
+    state = MonitorState()
+    _mark(state, tid, "fix_committed")
+    seed_resolvable_disposition(state, tid, "fix_committed", commits=("e" * 40,))
+    status = _status_with_outdated(_outdated_thread(tid))
+
+    await _call_resolve(
+        runner, workspace_id=workspace_id, status=status, state=state, wait_on_transient=False
+    )
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert state.threads_addressed_ids[tid] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
+    assert reason.startswith("THREAD_DISPOSITION_UNREAD_FEEDBACK:")
+    retired = read_item_disposition(state, tid)
+    assert retired is not None and retired.reply_comment_id is None
+
+
+@pytest.mark.parametrize("evidence", ["branch-commit", "comment-keyed-verdict"])
+async def test_reopened_flagged_outdated_thread_is_re_triaged_not_reseeded(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    evidence: str,
+) -> None:
+    # The operator clears a REVIEW_THREAD_DISPOSITION_UNVERIFIED thread by reopening
+    # it, which clears its verdict for re-triage. Outdated hygiene runs right after
+    # in the same poll. It must not rebuild a verdict from the ``fix: address``
+    # commit the branch already carries, nor promote a comment-keyed one onto the
+    # thread, or the thread would be resolved (or parked) without the re-triage the
+    # reopen asks for.
+    cmd = FakeCommandRunner()
+    gh = OrderedForge(cmd)
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    tid = "PRRT_test_reopened_flagged"
+    cmd.respond_when(
+        lambda argv: "log" in argv and "--grep" in argv,
+        stdout=f"{'d' * 40} 2026-10-01T10:00:00+00:00\n",
+    )
+    thread = _outdated_thread_with_comment(tid, comment_at=datetime(2026, 9, 30, tzinfo=UTC))
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "false_positive")
+    if evidence == "comment-keyed-verdict":
+        state.mark_addressed("c1", "fix_committed")
+    state.mark_addressed(_disposition_unverified_key(tid), "REVIEW_THREAD_DISPOSITION_UNVERIFIED")
+    status = _status_with_outdated(thread)
+
+    retire_reopened_dispositions(state, status, workspace_id=workspace_id)
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    assert gh.events == []
+    assert tid not in state.threads_addressed_ids
+    action = decide(status, state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [tid]
+    # Only the gate's flag clears a verdict: the re-triage's own one stands.
+    _mark_review_thread_addressed(state, thread, "false_positive")
+    retire_reopened_dispositions(state, status, workspace_id=workspace_id)
+    assert state.threads_addressed_ids[tid] == "false_positive"
 
 
 async def test_legacy_captured_defer_without_disposition_replies_with_reason_and_issue(

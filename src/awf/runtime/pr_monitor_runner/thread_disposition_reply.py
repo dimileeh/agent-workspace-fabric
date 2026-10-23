@@ -144,10 +144,97 @@ async def reply_before_resolve(
             forge_reason_code=forge_reason_code,
         )
 
+    async def _confirm(posted: ThreadDisposition) -> ThreadDisposition | None:
+        """Check the posted reply against the live thread; ``None`` means do NOT resolve."""
+        nonlocal disposition
+        disposition = posted
+        if repo is None or thread is None:
+            return posted
+        try:
+            moved, followed = await _reread_thread_after_reply(
+                self, repo=repo, pr_number=pr_number, thread=thread, retry=retry
+            )
+        except ForgeClientError as exc:
+            if not retry:
+                # Under the merge lock the re-read never backs off: its fault releases
+                # the lock to retry next poll (PRRT_kwDOSJAM6s6vbU2K).
+                await _requeue_unconfirmed_reply(
+                    self,
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    state=state,
+                    disposition=posted,
+                    action=action,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                )
+                return None
+            await _park(
+                REVIEW_THREAD_AUDIT_UNAVAILABLE,
+                "AWF could not re-read this review thread after posting its disposition "
+                f"reply ({_redact_and_truncate_forge_error(str(exc))}) to confirm no "
+                "feedback arrived first, so it left the thread open",
+                exc.reason_code,
+            )
+            return None
+        if followed is not None or posted.reread_pending:
+            # Kept with the reply, so retiring it before any audit bound it still
+            # tombstones the conversation its marker follows (PRRT_kwDOSJAM6s6vaq4v).
+            posted = replace(
+                posted,
+                reply_conversation_digest=followed or posted.reply_conversation_digest,
+                reread_pending=False,
+            )
+            disposition = posted
+            record_item_disposition(state, posted)
+            if moved is None:
+                await _persist_posted_disposition(
+                    self, workspace_id=workspace_id, state=state, item_id=thread_id
+                )
+        if moved == THREAD_DISPOSITION_UNREAD_FEEDBACK:
+            # The operator, under AWF's own account, left feedback the triage behind
+            # this reply never read, yet the gate would take the reply as its answer
+            # (PRRT_kwDOSJAM6s6vbU2H). A human reads it: the thread is parked open and
+            # the reply retired, so neither a later resolve nor its marker reuses it.
+            await _park(
+                THREAD_DISPOSITION_UNREAD_FEEDBACK,
+                "AWF did not resolve this review thread: a comment by its own forge "
+                "identity without an AWF disposition marker precedes its disposition "
+                "reply, and AWF never reads that identity's comments as feedback",
+            )
+            retire_item_disposition(state, posted)
+            await _persist_posted_disposition(
+                self, workspace_id=workspace_id, state=state, item_id=thread_id
+            )
+            return None
+        if moved is not None:
+            # Feedback added or edited after the listed snapshot sits before the
+            # reply, where the gate would read the reply as its answer
+            # (PRRT_kwDOSJAM6s6vaQrr). The reply is retired, so no later resolve
+            # reuses it, and the thread is left open: its changed body re-enters
+            # AddressComments, whose re-triage answers that feedback afresh.
+            retire_item_disposition(state, posted)
+            await _persist_posted_disposition(
+                self, workspace_id=workspace_id, state=state, item_id=thread_id
+            )
+            _log.info(
+                "monitor.thread_disposition_feedback_moved",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                thread_id=thread_id,
+                reply_comment_id=posted.reply_comment_id,
+                reason_code=moved,
+            )
+            return None
+        return posted
+
     if disposition is not None and disposition.reply_comment_id:
         # Replied on an earlier attempt whose resolve did not land: that reply is
-        # the thread's disposition, so resolve on it and never double-post.
-        return disposition
+        # the thread's disposition, so resolve on it and never double-post. One a
+        # fail-fast re-read never confirmed is re-read first.
+        return await _confirm(disposition) if disposition.reread_pending else disposition
     if disposition is None or problem is not None:
         reason_code = problem or THREAD_DISPOSITION_REASON_MISSING
         await _park(reason_code, _PROBLEM_DETAIL[reason_code])
@@ -181,82 +268,7 @@ async def reply_before_resolve(
         disposition_class=disposition.disposition_class,
         reply_comment_id=reply_id,
     )
-    if repo is None or thread is None:
-        return disposition
-    try:
-        moved, followed = await _reread_thread_after_reply(
-            self, repo=repo, pr_number=pr_number, thread=thread, retry=retry
-        )
-    except ForgeClientError as exc:
-        if not retry:
-            # Under the merge lock the re-read never backs off: its fault releases
-            # the lock to retry next poll (PRRT_kwDOSJAM6s6vbU2K).
-            await _requeue_unconfirmed_reply(
-                self,
-                exc,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                state=state,
-                disposition=disposition,
-                action=action,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                monitor_log=monitor_log,
-            )
-            return None
-        await _park(
-            REVIEW_THREAD_AUDIT_UNAVAILABLE,
-            "AWF could not re-read this review thread after posting its disposition "
-            f"reply ({_redact_and_truncate_forge_error(str(exc))}) to confirm no "
-            "feedback arrived first, so it left the thread open",
-            exc.reason_code,
-        )
-        return None
-    if followed is not None:
-        # Kept with the reply, so retiring it before any audit bound it still
-        # tombstones the conversation its marker follows (PRRT_kwDOSJAM6s6vaq4v).
-        disposition = replace(disposition, reply_conversation_digest=followed)
-        record_item_disposition(state, disposition)
-        if moved is None:
-            await _persist_posted_disposition(
-                self, workspace_id=workspace_id, state=state, item_id=thread_id
-            )
-    if moved == THREAD_DISPOSITION_UNREAD_FEEDBACK:
-        # The operator, under AWF's own account, left feedback the triage behind
-        # this reply never read, yet the gate would take the reply as its answer
-        # (PRRT_kwDOSJAM6s6vbU2H). A human reads it: the thread is parked open and
-        # the reply retired, so neither a later resolve nor its marker reuses it.
-        await _park(
-            THREAD_DISPOSITION_UNREAD_FEEDBACK,
-            "AWF did not resolve this review thread: a comment by its own forge identity "
-            "without an AWF disposition marker precedes its disposition reply, and AWF "
-            "never reads that identity's comments as feedback",
-        )
-        retire_item_disposition(state, disposition)
-        await _persist_posted_disposition(
-            self, workspace_id=workspace_id, state=state, item_id=thread_id
-        )
-        return None
-    if moved is not None:
-        # Feedback added or edited after the listed snapshot sits before the
-        # reply, where the gate would read the reply as its answer
-        # (PRRT_kwDOSJAM6s6vaQrr). The reply is retired, so no later resolve
-        # reuses it, and the thread is left open: its changed body re-enters
-        # AddressComments, whose re-triage answers that feedback afresh.
-        retire_item_disposition(state, disposition)
-        await _persist_posted_disposition(
-            self, workspace_id=workspace_id, state=state, item_id=thread_id
-        )
-        _log.info(
-            "monitor.thread_disposition_feedback_moved",
-            workspace_id=workspace_id,
-            pr_number=pr_number,
-            thread_id=thread_id,
-            reply_comment_id=reply_id,
-            reason_code=moved,
-        )
-        return None
-    return disposition
+    return await _confirm(disposition)
 
 
 async def _reread_thread_after_reply(
@@ -338,13 +350,15 @@ async def _requeue_unconfirmed_reply(
 ) -> None:
     """Leave the thread open for the next poll after a fail-fast re-read fault.
 
-    Nothing confirmed the reply followed the listed conversation, so it is retired:
-    the next poll's resolve posts a fresh reply and re-reads that one. The requeue
-    flag blocks this merge meanwhile, and the merge loop backs off after releasing
-    the lock. The verdict stays, so the retry still fires.
+    Nothing confirmed the reply followed the listed conversation, so it is kept
+    with ``reread_pending``: the next poll's resolve re-reads that same reply
+    before resolving on it, never posting a second one whose check this unchecked
+    reply would bound, and the gate certifies nothing on it meanwhile. The requeue
+    flag blocks this merge, and the merge loop backs off after releasing the lock.
+    The verdict stays, so the retry still fires.
     """
     thread_id = disposition.item_id
-    retire_item_disposition(state, disposition)
+    record_item_disposition(state, replace(disposition, reread_pending=True))
     await _persist_posted_disposition(
         self, workspace_id=workspace_id, state=state, item_id=thread_id
     )

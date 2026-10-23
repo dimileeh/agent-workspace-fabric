@@ -266,7 +266,8 @@ async def _verify_audit(
     newly_flagged = [
         thread_id
         for thread_id in unverified
-        if not state.threads_addressed_ids.get(_disposition_unverified_key(thread_id))
+        if state.threads_addressed_ids.get(_disposition_unverified_key(thread_id))
+        != REVIEW_THREAD_DISPOSITION_UNVERIFIED
     ]
     for thread_id in unverified:
         # A poll that lists the thread open again re-triages it (the operator's reopen).
@@ -320,9 +321,9 @@ def _disposition_holds(
     """True when the thread's newest current marker is a live disposition.
 
     :func:`_retire_broken_bindings` already retired every record this audit
-    breaks, so a record left must be the posted reply of that marker's class. The
-    first audit to see a posted reply resolved binds it to the conversation it
-    followed. With no record at all (a re-adopted PR whose record did not cross)
+    breaks, so a record left must be the posted reply of that marker's class, one
+    its post-reply re-read confirmed. The first audit to see a posted reply
+    resolved binds it to the conversation it followed. With no record at all (a re-adopted PR whose record did not cross)
     the marker is the evidence — unless it is a reply this monitor retired.
     """
     disposition = read_item_disposition(state, thread.thread_id)
@@ -333,6 +334,8 @@ def _disposition_holds(
         return retired not in state.threads_addressed_ids
     if disposition.disposition_class != disposition_class or not disposition.reply_comment_id:
         return False  # retired or never posted: the marker is an older reply's
+    if disposition.reread_pending:
+        return False  # never checked against the conversation it follows
     if disposition.conversation_digest is None:
         record_item_disposition(
             state, replace(disposition, conversation_digest=thread.conversation_digest_before_reply)

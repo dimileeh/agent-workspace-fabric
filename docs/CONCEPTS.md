@@ -523,16 +523,21 @@ reused or adopted PR, a thread the monitor already recorded a disposition for
 baseline ever exempts it.
 
 There is no acknowledgement directive: an operator clears a flagged thread by
-reopening it. The next poll that lists the thread open drops its flag and clears
-its verdict, so `decide()` re-triages it through the normal fix cycle, which posts
-a fresh disposition reply before resolving it. Without this, a FIXED or FALSE
-POSITIVE thread whose comments did not change would never re-enter triage. The
-gate itself never writes to the forge. It decides on ONE complete audit. Under the
-merge lock that audit fails fast, and so does outdated hygiene's re-read after a
-fresh reply: no transport retry or sleep holds the lock. A fault releases the
-lock, and the monitor retries on the next poll. A reply whose in-lock re-read
-faulted is retired and its thread requeued, so the retry posts a fresh reply and re-reads
-that one.
+reopening it. The next poll that lists the thread open clears its verdict, so
+`decide()` re-triages it through the normal fix cycle, which posts a fresh
+disposition reply before resolving it. Without this, a FIXED or FALSE POSITIVE
+thread whose comments did not change would never re-enter triage. The flag then
+reads `reopened` until the gate certifies the thread's new disposition. While it
+does, outdated hygiene does not re-seed the thread's verdict from branch
+evidence in the re-triage's place, and that poll step never clears the
+re-triage's own verdict again. The flag crosses a PR re-adoption. The gate itself
+never writes to the forge. It decides on ONE complete audit. Under the merge
+lock that audit fails fast, and so does outdated hygiene's re-read after a fresh
+reply: no transport retry or sleep holds the lock. A fault releases the lock,
+and the monitor retries on the next poll. A reply whose in-lock re-read faulted
+is kept but marked unconfirmed, and its thread is requeued. The retry re-reads
+that same reply before resolving on it and never posts a second one, and the
+gate certifies nothing on the reply until a re-read confirms it.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
 comment carrying the marker; the resolution audit is reported unsupported, so

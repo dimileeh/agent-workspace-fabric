@@ -79,6 +79,9 @@ DispositionClass = Literal[
 DISPOSITION_CLASSES: tuple[DispositionClass, ...] = get_args(DispositionClass)
 RESOLVED_BY_OTHERS = "resolved_by_others"
 LEGACY_BASELINE = "legacy_baseline"
+# The unverified flag once a poll saw the operator reopen the thread: its verdict
+# was cleared, and the re-triage it awaits must not be pre-empted (#1018).
+UNVERIFIED_THREAD_REOPENED = "reopened"
 
 _VERDICT_CLASS: dict[str, DispositionClass] = {
     "fix_committed": "fixed",
@@ -128,6 +131,10 @@ class ThreadDisposition:
     # read it. It binds nothing; it keys the reply's tombstone when the reply is
     # retired before any audit bound it (PRRT_kwDOSJAM6s6vaq4v).
     reply_conversation_digest: str | None = None
+    # The posted reply's fail-fast re-read under the merge lock faulted: nothing
+    # checked it against the live thread yet, so it is re-read before any resolve
+    # reuses it and certifies nothing meanwhile (PRRT_kwDOSJAM6s6vbU2K).
+    reread_pending: bool = False
 
     @property
     def is_bound(self) -> bool:
@@ -164,6 +171,7 @@ class ThreadDisposition:
             "conversation_digest": self.conversation_digest,
             "resolved": self.resolved,
             "reply_conversation_digest": self.reply_conversation_digest,
+            "reread_pending": self.reread_pending,
         }
 
     @classmethod
@@ -201,6 +209,7 @@ class ThreadDisposition:
             conversation_digest=_optional_text(raw.get("conversation_digest")),
             resolved=raw.get("resolved") is True,
             reply_conversation_digest=_optional_text(raw.get("reply_conversation_digest")),
+            reread_pending=raw.get("reread_pending") is True,
         )
 
 
@@ -307,6 +316,7 @@ def retire_item_disposition(
         conversation_digest=None,
         resolved=False,
         reply_conversation_digest=None,
+        reread_pending=False,
     )
     record_item_disposition(state, retired)
     return retired
@@ -323,10 +333,13 @@ def retire_reopened_dispositions(
     resolve's reply is kept, for its retry to reuse. Returns the retired item ids.
 
     A reopen is also how an operator clears a thread the gate flagged
-    ``REVIEW_THREAD_DISPOSITION_UNVERIFIED``: its flag is dropped and its verdict
-    cleared, so ``decide()`` re-triages it through the normal fix cycle, which
-    posts a fresh disposition before resolving it. A FIXED or FALSE POSITIVE
-    thread whose comments did not change would not re-enter triage otherwise.
+    ``REVIEW_THREAD_DISPOSITION_UNVERIFIED``: its verdict is cleared, so
+    ``decide()`` re-triages it through the normal fix cycle, which posts a fresh
+    disposition before resolving it. A FIXED or FALSE POSITIVE thread whose
+    comments did not change would not re-enter triage otherwise. The flag becomes
+    :data:`UNVERIFIED_THREAD_REOPENED`, which keeps outdated hygiene from seeding
+    a verdict from branch evidence in the re-triage's place and this poll step
+    from clearing the re-triage's own verdict again.
     """
     from awf.runtime.pr_monitor_runner.helpers import _clear_addressed_state_by_id
 
@@ -334,7 +347,13 @@ def retire_reopened_dispositions(
     retriaged: list[str] = []
     for thread in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
         thread_id = thread.thread_id
-        flagged = state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
+        flag_key = _disposition_unverified_key(thread_id)
+        flagged = state.threads_addressed_ids.get(flag_key) not in (
+            None,
+            UNVERIFIED_THREAD_REOPENED,
+        )
+        if flagged:
+            state.mark_addressed(flag_key, UNVERIFIED_THREAD_REOPENED)
         disposition = read_item_disposition(state, thread_id)
         if disposition is not None and (
             disposition.answers_resolution or (flagged and disposition.reply_comment_id)

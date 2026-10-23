@@ -39,6 +39,7 @@ from awf.runtime.feedback_policy import (
 )
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
+    _disposition_unverified_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
 )
@@ -329,7 +330,10 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     protection loop on NotifyHuman (PRRT_kwDOSJAM6s6dfPZ2).
 
     Threads carrying a live operator ruling are excluded too — see
-    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a).
+    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a) — and so
+    are threads the disposition gate flagged (#1018): the operator's reopen
+    cleared such a thread's verdict so it is re-triaged, not rebuilt from the
+    branch evidence it already carried.
     """
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     unseeded = [
@@ -341,6 +345,7 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         # re-triage through ``AddressComments``, not a verdict reconstructed from
         # the evidence the operator just ruled on (PRRT_kwDOSJAM6s6fwt3a).
         and not _thread_has_live_operator_decision(state, thread)
+        and _disposition_unverified_key(thread.thread_id) not in state.threads_addressed_ids
         # #548: never seed ``fix_committed`` from branch evidence onto a thread
         # that already holds a blocking sibling comment verdict (``needs_human`` /
         # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
@@ -509,7 +514,9 @@ def _reconcile_comment_keyed_outdated_verdicts(
     before hygiene's active-wins skip suppresses AddressComments without ever
     resolving the forge thread. Active-path ownership handles those IDs. Threads
     carrying a live operator ruling are skipped as well — see
-    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a).
+    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a) — and so
+    are threads the disposition gate flagged, whose reopen asks for a re-triage
+    (#1018).
     """
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     for thread in status.outdated_unresolved_inline_threads:
@@ -523,6 +530,10 @@ def _reconcile_comment_keyed_outdated_verdicts(
         # would resolve the thread — or re-park it — without the agent ever reading
         # the directive (PRRT_kwDOSJAM6s6fwt3a).
         if _thread_has_live_operator_decision(state, thread):
+            continue
+        # #1018: the operator's reopen cleared a flagged thread's verdict so that it
+        # is re-triaged, not rebuilt from its comments' earlier verdicts.
+        if _disposition_unverified_key(thread.thread_id) in state.threads_addressed_ids:
             continue
         # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
         # ``fix_committed`` and a reply ``needs_human``. Promoting the resolvable

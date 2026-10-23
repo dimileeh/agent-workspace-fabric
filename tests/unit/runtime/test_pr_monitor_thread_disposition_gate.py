@@ -610,7 +610,7 @@ async def test_reopening_a_flagged_thread_re_triages_it(
     # re-triages the thread through the normal fix cycle, which posts a fresh
     # disposition before resolving it. A FIXED thread whose comments did not change
     # would not re-enter triage by itself, so the poll that lists the reopen clears
-    # its verdict and flag, even when a gate audit saw the reopen first. Here the
+    # its verdict, even when a gate audit saw the reopen first. Here the
     # operator resolved it by hand under AWF's account, before AWF's resolve or
     # after its reply (to a resolve that failed) was superseded by newer feedback.
     comments = (ReviewThreadComment(comment_id="1", body="P1: crash on None"),)
@@ -662,7 +662,8 @@ async def test_reopening_a_flagged_thread_re_triages_it(
 
     assert isinstance(action, AddressComments)
     assert [t.thread_id for t in action.threads] == [_SILENT]
-    assert _disposition_unverified_key(_SILENT) not in state.threads_addressed_ids
+    # Awaiting that re-triage, which this poll step never clears again.
+    assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)] == "reopened"
     # No record left to reuse: the re-triage records, and replies with, a fresh one.
     assert read_item_disposition(state, _SILENT) is None
     retired = _disposition_retired_key(_SILENT, "b" * 64) in state.threads_addressed_ids
@@ -803,6 +804,26 @@ async def test_an_audit_binds_a_landed_resolve_it_sees_standing(
         True,
         resolved.conversation_digest_before_reply,
     )
+
+
+async def test_an_unconfirmed_reply_never_certifies(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A reply whose fail-fast re-read under the merge lock faulted was never checked
+    # against the conversation it follows (PRRT_kwDOSJAM6s6vbU2K), so a silent
+    # resolve by AWF's identity on it blocks until a re-read confirms it.
+    state = settled_baseline_state()
+    _, audit = _certified_fixed_thread(state)
+    posted = read_item_disposition(state, _SILENT)
+    assert posted is not None
+    record_item_disposition(state, replace(posted, reread_pending=True))
+    gh = _AuditForge(FakeCommandRunner(), audit=audit)
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    blocked = await _gate(runner, workspace_id, state)
+
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
 
 
 async def test_gate_rejects_a_marker_older_than_the_shared_identitys_own_feedback(
