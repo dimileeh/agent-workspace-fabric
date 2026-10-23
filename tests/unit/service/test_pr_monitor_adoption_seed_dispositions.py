@@ -179,3 +179,33 @@ def test_retired_disposition_tombstones_cross_regardless_of_head(
 )
 def test_malformed_retired_disposition_tombstones_never_cross(key: str) -> None:
     assert seedable_monitor_state({key: "retired"}, head_continuity=True) == {}
+
+
+_FLAG = "__awf_disposition_unverified__:"
+
+
+@pytest.mark.parametrize("value", ["REVIEW_THREAD_DISPOSITION_UNVERIFIED", "reopened"])
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_unverified_flags_cross_regardless_of_head(value: str, head_continuity: bool) -> None:
+    """The gate's flag turns the operator's reopen into a re-triage (#1018).
+
+    Left behind, a flagged thread reopened around the re-adoption keeps its
+    seeded verdict and is never re-triaged; a reopened one awaiting re-triage
+    could be re-seeded from branch evidence instead. It records thread history,
+    not code, and only makes the successor stricter.
+    """
+    key = f"{_FLAG}PRRT_test_flagged"
+
+    assert seedable_monitor_state({key: value}, head_continuity=head_continuity) == {key: value}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (f"{_FLAG}__awf_notify__:x", "reopened"),
+        (f"{_FLAG}", "reopened"),
+        (f"{_FLAG}PRRT_test_flagged", "acknowledged"),
+    ],
+)
+def test_malformed_unverified_flags_never_cross(key: str, value: str) -> None:
+    assert seedable_monitor_state({key: value}, head_continuity=True) == {}

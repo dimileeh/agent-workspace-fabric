@@ -174,6 +174,18 @@ _HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred"})
 _DISPOSITION_RETIRED_PREFIX = "__awf_disposition_retired__:"
 _CONVERSATION_DIGEST_RE = re.compile(r"^(?:[0-9a-f]{64})?$")
 
+# ``__awf_disposition_unverified__:<thread id>`` flags a thread the disposition
+# gate found resolved by AWF's identity without a disposition (#1018). The
+# operator clears it by reopening the thread: the poll that lists it open clears
+# its verdict for re-triage and turns the flag ``reopened``, which keeps branch
+# evidence from re-seeding that verdict. Left behind, a flagged thread reopened
+# around the re-adoption keeps its seeded verdict and is never re-triaged. It
+# records thread history rather than code and only makes the successor stricter,
+# so it crosses regardless of head continuity: the gate's reason code or
+# ``reopened``, under a verdict-key thread id.
+_DISPOSITION_UNVERIFIED_PREFIX = "__awf_disposition_unverified__:"
+_DISPOSITION_UNVERIFIED_VALUES = frozenset({"REVIEW_THREAD_DISPOSITION_UNVERIFIED", "reopened"})
+
 # ``__awf_review_thread_disposition_baseline__`` (``awf.runtime.monitor_state_keys``)
 # is the disposition gate's one-time legacy baseline: the unmarked AWF
 # resolutions its first run exempted, and the proof that first run happened
@@ -266,6 +278,7 @@ def seedable_monitor_state(
             or _is_copied_marker(key, value)
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
             or _is_disposition_retired_tombstone(key)
+            or _is_disposition_unverified_flag(key, value)
             or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
@@ -351,6 +364,14 @@ def _is_disposition_retired_tombstone(key: str) -> bool:
     return (
         _VERDICT_KEY_RE.match(thread_id) is not None
         and _CONVERSATION_DIGEST_RE.match(digest) is not None
+    )
+
+
+def _is_disposition_unverified_flag(key: str, value: str) -> bool:
+    return (
+        key.startswith(_DISPOSITION_UNVERIFIED_PREFIX)
+        and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_UNVERIFIED_PREFIX) :]) is not None
+        and value in _DISPOSITION_UNVERIFIED_VALUES
     )
 
 
