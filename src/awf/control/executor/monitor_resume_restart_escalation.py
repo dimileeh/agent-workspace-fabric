@@ -31,6 +31,7 @@ from awf.common.audit import redact_audit_text
 from awf.control.blocked_transition import enter_blocked_for_protected_violation_in_session
 from awf.control.executor.constants import (
     MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS,
+    MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY,
     MONITOR_RUNTIME_RESTART_BLOCK_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE,
@@ -258,10 +259,11 @@ async def dependencies_to_recreate_after_exhaustion(
 ) -> tuple[str, ...]:
     """Return the dependencies a guided retry after the park must force-recreate.
 
-    Only the first resume after ``exhausted`` gets them: the dependencies still
+    Only the first restart after ``exhausted`` gets them: the dependencies still
     ``starting``/``unhealthy`` at the last dependency-wait timeout of the parked
-    streak, which waiting on again would only time out once more. A usable
-    resume whose ``recovered`` write failed closes the park all the same.
+    streak, which waiting on again would only time out once more. A precheck
+    failure never reached the restart, so it and any park it caused are skipped.
+    A usable resume whose ``recovered`` write failed closes the park all the same.
     """
     since = _unpersisted_recoveries(self).get(workspace_id)
     try:
@@ -273,9 +275,17 @@ async def dependencies_to_recreate_after_exhaustion(
             workspace_id=workspace_id,
         )
         return ()
-    if not events or events[0][0] != MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE:
+    events = [
+        (event_type, payload)
+        for event_type, payload in events
+        if not payload.get(MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY)
+    ]
+    parks = 0
+    while parks < len(events) and events[parks][0] == MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE:
+        parks += 1
+    if parks == 0:
         return ()
-    for payload in _open_streak(events[1:]):
+    for payload in _open_streak(events[parks:]):
         unsettled = payload.get(MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY)
         if unsettled:
             return tuple(sorted(str(name) for name in unsettled))

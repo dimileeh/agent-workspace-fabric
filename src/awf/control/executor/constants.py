@@ -102,6 +102,10 @@ MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY = "counts_toward_restart_streak"
 # force-recreates them.
 MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY = "unsettled_dependencies"
 
+# Payload key marking a restart-failure event whose precheck failed before any
+# restart ran, so it leaves the dependencies a park left unsettled pending.
+MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY = "failed_before_restart"
+
 MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE = "workspace.monitor_runtime_restart_recovered"
 
 MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE = "workspace.monitor_runtime_restart_exhausted"

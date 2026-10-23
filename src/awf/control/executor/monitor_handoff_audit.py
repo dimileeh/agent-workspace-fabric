@@ -10,6 +10,7 @@ from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
+    MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY,
     MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
     MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
     MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY,
@@ -304,6 +305,7 @@ async def _record_monitor_runtime_restart_failed(
     compose_file_path: str,
     error: ComposeOperationError,
     event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
+    before_restart: bool = False,
 ) -> None:
     """Persist an audit event when compose restart fails during monitor resume handoff.
 
@@ -329,6 +331,9 @@ async def _record_monitor_runtime_restart_failed(
                 }
                 if isinstance(error, DependencyWaitTimeoutError)
                 else {}
+            ),
+            **(
+                {MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY: True} if before_restart else {}
             ),
         },
     }

@@ -141,6 +141,7 @@ async def _restart_compose_runtime_for_monitor_resume(
             compose_file_path=str(compose_file),
             error=exc,
             event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
+            before_restart=True,
         )
         await escalate_monitor_resume_restart_failure(
             self,
