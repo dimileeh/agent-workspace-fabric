@@ -12,6 +12,7 @@ from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
     MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY,
     MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+    MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY,
     MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
     MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
@@ -306,11 +307,14 @@ async def _record_monitor_runtime_restart_failed(
     error: ComposeOperationError,
     event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
     before_restart: bool = False,
+    pending_dependency_recreates: tuple[str, ...] = (),
 ) -> None:
     """Persist an audit event when compose restart fails during monitor resume handoff.
 
     The event counts toward the restart-failure streak, so a failed write keeps it
     in memory: escalation still counts it and the next restart attempt retries it.
+    ``pending_dependency_recreates`` are the dependencies this attempt was to
+    force-recreate after a park but failed before recreating.
     """
     event: dict[str, Any] = {
         "event_type": MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
@@ -334,6 +338,15 @@ async def _record_monitor_runtime_restart_failed(
             ),
             **(
                 {MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY: True} if before_restart else {}
+            ),
+            **(
+                {
+                    MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY: list(
+                        pending_dependency_recreates
+                    )
+                }
+                if pending_dependency_recreates
+                else {}
             ),
         },
     }

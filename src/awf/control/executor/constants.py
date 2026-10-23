@@ -102,6 +102,10 @@ MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY = "counts_toward_restart_streak"
 # force-recreates them.
 MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY = "unsettled_dependencies"
 
+# Payload key listing the dependencies a restart was to force-recreate after a
+# park but failed before recreating, so the next retry still recreates them.
+MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY = "pending_dependency_recreates"
+
 # Payload key marking a restart-failure event whose precheck failed before any
 # restart ran, so it leaves the dependencies a park left unsettled pending.
 MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY = "failed_before_restart"

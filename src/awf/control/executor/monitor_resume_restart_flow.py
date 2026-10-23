@@ -49,6 +49,8 @@ async def _restart_compose_runtime_for_monitor_resume(
     resolved; the restart then fails closed, since only the specs say which
     companions carry env secrets that a selective restart must recreate.
     """
+    # Dependencies a park left unsettled stay pending until their recreate succeeds.
+    pending_dependency_recreates: tuple[str, ...] = ()
     try:
         if companion_specs is None:
             raise _monitor_handoff.CompanionEnvSecretPrecheckError(
@@ -98,6 +100,17 @@ async def _restart_compose_runtime_for_monitor_resume(
             self, workspace_id=workspace_id
         )
         recreate_services = tuple(sorted(secret_companions | set(unsettled_services)))
+        pending_dependency_recreates = unsettled_services
+
+        def _on_recreated() -> None:
+            nonlocal pending_dependency_recreates
+            pending_dependency_recreates = ()
+            _monitor_handoff._clear_pending_companion_recreates_for_resume(
+                workspace_id=workspace_id,
+                compose_file=compose_file,
+                keep=tuple(name for name in pending_recreates if name not in recreate_services),
+            )
+
         # Recreate the agent and what must change; recovering dependencies are left alone (#936).
         tolerated_error = await restart_runtime_for_monitor_resume(
             self._compose,
@@ -120,11 +133,7 @@ async def _restart_compose_runtime_for_monitor_resume(
             # Cleared once the companions are recreated, so a later failure never
             # makes the next resume recreate them again mid-recovery (#936); a
             # pending companion outside the active services stays pending.
-            on_recreated=lambda: _monitor_handoff._clear_pending_companion_recreates_for_resume(
-                workspace_id=workspace_id,
-                compose_file=compose_file,
-                keep=tuple(name for name in pending_recreates if name not in recreate_services),
-            ),
+            on_recreated=_on_recreated,
         )
         if tolerated_error is not None:
             await self._record_monitor_runtime_restart_failed(
@@ -172,6 +181,7 @@ async def _restart_compose_runtime_for_monitor_resume(
             compose_project=compose_project,
             compose_file_path=str(compose_file),
             error=exc,
+            pending_dependency_recreates=pending_dependency_recreates,
         )
         await escalate_monitor_resume_restart_failure(
             self,

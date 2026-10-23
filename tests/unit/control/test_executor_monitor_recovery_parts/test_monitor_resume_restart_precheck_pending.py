@@ -1,8 +1,9 @@
-"""Precheck failures after a park keep its unsettled dependencies pending (#936).
+"""Failures after a park keep its unsettled dependencies pending (#936).
 
-A required-secret or companion-spec precheck fails before the restart runs, so
-neither its failure event nor a park it causes may consume the dependencies the
-guided retry after the earlier park must force-recreate.
+A required-secret or companion-spec precheck fails before the restart runs, and
+a failed force-recreate never recreated them, so neither failure event nor a
+park it causes may consume the dependencies the guided retry after the earlier
+park must force-recreate.
 """
 
 from __future__ import annotations
@@ -71,6 +72,50 @@ async def test_precheck_failures_after_exhaustion_keep_the_unsettled_dependencie
         # The precheck streak parked the workspace again.
         await _guide(factory, ws_id)
 
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
+        (("postgres",), True),
+        (("postgres",), None),
+        (("agent",), True),
+    ]
+    compose.calls.clear()
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("recreate_failures", [1, MONITOR_RUNTIME_RESTART_FAILURE_LIMIT])
+async def test_failed_recreates_after_exhaustion_keep_the_unsettled_dependencies_pending(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recreate_failures: int,
+) -> None:
+    """Only a recreate that succeeded consumes them; a failed one leaves them pending."""
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    compose.fail = False
+    executor = _executor(fake, factory, tmp_path, compose)
+    _dependency_health(monkeypatch, {"postgres": "unhealthy"})
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    await _guide(factory, ws_id)
+    compose.fail = True
+    for _ in range(recreate_failures):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
+        (("postgres",), True)
+    ] * recreate_failures
+    if recreate_failures == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT:
+        # The failed recreates parked the workspace again.
+        await _guide(factory, ws_id)
+
+    compose.fail = False
+    compose.calls.clear()
     _dependency_health(monkeypatch, {"postgres": "healthy"})
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
 
