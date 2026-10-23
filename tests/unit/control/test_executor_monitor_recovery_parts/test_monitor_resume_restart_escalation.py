@@ -321,7 +321,7 @@ async def test_failed_dependency_up_with_a_usable_runtime_resets_the_streak(
     for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
         assert await executor.resume_pr_monitor_handoff(ws_id) is None
 
-    async def _usable(*_args: Any) -> bool:
+    async def _usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     monkeypatch.setattr(monitor_handoff, "_compose_runtime_usable_after_restart_failure", _usable)
@@ -358,7 +358,7 @@ async def test_failed_agent_recreate_counts_and_parks_even_with_a_healthy_old_st
     compose = _AgentRecreateFails()
     executor = _executor(fake, factory, tmp_path, compose)
 
-    async def _usable(*_args: Any) -> bool:
+    async def _usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     replays: list[str] = []
@@ -409,7 +409,7 @@ async def test_failed_agent_recreate_counts_even_when_the_agent_identity_changed
     ) -> runtime_setup_replay.AgentContainerIdentity:
         return runtime_setup_replay.AgentContainerIdentity(f"agent-{next(incarnations)}")
 
-    async def _usable(*_args: Any) -> bool:
+    async def _usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     replays: list[str] = []
@@ -440,7 +440,7 @@ async def test_usable_runtime_after_dependency_up_failure_recreates_the_agent_an
     compose = _DependencyUpFails()
     executor = _executor(fake, factory, tmp_path, compose)
 
-    async def _usable(*_args: Any) -> bool:
+    async def _usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     replays: list[str] = []
@@ -463,6 +463,52 @@ async def test_usable_runtime_after_dependency_up_failure_recreates_the_agent_an
     assert failed[0].payload is not None
     assert failed[0].payload["stderr"] == "redis exited (1)"
     assert len(await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE)) == 1
+    assert await _streak(factory, ws_id) == 0
+
+
+@pytest.mark.unit
+async def test_tolerated_dependency_up_failure_ignores_the_stopped_agent(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a host restart the agent stays exited until the final recreate brings it up."""
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _DependencyUpFails()
+    executor = _executor(fake, factory, tmp_path, compose)
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
+
+    async def _inspect(_compose_project: str) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="postgres",
+                    container_id="postgres",
+                    image=None,
+                    state="running",
+                    health="healthy",
+                ),
+                RuntimeService(name="agent", container_id="agent", image=None, state="exited"),
+            ],
+        )
+
+    replays: list[str] = []
+
+    async def _replay(_self: Any, *, workspace_id: str, **_kwargs: Any) -> bool:
+        replays.append(workspace_id)
+        return True
+
+    monkeypatch.setattr(monitor_handoff, "_inspect_compose_runtime", _inspect)
+    monkeypatch.setattr(monitor_handoff, "replay_setup_on_monitor_resume", _replay)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert [call.get("services") for call in compose.calls] == [("postgres",), ("agent",)]
+    assert compose.calls[1]["force_recreate"] is True
+    assert replays == [ws_id]
     assert await _streak(factory, ws_id) == 0
 
 
@@ -1029,7 +1075,7 @@ async def test_dependency_wait_timeout_counts_even_when_the_runtime_settles_afte
     executor = _executor(fake, factory, tmp_path, compose)
     _dependency_health(monkeypatch, {"postgres": "unhealthy"})
 
-    async def _usable(*_args: Any) -> bool:
+    async def _usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     replays: list[str] = []

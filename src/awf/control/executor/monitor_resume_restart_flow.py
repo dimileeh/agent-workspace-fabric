@@ -22,6 +22,7 @@ from awf.control.executor.monitor_resume_restart_escalation import (
     reset_monitor_resume_restart_streak,
 )
 from awf.control.executor.monitor_resume_runtime import (
+    AGENT_SERVICE_NAME,
     AgentRecreateError,
     restart_runtime_for_monitor_resume,
 )
@@ -98,8 +99,9 @@ async def _restart_compose_runtime_for_monitor_resume(
             dependency_services=(
                 None if requirements is None else tuple(sorted(requirements.service_names))
             ),
+            # The agent stays stopped until the final recreate, so only dependencies count.
             runtime_usable=lambda: _monitor_handoff._compose_runtime_usable_after_restart_failure(
-                compose_project, compose_file
+                compose_project, compose_file, ignored_services=frozenset({AGENT_SERVICE_NAME})
             ),
             recreate_services=recreate_services,
             # Cleared once the companions are recreated, so a later failure never

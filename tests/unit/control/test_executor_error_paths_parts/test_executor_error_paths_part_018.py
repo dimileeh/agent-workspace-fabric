@@ -307,6 +307,60 @@ services:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("ignored_services", "expected"),
+    [(frozenset(), False), (frozenset({"agent"}), True)],
+)
+async def test_compose_runtime_usable_after_restart_failure_skips_ignored_services(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ignored_services: frozenset[str],
+    expected: bool,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent
+  postgres:
+    image: postgres
+""",
+        encoding="utf-8",
+    )
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="exited",
+                ),
+                RuntimeService(
+                    name="postgres",
+                    container_id="postgres-id",
+                    image="postgres",
+                    state="running",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert (
+        await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+            "awf_x",
+            compose_file,
+            ignored_services=ignored_services,
+        )
+        is expected
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("service", "active_profiles", "expected"),
     [
         (None, set(), True),

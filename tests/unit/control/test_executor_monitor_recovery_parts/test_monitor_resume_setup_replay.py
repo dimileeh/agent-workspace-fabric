@@ -607,7 +607,7 @@ async def test_unchanged_identity_rechecks_monitor_claim_before_monitor_build(
             operation="up", returncode=1, stdout="", stderr="companion unhealthy"
         )
 
-    async def _runtime_usable(*_args: Any) -> bool:
+    async def _runtime_usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     monkeypatch.setattr(compose, "ensure_project_up", _up_fails_while_lease_moves)
@@ -784,7 +784,7 @@ async def test_recovery_operation_reports_replay_failure_after_usable_compose_fa
             operation="up", returncode=1, stdout="", stderr="companion unhealthy"
         )
 
-    async def _runtime_usable(*_args: Any) -> bool:
+    async def _runtime_usable(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
     monkeypatch.setattr(compose, "ensure_project_up", _up_partially_fails)

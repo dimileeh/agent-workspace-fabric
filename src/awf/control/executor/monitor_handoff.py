@@ -593,8 +593,14 @@ async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
 async def _compose_runtime_usable_after_restart_failure(
     compose_project: str,
     compose_file: Path,
+    *,
+    ignored_services: frozenset[str] = frozenset(),
 ) -> bool:
-    """Return whether monitor resume can proceed after a compose restart failure."""
+    """Return whether monitor resume can proceed after a compose restart failure.
+
+    ``ignored_services`` need not be running yet, such as the agent a later step
+    recreates.
+    """
     try:
         snapshot = await _inspect_compose_runtime(compose_project)
     except Exception:
@@ -629,7 +635,7 @@ async def _compose_runtime_usable_after_restart_failure(
             successful_completion_services=requirements.successful_completion_services,
         )
     }
-    missing_services = expected_services - ready_services
+    missing_services = expected_services - ready_services - ignored_services
     if missing_services:
         _log.warning(
             "executor.resume_compose_runtime_partial_stack",
