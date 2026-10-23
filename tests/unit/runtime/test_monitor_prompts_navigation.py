@@ -70,7 +70,10 @@ class TestOperatorHintPrompt:
         )
         assert "Address what the hint says, commit any code changes locally" in prompt
         assert "push a fix commit" not in prompt
-        assert "reply to any relevant unresolved review threads" in prompt
+        # #1018: AWF posts every thread disposition; the agent never replies itself.
+        assert "reply to any relevant unresolved review threads" not in prompt
+        assert "Do not reply to or resolve review threads yourself" in prompt
+        assert "AWF posts the disposition reply" in prompt
         assert "op_rehint" in prompt
         assert "Workspace runtime context" in prompt
         assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt

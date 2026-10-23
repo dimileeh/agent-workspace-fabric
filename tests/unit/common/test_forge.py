@@ -177,3 +177,21 @@ def test_forge_not_supported_error_is_specific_exception() -> None:
     err = ForgeNotSupportedError(message="boom", reason_code="FORGE_NOT_SUPPORTED")
     assert err.message == "boom"
     assert err.reason_code == "FORGE_NOT_SUPPORTED"
+
+
+@pytest.mark.unit
+def test_forge_client_protocol_declares_thread_reply_and_audit() -> None:
+    """#1018: both forges expose the in-thread reply and the resolution audit."""
+    from awf.common.bitbucket_client import BitbucketClient
+    from tests.unit.common.test_bitbucket_client_parts._helpers import (
+        FakeBitbucket,
+        make_client,
+    )
+
+    assert hasattr(ForgeClient, "reply_to_thread")
+    assert hasattr(ForgeClient, "fetch_review_thread_audit")
+    github = GitHubClient(FakeCommandRunner())
+    bitbucket = make_client(FakeBitbucket())
+    assert isinstance(bitbucket, BitbucketClient)
+    assert isinstance(github, ForgeClient)
+    assert isinstance(bitbucket, ForgeClient)

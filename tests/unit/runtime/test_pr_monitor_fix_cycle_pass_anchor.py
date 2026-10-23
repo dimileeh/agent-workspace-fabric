@@ -33,11 +33,19 @@ from awf.runtime.pr_monitor_runner.comment_verdict import (
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
 )
+from tests.unit.runtime._thread_disposition_fixtures import seed_resolvable_disposition
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 @pytest.fixture
@@ -234,6 +242,8 @@ async def test_fix_cycle_settle_preserves_addressed_hash_over_equal_rank_stale_d
     )
     state = MonitorState()
     _mark_review_thread_addressed(state, handled, "fix_committed")
+    # #1018: the earlier cycle's FIXED disposition, cited by the reply before resolve.
+    seed_resolvable_disposition(state, "T_handled", "fix_committed")
     recorded_hash = state.threads_addressed_ids[review_thread_body_state_key("T_handled")]
     assert recorded_hash == review_thread_body_hash(handled)
     address_thread_ids: list[str] = []

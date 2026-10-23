@@ -53,6 +53,7 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _initial_review_grace_wall_started_value_from_datetime as _initial_review_grace_wall_started_value_from_datetime,
 )
+from awf.runtime.monitor_state_keys import _item_disposition_key
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_done_key as _non_check_reviewer_settle_done_key,
 )
@@ -345,6 +346,7 @@ def _clear_addressed_state_by_id(
     item_id: str,
     *,
     restore_operator_decision: bool = True,
+    keep_posted_reply: bool = True,
 ) -> None:
     """Clear verdict, body, and reason markers for ``item_id``.
 
@@ -357,7 +359,15 @@ def _clear_addressed_state_by_id(
     where the clear means "superseded by fresh reviewer feedback" rather than
     "rolled back": that feedback is not what the operator ruled on. A ruling the
     operator has since re-issued likewise wins over the parked copy.
+
+    A disposition whose reply already landed in the thread (#1018) is kept: a
+    rollback re-queues the item, and the retried resolve must reuse that reply,
+    never post a second one. Pass ``keep_posted_reply=False`` only where fresh
+    reviewer feedback supersedes it — that feedback is owed its own reply.
     """
+    from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
+
+    posted = read_item_disposition(state, item_id) if keep_posted_reply else None
     body_snapshot = state.threads_addressed_ids.get(_review_thread_body_state_key(item_id))
     state.threads_addressed_ids.pop(item_id, None)
     state.threads_addressed_ids.pop(_review_thread_body_state_key(item_id), None)
@@ -366,6 +376,8 @@ def _clear_addressed_state_by_id(
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_agent_failed_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
+    if posted is None or posted.reply_comment_id is None:
+        state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None
     )
@@ -401,8 +413,14 @@ def _drop_stale_review_thread_addressed_state(
         if recorded_review_thread_body_matches(recorded, thread):
             continue
         # Fresh reviewer feedback supersedes the answered operator ruling rather
-        # than rolling its verdict back, so the parked ruling retires for good.
-        _clear_addressed_state_by_id(state, thread.thread_id, restore_operator_decision=False)
+        # than rolling its verdict back, so the parked ruling retires for good,
+        # and the new feedback gets its own disposition reply (#1018).
+        _clear_addressed_state_by_id(
+            state,
+            thread.thread_id,
+            restore_operator_decision=False,
+            keep_posted_reply=False,
+        )
         changed = True
     return changed
 
@@ -1058,12 +1076,26 @@ def _base_fetch_retry_wait_seconds(
 
 
 def _notification_key(
-    *, head_sha: str, blocker_reason: str | None, items_digest: str | None = None
+    *,
+    head_sha: str,
+    blocker_reason: str | None,
+    items_digest: str | None = None,
+    disposition_count_rows: Sequence[tuple[str, int]] | None = None,
 ) -> str:
-    """Build a stable notification deduplication key."""
+    """Build a stable notification deduplication key.
+
+    ``disposition_count_rows`` are the audited counts the READY_TO_MERGE cert
+    renders (#1018). A no-commit FALSE POSITIVE / DEFER changes them at an
+    unchanged head, so they join the identity and the updated cert re-posts.
+    """
     reason = blocker_reason or "ready-to-merge"
     key = f"__awf_notify__:{head_sha}:{reason}"
-    return f"{key}:{items_digest}" if items_digest else key
+    if items_digest:
+        key = f"{key}:{items_digest}"
+    if disposition_count_rows:
+        payload = json.dumps(list(disposition_count_rows), separators=(",", ":"))
+        key = f"{key}:dispositions={hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+    return key
 
 
 def _protected_block_violations_digest(violations: Sequence[QualityGateViolation]) -> str:

@@ -90,6 +90,7 @@ from awf.common.bitbucket_client_parsing import (
 )
 from awf.common.bitbucket_client_paths import _BitbucketUrlsMixin
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -716,6 +717,55 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
                     reason_code=BITBUCKET_TASK_RESOLVE_FORBIDDEN,
                 ) from exc
             raise
+
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        """Post a disposition reply for ``thread_id`` and return the new comment id.
+
+        ``bb:`` comment threads get a child comment (``parent.id``). A ``bbtask:``
+        reviewer task has no reply thread, so its disposition is a PR comment whose
+        marker names the task id. No mention syntax is added here; callers own the body.
+        A non-idempotent mutation, so ``retry=False`` like the GitHub reply: no 429
+        retry, and no near-limit slow-down between the comment landing and its id
+        reaching the caller, which persists it to never post the reply twice.
+        """
+        parent_id: str | None = None
+        if is_task_thread_id(thread_id):
+            owner, name, pr_number, _task_id = decode_task_id(thread_id)
+        else:
+            try:
+                owner, name, pr_number, parent_id = decode_thread_id(thread_id)
+            except ValueError as exc:
+                raise BitbucketClientError(
+                    operation="bitbucket reply_to_thread",
+                    status=None,
+                    body=f"unrecognized Bitbucket thread id: {thread_id!r}",
+                ) from exc
+        payload: dict[str, Any] = {"content": {"raw": body}}
+        if parent_id is not None:
+            payload["parent"] = {"id": int(parent_id)}
+        data = await self._request_json(
+            "POST",
+            f"/2.0/repositories/{quote(owner, safe='')}/{quote(name, safe='')}"
+            f"/pullrequests/{pr_number}/comments",
+            operation="bitbucket reply_to_thread",
+            json_body=payload,
+            retry=False,
+        )
+        comment_id = data.get("id") if isinstance(data, dict) else None
+        if comment_id is None:
+            raise BitbucketClientError(
+                operation="bitbucket reply_to_thread",
+                status=None,
+                body="Bitbucket returned no comment id",
+            )
+        return str(comment_id)
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+    ) -> ReviewThreadAudit:
+        """Report the disposition audit unsupported: resolver identity is not read yet."""
+        del repo, pr_number, retry
+        return ReviewThreadAudit(supported=False)
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment."""

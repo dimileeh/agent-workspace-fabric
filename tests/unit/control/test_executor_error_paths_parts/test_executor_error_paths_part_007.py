@@ -30,18 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import PullRequestAdoptionMetadata
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor.helpers import (
-    _release_sync_source_branch,
-    _release_sync_target_branch,
-    _with_release_sync_pr_metadata,
-)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.models import MergeCandidate, Workspace
+from awf.db.models import MergeCandidate
 from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
@@ -50,6 +44,9 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.logs import LogStore
+from awf.runtime.monitor_state_keys import (
+    _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY as _DISPOSITION_BASELINE,
+)
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -901,6 +898,8 @@ class TestSyncReleasePrHandoff:
             assert ws.base_commit == "b" * 40
             assert ws.task_policy["release_sync"]["pr"]["number"] == 321
             assert ws.task_policy["release_sync"]["pr"]["created"] is True
+            # A release PR AWF created has no pre-rollout history to grandfather (#1018).
+            assert ws.monitor_threads_addressed == {_DISPOSITION_BASELINE: "[]"}
             candidate = (
                 await s.execute(select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id))
             ).scalar_one()
@@ -1105,6 +1104,7 @@ class TestSyncReleasePrHandoff:
             assert ws.status == WorkspaceStatus.monitoring_pr.value
             assert ws.pr_number == 88
             assert ws.task_policy["release_sync"]["pr"]["created"] is False
+            assert _DISPOSITION_BASELINE not in (ws.monitor_threads_addressed or {})
 
     @pytest.mark.unit
     async def test_invalid_repo_url_fails_before_git(
@@ -1388,61 +1388,3 @@ class TestSyncReleasePrHandoff:
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
             assert ws.events[-1].reason_code == "PR_MONITOR_ADOPTED"
-
-
-class TestReleaseSyncHelpers:
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "task_policy, expected",
-        [
-            ({"release_sync": {"source_branch": "release/x"}}, "release/x"),
-            ({"release_sync": {}}, "development"),
-            ({}, "development"),
-        ],
-    )
-    def test_release_sync_source_branch(self, task_policy: dict[str, Any], expected: str) -> None:
-        ws = Workspace(
-            repo_url="git@github.com:x/y.git", branch_base="main", task_policy=task_policy
-        )
-        assert _release_sync_source_branch(ws) == expected
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "task_policy, branch_base, expected",
-        [
-            ({"release_sync": {"target_branch": "master"}}, "main", "master"),
-            ({}, "main", "main"),
-            ({}, "", "main"),
-        ],
-    )
-    def test_release_sync_target_branch(
-        self, task_policy: dict[str, Any], branch_base: str, expected: str
-    ) -> None:
-        ws = Workspace(
-            repo_url="git@github.com:x/y.git", branch_base=branch_base, task_policy=task_policy
-        )
-        assert _release_sync_target_branch(ws) == expected
-
-    @pytest.mark.unit
-    @pytest.mark.parametrize("task_policy", [None, {"release_sync": "not-a-dict"}, {}])
-    def test_with_release_sync_pr_metadata_handles_missing_block(self, task_policy: Any) -> None:
-        metadata = PullRequestAdoptionMetadata(
-            number=5,
-            head_ref="development",
-            head_repo_slug="x/y",
-            base_ref="main",
-            head_sha="h" * 40,
-            base_sha="b" * 40,
-            state="OPEN",
-            is_draft=False,
-            closed=False,
-            merged=False,
-            author="octocat",
-            url="https://github.com/x/y/pull/5",
-            title="Release",
-        )
-
-        policy = _with_release_sync_pr_metadata(task_policy, metadata=metadata, created=True)
-
-        assert policy["release_sync"]["pr"]["number"] == 5
-        assert policy["release_sync"]["pr"]["created"] is True

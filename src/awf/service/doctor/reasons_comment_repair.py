@@ -110,4 +110,125 @@ def get_comment_repair_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"),
         ),
+        "REVIEW_THREAD_AUDIT_UNAVAILABLE": reason_text_cls(
+            "AWF could not enumerate the PR's review threads to verify thread dispositions.",
+            (
+                "Check forge connectivity and the token's permissions in the monitor log. AWF "
+                "re-runs the audit on the next poll; no READY_TO_MERGE or merge happens meanwhile."
+            ),
+            (
+                "Before READY_TO_MERGE (release) or merge (feature), AWF re-reads every review "
+                "thread with exhaustive pagination. A permanent forge fault, an exhausted "
+                "transient retry budget, a truncated page, or a missing viewer login fails "
+                "closed instead of certifying from a partial list."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_AUDIT_UNAVAILABLE"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE": reason_text_cls(
+            (
+                "AWF's first disposition audit on this workspace found review threads resolved by "
+                "its identity without an AWF disposition reply and recorded them as a legacy "
+                "baseline."
+            ),
+            (
+                "No action is required to merge: baseline threads do not block and the "
+                "READY_TO_MERGE certificate counts them separately. Inspect the thread ids in the "
+                "audit event if any of them should be reopened."
+            ),
+            (
+                "Those threads were resolved before AWF replied in every thread before resolving "
+                "it (the #1018 rollout). Only the workspace's first audit records a baseline; any "
+                "later unmarked resolution blocks as REVIEW_THREAD_DISPOSITION_UNVERIFIED."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_UNVERIFIED": reason_text_cls(
+            (
+                "AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's "
+                "identity carry no AWF disposition reply."
+            ),
+            (
+                "Inspect the listed threads and reopen each one. AWF then re-triages it through "
+                "the normal fix cycle and posts a fresh disposition in the thread before "
+                "resolving it. Do not resolve it again by hand under AWF's account."
+            ),
+            (
+                "A thread resolved by AWF's own forge identity has no in-thread "
+                "`AWF:thread-disposition` marker — it was resolved silently (for example before "
+                "AWF replied before every resolve, or by hand under the same account). Threads "
+                "resolved by other logins do not block."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_UNVERIFIED"),
+        ),
+        "THREAD_DISPOSITION_EVIDENCE_MISSING": reason_text_cls(
+            (
+                "AWF did not resolve a review thread because its FIXED disposition had no fix "
+                "commit (or its DEFER had no tracking issue) to cite."
+            ),
+            (
+                "Guide the workspace naming the thread id so the agent re-triages it; do not "
+                "resolve the thread by hand. The pushed commits are kept."
+            ),
+            (
+                "AWF replies in the thread with its disposition before every resolve. The fix "
+                "commit for this item was not recorded (for example a verdict carried over from "
+                "before the reply-before-resolve change), so there was nothing durable to cite."
+            ),
+            "awf workspace guide <workspace_id> --directive '<thread id>: ...'",
+            reason_catalog_link("THREAD_DISPOSITION_EVIDENCE_MISSING"),
+        ),
+        "THREAD_DISPOSITION_REASON_MISSING": reason_text_cls(
+            (
+                "AWF did not resolve a review thread because its FALSE POSITIVE or DEFER "
+                "disposition had no reason to post."
+            ),
+            (
+                "Guide the workspace naming the thread id so the agent re-triages it with a "
+                "one-line reason; do not resolve the thread by hand."
+            ),
+            (
+                "AWF publishes the agent's stated reason in the thread before resolving it. The "
+                "verdict carried no reason (for example one recorded before the reason was "
+                "captured), so the thread was parked instead of being closed silently."
+            ),
+            "awf workspace guide <workspace_id> --directive '<thread id>: ...'",
+            reason_catalog_link("THREAD_DISPOSITION_REASON_MISSING"),
+        ),
+        "THREAD_DISPOSITION_REPLY_FAILED": reason_text_cls(
+            (
+                "AWF could not post the disposition reply in a review thread, so it left the "
+                "thread open and parked it."
+            ),
+            (
+                "Check forge token scopes and connectivity in the monitor log, then guide the "
+                "workspace naming the thread id. The pushed commits are kept."
+            ),
+            (
+                "The forge rejected the in-thread reply (permissions, a locked conversation, or "
+                "an outage). A thread is never resolved without its reply, and the reply is not "
+                "retried blindly because it could be posted twice."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("THREAD_DISPOSITION_REPLY_FAILED"),
+        ),
+        "THREAD_DISPOSITION_UNREAD_FEEDBACK": reason_text_cls(
+            (
+                "AWF did not resolve a review thread because a comment by its own forge "
+                "identity, without an AWF disposition marker, preceded its disposition reply."
+            ),
+            (
+                "Read that comment in the thread, then guide the workspace naming the thread id "
+                "with what it asks; do not resolve the thread by hand. The pushed commits are kept."
+            ),
+            (
+                "AWF's identity can be the operator's own account. The monitor never reads that "
+                "identity's comments as feedback, so the triage behind the reply did not see the "
+                "comment; resolving would have closed it unread. The reply was retired."
+            ),
+            "awf workspace guide <workspace_id> --directive '<thread id>: ...'",
+            reason_catalog_link("THREAD_DISPOSITION_UNREAD_FEEDBACK"),
+        ),
     }

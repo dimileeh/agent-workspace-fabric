@@ -23,9 +23,27 @@ from awf.runtime.pr_monitor import (
     PRStatus,
     ReviewThread,
     ReviewThreadComment,
+    _mark_review_thread_addressed,
 )
 from awf.runtime.pr_monitor_runner.outdated_resolution import _grep_id_pattern
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.unit.runtime._thread_disposition_fixtures import seed_resolvable_disposition
+
+# A 40-hex commit sha for branch-evidence grep stdout (``--format=%H %aI``, #1018).
+_EVIDENCE_SHA = "f" * 40
+
+
+def _mark_addressed_with_disposition(
+    state: MonitorState, thread: ReviewThread, verdict: str
+) -> None:
+    """Record a resolvable verdict plus the disposition AWF replies with first (#1018).
+
+    Outdated hygiene now posts an in-thread disposition reply before every
+    resolve, and parks a thread whose disposition is missing. Tests that expect
+    a resolve therefore record the complete disposition alongside the verdict.
+    """
+    _mark_review_thread_addressed(state, thread, verdict)
+    seed_resolvable_disposition(state, thread.thread_id, verdict)
 
 
 class _RecordingGitHub(DefaultMergeMethodGitHubClient):
@@ -354,7 +372,7 @@ def _grep_argv(worktree_path: Path, *ids: str) -> list[str]:
         "log",
         "-n",
         "1",
-        "--format=%aI",
+        "--format=%H %aI",
         "-E",
         "--all-match",
         "--grep",

@@ -60,6 +60,11 @@ from awf.runtime.pr_monitor_runner.merge_methods import (
     _merge_method_preflight_rejection_reason,
     _resolve_effective_merge_methods,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
+    DispositionGateResult,
+    review_thread_audit_fault,
+    review_thread_disposition_gate,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -276,6 +281,40 @@ async def handle_merge_action(
             if handled is not None:
                 return cast(bool | None, handled)
 
+        # #1018: never merge over a thread AWF resolved without its disposition.
+        disposition_gate = await review_thread_disposition_gate(
+            self,
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+        )
+        if disposition_gate.retry:
+            return False
+        if disposition_gate.blocker is not None:
+            return cast(
+                bool | None,
+                await self._execute(
+                    action=NotifyHuman(message=disposition_gate.blocker),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                ),
+            )
+
         await self._record_monitor_state_operation(
             workspace_id=workspace_id,
             action="merge_ready",
@@ -337,6 +376,8 @@ async def handle_merge_action(
         merge_gate_after_lock: _MergeGateResult | None = None
         settle_recheck_decision: _NonCheckReviewerSettleDecision | None = None
         settle_recheck_performed = False
+        disposition_gate_after_lock: DispositionGateResult | None = None
+        disposition_audit_error_after_lock: ForgeClientError | None = None
         initial_grace_recheck_wait_seconds = 0.0
         operator_state_refreshed = False
         pre_merge_status_refreshed = False
@@ -672,6 +713,33 @@ async def handle_merge_action(
                         fresh_action is None
                         and settle_recheck_decision is None
                         and initial_grace_recheck_wait_seconds <= 0
+                    ):
+                        # #1018: the pre-lock disposition audit ran before the
+                        # coordinator wait and pre-merge settle. A thread AWF's
+                        # identity resolved silently meanwhile is absent from the
+                        # refreshed status, so ``decide`` still says Merge; re-audit
+                        # right before merging. A fetch fault is handled after the
+                        # lock is released, never slept on under it
+                        # (PRRT_kwDOSJAM6s6vMb1w).
+                        try:
+                            disposition_gate_after_lock = await review_thread_disposition_gate(
+                                self,
+                                workspace_id=workspace_id,
+                                repo=repo,
+                                pr_number=pr_number,
+                                status=merge_status,
+                                state=state,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                monitor_log=monitor_log,
+                                defer_forge_errors=True,
+                            )
+                        except ForgeClientError as exc:
+                            disposition_audit_error_after_lock = exc
+                    if (
+                        disposition_gate_after_lock is not None
+                        and not disposition_gate_after_lock.retry
+                        and disposition_gate_after_lock.blocker is None
                     ):
                         try:
                             effective_methods = await _resolve_effective_merge_methods(
@@ -1014,6 +1082,41 @@ async def handle_merge_action(
                 reason_code=recheck_forge_error.reason_code,
             )
             return True
+
+        if disposition_audit_error_after_lock is not None:
+            disposition_gate_after_lock = await review_thread_audit_fault(
+                self,
+                disposition_audit_error_after_lock,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+            )
+        if disposition_gate_after_lock is None:  # pragma: no cover - defensive invariant
+            raise RuntimeError("merge critical section exited without a disposition audit")
+        if disposition_gate_after_lock.retry:
+            return False
+        if disposition_gate_after_lock.blocker is not None:
+            return cast(
+                bool | None,
+                await self._execute(
+                    action=NotifyHuman(message=disposition_gate_after_lock.blocker),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                ),
+            )
 
         if merge_method_preflight_error is not None:
             if await self._wait_after_transient_github_error(
