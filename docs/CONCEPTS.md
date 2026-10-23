@@ -924,7 +924,11 @@ are recovering on their own (#936):
    unsettled at the last dependency-wait timeout. Every other exited or absent
    declared dependency is started alone with `--no-recreate --no-deps`. None of
    these calls waits, so nothing is waited on before every prerequisite is
-   started or recreated. A failed recreate fails the restart.
+   started or recreated. A failed recreate fails the restart, and so does a
+   prerequisite of a forced recreate that exited non-zero or never started
+   (`MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED`): `--no-deps` would skip its
+   `depends_on` condition and the later `--no-recreate` up would never recreate
+   the dependent, so it stays pending for the next resume.
 2. **Wait for recovering dependencies.** Every running non-agent service declared
    in compose.yml, including the ones just recreated, whose Docker health is
    `starting` or `unhealthy` is polled every 5 s until it is healthy; one-off

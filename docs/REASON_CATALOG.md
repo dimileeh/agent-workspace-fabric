@@ -662,6 +662,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
 
+### MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED
+**Problem:** A PR monitor resume had to recreate a dependency service, but a service it depends on had failed, so the restart failed before recreating it.
+**Likely Cause:** A forced recreate runs with --no-deps, which skips the depends_on condition, and the later up --no-recreate never recreates a running dependent. Recreating it against a prerequisite that exited non-zero or never started would leave its one-time initialization failed.
+**Operator Fix:** Check the logs of the prerequisite named in the error (for example a database that exited right after it was recreated) and fix its configuration. AWF retries the resume and parks the workspace in blocked after repeated failures; the dependent is still recreated on the next resume.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_resume_dependency_prerequisite_failed](#monitor_resume_dependency_prerequisite_failed)
+
 ### MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT
 **Problem:** A PR monitor resume waited for a running dependency service to become healthy and the stack's startup budget ran out.
 **Likely Cause:** Monitor resume never restarts a dependency that is still starting or unhealthy; it waits for it instead. The dependency stayed unsettled for longer than docker.startup_timeout_seconds (or a companion's larger compose_up_timeout_seconds).

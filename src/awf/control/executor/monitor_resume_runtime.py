@@ -12,7 +12,8 @@ stop, so the resume could fail and be retried forever. The restart now:
    ``--wait``, so no compose health gate can fail them on the healthcheck
    retries stored in a container created from an older compose.yml (the normal
    state after a host restart, as every service runs with ``restart: "no"``).
-   Nothing is waited on before every prerequisite is started or recreated, and
+   Nothing is waited on before every prerequisite is started or recreated, a
+   failed prerequisite of a forced recreate fails the restart, and
    a stopped dependency starts only once its compose ``depends_on``
    prerequisites are satisfied (healthy, exited 0, or running, per condition);
    one whose prerequisite failed is left to step 3;
@@ -46,7 +47,10 @@ from pathlib import Path
 from typing import Any, Final
 
 from awf.common.audit import redact_audit_text
-from awf.control.executor.constants import MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE
+from awf.control.executor.constants import (
+    MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE,
+    MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE,
+)
 from awf.control.executor.quality_gates import _log
 from awf.node.compose_manager import ComposeOperationError
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
@@ -191,15 +195,16 @@ def _prerequisite_progress(
     containers: Mapping[str, RuntimeService],
     pending: set[str],
     dependency_conditions: Mapping[str, Mapping[str, str]],
-) -> tuple[bool, dict[str, str]]:
-    """Return whether ``name`` may start and which prerequisites are still settling.
+) -> tuple[bool, dict[str, str], dict[str, str]]:
+    """Return whether ``name`` may start, which prerequisites settle, and which failed.
 
-    A prerequisite still waiting to be started blocks it; one that is gone or
-    failed blocks it without being waited on, so the dependency ``up`` (which
-    honors ``depends_on``) handles it. The agent and undeclared services never block.
+    A prerequisite still waiting to be started blocks it; one that failed blocks
+    it without being waited on and is returned with its status. A gone one, the
+    agent and undeclared services never block.
     """
     ready = True
     settling: dict[str, str] = {}
+    failed: dict[str, str] = {}
     for prerequisite, condition in dependency_conditions.get(name, {}).items():
         if prerequisite in pending:
             ready = False
@@ -224,7 +229,9 @@ def _prerequisite_progress(
             ready = False
             if progress is not None:
                 settling[prerequisite] = progress
-    return ready, settling
+            else:
+                failed[prerequisite] = (container.status or state).strip()
+    return ready, settling, failed
 
 
 def _completed_dependencies(
@@ -309,7 +316,7 @@ async def wait_for_recovering_dependencies(
             }
             ready: list[str] = []
             for name in sorted(pending):
-                can_start, waiting_on = _prerequisite_progress(
+                can_start, waiting_on, _ = _prerequisite_progress(
                     name,
                     containers=containers,
                     pending=pending,
@@ -357,9 +364,11 @@ async def _recreate_in_dependency_order(
     A stopped or absent prerequisite (a released runtime) is started with ``start``
     first, in the same order, so no dependent is recreated against a missing
     service; a failed start raises like a failed recreate. The runtime is
-    inspected only when nothing else can be recreated; when it is unreadable,
-    or a prerequisite is gone or failed with nothing left to wait on, the rest are
-    recreated in depends_on order and the dependency wait and ``up`` take over.
+    inspected only when nothing else can be recreated; when it is unreadable (or
+    a depends_on cycle leaves nothing to wait on) the rest are recreated in depends_on order and the dependency wait and ``up`` take
+    over. A prerequisite that failed with nothing left to wait on raises
+    ``MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED`` before its dependent is
+    recreated, so the dependent stays pending for the next resume.
     Raises ``DependencyWaitTimeoutError`` naming the settling prerequisites when
     the budget runs out first.
     """
@@ -400,8 +409,9 @@ async def _recreate_in_dependency_order(
                 service.name: service
                 for service in _dependency_containers(snapshot, declared_services)
             }
+            blocked: list[str] = []
             for name in unblocked:
-                can_recreate, waiting_on = _prerequisite_progress(
+                can_recreate, waiting_on, failed = _prerequisite_progress(
                     name,
                     containers=containers,
                     pending=pending,
@@ -410,6 +420,20 @@ async def _recreate_in_dependency_order(
                 if can_recreate:
                     ready.append(name)
                 settling.update(waiting_on)
+                blocked.extend(
+                    f"{name} needs {prerequisite}={status}"
+                    for prerequisite, status in sorted(failed.items())
+                )
+            if not ready and not settling and blocked:
+                # ``up --no-recreate`` can restart the prerequisite but never recreates
+                # the dependent, so a dependent recreated now would keep a failed init.
+                raise ComposeOperationError(
+                    operation="dependency_recreate",
+                    returncode=1,
+                    stdout="",
+                    stderr="dependency prerequisites failed: " + ", ".join(blocked),
+                    reason_code=MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE,
+                )
             if not ready and not settling:
                 gated = False
                 continue

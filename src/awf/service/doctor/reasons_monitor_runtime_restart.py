@@ -60,6 +60,26 @@ def get_monitor_runtime_restart_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT"),
         ),
+        "MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED": reason_text_cls(
+            (
+                "A PR monitor resume had to recreate a dependency service, but a service it "
+                "depends on had failed, so the restart failed before recreating it."
+            ),
+            (
+                "Check the logs of the prerequisite named in the error (for example a "
+                "database that exited right after it was recreated) and fix its "
+                "configuration. AWF retries the resume and parks the workspace in blocked "
+                "after repeated failures; the dependent is still recreated on the next resume."
+            ),
+            (
+                "A forced recreate runs with --no-deps, which skips the depends_on "
+                "condition, and the later up --no-recreate never recreates a running "
+                "dependent. Recreating it against a prerequisite that exited non-zero or "
+                "never started would leave its one-time initialization failed."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED"),
+        ),
         "COMPANION_SPECS_UNRESOLVED": reason_text_cls(
             (
                 "A PR monitor resume could not resolve the workspace's companion service "

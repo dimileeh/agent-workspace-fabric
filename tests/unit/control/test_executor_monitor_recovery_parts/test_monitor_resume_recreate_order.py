@@ -13,6 +13,10 @@ from typing import Any
 import pytest
 
 from awf.control.executor import monitor_resume_runtime
+from awf.control.executor.constants import (
+    MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE,
+)
+from awf.node.compose_manager import ComposeOperationError
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 
 _CONDITIONS = {"backend": {"postgres": "service_healthy", "agent": "service_started"}}
@@ -141,16 +145,15 @@ async def test_recreate_wait_shares_the_budget_and_names_the_unsettled_prerequis
     [
         OSError("docker missing"),
         RuntimeSnapshot(stack_state="unavailable", services=[]),
-        _postgres(state="exited", status="Exited (1) 1 second ago"),
     ],
-    ids=["inspect-error", "unreadable", "failed-prerequisite"],
+    ids=["inspect-error", "unreadable"],
 )
-async def test_nothing_to_wait_on_recreates_the_rest_in_dependency_order(
+async def test_unreadable_runtime_recreates_the_rest_in_dependency_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     first_inspection: RuntimeSnapshot | BaseException,
 ) -> None:
-    """Without a settling prerequisite the recreate no longer waits; the wait and up follow."""
+    """Without a readable runtime the recreate no longer waits; the wait and up follow."""
     runtime = _Runtime(first_inspection, _postgres(health="healthy"))
     clock = _install(monkeypatch, runtime)
     recreated: list[str] = []
@@ -160,6 +163,38 @@ async def test_nothing_to_wait_on_recreates_the_rest_in_dependency_order(
     assert recreated == ["postgres", "backend"]
     assert runtime.inspected_after[0] == 1
     assert _recreates(runtime) == [("postgres",), ("backend",), ("agent",)]
+    assert clock.sleeps == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "postgres",
+    [
+        {"state": "exited", "status": "Exited (1) 1 second ago"},
+        {"state": "created", "status": "Created"},
+    ],
+    ids=["exited-nonzero", "never-started"],
+)
+async def test_failed_prerequisite_fails_the_restart_before_its_dependent_is_recreated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, postgres: dict[str, str]
+) -> None:
+    """PRRT_kwDOSJAM6s6vewt7: a ``--no-deps`` recreate never bypasses a failed prerequisite.
+
+    The later ``up --no-recreate`` can restart postgres but never recreates the
+    backend, whose one-time initialization would already have failed against it.
+    """
+    runtime = _Runtime(_postgres(**postgres))
+    clock = _install(monkeypatch, runtime)
+    recreated: list[str] = []
+
+    with pytest.raises(ComposeOperationError) as raised:
+        await _restart(runtime, tmp_path, recreated=recreated)
+
+    assert raised.value.reason_code == MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE
+    assert f"backend needs postgres={postgres['status']}" in raised.value.stderr
+    # backend was never recreated, so it stays pending for the next resume.
+    assert recreated == ["postgres"]
+    assert _recreates(runtime) == [("postgres",)]
     assert clock.sleeps == []
 
 

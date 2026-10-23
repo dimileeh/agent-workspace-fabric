@@ -91,6 +91,12 @@ RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE = "RUNTIME_IDENTITY_PROBE_TIMEOUT"
 # the stack's startup budget.
 MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE = "MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT"
 
+# A prerequisite of a dependency the resume must force-recreate failed (exited
+# non-zero or never started), so its ``--no-deps`` recreate would bypass the gate.
+MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE = (
+    "MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED"
+)
+
 MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE = "workspace.monitor_runtime_restart_failed"
 
 # Payload key marking a restart-failure event as counted toward the streak. Events
