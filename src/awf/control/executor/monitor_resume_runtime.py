@@ -285,9 +285,14 @@ async def restart_runtime_for_monitor_resume(
             compose_project_name=compose_project,
             services=list(recreated),
         )
-        await compose.ensure_project_up(
-            **{**common, "wait": False}, force_recreate=True, no_deps=True, services=recreated
-        )
+        # One service per call: ``--no-deps`` then skips every depends_on health gate.
+        for service in recreated:
+            await compose.ensure_project_up(
+                **{**common, "wait": False},
+                force_recreate=True,
+                no_deps=True,
+                services=(service,),
+            )
         if on_recreated is not None:
             on_recreated()
 

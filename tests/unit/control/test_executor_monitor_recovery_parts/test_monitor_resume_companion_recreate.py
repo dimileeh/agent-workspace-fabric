@@ -167,15 +167,16 @@ async def test_restart_force_recreates_rewritten_companions_before_the_agent(
         recreate_services=("worker", "backend"),
     )
 
-    assert inspections == [1, 1]
+    assert inspections == [2, 2]
+    # One companion per recreate call: ``--no-deps`` then skips the health gate between them.
     assert [(call.get("services"), call.get("force_recreate")) for call in compose.calls] == [
-        (("backend", "worker"), True),
+        (("backend",), True),
+        (("worker",), True),
         (("backend", "postgres", "worker"), None),
         (("agent",), True),
     ]
-    assert compose.calls[0]["no_deps"] is True
-    assert compose.calls[0]["wait"] is False
-    assert compose.calls[2]["no_deps"] is True
+    assert all(call["no_deps"] is True and call["wait"] is False for call in compose.calls[:2])
+    assert compose.calls[3]["no_deps"] is True
 
 
 class _IdleMonitor:
