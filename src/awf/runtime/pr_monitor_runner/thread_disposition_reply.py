@@ -323,8 +323,10 @@ def _conversation_moved(thread: ReviewThread, live: AuditedReviewThread) -> str 
         for index, body in enumerate(bodies)
         if disposition_marker_class((body,), thread_id=live.thread_id) is not None
     }
-    # The newest marker is this reply; scan back over what precedes it.
-    for index in range(max(marked, default=0) - 1, -1, -1):
+    # The newest marker is this reply; scan back over what precedes it. A re-read
+    # showing no marker does not hold the reply yet: the reply follows every
+    # comment it shows (PRRT_kwDOSJAM6s6vc8M9).
+    for index in range(max(marked, default=len(bodies)) - 1, -1, -1):
         if index not in marked:
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:

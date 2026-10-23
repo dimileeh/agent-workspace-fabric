@@ -1066,8 +1066,14 @@ _OPERATOR_ASK = "also cover empty payloads"
         ((_OPERATOR_ASK, "reply"), 0),
         ((_OPERATOR_ASK, "reply"), 1),
         ((_OPERATOR_ASK, "parked-reply", "reply"), 2),
+        ((_OPERATOR_ASK,), 0),
     ],
-    ids=["right-before-the-reply", "before-outside-feedback", "before-a-superseded-awf-reply"],
+    ids=[
+        "right-before-the-reply",
+        "before-outside-feedback",
+        "before-a-superseded-awf-reply",
+        "reply-not-yet-in-the-re-read",
+    ],
 )
 async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_reply(
     factory: async_sessionmaker[AsyncSession],
@@ -1085,6 +1091,8 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
     # triage read that feedback, never the operator's. An earlier AWF reply that
     # such feedback superseded bounds nothing (PRRT_kwDOSJAM6s6vbrwH): the one an
     # earlier park retired, say, before a reviewer reply re-triaged the thread.
+    # A stale re-read that does not show the reply yet bounds nothing either:
+    # every comment of that identity it shows is unread (PRRT_kwDOSJAM6s6vc8M9).
     # The thread is parked for a human instead of resolved, and the reply retired
     # (saved at once) so its marker never certifies that feedback.
     gh = OrderedForge(FakeCommandRunner())
