@@ -1395,6 +1395,40 @@ async def test_usable_restart_records_an_unrecorded_failure_before_the_boundary(
 
 
 @pytest.mark.unit
+async def test_unrecorded_failure_survives_a_failed_recovery_write(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure held for a ``recovered`` write that fails is retried ahead of it."""
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    _fail_failure_event_writes(monkeypatch, times=1)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    monkeypatch.setattr(
+        monitor_resume_restart_escalation, "_persist_unrecorded_failures", _noop_persist
+    )
+    compose.fail = False
+    _fail_the_next_streak_count(monkeypatch)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    assert await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE) == []
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    failed = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE)
+    assert len(failed) == 1
+    assert failed[0].reason_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+    recovered = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE)
+    assert [event.payload for event in recovered] == [{"previous_consecutive_failures": 1}]
+    assert failed[0].event_order < recovered[0].event_order
+    assert await _streak(factory, ws_id) == 0
+    assert executor._restart_streak_unrecorded_failures == {}
+    assert executor._restart_streak_recovery_failures == {}
+
+
+@pytest.mark.unit
 async def test_unrecorded_failure_retry_error_keeps_it_in_memory(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

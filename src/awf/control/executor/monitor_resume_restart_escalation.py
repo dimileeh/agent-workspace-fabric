@@ -15,6 +15,8 @@ executor remembers the restart time, counts only later failures, and retries the
 write before the next restart attempt, so a replacement executor sees the boundary.
 A failure event whose write fails is likewise kept in memory: it still counts
 toward the streak and its backoff, and is written before the next restart attempt.
+One still unwritten when the ``recovered`` write fails stays with that pending
+boundary and is written just ahead of it.
 """
 
 from __future__ import annotations
@@ -80,6 +82,17 @@ def _unrecorded_failures(self: Any) -> dict[str, list[dict[str, Any]]]:
     if failures is None:
         failures = {}
         self._restart_streak_unrecorded_failures = failures
+    return failures
+
+
+def _recovery_failures(self: Any) -> dict[str, list[dict[str, Any]]]:
+    """Unrecorded failures, per workspace, that precede the pending ``recovered`` event."""
+    failures: dict[str, list[dict[str, Any]]] | None = getattr(
+        self, "_restart_streak_recovery_failures", None
+    )
+    if failures is None:
+        failures = {}
+        self._restart_streak_recovery_failures = failures
     return failures
 
 
@@ -450,10 +463,14 @@ async def reset_monitor_resume_restart_streak(self: Any, *, workspace_id: str) -
     """Close an open failure streak or park after a usable restart; a no-op without one.
 
     Unrecorded failures predate the usable restart, so they are written ahead of
-    the ``recovered`` boundary and never carried past it.
+    the ``recovered`` boundary and never carried past it. A failed write keeps
+    them with the pending boundary instead, so the retry still writes them first.
     """
     recoveries = _unpersisted_recoveries(self)
-    pending = _unrecorded_failures(self).pop(workspace_id, [])
+    pending = [
+        *_recovery_failures(self).pop(workspace_id, []),
+        *_unrecorded_failures(self).pop(workspace_id, []),
+    ]
     try:
         async with self._session_factory() as session:
             failures = await consecutive_restart_failures(session, workspace_id) + len(pending)
@@ -478,6 +495,8 @@ async def reset_monitor_resume_restart_streak(self: Any, *, workspace_id: str) -
         # Never block a resume whose runtime is usable. Later failures count
         # only after this restart, and the next usable restart retries the write.
         recoveries[workspace_id] = datetime.now(UTC)
+        if pending:
+            _recovery_failures(self)[workspace_id] = pending
         _log.exception(
             "executor.resume_restart_streak_reset_failed",
             workspace_id=workspace_id,
