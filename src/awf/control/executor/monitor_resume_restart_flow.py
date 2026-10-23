@@ -113,6 +113,10 @@ async def _restart_compose_runtime_for_monitor_resume(
                 compose_project, compose_file, ignored_services=frozenset({AGENT_SERVICE_NAME})
             ),
             recreate_services=recreate_services,
+            # ``--no-deps`` starts skip depends_on, so dependents start after their prerequisites.
+            dependency_conditions=None
+            if requirements is None
+            else requirements.dependency_conditions,
             # Cleared once the companions are recreated, so a later failure never
             # makes the next resume recreate them again mid-recovery (#936); a
             # pending companion outside the active services stays pending.

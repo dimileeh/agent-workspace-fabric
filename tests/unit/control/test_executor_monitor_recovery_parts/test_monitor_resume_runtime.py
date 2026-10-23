@@ -656,6 +656,137 @@ async def test_one_shot_dependencies_the_resume_ran_to_completion_are_not_starte
 
 
 @pytest.mark.unit
+async def test_stopped_dependents_start_only_after_their_prerequisites_settle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRRT_kwDOSJAM6s6vdT89: ``--no-deps`` starts must still honor ``depends_on``.
+
+    ``app`` sorts before ``postgres``; started first, a one-time init against a
+    database that is not up yet could leave it running but unhealthy for good.
+    Each stopped dependency now starts only once its prerequisites are healthy.
+    """
+    stopped = _running(
+        _service("app", state="exited"),
+        _service("postgres", state="exited"),
+        _service("agent", state="exited"),
+    )
+    postgres_starting = _running(
+        _service("app", state="exited"),
+        _service("postgres", health="starting"),
+        _service("agent", state="exited"),
+    )
+    postgres_healthy = _running(
+        _service("app", state="exited"),
+        _service("postgres", health="healthy"),
+        _service("agent", state="exited"),
+    )
+    settled = _running(
+        _service("app", health="healthy"),
+        _service("postgres", health="healthy"),
+        _service("agent", state="exited"),
+    )
+    inspector = _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(stopped, postgres_starting, postgres_healthy, settled),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+    started_at: list[tuple[tuple[str, ...] | None, int]] = []
+
+    async def _recording_up(**kwargs: Any) -> None:
+        started_at.append((kwargs.get("services"), inspector.calls))
+        compose.calls.append(kwargs)
+
+    monkeypatch.setattr(compose, "ensure_project_up", _recording_up)
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=300,
+        dependency_services=("agent", "app", "postgres"),
+        dependency_conditions={"app": {"postgres": "service_healthy", "agent": "service_started"}},
+    )
+
+    # postgres starts on the first snapshot; app only once postgres reports healthy.
+    assert started_at == [
+        (("postgres",), 1),
+        (("app",), 3),
+        (("app", "postgres"), 4),
+        (("agent",), 4),
+    ]
+    assert compose.calls[1]["no_deps"] is True
+    assert compose.calls[1]["wait"] is False
+
+
+@pytest.mark.unit
+async def test_dependents_wait_for_a_one_shot_and_skip_a_failed_prerequisite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dependent waits for a one-shot job to exit 0; a failed prerequisite never blocks.
+
+    ``app`` waits while ``migrate`` runs; ``worker`` depends on ``broken``, which
+    exits non-zero, so it is left to the dependency ``up`` that honors depends_on.
+    """
+    stopped = _running(
+        _service("app", state="exited"),
+        _service("broken", state="exited"),
+        _service("migrate", state="exited"),
+        _service("worker", state="exited"),
+    )
+    migrate_running = _running(
+        _service("app", state="exited"),
+        _service("broken", state="exited", status="Exited (1) 1 second ago"),
+        _service("migrate"),
+        _service("worker", state="exited"),
+    )
+    migrate_done = _running(
+        _service("app", state="exited"),
+        _service("broken", state="exited", status="Exited (1) 2 seconds ago"),
+        _service("migrate", state="exited", status="Exited (0) 1 second ago"),
+        _service("worker", state="exited"),
+    )
+    settled = _running(
+        _service("app"),
+        _service("broken", state="exited", status="Exited (1) 3 seconds ago"),
+        _service("migrate", state="exited", status="Exited (0) 2 seconds ago"),
+        _service("worker", state="exited"),
+    )
+    _install_inspector(
+        monkeypatch, _ScriptedInspector(stopped, migrate_running, migrate_done, settled)
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=300,
+        dependency_services=("agent", "app", "broken", "migrate", "worker"),
+        dependency_conditions={
+            "app": {"migrate": "service_completed_successfully"},
+            "worker": {"broken": "service_started"},
+        },
+    )
+
+    assert [call.get("services") for call in compose.calls] == [
+        ("broken",),
+        ("migrate",),
+        ("app",),
+        ("app", "broken", "worker"),
+        ("agent",),
+    ]
+    assert clock.sleeps == [5.0]
+
+
+@pytest.mark.unit
 async def test_unreadable_runtime_after_the_start_keeps_every_dependency_in_the_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

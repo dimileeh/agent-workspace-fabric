@@ -14,7 +14,7 @@ import shlex as shlex
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -144,6 +144,8 @@ class ResumeHandoff:
 class _ComposeRuntimeRequirements:
     service_names: set[str]
     successful_completion_services: set[str]
+    # service -> prerequisite -> compose ``depends_on`` condition, active services only.
+    dependency_conditions: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 class MonitorResumePreStartError(Exception):
@@ -690,7 +692,38 @@ def _compose_runtime_requirements_from_file(
             active_services,
             service_names=service_names,
         ),
+        dependency_conditions=_compose_dependency_conditions(
+            active_services, service_names=service_names
+        ),
     )
+
+
+def _compose_dependency_conditions(
+    services: Mapping[str, object],
+    *,
+    service_names: set[str],
+) -> dict[str, dict[str, str]]:
+    """Map each service to its active ``depends_on`` prerequisites and their conditions."""
+    conditions: dict[str, dict[str, str]] = {}
+    for name, service in services.items():
+        depends_on = service.get("depends_on") if isinstance(service, dict) else None
+        if isinstance(depends_on, list):
+            depends_on = {item: {} for item in depends_on if isinstance(item, str)}
+        if not isinstance(depends_on, dict):
+            continue
+        edges: dict[str, str] = {}
+        for dependency_name, dependency_config in depends_on.items():
+            if not isinstance(dependency_name, str) or dependency_name not in service_names:
+                continue
+            condition = (
+                dependency_config.get("condition") if isinstance(dependency_config, dict) else None
+            )
+            edges[dependency_name] = (
+                condition.strip().lower() if isinstance(condition, str) else "service_started"
+            )
+        if edges:
+            conditions[name] = edges
+    return conditions
 
 
 def _compose_service_enabled_for_active_profiles(

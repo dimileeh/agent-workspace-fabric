@@ -1176,6 +1176,19 @@ services:
     image: malformed
     profiles: ["worker", 7]
   scalar: scalar-service
+  worker:
+    image: worker
+    depends_on: [migrate, 7, skipped]
+  lonely:
+    image: lonely
+    depends_on:
+      external:
+        condition: service_healthy
+  api:
+    image: api
+    depends_on:
+      migrate:
+        required: false
 """,
         encoding="utf-8",
     )
@@ -1184,8 +1197,23 @@ services:
     requirements = monitor_handoff_module._compose_runtime_requirements_from_file(compose_file)
 
     assert requirements is not None
-    assert requirements.service_names == {"app", "migrate", "cache", "malformed", "scalar"}
+    assert requirements.service_names == {
+        "app",
+        "migrate",
+        "cache",
+        "malformed",
+        "scalar",
+        "worker",
+        "lonely",
+        "api",
+    }
     assert requirements.successful_completion_services == {"migrate"}
+    # Inactive or undeclared prerequisites never gate a monitor resume start.
+    assert requirements.dependency_conditions == {
+        "app": {"migrate": "service_completed_successfully", "cache": "service_started"},
+        "worker": {"migrate": "service_started"},
+        "api": {"migrate": "service_started"},
+    }
 
 
 @pytest.mark.unit

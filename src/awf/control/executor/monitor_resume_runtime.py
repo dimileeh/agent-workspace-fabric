@@ -11,7 +11,9 @@ stop, so the resume could fail and be retried forever. The restart now:
    health gate can fail them on the healthcheck retries stored in a container
    created from an older compose.yml (the normal state after a host restart, as
    every service runs with ``restart: "no"``). Nothing is waited on before every
-   prerequisite is started or recreated;
+   prerequisite is started or recreated, and a stopped dependency starts only
+   once its compose ``depends_on`` prerequisites are satisfied (healthy, exited
+   0, or running, per condition); one whose prerequisite failed is left to step 3;
 2. waits for every running declared dependency (never a ``compose run`` or
    orphan container) whose Docker health is ``starting`` or
    ``unhealthy`` to become healthy, bounded by the stack's startup budget rather
@@ -37,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -160,6 +162,48 @@ def _stopped_dependencies(
     return tuple(sorted(stopped - set(recreated_services)))
 
 
+def _prerequisite_progress(
+    name: str,
+    *,
+    containers: Mapping[str, RuntimeService],
+    pending: set[str],
+    dependency_conditions: Mapping[str, Mapping[str, str]],
+) -> tuple[bool, dict[str, str]]:
+    """Return whether ``name`` may start and which prerequisites are still settling.
+
+    A prerequisite still waiting to be started blocks it; one that is gone or
+    failed blocks it without being waited on, so the dependency ``up`` (which
+    honors ``depends_on``) handles it. The agent and undeclared services never block.
+    """
+    ready = True
+    settling: dict[str, str] = {}
+    for prerequisite, condition in dependency_conditions.get(name, {}).items():
+        if prerequisite in pending:
+            ready = False
+            continue
+        container = containers.get(prerequisite)
+        if container is None:
+            continue
+        state = container.state.strip().lower()
+        health = (container.health or "").strip().lower()
+        exited_ok = (
+            state == "exited"
+            and _EXITED_SUCCESSFULLY.match((container.status or "").strip().lower()) is not None
+        )
+        if condition == "service_completed_successfully":
+            satisfied, progress = exited_ok, "running" if state == "running" else None
+        elif condition == "service_healthy":
+            satisfied = state == "running" and health not in _RECOVERING_HEALTH
+            progress = health if state == "running" and not satisfied else None
+        else:
+            satisfied, progress = state == "running" or exited_ok, None
+        if not satisfied:
+            ready = False
+            if progress is not None:
+                settling[prerequisite] = progress
+    return ready, settling
+
+
 def _completed_dependencies(
     snapshot: RuntimeSnapshot | None,
     declared_services: tuple[str, ...] | None,
@@ -189,12 +233,16 @@ async def wait_for_recovering_dependencies(
     start_stopped: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     declared_services: tuple[str, ...] | None = None,
     recreated_services: tuple[str, ...] = (),
+    dependency_conditions: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RuntimeSnapshot | None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
     ``start_stopped`` receives the dependencies stopped in the first snapshot,
     other than the ``recreated_services`` already recreated; once it has started
-    them they are waited on like any other running dependency.
+    them they are waited on like any other running dependency. With
+    ``dependency_conditions`` (service -> prerequisite -> compose ``depends_on``
+    condition) each one is started only once its prerequisites are satisfied,
+    and the wait also covers prerequisites a still-unstarted dependency needs.
 
     Raises ``DependencyWaitTimeoutError`` (``MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT``)
     naming each unsettled service when the budget runs out. An unreadable runtime
@@ -202,7 +250,8 @@ async def wait_for_recovering_dependencies(
     Returns the settled snapshot, or ``None`` when the runtime was unreadable.
     """
     deadline = _monotonic() + budget_seconds
-    start_pending = start_stopped
+    conditions = dependency_conditions or {}
+    pending: set[str] | None = None
     while True:
         try:
             snapshot = await inspect_resume_runtime(compose_project)
@@ -222,13 +271,32 @@ async def wait_for_recovering_dependencies(
                 stack_state=snapshot.stack_state,
             )
             return None
-        if start_pending is not None:
-            start, start_pending = start_pending, None
-            stopped = _stopped_dependencies(snapshot, declared_services, recreated_services)
-            if stopped:
-                await start(stopped)
+        settling: dict[str, str] = {}
+        if start_stopped is not None:
+            if pending is None:
+                pending = set(
+                    _stopped_dependencies(snapshot, declared_services, recreated_services)
+                )
+            containers = {
+                service.name: service
+                for service in _dependency_containers(snapshot, declared_services)
+            }
+            ready: list[str] = []
+            for name in sorted(pending):
+                can_start, waiting_on = _prerequisite_progress(
+                    name,
+                    containers=containers,
+                    pending=pending,
+                    dependency_conditions=conditions,
+                )
+                if can_start:
+                    ready.append(name)
+                settling.update(waiting_on)
+            if ready:
+                pending.difference_update(ready)
+                await start_stopped(tuple(ready))
                 continue
-        recovering = _recovering_dependencies(snapshot, declared_services)
+        recovering = {**settling, **_recovering_dependencies(snapshot, declared_services)}
         if not recovering:
             return snapshot
         remaining = deadline - _monotonic()
@@ -255,6 +323,7 @@ async def restart_runtime_for_monitor_resume(
     runtime_usable: Callable[[], Awaitable[bool]] | None = None,
     recreate_services: tuple[str, ...] = (),
     on_recreated: Callable[[], None] | None = None,
+    dependency_conditions: Mapping[str, Mapping[str, str]] | None = None,
 ) -> ComposeOperationError | None:
     """Restart the runtime for a monitor resume, recreating only what must change.
 
@@ -269,6 +338,7 @@ async def restart_runtime_for_monitor_resume(
     decides whether the agent is still recreated (auth overlays, env and #1090's
     setup replay depend on it); the tolerated failure is returned so the caller
     can record it. A failed agent recreate raises ``AgentRecreateError``.
+    ``dependency_conditions`` (compose ``depends_on``) orders the stopped starts.
     """
     common: dict[str, Any] = {
         "project_name": compose_project,
@@ -324,6 +394,7 @@ async def restart_runtime_for_monitor_resume(
             start_stopped=_start_stopped,
             declared_services=dependency_services,
             recreated_services=recreated,
+            dependency_conditions=dependency_conditions,
         )
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
