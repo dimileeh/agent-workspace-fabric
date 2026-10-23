@@ -299,8 +299,10 @@ async def _reread_thread_after_reply(
 
     ``moved`` is why the conversation the reply follows is not the one its triage
     read (:func:`_conversation_moved`), ``None`` when it is; ``followed`` is the
-    conversation the reply followed (``None`` when the re-read cannot tell: the
-    newest comment is not a marker, so it is not the reply, PRRT_kwDOSJAM6s6vc8NC).
+    conversation the reply followed (``None`` when the re-read cannot tell: its
+    newest comment by AWF's identity is not the reply, found by its comment id, but
+    the operator's or, in a re-read too stale to show the reply, an earlier AWF
+    reply, PRRT_kwDOSJAM6s6vc8NC, PRRT_kwDOSJAM6s6veO2F).
     Runs once a fresh reply has landed, so anything that arrived before the reply
     shows up here; anything later follows the reply, which the gate already
     refuses as its answer. An unsupported audit or a thread missing from it is no
@@ -313,8 +315,7 @@ async def _reread_thread_after_reply(
     if not audit.supported or live is None:
         return None, None
     moved = _conversation_moved(thread, live, reply_comment_id)
-    newest = live.viewer_comment_bodies[-1:]
-    if newest and disposition_marker_class(newest, thread_id=thread_id) is None:
+    if live.viewer_comment_ids[-1:] != (reply_comment_id,):
         return moved, None
     return moved, live.conversation_digest_before_reply or None
 

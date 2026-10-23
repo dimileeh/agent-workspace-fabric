@@ -135,7 +135,15 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     tid = "PRRT_test_feedback_moved"
     thread = _commented_thread(tid, _ASK)
     followed = "d" * 64
-    audited = _serve_live_thread(gh, monkeypatch, tid, live, before_reply=followed)
+    audited = _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        live,
+        before_reply=followed,
+        viewer_bodies=(_MARKER.format(cls="false_positive", tid=tid),),
+        viewer_ids=("reply-1",),
+    )
 
     workspace_id, state, result = await _run_cycle(
         factory=factory,
@@ -440,19 +448,36 @@ async def test_fix_cycle_re_reads_a_reply_to_a_thread_the_settle_feed_does_not_l
     assert state.threads_addressed_ids[tid] == verdict
 
 
+@pytest.mark.parametrize(
+    "newest", ["reply", "earlier-reply"], ids=["shows-the-reply", "stale-re-read"]
+)
 async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombstone(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    newest: str,
 ) -> None:
     # PRRT_kwDOSJAM6s6vaq4v: the re-read right after the reply records the
     # conversation it followed, saved at once. A reopen before any audit bound the
     # reply then still tombstones that conversation, which outlives the record.
+    # A re-read too stale to show the reply may end on an earlier AWF reply: the
+    # digest before that one is not the reply's conversation, so none is recorded
+    # and the reply is tombstoned as one of an unread conversation
+    # (PRRT_kwDOSJAM6s6vc8NC, PRRT_kwDOSJAM6s6veO2F).
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_landed_followed"
     thread = _commented_thread(tid, _ASK)
-    followed = "e" * 64
-    _serve_live_thread(gh, monkeypatch, tid, (_ASK,), before_reply=followed)
+    before_reply = "e" * 64
+    followed = before_reply if newest == "reply" else None
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply=before_reply,
+        viewer_bodies=(_MARKER.format(cls="false_positive", tid=tid),),
+        viewer_ids=_own_comment_ids((newest,)),
+    )
 
     workspace_id, state, _ = await _run_cycle(
         factory=factory,
@@ -481,7 +506,7 @@ async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombsto
         state, _status(_PUSHED, (thread,)), workspace_id=workspace_id
     ) == [tid]
 
-    assert _disposition_retired_key(tid, followed) in state.threads_addressed_ids
+    assert _disposition_retired_key(tid, followed or "") in state.threads_addressed_ids
     retired = read_item_disposition(state, tid)
     assert retired is not None and retired.reply_conversation_digest is None
 
