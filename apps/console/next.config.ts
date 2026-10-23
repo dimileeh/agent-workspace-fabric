@@ -2,7 +2,10 @@ import type { NextConfig } from "next";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveConsolePageExtensions } from "./console-test-harness-routes.ts";
+import {
+  resolveConsoleDevIndicators,
+  resolveConsolePageExtensions,
+} from "./console-test-harness-routes.ts";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const defaultAllowedDevOrigins = ["127.0.0.1", "localhost"];
@@ -15,6 +18,7 @@ const allowedDevOrigins = uniqueAllowedDevOrigins([
 // pageExtensions uses ./console-test-harness-routes.ts, which the runtime image
 // copies alongside this file (see Dockerfile).
 const basePath = normalizeBasePath(process.env.NEXT_PUBLIC_AWF_CONSOLE_BASE_PATH);
+const devIndicators = resolveConsoleDevIndicators();
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -23,6 +27,7 @@ const nextConfig: NextConfig = {
   // `page.harness.tsx` is registered only when AWF_CONSOLE_TEST_HARNESS=1 in a
   // non-production build (Playwright); production builds omit the harness route.
   pageExtensions: resolveConsolePageExtensions(),
+  ...(devIndicators === false ? { devIndicators } : {}),
   turbopack: {
     root,
   },
