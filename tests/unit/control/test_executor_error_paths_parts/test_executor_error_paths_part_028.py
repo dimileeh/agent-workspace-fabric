@@ -369,3 +369,49 @@ services:
         )
         is expected
     )
+
+
+@pytest.mark.unit
+async def test_compose_runtime_usable_after_restart_failure_ignores_one_off_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        """
+services:
+  agent:
+    image: awf-agent
+  postgres:
+    image: postgres
+""",
+        encoding="utf-8",
+    )
+
+    async def _inspect(_compose_project: str) -> monitor_handoff_module.RuntimeSnapshot:
+        return monitor_handoff_module.RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent-id",
+                    image="awf-agent",
+                    state="running",
+                ),
+                RuntimeService(
+                    name="postgres",
+                    container_id="postgres-run-id",
+                    image="postgres",
+                    state="running",
+                    health="healthy",
+                    one_off=True,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(monitor_handoff_module, "_inspect_compose_runtime", _inspect)
+
+    assert not await monitor_handoff_module._compose_runtime_usable_after_restart_failure(
+        "awf_x",
+        compose_file,
+    )

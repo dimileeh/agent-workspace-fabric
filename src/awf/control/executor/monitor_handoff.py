@@ -599,7 +599,7 @@ async def _compose_runtime_usable_after_restart_failure(
     """Return whether monitor resume can proceed after a compose restart failure.
 
     ``ignored_services`` need not be running yet, such as the agent a later step
-    recreates.
+    recreates. A ``compose run`` container never stands in for its service.
     """
     try:
         snapshot = await _inspect_compose_runtime(compose_project)
@@ -630,7 +630,8 @@ async def _compose_runtime_usable_after_restart_failure(
     ready_services = {
         service.name
         for service in snapshot.services
-        if _compose_runtime_service_satisfied_after_restart_failure(
+        if not service.one_off
+        and _compose_runtime_service_satisfied_after_restart_failure(
             service,
             successful_completion_services=requirements.successful_completion_services,
         )
