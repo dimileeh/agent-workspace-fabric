@@ -497,8 +497,7 @@ resolve's reply is reused, by its retry. A retired disposition loses its reply
 id, so the monitor's next resolve of the thread posts a fresh reply instead of
 resolving on the old one. With no record at all
 (a re-adopted PR whose record did not cross), an agent's marker is still the
-evidence. A
-failing thread is
+evidence. A failing thread is
 `NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
 ids (never a workspace failure); a failed enumeration is
 `REVIEW_THREAD_AUDIT_UNAVAILABLE`, whose public text stays stable across an
