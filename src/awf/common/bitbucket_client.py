@@ -757,10 +757,10 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         return str(comment_id)
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         """Report the disposition audit unsupported: resolver identity is not read yet."""
-        del repo, pr_number
+        del repo, pr_number, retry
         return ReviewThreadAudit(supported=False)
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:

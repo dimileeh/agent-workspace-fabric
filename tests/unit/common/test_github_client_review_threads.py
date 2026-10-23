@@ -189,6 +189,44 @@ async def test_audit_paginates_thread_comments_for_marker() -> None:
     assert "cursor=k1" in fake.calls[1].args
 
 
+class _RecordedSleep:
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+@pytest.mark.parametrize("comments_next", [None, "k1"], ids=["thread_page", "comment_page"])
+async def test_audit_without_retry_fails_fast_on_every_page(comments_next: str | None) -> None:
+    # The merge loop re-audits under ``serialized_merge`` (PRRT_kwDOSJAM6s6vbU2K):
+    # ``retry=False`` must reach the thread AND comment pages with
+    # ``RetryPolicy.NEVER``, so a transient blip raises without transport backoff
+    # instead of holding the merge lock for other PRs on the same base.
+    fake = FakeCommandRunner()
+    thread = _audit_thread("PRRT_test_a", comments_next=comments_next)
+    fake.queue_result(stdout=_audit_page([thread], cursor="c1" if comments_next is None else None))
+    fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    sleep = _RecordedSleep()
+    with pytest.raises(GitHubClientError, match="502"):
+        await GitHubClient(fake, sleep=sleep).fetch_review_thread_audit(
+            repo=_REPO, pr_number=7, retry=False
+        )
+    assert len(fake.calls) == 2  # page 1 ok, page 2 raises without a retry
+    assert sleep.calls == []
+
+
+async def test_audit_retries_a_transient_page_by_default() -> None:
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    fake.queue_result(stdout=_audit_page([_audit_thread("PRRT_test_a")], cursor=None))
+    sleep = _RecordedSleep()
+    audit = await GitHubClient(fake, sleep=sleep).fetch_review_thread_audit(repo=_REPO, pr_number=7)
+    assert [thread.thread_id for thread in audit.threads] == ["PRRT_test_a"]
+    assert len(fake.calls) == 2
+    assert len(sleep.calls) == 1
+
+
 async def test_audit_keeps_only_viewer_authored_bodies_and_null_resolver() -> None:
     fake = FakeCommandRunner()
     thread = _audit_thread(

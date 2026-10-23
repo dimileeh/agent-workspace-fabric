@@ -122,7 +122,7 @@ class _AuditForge(DefaultMergeMethodGitHubClient):
         self.merges: list[str] = []
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         assert repo == _REPO and pr_number == 42
         if self.error is not None:
@@ -899,9 +899,9 @@ class _AuditMergeClient(_MergeMethodClient):
         self.audit = audit
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
-        del repo, pr_number
+        del repo, pr_number, retry
         return self.audit
 
 
@@ -1085,9 +1085,9 @@ async def test_feature_merge_waits_on_transient_audit_fault(
 ) -> None:
     class _TransientAuditMergeClient(_AuditMergeClient):
         async def fetch_review_thread_audit(
-            self, *, repo: RepoRef, pr_number: int
+            self, *, repo: RepoRef, pr_number: int, retry: bool = True
         ) -> ReviewThreadAudit:
-            del repo, pr_number
+            del repo, pr_number, retry
             raise GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502")
 
     gh = _TransientAuditMergeClient(ReviewThreadAudit(supported=True))
@@ -1110,12 +1110,14 @@ class _SequencedAuditMergeClient(_AuditMergeClient):
         super().__init__(ReviewThreadAudit(supported=True, viewer_login=_VIEWER))
         self.results = list(results)
         self.status_refreshes_at_audit: list[int] = []
+        self.audit_retries: list[bool] = []
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         del repo, pr_number
         self.status_refreshes_at_audit.append(self.fetch_pr_status_calls)
+        self.audit_retries.append(retry)
         result = self.results.pop(0)
         if isinstance(result, ForgeClientError):
             raise result
@@ -1228,6 +1230,22 @@ async def test_feature_merge_waits_for_a_poll_that_lists_feedback_opened_after_i
     assert gh.status_refreshes_at_audit == [0, 1][: fresh_audit + 1]
     assert gh.merge_calls == []
     assert gh.comments == []
+
+
+async def test_feature_merge_in_lock_reaudit_fails_fast(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6vbU2K: only the pre-lock audit retries in transport; the in-lock
+    re-audit fails fast, so a transient blip never backs off holding the merge lock."""
+    clean = ReviewThreadAudit(supported=True, viewer_login=_VIEWER)
+    gh = _SequencedAuditMergeClient(clean, clean)
+
+    terminal, _, _, _ = await _execute_merge(factory=factory, tmp_path=tmp_path, gh=gh)
+
+    assert terminal is True
+    assert gh.status_refreshes_at_audit == [0, 1]
+    assert gh.audit_retries == [True, False]
 
 
 async def test_feature_merge_in_lock_transient_audit_fault_backs_off_after_release(

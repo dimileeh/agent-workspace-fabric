@@ -180,7 +180,7 @@ class _MergeMethodClient:
         return f"reply-{len(self.thread_replies)}"
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         """A clean disposition audit (#1018): no AWF-resolved threads to verify."""
         assert repo == self.expected_repo

@@ -922,8 +922,8 @@ def _serve_live_thread(
     """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited."""
     audited: list[int] = []
 
-    async def _audit(*, repo: RepoRef, pr_number: int) -> ReviewThreadAudit:
-        del repo
+    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+        del repo, retry
         audited.append(pr_number)
         if error is not None:
             raise error

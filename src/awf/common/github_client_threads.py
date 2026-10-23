@@ -65,14 +65,18 @@ async def fetch_review_thread_audit(
     *,
     repo: RepoRef,
     pr_number: int,
+    retry: bool = True,
 ) -> ReviewThreadAudit:
     """Enumerate EVERY review thread (resolved included) with exhaustive pagination.
 
     Fails closed (``GitHubClientError``) when a page claims ``hasNextPage`` without
     a cursor, so the gate can never certify a PR from a truncated list.
+    ``retry=False`` (the in-lock re-audit) fails fast on every thread and comment
+    page instead of backing off while holding the merge lock.
     """
     from awf.common.github_client import GitHubClientError
 
+    retry_policy = RetryPolicy.READ if retry else RetryPolicy.NEVER
     threads: list[AuditedReviewThread] = []
     viewer_login: str | None = None
     cursor: str | None = None
@@ -83,7 +87,7 @@ async def fetch_review_thread_audit(
         payload = await self._graphql(
             query=_GQL_REVIEW_THREAD_AUDIT,
             variables=variables,
-            retry_policy=RetryPolicy.READ,
+            retry_policy=retry_policy,
         )
         viewer_login = viewer_login or _clean_optional_str(_dig(payload, "data", "viewer", "login"))
         pr = _dig(payload, "data", "repository", "pullRequest")
@@ -95,7 +99,7 @@ async def fetch_review_thread_audit(
             )
         connection = pr.get("reviewThreads")
         for node in _connection_nodes(connection):
-            thread = await _audited_thread(self, node)
+            thread = await _audited_thread(self, node, retry_policy=retry_policy)
             if thread is not None:
                 threads.append(thread)
         cursor = _next_cursor(connection, operation="fetch_review_thread_audit")
@@ -123,7 +127,9 @@ def _next_cursor(connection: Any, *, operation: str) -> str | None:
     return cursor
 
 
-async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedReviewThread | None:
+async def _audited_thread(
+    self: GitHubClient, node: dict[str, Any], *, retry_policy: RetryPolicy
+) -> AuditedReviewThread | None:
     """Build one audited thread, following its comment pages for viewer bodies."""
     thread_id = _clean_optional_str(node.get("id"))
     if thread_id is None:
@@ -135,7 +141,7 @@ async def _audited_thread(self: GitHubClient, node: dict[str, Any]) -> AuditedRe
         payload = await self._graphql(
             query=_GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
             variables={"threadId": thread_id, "cursor": cursor},
-            retry_policy=RetryPolicy.READ,
+            retry_policy=retry_policy,
         )
         page = _dig(payload, "data", "node", "comments")
         comment_nodes.extend(_connection_nodes(page))

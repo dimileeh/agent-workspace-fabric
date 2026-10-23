@@ -408,8 +408,8 @@ async def test_outdated_reply_after_unseen_feedback_leaves_the_thread_open(
         reply_at=datetime(2026, 10, 2, tzinfo=UTC),
     )
 
-    async def _audit(*, repo: RepoRef, pr_number: int) -> ReviewThreadAudit:
-        del repo, pr_number
+    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+        del repo, pr_number, retry
         live = AuditedReviewThread(
             thread_id=tid,
             is_resolved=False,

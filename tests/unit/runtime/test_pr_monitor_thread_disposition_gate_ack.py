@@ -93,11 +93,13 @@ class _SilentAuditForge(DefaultMergeMethodGitHubClient):
         self.reopen_during_reply = False
         self.reaudit_error: ForgeClientError | None = None
         self._armed_audit_error: ForgeClientError | None = None
+        self.audit_retries: list[bool] = []
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         del repo, pr_number
+        self.audit_retries.append(retry)
         if self._armed_audit_error is not None:
             error, self._armed_audit_error = self._armed_audit_error, None
             raise error
@@ -149,9 +151,9 @@ class _TwoSilentAuditForge(DefaultMergeMethodGitHubClient):
         self.audits = 0
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
-        del repo, pr_number
+        del repo, pr_number, retry
         self.audits += 1
         return ReviewThreadAudit(
             supported=True,
@@ -198,7 +200,9 @@ async def _runner(
     return workspace_id, runner
 
 
-async def _gate(runner: Any, workspace_id: str, state: MonitorState) -> Any:
+async def _gate(
+    runner: Any, workspace_id: str, state: MonitorState, *, defer_forge_errors: bool = False
+) -> Any:
     return await review_thread_disposition_gate(
         runner,
         workspace_id=workspace_id,
@@ -209,6 +213,7 @@ async def _gate(runner: Any, workspace_id: str, state: MonitorState) -> Any:
         base_branch="development",
         remote_branch=f"awf/{workspace_id}",
         monitor_log=None,
+        defer_forge_errors=defer_forge_errors,
     )
 
 
@@ -315,6 +320,27 @@ async def test_operator_guide_acknowledges_flagged_thread_and_cert_follows(
     again = await _gate(runner, workspace_id, state)
     assert again.blocker is None
     assert len(gh.thread_replies) == 1
+
+
+async def test_in_lock_gate_fails_fast_on_the_audit_after_its_replies(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6vbU2K: the in-lock gate (``defer_forge_errors``) posts pending
+    acknowledgements, then re-audits; neither audit may back off under the merge lock."""
+    gh = _SilentAuditForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = settled_baseline_state()
+    assert (await _gate(runner, workspace_id, state)).blocker is not None
+    await _consume_guide(runner, workspace_id, state, monkeypatch)
+    gh.audit_retries.clear()
+
+    passed = await _gate(runner, workspace_id, state, defer_forge_errors=True)
+
+    assert passed.blocker is None
+    assert len(gh.thread_replies) == 1
+    assert gh.audit_retries == [False, False]
 
 
 async def test_posted_acknowledgement_reply_survives_a_restart_before_the_loop_flush(
@@ -585,8 +611,10 @@ async def test_acknowledgement_is_not_accepted_when_the_re_audit_misses_the_thre
     async def _reply_then_vanish(*, thread_id: str, body: str) -> str:
         reply_id = await post_reply(thread_id=thread_id, body=body)
 
-        async def _without_threads(*, repo: RepoRef, pr_number: int) -> ReviewThreadAudit:
-            del repo, pr_number
+        async def _without_threads(
+            *, repo: RepoRef, pr_number: int, retry: bool = True
+        ) -> ReviewThreadAudit:
+            del repo, pr_number, retry
             return ReviewThreadAudit(supported=True, viewer_login="awf-operator")
 
         monkeypatch.setattr(gh, "fetch_review_thread_audit", _without_threads)

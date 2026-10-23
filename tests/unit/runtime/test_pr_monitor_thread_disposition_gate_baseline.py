@@ -101,9 +101,9 @@ class _AuditForge(DefaultMergeMethodGitHubClient):
         self.comments: list[str] = []
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
-        del repo, pr_number
+        del repo, pr_number, retry
         return ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=self.threads)
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:

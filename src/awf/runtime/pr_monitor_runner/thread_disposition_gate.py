@@ -106,10 +106,14 @@ async def review_thread_disposition_gate(
     ``defer_forge_errors`` re-raises an audit fetch fault instead of backing off:
     the merge loop re-audits under ``serialized_merge`` and must not sleep while
     holding the lock, so it passes the fault to :func:`review_thread_audit_fault`
-    after release.
+    after release. It also turns off transport retries for every audit here
+    (PRRT_kwDOSJAM6s6vbU2K), so no page backs off under the lock either.
     """
+    retry = not defer_forge_errors
     try:
-        audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
+        audit = await self._deps.gh.fetch_review_thread_audit(
+            repo=repo, pr_number=pr_number, retry=retry
+        )
     except ForgeClientError as exc:
         if defer_forge_errors:
             raise
@@ -160,7 +164,9 @@ async def review_thread_disposition_gate(
         # write, never on the snapshot the replies were posted from
         # (PRRT_kwDOSJAM6s6vW9qA).
         try:
-            audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
+            audit = await self._deps.gh.fetch_review_thread_audit(
+                repo=repo, pr_number=pr_number, retry=retry
+            )
         except ForgeClientError as exc:
             # Nothing proves the replies followed the acknowledged conversations:
             # no cert this cycle. The next audit can still confirm them.

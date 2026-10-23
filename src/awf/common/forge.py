@@ -174,13 +174,15 @@ class ForgeClient(Protocol):
         ...
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         """Enumerate every review thread, resolved ones included, plus AWF's own login.
 
         Exhaustive (fails closed on a truncated page) so the READY_TO_MERGE gate
         can verify each AWF resolution carries its disposition marker (#1018).
         ``supported=False`` means the forge cannot attribute resolutions yet.
+        ``retry=False`` (the in-lock re-audit) surfaces a single failure promptly
+        instead of retrying under the merge lock, as for ``fetch_pr_status``.
         """
         ...
 

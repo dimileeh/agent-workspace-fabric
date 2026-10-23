@@ -43,10 +43,10 @@ class DefaultMergeMethodGitHubClient(GitHubClient):
         return f"reply-{len(self.thread_replies)}"
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True
     ) -> ReviewThreadAudit:
         """A clean audit (no AWF-resolved threads) for tests that do not exercise the gate."""
-        del repo, pr_number
+        del repo, pr_number, retry
         return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot")
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
