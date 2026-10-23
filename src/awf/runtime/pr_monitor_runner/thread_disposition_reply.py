@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.forge_errors import ForgeClientError
+from awf.common.forge_thread_audit import AuditedReviewThread
 from awf.common.github_client import RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.feedback_policy import review_thread_body_state_key
@@ -46,8 +47,10 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     THREAD_DISPOSITION_EVIDENCE_MISSING,
     THREAD_DISPOSITION_REASON_MISSING,
     THREAD_DISPOSITION_REPLY_FAILED,
+    THREAD_DISPOSITION_UNREAD_FEEDBACK,
     ThreadDisposition,
     attach_issue_url,
+    disposition_marker_class,
     disposition_problem,
     read_item_disposition,
     record_item_disposition,
@@ -174,7 +177,7 @@ async def reply_before_resolve(
     if repo is None or thread is None:
         return disposition
     try:
-        moved, followed = await _reread_thread_after_reply(
+        moved, unread, followed = await _reread_thread_after_reply(
             self, repo=repo, pr_number=pr_number, thread=thread
         )
     except ForgeClientError as exc:
@@ -191,10 +194,26 @@ async def reply_before_resolve(
         # tombstones the conversation its marker follows (PRRT_kwDOSJAM6s6vaq4v).
         disposition = replace(disposition, reply_conversation_digest=followed)
         record_item_disposition(state, disposition)
-        if not moved:
+        if not (moved or unread):
             await _persist_posted_disposition(
                 self, workspace_id=workspace_id, state=state, item_id=thread_id
             )
+    if unread:
+        # The operator, under AWF's own account, left feedback the triage behind
+        # this reply never read, yet the gate would take the reply as its answer
+        # (PRRT_kwDOSJAM6s6vbU2H). A human reads it: the thread is parked open and
+        # the reply retired, so neither a later resolve nor its marker reuses it.
+        await _park(
+            THREAD_DISPOSITION_UNREAD_FEEDBACK,
+            "AWF did not resolve this review thread: a comment by its own forge identity "
+            "without an AWF disposition marker precedes its disposition reply, and AWF "
+            "never reads that identity's comments as feedback",
+        )
+        retire_item_disposition(state, disposition)
+        await _persist_posted_disposition(
+            self, workspace_id=workspace_id, state=state, item_id=thread_id
+        )
+        return None
     if moved:
         # Feedback added or edited after the listed snapshot sits before the
         # reply, where the gate would read the reply as its answer
@@ -223,12 +242,14 @@ async def _reread_thread_after_reply(
     repo: RepoRef,
     pr_number: int,
     thread: ReviewThread,
-) -> tuple[bool, str | None]:
-    """Re-read the live thread after a fresh reply: ``(moved, followed)``.
+) -> tuple[bool, bool, str | None]:
+    """Re-read the live thread after a fresh reply: ``(moved, unread, followed)``.
 
     ``moved`` is True when its outside feedback is no longer ``thread``'s;
-    ``followed`` is the conversation the reply followed (``None`` when the
-    re-read cannot tell). Runs once a fresh reply has landed, so anything that
+    ``unread`` when unmarked feedback by AWF's own identity directly precedes the
+    reply (:func:`_own_identity_feedback_before_reply`); ``followed`` is the
+    conversation the reply followed (``None`` when the re-read cannot tell).
+    Runs once a fresh reply has landed, so anything that
     arrived before the reply shows up here; anything later follows the reply,
     which the gate already refuses as its answer. Outside comments are compared
     as ``fetch_pr_status`` lists them. Only a provable difference counts: an
@@ -238,10 +259,29 @@ async def _reread_thread_after_reply(
     audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
     live = next((t for t in audit.threads if t.thread_id == thread.thread_id), None)
     if not audit.supported or live is None:
-        return False, None
+        return False, False, None
     listed = tuple(comment.body for comment in thread.comments)
     moved = bool(listed) and live.external_comment_bodies != listed
-    return moved, live.conversation_digest_before_reply or None
+    unread = _own_identity_feedback_before_reply(live)
+    return moved, unread, live.conversation_digest_before_reply or None
+
+
+def _own_identity_feedback_before_reply(live: AuditedReviewThread) -> bool:
+    """True when an unmarked comment by AWF's own identity directly precedes its reply.
+
+    AWF's identity can be the operator's own account, and ``fetch_pr_status``
+    lists none of that identity's comments, so the triage behind the reply never
+    read one. AWF only posts marker-carrying replies, so an unmarked one is the
+    operator's feedback, which the gate reads the reply after it as answering.
+    The current viewer comments all follow the thread's newest outside feedback,
+    so the one before the reply is the comment right before it.
+    """
+    if not live.conversation_digest_before_reply:
+        return False  # the reply is not the newest comment: the gate refuses it anyway
+    before_reply = live.current_viewer_comment_bodies[:-1]
+    return bool(before_reply) and (
+        disposition_marker_class(before_reply[-1:], thread_id=live.thread_id) is None
+    )
 
 
 async def _with_item_commit_recorded_this_cycle(

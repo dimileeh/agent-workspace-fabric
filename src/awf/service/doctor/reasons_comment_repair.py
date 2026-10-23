@@ -216,4 +216,21 @@ def get_comment_repair_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("THREAD_DISPOSITION_REPLY_FAILED"),
         ),
+        "THREAD_DISPOSITION_UNREAD_FEEDBACK": reason_text_cls(
+            (
+                "AWF did not resolve a review thread because a comment by its own forge "
+                "identity, without an AWF disposition marker, preceded its disposition reply."
+            ),
+            (
+                "Read that comment in the thread, then guide the workspace naming the thread id "
+                "with what it asks; do not resolve the thread by hand. The pushed commits are kept."
+            ),
+            (
+                "AWF's identity can be the operator's own account. The monitor never reads that "
+                "identity's comments as feedback, so the triage behind the reply did not see the "
+                "comment; resolving would have closed it unread. The reply was retired."
+            ),
+            "awf workspace guide <workspace_id> --directive '<thread id>: ...'",
+            reason_catalog_link("THREAD_DISPOSITION_UNREAD_FEEDBACK"),
+        ),
     }

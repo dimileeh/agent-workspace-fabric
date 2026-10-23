@@ -916,6 +916,8 @@ def _serve_live_thread(
     supported: bool = True,
     error: GitHubClientError | None = None,
     before_reply: str = "",
+    viewer_bodies: tuple[str, ...] = (),
+    superseded: int = 0,
 ) -> list[int]:
     """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited."""
     audited: list[int] = []
@@ -930,6 +932,8 @@ def _serve_live_thread(
             is_resolved=False,
             is_outdated=False,
             resolved_by=None,
+            viewer_comment_bodies=viewer_bodies,
+            superseded_viewer_comments=superseded,
             conversation_digest_before_reply=before_reply,
             external_comment_bodies=bodies,
         )
@@ -1051,6 +1055,122 @@ async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
         "reply-1",
         True,
     )
+
+
+_OPERATOR_ASK = "also cover empty payloads"
+
+
+async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6vbU2H: the operator, under AWF's own account, replies after
+    # the status read but before AWF's reply lands. ``fetch_pr_status`` lists none
+    # of that identity's comments, so the outside comments still match, yet the
+    # gate would read AWF's reply after it as its answer. The thread is parked for
+    # a human instead of resolved, and the reply retired (saved at once) so its
+    # marker never certifies that feedback.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_own_identity_feedback"
+    thread = _commented_thread(tid, _ASK)
+    followed = "f" * 64
+    reply = _MARKER.format(cls="false_positive", tid=tid)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply=followed,
+        viewer_bodies=(_OPERATOR_ASK, reply),
+    )
+
+    workspace_id, state, result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert result.failed is False and result.pushed is True
+    assert state.threads_addressed_ids[tid] == "needs_human"
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
+    assert reason.startswith("THREAD_DISPOSITION_UNREAD_FEEDBACK:")
+    parked = [
+        e
+        for e in await _resolution_events(factory, workspace_id)
+        if e["action"] == "resolve_thread"
+    ]
+    assert [(e["outcome"], e["reason_code"]) for e in parked] == [
+        ("needs_human", "THREAD_DISPOSITION_UNREAD_FEEDBACK")
+    ]
+    assert parked[0]["evidence"]["disposition"]["reply_comment_id"] == "reply-1"
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    for kept_state in (state, _load_state(None, ws)):
+        assert kept_state.threads_addressed_ids[tid] == "needs_human"
+        kept = read_item_disposition(kept_state, tid)
+        assert kept is not None and kept.reply_comment_id is None
+        assert _disposition_retired_key(tid, followed) in kept_state.threads_addressed_ids
+    action = decide(_status(_PUSHED, (thread,)), state, MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.parametrize(
+    ("viewer_bodies", "superseded", "before_reply"),
+    [
+        (("earlier-reply", "reply"), 0, "d" * 64),
+        ((_OPERATOR_ASK, "reply"), 1, "d" * 64),
+        (("reply", _OPERATOR_ASK), 0, ""),
+    ],
+    ids=["awf-reply-precedes", "superseded-by-outside-feedback", "reply-not-newest"],
+)
+async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_the_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    viewer_bodies: tuple[str, ...],
+    superseded: int,
+    before_reply: str,
+) -> None:
+    # Only unmarked feedback by AWF's identity right before the reply is unread:
+    # an earlier AWF reply answered what precedes it, newer outside feedback (which
+    # ``fetch_pr_status`` lists) supersedes it, and a comment after the reply is
+    # one the gate already refuses the reply as answering.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_own_identity_answered"
+    thread = _commented_thread(tid, _ASK)
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    bodies = tuple(marker if body.endswith("reply") else body for body in viewer_bodies)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply=before_reply,
+        viewer_bodies=bodies,
+        superseded=superseded,
+    )
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    assert state.threads_addressed_ids[tid] == "false_positive"
 
 
 async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombstone(
