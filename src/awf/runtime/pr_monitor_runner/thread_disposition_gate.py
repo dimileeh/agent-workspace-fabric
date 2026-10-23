@@ -358,9 +358,10 @@ def _retire_broken_bindings(
     its reply. A reopen, or a new or edited comment, retires it — posted or not.
     One whose AWF resolve landed before any audit bound it holds while that
     resolution stands, so a reopen retires it too (PRRT_kwDOSJAM6s6vZ4nJ).
-    Likewise a reopen or change of a legacy-baseline thread retires its exemption
-    for good. A reopened thread's unverified flag is left for the poll that lists
-    it open, which re-triages it.
+    Likewise a reopen, change, or another login's resolve of a legacy-baseline
+    thread retires its exemption for good (PRRT_kwDOSJAM6s6vcSmq). A reopened
+    thread's unverified flag is left for the poll that lists it open, which
+    re-triages it.
     """
     legacy_conversations = _decode_baseline_conversations(
         state.threads_addressed_ids.get(_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY)
@@ -368,21 +369,20 @@ def _retire_broken_bindings(
     retired_legacy: list[str] = []
     for thread in audit.threads:
         thread_id = thread.thread_id
+        resolved_by_viewer = (
+            thread.is_resolved and (thread.resolved_by or "").strip().casefold() == viewer
+        )
         legacy_conversation = legacy_conversations.get(thread_id)
         if legacy_conversation is not None and (
-            not thread.is_resolved or legacy_conversation != thread.conversation_digest
+            not resolved_by_viewer or legacy_conversation != thread.conversation_digest
         ):
             retired_legacy.append(thread_id)
         disposition = read_item_disposition(state, thread_id)
         if disposition is None or not disposition.answers_resolution:
             continue  # a reply whose resolve did not land answers no resolution yet
-        if (
-            thread.is_resolved
-            and (thread.resolved_by or "").strip().casefold() == viewer
-            and (
-                not disposition.is_bound
-                or thread.conversation_digest_before_reply == disposition.conversation_digest
-            )
+        if resolved_by_viewer and (
+            not disposition.is_bound
+            or thread.conversation_digest_before_reply == disposition.conversation_digest
         ):
             continue  # still standing; an unbound landed resolve is bound on verify
         retire_item_disposition(state, disposition)

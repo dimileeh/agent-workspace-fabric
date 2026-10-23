@@ -457,6 +457,31 @@ async def test_a_reopened_baselined_thread_loses_its_exemption(
     assert resolved_again.blocker is not None and _LEGACY in resolved_again.blocker
 
 
+async def test_a_baselined_thread_resolved_by_another_login_loses_its_exemption(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Another login's resolve means AWF's original resolution ended in a reopen
+    # the audits never saw: a later silent resolve by AWF's shared identity,
+    # comments unchanged, is a new resolution and needs its marker
+    # (PRRT_kwDOSJAM6s6vcSmq).
+    gh = _AuditForge(FakeCommandRunner(), threads=(_thread(_LEGACY, conversation="original"),))
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    state = MonitorState()
+    await _gate(runner, workspace_id, state)
+
+    gh.threads = (_thread(_LEGACY, conversation="original", resolved_by="reviewer"),)
+    by_other = await _gate(runner, workspace_id, state)
+
+    assert by_other.blocker is None  # that login's own disposition never blocks
+    assert _baseline_conversations(state) == {}
+
+    gh.threads = (_thread(_LEGACY, conversation="original"),)
+    resolved_again = await _gate(runner, workspace_id, state)
+
+    assert resolved_again.blocker is not None and _LEGACY in resolved_again.blocker
+
+
 @pytest.mark.parametrize(
     "conversations", [None, "{not json", f'["{_LEGACY}"]', f'{{"{_LEGACY}": 1}}']
 )
