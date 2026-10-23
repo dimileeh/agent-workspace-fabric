@@ -240,11 +240,9 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   page,
 }) => {
   const overviewRequests: Array<string | null> = [];
-  let noteRetainedRefresh: (() => void) | null = null;
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
     onRequest: (cursor) => overviewRequests.push(cursor),
-    onBatchRequest: () => noteRetainedRefresh?.(),
   });
 
   await page.goto("/");
@@ -284,13 +282,22 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
 
   // Open the 5.5 s window when a routine first-page load settles. The poll
   // timer starts only after loadOverview() settles, and the retained-window
-  // batch refresh is the last request that load starts. Anchoring on the
-  // first-page request start instead lets slow response processing under
-  // shared CI CPUs push the next poll past the window.
-  await new Promise<void>((resolve) => {
-    noteRetainedRefresh = resolve;
-  });
-  noteRetainedRefresh = null;
+  // batch refresh is the last request that load awaits. Anchoring on a
+  // request-start callback instead lets slow response processing under
+  // shared CI CPUs push the next poll past the window, so wait for the batch
+  // response body to reach the page and then drain a page task so the loader
+  // applies it before the window opens.
+  const retainedRefresh = await page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/workspaces/overview/batch"),
+  );
+  await retainedRefresh.finished();
+  await page.evaluate(
+    () => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => window.setTimeout(resolve, 0));
+    }),
+  );
   const requestsAfterHistory = overviewRequests.length;
   await page.waitForTimeout(5_500);
   expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
