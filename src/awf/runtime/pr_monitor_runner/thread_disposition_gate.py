@@ -324,14 +324,17 @@ def _disposition_holds(
     breaks, so a record left must be the posted reply of that marker's class, one
     its post-reply re-read confirmed. The first audit to see a posted reply
     resolved binds it to the conversation it followed. With no record at all (a re-adopted PR whose record did not cross)
-    the marker is the evidence — unless it is a reply this monitor retired.
+    the marker is the evidence — unless it is a reply this monitor retired, or the
+    thread holds a retired reply whose conversation AWF never read, which could be
+    any marker in it (PRRT_kwDOSJAM6s6vc8NC).
     """
     disposition = read_item_disposition(state, thread.thread_id)
     if disposition is None:
-        retired = _disposition_retired_key(
-            thread.thread_id, thread.conversation_digest_before_reply
-        )
-        return retired not in state.threads_addressed_ids
+        retired = {
+            _disposition_retired_key(thread.thread_id, thread.conversation_digest_before_reply),
+            _disposition_retired_key(thread.thread_id, ""),
+        }
+        return retired.isdisjoint(state.threads_addressed_ids)
     if disposition.disposition_class != disposition_class or not disposition.reply_comment_id:
         return False  # retired or never posted: the marker is an older reply's
     if disposition.reread_pending:

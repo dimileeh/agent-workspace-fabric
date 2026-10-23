@@ -184,8 +184,8 @@ _RETIRED_REPLY_FIELDS: dict[str, object] = {
 # conversation by the shared forge identity would let the stale marker certify
 # the thread again. It records thread history rather than code and only ever
 # makes the gate stricter, so it crosses regardless of head continuity. The
-# digest is AWF's own SHA-256 hex of the conversation (empty when the reply was
-# not the thread's newest comment), and the thread id must be a verdict-key form.
+# digest is AWF's own SHA-256 hex of the conversation (empty when AWF never read
+# the conversation the reply followed), and the thread id must be a verdict-key form.
 _DISPOSITION_RETIRED_PREFIX = "__awf_disposition_retired__:"
 _CONVERSATION_DIGEST_RE = re.compile(r"^(?:[0-9a-f]{64})?$")
 

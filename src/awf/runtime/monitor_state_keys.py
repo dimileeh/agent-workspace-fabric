@@ -169,6 +169,8 @@ def _disposition_retired_key(thread_id: str, conversation_digest: str) -> str:
     Keyed by the conversation that reply followed: while the thread's newest
     marker still follows exactly that conversation, it is the retired reply,
     which certifies nothing even once the thread has no disposition record left.
+    The empty digest records a retired reply whose conversation AWF never read:
+    then no marker in the thread certifies without a record (PRRT_kwDOSJAM6s6vc8NC).
     """
     return f"__awf_disposition_retired__:{thread_id}:{conversation_digest}"
 

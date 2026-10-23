@@ -303,13 +303,17 @@ def retire_item_disposition(
     Its reply, posted or not, answers nothing current any more. A posted reply is
     remembered by the conversation it followed (its binding, else as read right
     after posting it), so its marker never certifies again, whatever happens to
-    the record (PRRT_kwDOSJAM6s6vaq4v). The record keeps its evidence but loses
+    the record (PRRT_kwDOSJAM6s6vaq4v). One whose conversation AWF never read is
+    remembered under the empty digest, which no marker in its thread certifies
+    past (PRRT_kwDOSJAM6s6vc8NC). The record keeps its evidence but loses
     its reply id, binding and landed resolve, so the thread's next AWF resolve
     posts a fresh reply. Returns the record left in state.
     """
     followed = disposition.conversation_digest or disposition.reply_conversation_digest
-    if disposition.reply_comment_id and followed is not None:
-        state.mark_addressed(_disposition_retired_key(disposition.item_id, followed), "retired")
+    if disposition.reply_comment_id:
+        state.mark_addressed(
+            _disposition_retired_key(disposition.item_id, followed or ""), "retired"
+        )
     retired = replace(
         disposition,
         reply_comment_id=None,

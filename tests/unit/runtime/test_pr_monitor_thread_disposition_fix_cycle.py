@@ -1138,11 +1138,15 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
+    # A re-read too stale to show the reply ends on the operator's comment, so the
+    # digest before it is not the conversation the reply followed: that reply is
+    # tombstoned as one of an unread conversation (PRRT_kwDOSJAM6s6vc8NC).
+    tombstoned = followed if viewer_bodies[-1].endswith("reply") else ""
     for kept_state in (state, _load_state(None, ws)):
         assert kept_state.threads_addressed_ids[tid] == "needs_human"
         kept = read_item_disposition(kept_state, tid)
         assert kept is not None and kept.reply_comment_id is None
-        assert _disposition_retired_key(tid, followed) in kept_state.threads_addressed_ids
+        assert _disposition_retired_key(tid, tombstoned) in kept_state.threads_addressed_ids
     action = decide(_status(_PUSHED, (thread,)), state, MonitorConfig(auto_merge=True))
     assert isinstance(action, NotifyHuman)
 
