@@ -238,7 +238,7 @@ async def restart_runtime_for_monitor_resume(
     in compose.yml or backed by a set env secret, or still unsettled when the
     last attempt gave up), so nothing waits on them while they hold stale config;
     a failed recreate raises and is never tolerated, and ``on_recreated`` runs as
-    soon as it succeeds, whatever fails later. Every other dependency is
+    soon as it succeeds, whatever fails later (never when nothing was recreated). Every other dependency is
     never recreated. When a dependency start or up fails, ``runtime_usable``
     decides whether the agent is still recreated (auth overlays, env and #1090's
     setup replay depend on it); the tolerated failure is returned so the caller
@@ -262,8 +262,8 @@ async def restart_runtime_for_monitor_resume(
         await compose.ensure_project_up(
             **{**common, "wait": False}, force_recreate=True, no_deps=True, services=recreated
         )
-    if on_recreated is not None:
-        on_recreated()
+        if on_recreated is not None:
+            on_recreated()
 
     async def _start_stopped(services: tuple[str, ...]) -> None:
         _log.info(

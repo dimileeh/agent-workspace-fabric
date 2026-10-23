@@ -619,3 +619,43 @@ async def test_resume_keeps_pending_recreates_for_companions_it_could_not_recrea
     recreate = [call for call in compose.calls if call.get("force_recreate")]
     assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
     assert marker.read_text(encoding="utf-8") == "extra\n"
+
+
+@pytest.mark.unit
+async def test_resume_leaves_the_pending_recreate_alone_when_nothing_was_recreated(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        _COMPOSE + "  extra:\n    image: extra\n    profiles: [extra]\n", encoding="utf-8"
+    )
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    marker = monitor_handoff._companion_env._pending_companion_recreates_path(compose_file)
+    marker.write_text("extra\n", encoding="utf-8")
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    compose = _RecordingCompose()
+
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
+    # The only pending companion is outside the active profiles: no dependency is
+    # force-recreated, so the marker must not be cleared or rewritten.
+    clears: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        monitor_handoff,
+        "_clear_pending_companion_recreates_for_resume",
+        lambda **kwargs: clears.append(kwargs),
+    )
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("agent",)]
+    assert clears == []
+    assert marker.read_text(encoding="utf-8") == "extra\n"
