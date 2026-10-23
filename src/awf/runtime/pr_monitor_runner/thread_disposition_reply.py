@@ -62,6 +62,18 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
 # the thread was listed: the reply is retired and the thread re-enters triage.
 _FEEDBACK_AFTER_DECISION = "REVIEW_THREAD_FEEDBACK_AFTER_DECISION"
 
+
+class _StaleRereadError(ForgeClientError):
+    """The post-reply re-read predates the reply, so it confirms nothing.
+
+    Raised where a re-read fault is, so it is handled as one: the reply stays
+    ``reread_pending`` and the thread open, requeued or parked (PRRT_kwDOSJAM6s6vexk8).
+    """
+
+    operation = "fetch_review_thread_audit"
+    reason_code = REVIEW_THREAD_AUDIT_UNAVAILABLE
+
+
 _PROBLEM_DETAIL = {
     THREAD_DISPOSITION_REASON_MISSING: (
         "AWF did not resolve this review thread: its FALSE POSITIVE or DEFER "
@@ -306,7 +318,9 @@ async def _reread_thread_after_reply(
     Runs once a fresh reply has landed, so anything that arrived before the reply
     shows up here; anything later follows the reply, which the gate already
     refuses as its answer. An unsupported audit or a thread missing from it is no
-    evidence of new feedback.
+    evidence of new feedback. A re-read too stale to show the reply can miss
+    feedback that preceded it too, so unless it already shows ``moved`` it raises
+    :class:`_StaleRereadError` (PRRT_kwDOSJAM6s6vexk8).
     """
     audit = await self._deps.gh.fetch_review_thread_audit(
         repo=repo, pr_number=pr_number, retry=retry
@@ -315,6 +329,8 @@ async def _reread_thread_after_reply(
     if not audit.supported or live is None:
         return None, None
     moved = _conversation_moved(thread, live, reply_comment_id)
+    if moved is None and reply_comment_id not in live.viewer_comment_ids:
+        raise _StaleRereadError(f"the re-read does not show reply {reply_comment_id} yet")
     if live.viewer_comment_ids[-1:] != (reply_comment_id,):
         return moved, None
     return moved, live.conversation_digest_before_reply or None

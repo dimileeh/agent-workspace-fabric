@@ -85,11 +85,14 @@ def _serve_live_thread(
     supported: bool = True,
     error: GitHubClientError | None = None,
     before_reply: str = "",
-    viewer_bodies: tuple[str, ...] = (),
+    viewer_bodies: tuple[str, ...] | None = None,
     viewer_ids: tuple[str, ...] = (),
     superseded: int = 0,
 ) -> list[int]:
-    """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited."""
+    """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited.
+
+    Without ``viewer_bodies`` the thread shows the replies AWF posted in it so far.
+    """
     audited: list[int] = []
 
     async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
@@ -97,13 +100,22 @@ def _serve_live_thread(
         audited.append(pr_number)
         if error is not None:
             raise error
+        posted = [
+            (body, f"reply-{number}")
+            for number, (replied_to, body) in enumerate(gh.replies(), start=1)
+            if replied_to == thread_id
+        ]
         live = AuditedReviewThread(
             thread_id=thread_id,
             is_resolved=False,
             is_outdated=False,
             resolved_by=None,
-            viewer_comment_bodies=viewer_bodies,
-            viewer_comment_ids=viewer_ids,
+            viewer_comment_bodies=(
+                tuple(body for body, _ in posted) if viewer_bodies is None else viewer_bodies
+            ),
+            viewer_comment_ids=(
+                tuple(reply_id for _, reply_id in posted) if viewer_bodies is None else viewer_ids
+            ),
             superseded_viewer_comments=superseded,
             conversation_digest_before_reply=before_reply,
             external_comment_bodies=bodies,
@@ -135,15 +147,7 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     tid = "PRRT_test_feedback_moved"
     thread = _commented_thread(tid, _ASK)
     followed = "d" * 64
-    audited = _serve_live_thread(
-        gh,
-        monkeypatch,
-        tid,
-        live,
-        before_reply=followed,
-        viewer_bodies=(_MARKER.format(cls="false_positive", tid=tid),),
-        viewer_ids=("reply-1",),
-    )
+    audited = _serve_live_thread(gh, monkeypatch, tid, live, before_reply=followed)
 
     workspace_id, state, result = await _run_cycle(
         factory=factory,
@@ -448,36 +452,19 @@ async def test_fix_cycle_re_reads_a_reply_to_a_thread_the_settle_feed_does_not_l
     assert state.threads_addressed_ids[tid] == verdict
 
 
-@pytest.mark.parametrize(
-    "newest", ["reply", "earlier-reply"], ids=["shows-the-reply", "stale-re-read"]
-)
 async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombstone(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    newest: str,
 ) -> None:
     # PRRT_kwDOSJAM6s6vaq4v: the re-read right after the reply records the
     # conversation it followed, saved at once. A reopen before any audit bound the
     # reply then still tombstones that conversation, which outlives the record.
-    # A re-read too stale to show the reply may end on an earlier AWF reply: the
-    # digest before that one is not the reply's conversation, so none is recorded
-    # and the reply is tombstoned as one of an unread conversation
-    # (PRRT_kwDOSJAM6s6vc8NC, PRRT_kwDOSJAM6s6veO2F).
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_landed_followed"
     thread = _commented_thread(tid, _ASK)
-    before_reply = "e" * 64
-    followed = before_reply if newest == "reply" else None
-    _serve_live_thread(
-        gh,
-        monkeypatch,
-        tid,
-        (_ASK,),
-        before_reply=before_reply,
-        viewer_bodies=(_MARKER.format(cls="false_positive", tid=tid),),
-        viewer_ids=_own_comment_ids((newest,)),
-    )
+    followed = "e" * 64
+    _serve_live_thread(gh, monkeypatch, tid, (_ASK,), before_reply=followed)
 
     workspace_id, state, _ = await _run_cycle(
         factory=factory,
@@ -506,7 +493,7 @@ async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombsto
         state, _status(_PUSHED, (thread,)), workspace_id=workspace_id
     ) == [tid]
 
-    assert _disposition_retired_key(tid, followed or "") in state.threads_addressed_ids
+    assert _disposition_retired_key(tid, followed) in state.threads_addressed_ids
     retired = read_item_disposition(state, tid)
     assert retired is not None and retired.reply_conversation_digest is None
 
@@ -548,6 +535,63 @@ async def test_fix_cycle_parks_when_the_thread_cannot_be_re_read_after_the_reply
     ]
     assert parked[0]["evidence"]["disposition"]["reply_comment_id"] == "reply-1"
     assert parked[0]["evidence"]["forge_reason_code"] == fault.reason_code
+
+
+@pytest.mark.parametrize(
+    "viewer_bodies", [(), ("earlier-reply",)], ids=["no-reply-yet", "ends-on-an-earlier-reply"]
+)
+async def test_fix_cycle_parks_when_the_re_read_is_too_stale_to_show_the_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    viewer_bodies: tuple[str, ...],
+) -> None:
+    # PRRT_kwDOSJAM6s6vexk8: a re-read too stale to show the reply just posted can
+    # miss feedback that preceded the reply as well, which a later audit then shows
+    # before its marker. It confirms nothing, so it is handled as a failed re-read:
+    # no resolve, the thread parked, and the reply kept pending with no conversation
+    # recorded, so the gate never certifies it on that feedback.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_stale_re_read"
+    thread = _commented_thread(tid, _ASK)
+    _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK,),
+        before_reply="e" * 64,
+        viewer_bodies=tuple(_MARKER.format(cls="false_positive", tid=tid) for _ in viewer_bodies),
+        viewer_ids=_own_comment_ids(viewer_bodies),
+    )
+
+    workspace_id, state, result = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        settle_threads=(thread,),
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert result.failed is False
+    reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
+    assert reason.startswith("REVIEW_THREAD_AUDIT_UNAVAILABLE:")
+    assert "does not show reply reply-1" in reason
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    for kept_state in (state, _load_state(None, ws)):
+        assert kept_state.threads_addressed_ids[tid] == "needs_human"
+        kept = read_item_disposition(kept_state, tid)
+        assert kept is not None
+        assert (kept.reply_comment_id, kept.reread_pending, kept.reply_conversation_digest) == (
+            "reply-1",
+            True,
+            None,
+        )
 
 
 async def test_a_reply_no_re_read_confirmed_stays_saved_pending(

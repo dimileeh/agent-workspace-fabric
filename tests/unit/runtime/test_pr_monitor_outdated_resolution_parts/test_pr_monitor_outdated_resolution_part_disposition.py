@@ -522,6 +522,68 @@ async def test_outdated_reply_reread_fails_fast_under_the_merge_lock(
     assert (confirmed.reply_comment_id, confirmed.reread_pending) == ("reply-1", False)
 
 
+async def test_a_stale_re_read_under_the_merge_lock_requeues_until_it_shows_the_reply(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6vexk8: a re-read too stale to show the reply just posted can
+    # miss feedback that preceded it too, so it confirms nothing. Under the merge
+    # lock the thread is requeued with the reply kept pending, and the next poll
+    # resolves on that same reply once its re-read shows it.
+    gh = OrderedForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    tid = "PRRT_test_outdated_stale_reread"
+    reads: list[bool] = []
+
+    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+        del repo, pr_number, retry
+        shows_reply = bool(reads)
+        reads.append(shows_reply)
+        live = AuditedReviewThread(
+            thread_id=tid,
+            is_resolved=False,
+            is_outdated=True,
+            resolved_by=None,
+            viewer_comment_bodies=(gh.events[0][2],) if shows_reply else (),
+            viewer_comment_ids=("reply-1",) if shows_reply else (),
+        )
+        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot", threads=(live,))
+
+    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
+    state = MonitorState()
+    _mark(state, tid, "fix_committed")
+    seed_resolvable_disposition(state, tid, "fix_committed", commits=("e" * 40,))
+    status = _status_with_outdated(_outdated_thread(tid))
+
+    await _call_resolve(
+        runner, workspace_id=workspace_id, status=status, state=state, wait_on_transient=False
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    requeued = _outdated_resolve_requeued_key(tid)
+    assert state.threads_addressed_ids[tid] == "fix_committed"
+    assert state.threads_addressed_ids[requeued] == "requeued"
+    unconfirmed = read_item_disposition(state, tid)
+    assert unconfirmed is not None
+    assert (unconfirmed.reply_comment_id, unconfirmed.reread_pending) == ("reply-1", True)
+    events = await _events(factory, workspace_id)
+    assert [(e.payload["outcome"], e.payload["reason_code"]) for e in events] == [
+        ("requeued", "REVIEW_THREAD_AUDIT_UNAVAILABLE")
+    ]
+
+    await _call_resolve(
+        runner, workspace_id=workspace_id, status=status, state=state, wait_on_transient=False
+    )
+
+    assert [event[0] for event in gh.events] == ["reply", "resolve"]
+    assert reads == [False, True]
+    assert requeued not in state.threads_addressed_ids
+    confirmed = read_item_disposition(state, tid)
+    assert confirmed is not None
+    assert (confirmed.reply_comment_id, confirmed.reread_pending) == ("reply-1", False)
+
+
 async def test_a_requeued_reply_parks_on_own_identity_feedback_its_re_read_finds(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

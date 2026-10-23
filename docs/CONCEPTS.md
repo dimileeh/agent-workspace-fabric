@@ -533,7 +533,8 @@ re-triage's own verdict again. The flag crosses a PR re-adoption. The gate itsel
 never writes to the forge. It decides on ONE complete audit. Under the merge
 lock that audit fails fast, and so does outdated hygiene's re-read after a fresh
 reply: no transport retry or sleep holds the lock. A fault releases the lock,
-and the monitor retries on the next poll. A reply whose in-lock re-read faulted
+and the monitor retries on the next poll. A reply whose in-lock re-read faulted,
+or was too stale to show that reply (so it could miss feedback before it too),
 is kept but marked unconfirmed, and its thread is requeued. The retry re-reads
 that same reply before resolving on it and never posts a second one, and the
 gate certifies nothing on the reply until a re-read confirms it.
