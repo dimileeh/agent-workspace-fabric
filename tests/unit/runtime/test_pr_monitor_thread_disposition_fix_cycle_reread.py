@@ -507,3 +507,58 @@ async def test_fix_cycle_parks_when_the_thread_cannot_be_re_read_after_the_reply
     ]
     assert parked[0]["evidence"]["disposition"]["reply_comment_id"] == "reply-1"
     assert parked[0]["evidence"]["forge_reason_code"] == fault.reason_code
+
+
+async def test_a_reply_no_re_read_confirmed_stays_saved_pending(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PRRT_kwDOSJAM6s6veO2C: a fresh reply is saved pending until its re-read
+    # succeeds, so a re-read fault's park (or a restart before the re-read) leaves
+    # nothing the gate would certify once the shared identity resolves the thread.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_feedback_unread_park"
+    thread = _commented_thread(tid, _ASK)
+    fault = GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502")
+    workspace_ids: list[str] = []
+    saved_at_re_read: list[bool] = []
+
+    async def _capture_workspace(_runner: object, workspace_id: str) -> None:
+        workspace_ids.append(workspace_id)
+
+    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+        del repo, pr_number, retry
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_ids[0])
+        assert ws is not None
+        saved = read_item_disposition(_load_state(None, ws), tid)
+        assert saved is not None and saved.reply_comment_id == "reply-1"
+        saved_at_re_read.append(saved.reread_pending)
+        raise fault
+
+    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
+
+    workspace_id, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=thread,
+        before_cycle=_capture_workspace,
+        settle_threads=(thread,),
+    )
+
+    assert saved_at_re_read == [True]
+    assert state.threads_addressed_ids[tid] == "needs_human"
+    parked = read_item_disposition(state, tid)
+    assert parked is not None
+    assert (parked.reply_comment_id, parked.reread_pending) == ("reply-1", True)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    saved = read_item_disposition(_load_state(None, ws), tid)
+    assert saved is not None
+    assert (saved.reply_comment_id, saved.reread_pending) == ("reply-1", True)

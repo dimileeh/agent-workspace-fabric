@@ -238,8 +238,8 @@ async def reply_before_resolve(
 
     if disposition is not None and disposition.reply_comment_id:
         # Replied on an earlier attempt whose resolve did not land: that reply is
-        # the thread's disposition, so resolve on it and never double-post. One a
-        # fail-fast re-read never confirmed is re-read first.
+        # the thread's disposition, so resolve on it and never double-post. One no
+        # re-read confirmed yet is re-read first.
         return await _confirm(disposition) if disposition.reread_pending else disposition
     if disposition is None or problem is not None:
         reason_code = problem or THREAD_DISPOSITION_REASON_MISSING
@@ -261,7 +261,14 @@ async def reply_before_resolve(
             exc.reason_code,
         )
         return None
-    disposition = replace(disposition, reply_comment_id=reply_id, reply_conversation_digest=None)
+    # Pending until its re-read succeeds: a re-read fault's park, or a restart
+    # before the re-read, leaves nothing the gate certifies (PRRT_kwDOSJAM6s6veO2C).
+    disposition = replace(
+        disposition,
+        reply_comment_id=reply_id,
+        reply_conversation_digest=None,
+        reread_pending=repo is not None,
+    )
     record_item_disposition(state, disposition)
     await _persist_posted_disposition(
         self, workspace_id=workspace_id, state=state, item_id=thread_id

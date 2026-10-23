@@ -131,9 +131,9 @@ class ThreadDisposition:
     # read it. It binds nothing; it keys the reply's tombstone when the reply is
     # retired before any audit bound it (PRRT_kwDOSJAM6s6vaq4v).
     reply_conversation_digest: str | None = None
-    # The posted reply's fail-fast re-read under the merge lock faulted: nothing
-    # checked it against the live thread yet, so it is re-read before any resolve
-    # reuses it and certifies nothing meanwhile (PRRT_kwDOSJAM6s6vbU2K).
+    # No re-read checked the posted reply against the live thread yet (it has not
+    # run, or it faulted), so it is re-read before any resolve reuses it and
+    # certifies nothing meanwhile (PRRT_kwDOSJAM6s6vbU2K, PRRT_kwDOSJAM6s6veO2C).
     reread_pending: bool = False
 
     @property
