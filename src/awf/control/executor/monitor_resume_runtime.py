@@ -5,7 +5,8 @@ force-recreate the whole compose project. That restarted dependencies still in
 their own crash recovery, such as Postgres replaying its WAL after an unclean
 stop, so the resume could fail and be retried forever. The restart now:
 
-1. force-recreates each dependency the resume must recreate (``recreate_services``)
+1. force-recreates each dependency the resume must recreate (``recreate_services``),
+   a dependent only once the recreated prerequisites it depends on are satisfied,
    and starts each other exited or absent dependency on its own with
    ``--no-recreate``, all ``--no-deps`` and without ``--wait``, so no compose
    health gate can fail them on the healthcheck retries stored in a container
@@ -234,6 +235,7 @@ async def wait_for_recovering_dependencies(
     declared_services: tuple[str, ...] | None = None,
     recreated_services: tuple[str, ...] = (),
     dependency_conditions: Mapping[str, Mapping[str, str]] | None = None,
+    deadline: float | None = None,
 ) -> RuntimeSnapshot | None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
@@ -248,8 +250,10 @@ async def wait_for_recovering_dependencies(
     naming each unsettled service when the budget runs out. An unreadable runtime
     is logged and skipped: the compose call that follows surfaces the real error.
     Returns the settled snapshot, or ``None`` when the runtime was unreadable.
+    ``deadline`` (a ``_monotonic`` instant) lets an earlier step share the budget.
     """
-    deadline = _monotonic() + budget_seconds
+    if deadline is None:
+        deadline = _monotonic() + budget_seconds
     conditions = dependency_conditions or {}
     pending: set[str] | None = None
     while True:
@@ -312,6 +316,99 @@ async def wait_for_recovering_dependencies(
         await _sleep(min(DEPENDENCY_POLL_INTERVAL_SECONDS, remaining))
 
 
+async def _recreate_in_dependency_order(
+    recreate: Callable[[str], Awaitable[None]],
+    services: tuple[str, ...],
+    *,
+    compose_project: str,
+    workspace_id: str,
+    budget_seconds: int,
+    deadline: float,
+    declared_services: tuple[str, ...] | None,
+    dependency_conditions: Mapping[str, Mapping[str, str]],
+) -> None:
+    """Force-recreate ``services``, each after the recreated prerequisites it depends on.
+
+    ``--no-deps`` skips every depends_on health gate, so a dependent is recreated
+    only once each prerequisite recreated here satisfies its condition. The runtime
+    is inspected only when nothing else can be recreated; when it is unreadable,
+    or a prerequisite is gone or failed with nothing left to wait on, the rest are
+    recreated in depends_on order and the dependency wait and ``up`` take over.
+    Raises ``DependencyWaitTimeoutError`` naming the settling prerequisites when
+    the budget runs out first.
+    """
+    pending = set(services)
+    recreated: set[str] = set()
+    gated = True
+    while pending:
+        # A cycle (rejected by compose) cannot block every recreate.
+        unblocked = [
+            name
+            for name in sorted(pending)
+            if not dependency_conditions.get(name, {}).keys() & pending
+        ] or sorted(pending)
+        ready = [
+            name
+            for name in unblocked
+            if not gated or not dependency_conditions.get(name, {}).keys() & recreated
+        ]
+        settling: dict[str, str] = {}
+        if not ready:
+            try:
+                snapshot = await inspect_resume_runtime(compose_project)
+            except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
+                _log.warning(
+                    "executor.resume_dependency_recreate_inspect_failed",
+                    workspace_id=workspace_id,
+                    compose_project_name=compose_project,
+                    error=redact_audit_text(repr(exc), limit=500),
+                )
+                snapshot = None
+            if snapshot is None or snapshot.stack_state in _UNREADABLE_STACK_STATES:
+                gated = False
+                continue
+            containers = {
+                service.name: service
+                for service in _dependency_containers(snapshot, declared_services)
+            }
+            for name in unblocked:
+                can_recreate, waiting_on = _prerequisite_progress(
+                    name,
+                    containers=containers,
+                    pending=pending,
+                    dependency_conditions={
+                        name: {
+                            prerequisite: condition
+                            for prerequisite, condition in dependency_conditions[name].items()
+                            if prerequisite in recreated
+                        }
+                    },
+                )
+                if can_recreate:
+                    ready.append(name)
+                settling.update(waiting_on)
+            if not ready and not settling:
+                gated = False
+                continue
+        if ready:
+            for name in ready:
+                await recreate(name)
+                pending.discard(name)
+                recreated.add(name)
+            continue
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            raise DependencyWaitTimeoutError(budget_seconds=budget_seconds, recovering=settling)
+        _log.info(
+            "executor.resume_dependency_recreate_wait",
+            workspace_id=workspace_id,
+            compose_project_name=compose_project,
+            recovering=settling,
+            remaining_seconds=round(remaining, 1),
+        )
+        await _sleep(min(DEPENDENCY_POLL_INTERVAL_SECONDS, remaining))
+
+
 async def restart_runtime_for_monitor_resume(
     compose: Any,
     *,
@@ -338,7 +435,8 @@ async def restart_runtime_for_monitor_resume(
     decides whether the agent is still recreated (auth overlays, env and #1090's
     setup replay depend on it); the tolerated failure is returned so the caller
     can record it. A failed agent recreate raises ``AgentRecreateError``.
-    ``dependency_conditions`` (compose ``depends_on``) orders the stopped starts.
+    ``dependency_conditions`` (compose ``depends_on``) orders the recreates and
+    the stopped starts.
     """
     common: dict[str, Any] = {
         "project_name": compose_project,
@@ -347,6 +445,7 @@ async def restart_runtime_for_monitor_resume(
         "wait": True,
         "compose_up_timeout_seconds": budget_seconds,
     }
+    deadline = _monotonic() + budget_seconds
     recreated = tuple(sorted(set(recreate_services) - {AGENT_SERVICE_NAME}))
     if recreated:
         _log.info(
@@ -355,8 +454,9 @@ async def restart_runtime_for_monitor_resume(
             compose_project_name=compose_project,
             services=list(recreated),
         )
+
         # One service per call: ``--no-deps`` then skips every depends_on health gate.
-        for service in recreated:
+        async def _recreate(service: str) -> None:
             await compose.ensure_project_up(
                 **{**common, "wait": False},
                 force_recreate=True,
@@ -365,6 +465,17 @@ async def restart_runtime_for_monitor_resume(
             )
             if on_recreated is not None:
                 on_recreated(service)
+
+        await _recreate_in_dependency_order(
+            _recreate,
+            recreated,
+            compose_project=compose_project,
+            workspace_id=workspace_id,
+            budget_seconds=budget_seconds,
+            deadline=deadline,
+            declared_services=dependency_services,
+            dependency_conditions=dependency_conditions or {},
+        )
 
     started = set(recreated)
 
@@ -395,6 +506,7 @@ async def restart_runtime_for_monitor_resume(
             declared_services=dependency_services,
             recreated_services=recreated,
             dependency_conditions=dependency_conditions,
+            deadline=deadline,
         )
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
