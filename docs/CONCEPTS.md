@@ -438,7 +438,6 @@ copy pasted into another thread is no evidence:
 | `fixed_branch_evidence` | the branch commit an outdated thread's evidence grep matched |
 | `false_positive` | the agent's one-line reason (required by the prompt) |
 | `deferred` | the agent's reason and the tracking-issue link |
-| `operator_acknowledged` | a fixed acknowledgement sentence and the guide operation id |
 
 Reason text is redacted and markdown-escaped: replies never contain `@`, so no
 bot or human is summoned, and a pasted marker cannot be forged. The record
@@ -472,11 +471,11 @@ silently after new or edited feedback blocks. Threads resolved
 by any other login are that person's or bot's disposition and never block.
 
 One invariant governs every disposition the monitor records, posted or not: it
-is bound to the conversation it answers — an acknowledgement to the flagged one,
-any other once a gate audit first sees its reply resolved — and holds only while
-an audit shows the thread still resolved by AWF's identity with that conversation
-before its reply. A reopen, a resolution by someone else, or a new or edited
-comment retires it for good: its marker then certifies nothing — the monitor
+is bound to the conversation it answers once a gate audit first sees its reply
+resolved, and holds only while an audit shows the thread still resolved by AWF's
+identity with that conversation before its reply. A reopen, a resolution by
+someone else, or a new or edited comment retires it for good: its marker then
+certifies nothing — the monitor
 remembers a retired reply by the conversation it followed, whatever later
 happens to the record — so a silent re-resolve blocks. A reply whose AWF
 resolve landed is recorded as such (saved at once), so it is retired by a reopen
@@ -484,10 +483,9 @@ just like a bound one even before any audit binds it. Every poll whose status
 lists such a reply's thread open again retires it too, as do an audit seeing it
 open, a re-triage and outdated hygiene reaching that thread, so a reopen counts
 even when no gate audit runs before the thread is resolved again. Only a failed
-resolve's reply is reused, by its retry. A retired acknowledgement is
-dropped (the current resolution needs its own `ACK-THREAD`); any other
-disposition loses its reply id, so the monitor's next resolve of the thread
-posts a fresh reply instead of resolving on the old one. With no record at all
+resolve's reply is reused, by its retry. A retired disposition loses its reply
+id, so the monitor's next resolve of the thread posts a fresh reply instead of
+resolving on the old one. With no record at all
 (a re-adopted PR whose record did not cross), an agent's marker is still the
 evidence. A
 failing thread is
@@ -514,22 +512,12 @@ reused or adopted PR, a thread the monitor already recorded a disposition for
 (or that carries an AWF marker at all) was handled after the rollout, so no
 baseline ever exempts it.
 
-An operator acknowledges flagged threads with the ordinary guide path and an
-explicit token per thread (`awf workspace guide <id> --directive 'ACK-THREAD
-<thread id> …'`); a directive that merely mentions a thread id acknowledges
-nothing. Only flagged ids are acknowledged, on intake of the guide and whatever
-its agent run answers; AWF then posts an `operator_acknowledged` reply
-into each such thread — never the directive text — and the gate passes once
-every AWF resolution carries a marker. An acknowledgement answers only the
-conversation that was flagged, under the invariant above: a reopen also drops the
-flag. Those acknowledgement replies are
-the gate's only writes: it posts them all first, then decides on ONE complete audit
-taken after the last of them — never on the snapshot they were posted from. A reply
-counts only while the conversation it followed is the acknowledged one, so an edit
-landing between the audit and the reply is never certified, and an acknowledgement
-posted in a cycle that its final audit does not certify (edited, reopened, gone, or
-the audit failed) keeps that cycle from certifying. Flags bind the conversation that
-final audit saw.
+There is no acknowledgement directive: an operator clears a flagged thread by
+reopening it. The next poll that lists the thread open drops its flag and clears
+its verdict, so `decide()` re-triages it through the normal fix cycle, which posts
+a fresh disposition reply before resolving it. Without this, a FIXED or FALSE
+POSITIVE thread whose comments did not change would never re-enter triage. The
+gate itself never writes to the forge. It decides on ONE complete audit.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
 comment carrying the marker; the resolution audit is reported unsupported, so

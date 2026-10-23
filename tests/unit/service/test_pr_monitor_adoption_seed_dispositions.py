@@ -5,9 +5,9 @@ published, with its reply id) in a review thread before resolving it. It follows
 the verdict it answers across the supersede boundary, under the same
 head-continuity rule: a FIXED / branch-evidence / FALSE POSITIVE disposition is a
 claim about the code at the predecessor's head, so it crosses only when that head
-is still the adopted one; a DEFER or an operator acknowledgement judges the
-feedback and crosses either way. Without the sidecar a seeded resolvable verdict
-parks ``THREAD_DISPOSITION_*_MISSING`` (or re-posts its reply) on the successor.
+is still the adopted one; a DEFER judges the feedback and crosses either way.
+Without the sidecar a seeded resolvable verdict parks ``THREAD_DISPOSITION_*_MISSING``
+(or re-posts its reply) on the successor.
 """
 
 from __future__ import annotations
@@ -48,7 +48,6 @@ _HEAD_DEPENDENT = [
 ]
 _HEAD_INDEPENDENT = [
     ("PRRT_test_deferred", "deferred", "defer"),
-    ("PRRT_test_ack", "operator_acknowledged", None),
 ]
 
 

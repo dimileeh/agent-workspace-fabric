@@ -7,10 +7,9 @@ marker::
     <!-- AWF:thread-disposition:v1 class=<class> thread=<thread id> -->
 
 followed by the disposition: the fix commit(s) for ``fixed``, the agent's own
-reason for ``false_positive`` / ``deferred`` (plus the tracking issue), the
-matched branch commit for ``fixed_branch_evidence`` and the guide operation for
-``operator_acknowledged``. The thread id binds the marker to its thread, so a
-copy pasted anywhere else is not evidence.
+reason for ``false_positive`` / ``deferred`` (plus the tracking issue) and the
+matched branch commit for ``fixed_branch_evidence``. The thread id binds the
+marker to its thread, so a copy pasted anywhere else is not evidence.
 
 This module is the pure half: the per-item record persisted in
 ``MonitorState.threads_addressed_ids`` (``_item_disposition_key``), the checks
@@ -76,7 +75,6 @@ DispositionClass = Literal[
     "fixed_branch_evidence",
     "false_positive",
     "deferred",
-    "operator_acknowledged",
 ]
 DISPOSITION_CLASSES: tuple[DispositionClass, ...] = get_args(DispositionClass)
 RESOLVED_BY_OTHERS = "resolved_by_others"
@@ -96,17 +94,13 @@ _LABELS: dict[str, str] = {
     "fixed_branch_evidence": "fixed (branch evidence)",
     "false_positive": "false positive",
     "deferred": "deferred",
-    "operator_acknowledged": "operator acknowledged",
     RESOLVED_BY_OTHERS: RESOLVED_BY_OTHERS_LABEL,
     LEGACY_BASELINE: LEGACY_BASELINE_LABEL,
 }
-# An operator acknowledges a flagged thread only with this explicit token; a
-# directive that merely mentions the thread id (to re-check it, say) does not.
-_ACK_THREAD_RE = re.compile(r"(?<![\w-])ACK-THREAD[ \t]+(?P<thread>PRRT_[A-Za-z0-9_-]+)")
 _PAYLOAD_VERSION = 1
 _UNSAFE_URL_CHARACTERS = frozenset('<>"`')
 _BLOCKER_LISTED_IDS = 10
-_BLOCKER_MAX_CHARS = 480
+_BLOCKER_MAX_CHARS = 560
 
 
 @dataclass(frozen=True)
@@ -123,9 +117,9 @@ class ThreadDisposition:
     source: str = "agent_verdict"
     reply_comment_id: str | None = None
     thread_body_hash: str | None = None
-    # The audited conversation (before AWF's reply) this disposition answers: an
-    # acknowledgement's flagged one; any other's, once a gate audit saw its reply
-    # resolved. It holds only while that conversation stays resolved (#1018).
+    # The audited conversation (before AWF's reply) this disposition answers, once
+    # a gate audit saw its reply resolved. It holds only while that conversation
+    # stays resolved (#1018).
     conversation_digest: str | None = None
     # AWF's own resolve on this reply landed: unlike a failed resolve's reply, it
     # is never reused once the thread is seen open again (PRRT_kwDOSJAM6s6vZ4nJ).
@@ -137,15 +131,11 @@ class ThreadDisposition:
 
     @property
     def is_bound(self) -> bool:
-        """Whether this disposition answers a resolution an audit saw.
+        """Whether a gate audit bound this disposition to the resolution it saw.
 
-        An acknowledgement always does (a missing conversation then matches
-        none); any other once a gate audit bound it. Seeing the thread open again
-        means a bound disposition's resolution was reopened.
+        Seeing the thread open again means that resolution was reopened.
         """
-        return self.conversation_digest is not None or (
-            self.disposition_class == "operator_acknowledged"
-        )
+        return self.conversation_digest is not None
 
     @property
     def answers_resolution(self) -> bool:
@@ -298,24 +288,19 @@ def sync_item_disposition(
 
 def retire_item_disposition(
     state: MonitorState, disposition: ThreadDisposition
-) -> ThreadDisposition | None:
+) -> ThreadDisposition:
     """Retire ``disposition``: its thread reopened, or its conversation moved on.
 
     Its reply, posted or not, answers nothing current any more. A posted reply is
     remembered by the conversation it followed (its binding, else as read right
     after posting it), so its marker never certifies again, whatever happens to
-    the record (PRRT_kwDOSJAM6s6vaq4v). An operator
-    acknowledgement is dropped: only a new ``ACK-THREAD`` for the current
-    resolution replaces it. Any other record keeps its evidence but loses its
-    reply id, binding and landed resolve, so the thread's next AWF resolve posts
-    a fresh reply. Returns the record left in state.
+    the record (PRRT_kwDOSJAM6s6vaq4v). The record keeps its evidence but loses
+    its reply id, binding and landed resolve, so the thread's next AWF resolve
+    posts a fresh reply. Returns the record left in state.
     """
     followed = disposition.conversation_digest or disposition.reply_conversation_digest
     if disposition.reply_comment_id and followed is not None:
         state.mark_addressed(_disposition_retired_key(disposition.item_id, followed), "retired")
-    if disposition.disposition_class == "operator_acknowledged":
-        state.threads_addressed_ids.pop(_item_disposition_key(disposition.item_id), None)
-        return None
     retired = replace(
         disposition,
         reply_comment_id=None,
@@ -336,19 +321,36 @@ def retire_reopened_dispositions(
     the reply landed, so a later poll listing its thread unresolved is a reopen,
     even if no gate audit runs before the thread is resolved again. Only a failed
     resolve's reply is kept, for its retry to reuse. Returns the retired item ids.
+
+    A reopen is also how an operator clears a thread the gate flagged
+    ``REVIEW_THREAD_DISPOSITION_UNVERIFIED``: its flag is dropped and its verdict
+    cleared, so ``decide()`` re-triages it through the normal fix cycle, which
+    posts a fresh disposition before resolving it. A FIXED or FALSE POSITIVE
+    thread whose comments did not change would not re-enter triage otherwise.
     """
+    from awf.runtime.pr_monitor_runner.helpers import _clear_addressed_state_by_id
+
     retired: list[str] = []
+    retriaged: list[str] = []
     for thread in (*status.unresolved_inline_threads, *status.outdated_unresolved_inline_threads):
-        disposition = read_item_disposition(state, thread.thread_id)
-        if disposition is not None and disposition.answers_resolution:
+        thread_id = thread.thread_id
+        flagged = state.threads_addressed_ids.pop(_disposition_unverified_key(thread_id), None)
+        disposition = read_item_disposition(state, thread_id)
+        if disposition is not None and (
+            disposition.answers_resolution or (flagged and disposition.reply_comment_id)
+        ):
             retire_item_disposition(state, disposition)
-            retired.append(thread.thread_id)
-    if retired:
+            retired.append(thread_id)
+        if flagged:
+            _clear_addressed_state_by_id(state, thread_id)
+            retriaged.append(thread_id)
+    if retired or retriaged:
         _log.info(
             "monitor.thread_disposition_retired",
             workspace_id=workspace_id,
             pr_number=status.number,
             thread_ids=retired,
+            retriaged_thread_ids=retriaged,
             reason_code=REVIEW_THREAD_DISPOSITION_UNVERIFIED,
         )
     return retired
@@ -491,8 +493,6 @@ def render_disposition_reply(disposition: ThreadDisposition) -> str:
             f"**AWF disposition: {label}.** Reason: {reason} "
             f"Tracked in {_safe_url(disposition.issue_url)}."
         )
-    elif disposition.disposition_class == "operator_acknowledged":
-        line = f"**AWF disposition: {label}.** {reason}"
     else:
         line = f"**AWF disposition: {label}.** Reason: {reason}"
     return f"{marker}\n{line}"
@@ -536,65 +536,16 @@ def disposition_count_rows(counts: Mapping[str, int]) -> tuple[tuple[str, int], 
     return tuple((_LABELS[key], int(counts.get(key, 0))) for key in keys)
 
 
-def acknowledged_thread_ids(directive: str) -> tuple[str, ...]:
-    """Thread ids a guide directive acknowledges with ``ACK-THREAD <thread id>``."""
-    return tuple(
-        dict.fromkeys(match.group("thread") for match in _ACK_THREAD_RE.finditer(directive))
-    )
-
-
-def unverified_flag(conversation_digest: str) -> str:
-    """The unverified-flag value: the reason code bound to the audited conversation."""
-    return f"{REVIEW_THREAD_DISPOSITION_UNVERIFIED}:{conversation_digest}"
-
-
-def acknowledge_unverified_threads(
-    state: MonitorState,
-    thread_ids: Sequence[str],
-    *,
-    operation_id: str | None,
-) -> tuple[str, ...]:
-    """Record an operator acknowledgement for every *flagged* thread in ``thread_ids``.
-
-    ``thread_ids`` are the guide's explicit ``ACK-THREAD`` tokens
-    (:func:`acknowledged_thread_ids`). Only threads the disposition gate flagged
-    can be acknowledged; acknowledging any other thread records nothing. Each
-    acknowledgement is bound to the conversation its flag was raised for
-    (:func:`unverified_flag`). The gate posts the acknowledgement reply (with its
-    marker) into each thread on its next run, while that conversation stands.
-    """
-    reason = "An AWF operator guide acknowledged this resolution" + (
-        f" (operation {operation_id})" if operation_id else ""
-    )
-    acknowledged: list[str] = []
-    for thread_id in dict.fromkeys(thread_ids):
-        flag_key = _disposition_unverified_key(thread_id)
-        flag = state.threads_addressed_ids.get(flag_key)
-        if not flag:
-            continue
-        record_item_disposition(
-            state,
-            ThreadDisposition(
-                item_id=thread_id,
-                disposition_class="operator_acknowledged",
-                verdict=None,
-                reason=reason,
-                source="operator_guide",
-                conversation_digest=flag.partition(":")[2],
-            ),
-        )
-        state.threads_addressed_ids.pop(flag_key, None)
-        acknowledged.append(thread_id)
-    return tuple(acknowledged)
-
-
 def unverified_blocker_message(thread_ids: Sequence[str]) -> str:
     """Reason-coded NotifyHuman text listing the unverified thread ids (bounded)."""
     head = (
         f"{REVIEW_THREAD_DISPOSITION_UNVERIFIED}: {len(thread_ids)} review thread(s) "
         "resolved by AWF's identity carry no AWF disposition reply: "
     )
-    tail = "; acknowledge each with a workspace guide directive ACK-THREAD followed by its id"
+    tail = (
+        "; to clear one, reopen it: AWF re-triages it through the normal fix cycle and "
+        "posts a fresh disposition before resolving it"
+    )
     listed: list[str] = []
     for thread_id in thread_ids[:_BLOCKER_LISTED_IDS]:
         candidate = ", ".join([*listed, thread_id])

@@ -875,8 +875,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### REVIEW_THREAD_DISPOSITION_UNVERIFIED
 **Problem:** AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's identity carry no AWF disposition reply.
 **Likely Cause:** A thread resolved by AWF's own forge identity has no in-thread `AWF:thread-disposition` marker — it was resolved silently (for example before AWF replied before every resolve, or by hand under the same account). Threads resolved by other logins do not block.
-**Operator Fix:** Inspect the listed threads. Acknowledge each with an explicit `ACK-THREAD <thread id>` token in `awf workspace guide <workspace_id> --directive 'ACK-THREAD <thread id> <why>'` (a bare mention of the id does not acknowledge; AWF then posts the acknowledgement into each thread), or reopen a thread for re-triage.
-**Related Command:** `awf workspace guide <workspace_id> --directive 'ACK-THREAD <thread id> <why>'`
+**Operator Fix:** Inspect the listed threads and reopen each one. AWF then re-triages it through the normal fix cycle and posts a fresh disposition in the thread before resolving it. Do not resolve it again by hand under AWF's account.
+**Related Command:** `awf workspace events <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_unverified](#review_thread_disposition_unverified)
 
 ### RUNTIME_SETUP_REPLAY_FAILED

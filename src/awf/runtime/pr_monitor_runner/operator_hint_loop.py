@@ -35,10 +35,6 @@ from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
 )
-from awf.runtime.pr_monitor_runner.thread_disposition import (
-    acknowledge_unverified_threads,
-    acknowledged_thread_ids,
-)
 from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
@@ -81,16 +77,6 @@ async def handle_operator_hint_action(
     finish_if_pr_terminal_after_cleanup_error: _FinishIfPrTerminalAfterCleanupError,
 ) -> bool:
     """Run one operator-hint repair cycle; return True iff the monitor is terminal."""
-    # #1018: a guide's explicit ``ACK-THREAD <thread id>`` tokens acknowledge the
-    # threads the disposition gate flagged, on intake and whatever the agent later
-    # answers for the rest of the directive; the gate then posts the
-    # acknowledgement marker into each such thread. A bare mention acknowledges
-    # nothing.
-    acknowledge_unverified_threads(
-        state,
-        acknowledged_thread_ids(action.hint.directive or ""),
-        operation_id=action.hint.operation_id,
-    )
     operation = await self._begin_monitor_operation(
         workspace_id=workspace_id,
         operation_type=OperationType.comment_repair,

@@ -155,8 +155,9 @@ def _disposition_unverified_key(thread_id: str) -> str:
     """Build state key flagging a thread the READY_TO_MERGE audit could not verify.
 
     Set when a thread resolved by AWF's own identity carries no AWF disposition
-    marker (#1018). Only flagged threads can be acknowledged by an operator guide;
-    the flag clears once the thread carries a marker.
+    marker (#1018). The flag clears once the thread carries a marker, or when a
+    poll lists the thread open again: that reopen is how an operator clears it,
+    and the thread is re-triaged.
     """
     return f"__awf_disposition_unverified__:{thread_id}"
 

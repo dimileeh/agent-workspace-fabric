@@ -266,8 +266,8 @@ async def test_cert_shows_the_legacy_baseline_count_separately(
     assert len(gh.comments) == 1
     assert "is ready to merge" in gh.comments[0]
     assert (
-        "AWF dispositions: fixed 0, fixed (branch evidence) 0, false positive 1, deferred 0, "
-        f"operator acknowledged 0; resolved by others 0; {_LEGACY_LABEL} 1."
+        "AWF dispositions: fixed 0, fixed (branch evidence) 0, false positive 1, deferred 0"
+        f"; resolved by others 0; {_LEGACY_LABEL} 1."
     ) in gh.comments[0]
 
 

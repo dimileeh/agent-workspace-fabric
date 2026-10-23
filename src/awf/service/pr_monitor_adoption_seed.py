@@ -150,14 +150,14 @@ _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
 # head-continuity rule: without it a seeded resolvable verdict parks for missing
 # evidence, or re-posts a reply the thread already carries. ``fixed`` /
 # ``fixed_branch_evidence`` / ``false_positive`` describe the code at the
-# predecessor's head and cross only with continuity; ``deferred`` and an
-# operator acknowledgement judge the feedback and cross either way. A record
+# predecessor's head and cross only with continuity; ``deferred`` judges the
+# feedback and crosses either way. A record
 # that does not decode to a known class, or names no thread/comment id, stays.
 _ITEM_DISPOSITION_PREFIX = "__awf_item_disposition__:"
 _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
     {"fixed", "fixed_branch_evidence", "false_positive"}
 )
-_HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred", "operator_acknowledged"})
+_HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred"})
 
 # ``__awf_disposition_retired__:<thread id>:<conversation digest>``
 # (``awf.runtime.monitor_state_keys``) is the tombstone of a posted disposition

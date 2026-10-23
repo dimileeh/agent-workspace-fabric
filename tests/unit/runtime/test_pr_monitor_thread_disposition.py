@@ -16,7 +16,6 @@ import pytest
 from awf.runtime.feedback_policy import review_thread_body_hash, review_thread_body_state_key
 from awf.runtime.monitor_state_keys import (
     _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY,
-    _disposition_unverified_key,
     _item_disposition_key,
 )
 from awf.runtime.pr_monitor import (
@@ -41,11 +40,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _drop_stale_review_thread_addressed_state,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition import (
-    REVIEW_THREAD_DISPOSITION_UNVERIFIED,
     THREAD_DISPOSITION_EVIDENCE_MISSING,
     THREAD_DISPOSITION_REASON_MISSING,
     ThreadDisposition,
-    acknowledge_unverified_threads,
     attach_issue_url,
     attach_item_commits,
     copy_item_disposition,
@@ -57,7 +54,6 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     render_disposition_reply,
     sync_item_disposition,
     unverified_blocker_message,
-    unverified_flag,
 )
 
 pytestmark = pytest.mark.unit
@@ -129,16 +125,6 @@ def test_render_reply_neutralizes_mentions_markers_newlines_and_secrets() -> Non
                 "Reason: track the retry budget follow-up",
                 "https://github.com/acme/widgets/issues/7",
             ),
-        ),
-        (
-            ThreadDisposition(
-                item_id="PRRT_test_b",
-                disposition_class="operator_acknowledged",
-                verdict=None,
-                reason="An AWF operator guide acknowledged this resolution",
-                source="operator_guide",
-            ),
-            ("class=operator_acknowledged", "operator acknowledged"),
         ),
         (
             ThreadDisposition(
@@ -485,47 +471,21 @@ def test_disposition_count_rows_orders_all_classes_and_others() -> None:
         ("fixed (branch evidence)", 0),
         ("false positive", 0),
         ("deferred", 1),
-        ("operator acknowledged", 0),
         ("resolved by others", 3),
     )
-
-
-def test_acknowledge_unverified_threads_only_touches_flagged_ids() -> None:
-    state = MonitorState()
-    state.mark_addressed(
-        _disposition_unverified_key("PRRT_test_flagged"), unverified_flag("conversation-1")
-    )
-    acknowledged = acknowledge_unverified_threads(
-        state,
-        ["PRRT_test_flagged", "PRRT_test_unflagged", "PRRT_test_flagged"],
-        operation_id="op_test_1",
-    )
-    assert acknowledged == ("PRRT_test_flagged",)
-    assert _disposition_unverified_key("PRRT_test_flagged") not in state.threads_addressed_ids
-    ack = read_item_disposition(state, "PRRT_test_flagged")
-    assert ack is not None
-    assert ack.disposition_class == "operator_acknowledged"
-    assert ack.source == "operator_guide"
-    assert ack.reason is not None and "op_test_1" in ack.reason
-    assert ack.conversation_digest == "conversation-1"  # bound to the flagged conversation
-    assert read_item_disposition(state, "PRRT_test_unflagged") is None
-
-    state.mark_addressed(
-        _disposition_unverified_key("PRRT_test_two"), REVIEW_THREAD_DISPOSITION_UNVERIFIED
-    )
-    assert acknowledge_unverified_threads(state, ["PRRT_test_two"], operation_id=None) == (
-        "PRRT_test_two",
-    )
-    no_op = read_item_disposition(state, "PRRT_test_two")
-    assert no_op is not None and no_op.reason is not None and "operation" not in no_op.reason
-    assert no_op.conversation_digest is None  # a flag without its conversation binds none
 
 
 def test_unverified_blocker_message_lists_ten_ids_and_counts_rest() -> None:
     ids = [f"PRRT_test_long_{i:010d}" for i in range(12)]
     message = unverified_blocker_message(ids)
     assert message.startswith("REVIEW_THREAD_DISPOSITION_UNVERIFIED:")
-    assert len(message) <= 480
+    # Clearing one is a reopen, which AWF re-triages before resolving it afresh.
+    assert message.endswith(
+        "; to clear one, reopen it: AWF re-triages it through the normal fix cycle and "
+        "posts a fresh disposition before resolving it"
+    )
+    assert "ACK-THREAD" not in message
+    assert len(message) <= 560
     for tid in ids[:10]:
         assert tid in message
     assert ids[10] not in message
@@ -536,7 +496,7 @@ def test_unverified_blocker_message_lists_ten_ids_and_counts_rest() -> None:
     # Forge ids are opaque: very long ones stop listing early but keep the bound.
     long_ids = [f"PRRT_{'x' * 60}{i}" for i in range(6)]
     bounded = unverified_blocker_message(long_ids)
-    assert len(bounded) <= 480
+    assert len(bounded) <= 560
     assert long_ids[0] in bounded
     assert long_ids[5] not in bounded
     assert "more)" in bounded
@@ -679,19 +639,10 @@ def test_sync_item_disposition_keeps_a_posted_reply_no_feedback_follows(
 @pytest.mark.parametrize(
     "bound",
     [
-        ThreadDisposition(
-            item_id="PRRT_test_a",
-            disposition_class="operator_acknowledged",
-            verdict=None,
-            reason="An AWF operator guide acknowledged this resolution",
-            source="operator_guide",
-            reply_comment_id="reply-1",
-            conversation_digest="flagged",
-        ),
         replace(_posted_answering(_thread_with("c-1")), conversation_digest="seen-resolved"),
         replace(_posted_answering(_thread_with("c-1")), resolved=True),
     ],
-    ids=["acknowledgement", "agent-disposition", "resolve-landed"],
+    ids=["agent-disposition", "resolve-landed"],
 )
 def test_sync_item_disposition_retires_a_reply_a_gate_audit_saw_resolved(
     bound: ThreadDisposition,

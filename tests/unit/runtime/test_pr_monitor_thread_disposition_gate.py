@@ -29,24 +29,29 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.monitor_state_keys import _disposition_unverified_key
+from awf.runtime.feedback_policy import review_thread_body_hash, review_thread_body_state_key
+from awf.runtime.monitor_state_keys import _disposition_retired_key, _disposition_unverified_key
 from awf.runtime.pr_monitor import (
+    AddressComments,
     CheckState,
     Merge,
     MergeableState,
     MergeStateStatus,
+    MonitorConfig,
     MonitorState,
     NotifyHuman,
     PRStatus,
     ReviewThread,
     ReviewThreadComment,
+    decide,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     ThreadDisposition,
-    acknowledge_unverified_threads,
     read_item_disposition,
     record_item_disposition,
     retire_reopened_dispositions,
+    sync_item_disposition,
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_disposition_gate,
@@ -351,8 +356,8 @@ async def test_cert_posts_per_class_counts_when_all_markers_present(
     assert len(gh.comments) == 1
     assert "is ready to merge" in gh.comments[0]
     assert (
-        "AWF dispositions: fixed 2, fixed (branch evidence) 1, false positive 1, deferred 1, "
-        "operator acknowledged 0; resolved by others 3."
+        "AWF dispositions: fixed 2, fixed (branch evidence) 1, false positive 1, deferred 1"
+        "; resolved by others 3."
     ) in gh.comments[0]
     assert await _audit_events(factory, workspace_id) == []
 
@@ -541,13 +546,8 @@ async def test_a_retired_reply_never_certifies_once_its_thread_has_no_record(
     assert (await _gate(runner, workspace_id, state)).blocker is None
     gh.audit = reopened
     await _gate(runner, workspace_id, state)  # the reopen retires the FIXED reply
-    gh.audit = audit
-    assert (await _gate(runner, workspace_id, state)).blocker is not None
-    # The operator acknowledges the silent re-resolve, but the thread reopens
-    # before the acknowledgement is posted: no record is left for it at all.
-    assert acknowledge_unverified_threads(state, [_SILENT], operation_id="op_1") == (_SILENT,)
-    gh.audit = reopened
-    await _gate(runner, workspace_id, state)
+    # Its re-triage leaves the thread open, which drops the record altogether.
+    sync_item_disposition(state, _SILENT, VerdictResult(verdict="needs_human", reason="ask"))
     assert read_item_disposition(state, _SILENT) is None
 
     gh.audit = audit
@@ -596,6 +596,78 @@ async def test_a_reopen_only_a_poll_lists_retires_the_bound_reply(
         == []
     )
     assert read_item_disposition(state, _FRESH) == unbound
+
+
+@pytest.mark.parametrize("reply_comment_id", [None, "reply-1"])
+@pytest.mark.parametrize("audit_sees_reopen", [False, True])
+async def test_reopening_a_flagged_thread_re_triages_it(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    reply_comment_id: str | None,
+    audit_sees_reopen: bool,
+) -> None:
+    # Reopening is how an operator clears REVIEW_THREAD_DISPOSITION_UNVERIFIED: AWF
+    # re-triages the thread through the normal fix cycle, which posts a fresh
+    # disposition before resolving it. A FIXED thread whose comments did not change
+    # would not re-enter triage by itself, so the poll that lists the reopen clears
+    # its verdict and flag, even when a gate audit saw the reopen first. Here the
+    # operator resolved it by hand under AWF's account, before AWF's resolve or
+    # after its reply (to a resolve that failed) was superseded by newer feedback.
+    comments = (ReviewThreadComment(comment_id="1", body="P1: crash on None"),)
+    listed = ReviewThread(
+        thread_id=_SILENT, path="a.py", line=1, body_excerpt="P1", comments=comments
+    )
+    untouched = replace(listed, thread_id=_FRESH)
+    state = settled_baseline_state()
+    for thread in (listed, untouched):
+        state.mark_addressed(thread.thread_id, "fix_committed")
+        state.mark_addressed(
+            review_thread_body_state_key(thread.thread_id), review_thread_body_hash(thread)
+        )
+    record_item_disposition(
+        state,
+        ThreadDisposition(
+            item_id=_SILENT,
+            disposition_class="fixed",
+            verdict="fix_committed",
+            commits=("c" * 40,),
+            reply_comment_id=reply_comment_id,
+            reply_conversation_digest="b" * 64 if reply_comment_id else None,
+        ),
+    )
+    marker = (_marker("fixed", _SILENT),) if reply_comment_id else ()
+    flagged = _thread(_SILENT, bodies=marker, superseded=len(marker), external=(comments[0].body,))
+    gh = _AuditForge(
+        FakeCommandRunner(),
+        audit=ReviewThreadAudit(supported=True, viewer_login=_VIEWER, threads=(flagged,)),
+    )
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    blocked = await _gate(runner, workspace_id, state)
+    assert blocked.blocker is not None and _SILENT in blocked.blocker
+    assert "reopen it: AWF re-triages it through the normal fix cycle" in blocked.blocker
+    reopened = replace(_green_status(), unresolved_inline_threads=(listed, untouched))
+    config = MonitorConfig(auto_merge=False)
+    assert not isinstance(decide(reopened, state, config), AddressComments)
+    if audit_sees_reopen:
+        gh.audit = ReviewThreadAudit(
+            supported=True,
+            viewer_login=_VIEWER,
+            threads=(replace(flagged, is_resolved=False, resolved_by=None),),
+        )
+        assert (await _gate(runner, workspace_id, state, reopened)).blocker is None
+        assert state.threads_addressed_ids[_disposition_unverified_key(_SILENT)]
+
+    retire_reopened_dispositions(state, reopened, workspace_id=workspace_id)
+    action = decide(reopened, state, config)
+
+    assert isinstance(action, AddressComments)
+    assert [t.thread_id for t in action.threads] == [_SILENT]
+    assert _disposition_unverified_key(_SILENT) not in state.threads_addressed_ids
+    # No record left to reuse: the re-triage records, and replies with, a fresh one.
+    assert read_item_disposition(state, _SILENT) is None
+    retired = _disposition_retired_key(_SILENT, "b" * 64) in state.threads_addressed_ids
+    assert retired is (reply_comment_id is not None)
+    assert state.threads_addressed_ids[_FRESH] == "fix_committed"  # never flagged
 
 
 @pytest.mark.parametrize("seen_by", ["poll", "audit"])

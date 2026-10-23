@@ -150,11 +150,9 @@ def get_comment_repair_reasons(
                 "identity carry no AWF disposition reply."
             ),
             (
-                "Inspect the listed threads. Acknowledge each with an explicit "
-                "`ACK-THREAD <thread id>` token in `awf workspace guide <workspace_id> "
-                "--directive 'ACK-THREAD <thread id> <why>'` (a bare mention of the id does not "
-                "acknowledge; AWF then posts the acknowledgement into each thread), or reopen a "
-                "thread for re-triage."
+                "Inspect the listed threads and reopen each one. AWF then re-triages it through "
+                "the normal fix cycle and posts a fresh disposition in the thread before "
+                "resolving it. Do not resolve it again by hand under AWF's account."
             ),
             (
                 "A thread resolved by AWF's own forge identity has no in-thread "
@@ -162,7 +160,7 @@ def get_comment_repair_reasons(
                 "AWF replied before every resolve, or by hand under the same account). Threads "
                 "resolved by other logins do not block."
             ),
-            "awf workspace guide <workspace_id> --directive 'ACK-THREAD <thread id> <why>'",
+            "awf workspace events <workspace_id>",
             reason_catalog_link("REVIEW_THREAD_DISPOSITION_UNVERIFIED"),
         ),
         "THREAD_DISPOSITION_EVIDENCE_MISSING": reason_text_cls(
