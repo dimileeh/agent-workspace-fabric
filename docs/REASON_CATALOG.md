@@ -291,6 +291,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_provenance_missing](#comment_repair_unpublished_provenance_missing)
 
+### COMPANION_SPECS_UNRESOLVED
+**Problem:** A PR monitor resume could not resolve the workspace's companion service specs, so it refused to restart the runtime.
+**Likely Cause:** The stored companion policy could not be parsed. Only the specs say which companions carry env secrets that the restart must recreate, so restarting without them could leave a rotated or revoked secret in a running companion.
+**Operator Fix:** Read the executor.resume_companion_spec_resolution_failed log for the parse error and fix the companion entries in the workspace task_policy. AWF retries the resume and parks the workspace in blocked after repeated failures; run guide on the blocked workspace once the policy is fixed.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#companion_specs_unresolved](#companion_specs_unresolved)
+
 ### COMPLETED_PR_NOT_MERGED
 **Problem:** A completed workspace has a PR, but the PR has not been merged.
 **Likely Cause:** The PR is still open, was closed without merging, or the merge SHA was not recorded.

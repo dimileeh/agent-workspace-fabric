@@ -266,6 +266,7 @@ def test_runtime_setup_replay_failed_has_doctor_guidance() -> None:
     [
         ("MONITOR_RUNTIME_RESTART_EXHAUSTED", ("blocked", "guide")),
         ("MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT", ("docker.startup_timeout_seconds",)),
+        ("COMPANION_SPECS_UNRESOLVED", ("task_policy", "guide")),
     ],
 )
 def test_monitor_runtime_restart_reasons_have_doctor_guidance(
