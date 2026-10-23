@@ -322,6 +322,9 @@ async def dependencies_to_recreate_after_exhaustion(
         return tuple(sorted(str(name) for name in pending))
     parks = 0
     while parks < len(events) and events[parks][0] == MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE:
+        # A later precheck park never recreated what an earlier park carries.
+        if pending := events[parks][1].get(MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY):
+            return tuple(sorted(str(name) for name in pending))
         parks += 1
     if parks == 0:
         return ()

@@ -42,6 +42,9 @@ from tests.unit.control.test_executor_monitor_recovery_parts.test_monitor_resume
     factory,
     fake,
 )
+from tests.unit.control.test_executor_monitor_recovery_parts.test_monitor_resume_restart_precheck_pending import (  # noqa: E501
+    _fail_the_precheck,
+)
 
 _IMPORTED_FIXTURES = (_runtime_unusable, factory, fake)
 
@@ -280,6 +283,42 @@ async def test_park_on_an_unrecorded_timeout_keeps_its_unsettled_dependencies(
 
     await _guide(factory, ws_id)
     compose.calls.clear()
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert compose.calls[0]["services"] == ("postgres",)
+    assert compose.calls[0]["force_recreate"] is True
+
+
+@pytest.mark.unit
+async def test_precheck_park_after_an_unrecorded_timeout_park_keeps_its_dependencies(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later precheck park never hides the pending recreates the earlier park carries."""
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    compose.fail = False
+    _dependency_health(monkeypatch, {"postgres": "unhealthy"})
+    _fail_failure_event_writes(monkeypatch, times=1)
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    await _guide(factory, ws_id)
+    compose.calls.clear()
+    with monkeypatch.context() as precheck:
+        _fail_the_precheck(precheck)
+        for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT):
+            assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    assert compose.calls == []
+    exhausted = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE)
+    assert len(exhausted) == 2
+    await _guide(factory, ws_id)
+
     _dependency_health(monkeypatch, {"postgres": "healthy"})
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
 
