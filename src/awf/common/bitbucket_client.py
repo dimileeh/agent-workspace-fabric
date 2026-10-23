@@ -724,6 +724,9 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
         ``bb:`` comment threads get a child comment (``parent.id``). A ``bbtask:``
         reviewer task has no reply thread, so its disposition is a PR comment whose
         marker names the task id. No mention syntax is added here; callers own the body.
+        A non-idempotent mutation, so ``retry=False`` like the GitHub reply: no 429
+        retry, and no near-limit slow-down between the comment landing and its id
+        reaching the caller, which persists it to never post the reply twice.
         """
         parent_id: str | None = None
         if is_task_thread_id(thread_id):
@@ -746,6 +749,7 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
             f"/pullrequests/{pr_number}/comments",
             operation="bitbucket reply_to_thread",
             json_body=payload,
+            retry=False,
         )
         comment_id = data.get("id") if isinstance(data, dict) else None
         if comment_id is None:

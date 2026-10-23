@@ -14,7 +14,7 @@ import pytest
 
 from awf.common.bitbucket_client import BitbucketClientError
 
-from ._helpers import FakeBitbucket, make_client, repo
+from ._helpers import FakeBitbucket, RecordingSleep, make_client, repo
 
 pytestmark = pytest.mark.unit
 
@@ -42,6 +42,30 @@ async def test_reply_to_task_posts_top_level_comment() -> None:
     assert call.url.path == f"{_PR}/comments"
     assert json.loads(call.content) == {"content": {"raw": "t"}}
     assert reply_id == "502"
+
+
+@pytest.mark.parametrize(
+    ("status", "headers"),
+    [(200, {"X-RateLimit-NearLimit": "true"}), (429, {"Retry-After": "7"})],
+    ids=["near-limit-after-success", "rate-limited"],
+)
+async def test_reply_never_sleeps_or_retries(status: int, headers: dict[str, str]) -> None:
+    # PRRT_kwDOSJAM6s6vbqy5: a disposition reply is a non-idempotent mutation, so
+    # it fails fast like the GitHub reply. A near-limit slow-down after Bitbucket
+    # already created the comment would delay persisting its id, and a cancel or
+    # restart in that window posts a duplicate; a 429 is not retried either.
+    fake = FakeBitbucket()
+    fake.enqueue("POST", f"{_PR}/comments", status=status, json={"id": 503}, headers=headers)
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep, near_limit_delay_seconds=2.5)
+    if status == 200:
+        assert await client.reply_to_thread(thread_id="bb:workspace/repo#42:100", body="d") == "503"
+    else:
+        with pytest.raises(BitbucketClientError) as excinfo:
+            await client.reply_to_thread(thread_id="bb:workspace/repo#42:100", body="d")
+        assert excinfo.value.status == 429
+    assert sleep.delays == []
+    assert len(fake.calls("POST")) == 1
 
 
 async def test_reply_rejects_unrecognized_id() -> None:
