@@ -1060,16 +1060,21 @@ async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
 _OPERATOR_ASK = "also cover empty payloads"
 
 
+@pytest.mark.parametrize("superseded", [0, 1], ids=["right-before-the-reply", "before-outside"])
 async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_reply(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    superseded: int,
 ) -> None:
     # PRRT_kwDOSJAM6s6vbU2H: the operator, under AWF's own account, replies after
     # the status read but before AWF's reply lands. ``fetch_pr_status`` lists none
     # of that identity's comments, so the outside comments still match, yet the
-    # gate would read AWF's reply after it as its answer. The thread is parked for
-    # a human instead of resolved, and the reply retired (saved at once) so its
+    # gate would read AWF's reply after it as its answer. The moved check compares
+    # the full conversation before the reply, that identity's unmarked comments
+    # included, even one newer outside feedback (``superseded``) followed: the
+    # triage read that feedback, never the operator's. The thread is parked for a
+    # human instead of resolved, and the reply retired (saved at once) so its
     # marker never certifies that feedback.
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_own_identity_feedback"
@@ -1083,6 +1088,7 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
         (_ASK,),
         before_reply=followed,
         viewer_bodies=(_OPERATOR_ASK, reply),
+        superseded=superseded,
     )
 
     workspace_id, state, result = await _run_cycle(
@@ -1126,10 +1132,10 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
     ("viewer_bodies", "superseded", "before_reply"),
     [
         (("earlier-reply", "reply"), 0, "d" * 64),
-        ((_OPERATOR_ASK, "reply"), 1, "d" * 64),
+        ((_OPERATOR_ASK, "earlier-reply", "reply"), 0, "d" * 64),
         (("reply", _OPERATOR_ASK), 0, ""),
     ],
-    ids=["awf-reply-precedes", "superseded-by-outside-feedback", "reply-not-newest"],
+    ids=["awf-reply-precedes", "awf-reply-followed-the-operator", "reply-not-newest"],
 )
 async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_the_reply(
     factory: async_sessionmaker[AsyncSession],
@@ -1139,10 +1145,10 @@ async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_
     superseded: int,
     before_reply: str,
 ) -> None:
-    # Only unmarked feedback by AWF's identity right before the reply is unread:
-    # an earlier AWF reply answered what precedes it, newer outside feedback (which
-    # ``fetch_pr_status`` lists) supersedes it, and a comment after the reply is
-    # one the gate already refuses the reply as answering.
+    # Only unmarked feedback by AWF's identity since its previous reply is unread:
+    # that earlier reply already passed this check (or parked the thread for a
+    # human) for what precedes it, and a comment after the reply is one the gate
+    # already refuses the reply as answering.
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_own_identity_answered"
     thread = _commented_thread(tid, _ASK)

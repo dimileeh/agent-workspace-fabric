@@ -343,8 +343,11 @@ When meaningful bot or human feedback appears, AWF:
 7. Posts one in-thread disposition reply per thread (machine marker, class, fix
    commit / reason / issue link), then resolves it; a thread whose reply cannot
    be posted stays open and is parked `needs_human`. A fresh reply is checked
-   against the live thread first: feedback added or edited since the thread was
-   listed retires the reply and leaves the thread open for re-triage.
+   against the full live conversation before it first: feedback added or edited
+   since the thread was listed retires the reply and leaves the thread open for
+   re-triage, and an unmarked comment by AWF's own account since its previous
+   reply in the thread (the operator's, which the monitor never reads) parks the
+   thread `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
@@ -450,7 +453,11 @@ resolved only after the reply succeeded; otherwise it stays open and is parked
 - `THREAD_DISPOSITION_EVIDENCE_MISSING` — FIXED without a commit, DEFER without
   an issue;
 - `THREAD_DISPOSITION_REPLY_FAILED` — the forge rejected the reply (never retried
-  blindly, since a retry could post twice).
+  blindly, since a retry could post twice);
+- `THREAD_DISPOSITION_UNREAD_FEEDBACK` — an unmarked comment by AWF's own account
+  precedes the reply. That account can be the operator's, and
+  `fetch_pr_status` never lists its comments, so the triage never read it. This
+  holds even when newer outside feedback followed it; the reply is retired.
 
 DEFER no longer posts a separate top-level PR comment: the in-thread reply is
 the explanation. A newly posted reply id is saved durably right after the reply
