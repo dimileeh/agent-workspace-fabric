@@ -444,6 +444,75 @@ async def test_outdated_reply_after_unseen_feedback_leaves_the_thread_open(
     assert [t.thread_id for t in action.threads] == [tid]
 
 
+@pytest.mark.parametrize("under_merge_lock", [False, True], ids=["outer-poll", "merge-lock"])
+async def test_outdated_reply_reread_fails_fast_under_the_merge_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    under_merge_lock: bool,
+) -> None:
+    # PRRT_kwDOSJAM6s6vbU2K: pre-merge hygiene runs under ``serialized_merge``
+    # (``wait_on_transient=False``), where the re-read after a fresh reply must not
+    # back off in transport. It fails fast, and a fault releases the lock to retry
+    # next poll: the reply is retired, so that retry re-reads a fresh one, and the
+    # requeued thread blocks this merge meanwhile. The outer poll keeps transport
+    # retries, and a fault there still parks the thread for a human.
+    gh = OrderedForge(FakeCommandRunner())
+    workspace_id, runner = await _runner(factory, tmp_path, gh)
+    tid = "PRRT_test_outdated_reread"
+    retries: list[bool] = []
+    clean = gh.fetch_review_thread_audit
+
+    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+        retries.append(retry)
+        if len(retries) == 1:
+            raise _TRANSIENT
+        return await clean(repo=repo, pr_number=pr_number, retry=retry)
+
+    monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
+    state = MonitorState()
+    _mark(state, tid, "fix_committed")
+    seed_resolvable_disposition(state, tid, "fix_committed", commits=("e" * 40,))
+    status = _status_with_outdated(_outdated_thread(tid))
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+        wait_on_transient=not under_merge_lock,
+    )
+
+    assert [event[0] for event in gh.events] == ["reply"]
+    assert retries == [not under_merge_lock]
+    assert runner._deps.sleep.calls == []
+    requeued = _outdated_resolve_requeued_key(tid)
+    if not under_merge_lock:
+        assert state.threads_addressed_ids[tid] == "needs_human"
+        assert requeued not in state.threads_addressed_ids
+        return
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+    assert ws is not None
+    for kept in (state, _load_state(None, ws)):
+        assert kept.threads_addressed_ids[tid] == "fix_committed"
+        assert kept.threads_addressed_ids[requeued] == "requeued"
+        retired = read_item_disposition(kept, tid)
+        assert retired is not None and retired.reply_comment_id is None
+    events = await _events(factory, workspace_id)
+    assert [(e.payload["outcome"], e.payload["reason_code"]) for e in events] == [
+        ("requeued", "REVIEW_THREAD_AUDIT_UNAVAILABLE")
+    ]
+    assert events[0].payload["evidence"]["forge_reason_code"] == _TRANSIENT.reason_code
+
+    # The next poll, outside the lock, answers with a fresh reply it re-reads.
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    assert [event[0] for event in gh.events] == ["reply", "reply", "resolve"]
+    assert retries == [False, True]
+    assert requeued not in state.threads_addressed_ids
+
+
 async def test_legacy_captured_defer_without_disposition_replies_with_reason_and_issue(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

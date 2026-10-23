@@ -733,11 +733,15 @@ async def _resolve_addressed_outdated_threads(
             thread=preferred,
             monitor_log=monitor_log,
             repo=repo,
+            # Under the merge lock its post-reply re-read fails fast too
+            # (PRRT_kwDOSJAM6s6vbU2K).
+            retry=wait_on_transient,
         )
         if disposition is None:
-            # Parked, or its feedback moved on before the reply (#1018). Persist
-            # now (any reply id too) for the same reason as the permanent-fault
-            # downgrade below: a transient ``_execute`` fault skips ``_persist_state``.
+            # Parked, requeued, or its feedback moved on before the reply (#1018).
+            # Persist now (any reply id too) for the same reason as the permanent-
+            # fault downgrade below: a transient ``_execute`` fault skips
+            # ``_persist_state``.
             await self._persist_state(workspace_id, state)
             continue
         if previous is None or previous.reply_comment_id != disposition.reply_comment_id:

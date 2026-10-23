@@ -90,12 +90,15 @@ async def reply_before_resolve(
     monitor_log: WorkspaceLogSink | None = None,
     source_head_sha: str | None = None,
     repo: RepoRef | None = None,
+    retry: bool = True,
 ) -> ThreadDisposition | None:
     """Post the thread's disposition reply; ``None`` means do NOT resolve.
 
     ``thread`` is the thread as the monitor listed it. With ``repo`` too, a fresh
     reply is checked against the live thread before it is returned
-    (:func:`_reread_thread_after_reply`).
+    (:func:`_reread_thread_after_reply`). ``retry=False`` (outdated hygiene under
+    ``serialized_merge``) makes that re-read fail fast, and a fault requeues the
+    thread for the next poll instead of parking it.
     """
     verdict = state.threads_addressed_ids.get(thread_id)
     disposition = _disposition_for_resolve(state, thread_id, verdict, thread)
@@ -182,9 +185,25 @@ async def reply_before_resolve(
         return disposition
     try:
         moved, followed = await _reread_thread_after_reply(
-            self, repo=repo, pr_number=pr_number, thread=thread
+            self, repo=repo, pr_number=pr_number, thread=thread, retry=retry
         )
     except ForgeClientError as exc:
+        if not retry:
+            # Under the merge lock the re-read never backs off: its fault releases
+            # the lock to retry next poll (PRRT_kwDOSJAM6s6vbU2K).
+            await _requeue_unconfirmed_reply(
+                self,
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                state=state,
+                disposition=disposition,
+                action=action,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+            )
+            return None
         await _park(
             REVIEW_THREAD_AUDIT_UNAVAILABLE,
             "AWF could not re-read this review thread after posting its disposition "
@@ -246,6 +265,7 @@ async def _reread_thread_after_reply(
     repo: RepoRef,
     pr_number: int,
     thread: ReviewThread,
+    retry: bool,
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
 
@@ -257,7 +277,9 @@ async def _reread_thread_after_reply(
     refuses as its answer. An unsupported audit or a thread missing from it is no
     evidence of new feedback.
     """
-    audit = await self._deps.gh.fetch_review_thread_audit(repo=repo, pr_number=pr_number)
+    audit = await self._deps.gh.fetch_review_thread_audit(
+        repo=repo, pr_number=pr_number, retry=retry
+    )
     live = next((t for t in audit.threads if t.thread_id == thread.thread_id), None)
     if not audit.supported or live is None:
         return None, None
@@ -293,6 +315,62 @@ def _conversation_moved(thread: ReviewThread, live: AuditedReviewThread) -> str 
     if listed and live.external_comment_bodies != listed:
         return _FEEDBACK_AFTER_DECISION
     return None
+
+
+async def _requeue_unconfirmed_reply(
+    self: Any,
+    exc: ForgeClientError,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    state: MonitorState,
+    disposition: ThreadDisposition,
+    action: str,
+    base_branch: str | None,
+    remote_branch: str | None,
+    monitor_log: WorkspaceLogSink | None,
+) -> None:
+    """Leave the thread open for the next poll after a fail-fast re-read fault.
+
+    Nothing confirmed the reply followed the listed conversation, so it is retired:
+    the next poll's resolve posts a fresh reply and re-reads that one. The requeue
+    flag blocks this merge meanwhile, and the merge loop backs off after releasing
+    the lock. The verdict stays, so the retry still fires.
+    """
+    thread_id = disposition.item_id
+    retire_item_disposition(state, disposition)
+    await _persist_posted_disposition(
+        self, workspace_id=workspace_id, state=state, item_id=thread_id
+    )
+    state.mark_addressed(_outdated_resolve_requeued_key(thread_id), "requeued")
+    _log.warning(
+        "monitor.thread_disposition_reread_requeued",
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        thread_id=thread_id,
+        reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+        forge_reason_code=exc.reason_code,
+    )
+    await self._record_pr_monitor_audit_event(
+        workspace_id=workspace_id,
+        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+        action=action,
+        outcome="requeued",
+        reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+        pr_number=pr_number,
+        status=None,
+        base_branch=base_branch or "",
+        remote_branch=remote_branch,
+        monitor_log=monitor_log,
+        evidence={
+            "thread_ids": [thread_id],
+            "resolved_thread_count": 0,
+            "requeued_thread_count": 1,
+            "forge_reason_code": exc.reason_code,
+            "error_message": _redact_and_truncate_forge_error(str(exc)),
+            "disposition": disposition.as_payload(),
+        },
+    )
 
 
 async def _with_item_commit_recorded_this_cycle(

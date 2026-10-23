@@ -524,7 +524,12 @@ reopening it. The next poll that lists the thread open drops its flag and clears
 its verdict, so `decide()` re-triages it through the normal fix cycle, which posts
 a fresh disposition reply before resolving it. Without this, a FIXED or FALSE
 POSITIVE thread whose comments did not change would never re-enter triage. The
-gate itself never writes to the forge. It decides on ONE complete audit.
+gate itself never writes to the forge. It decides on ONE complete audit. Under the
+merge lock that audit fails fast, and so does outdated hygiene's re-read after a
+fresh reply: no transport retry or sleep holds the lock. A fault releases the
+lock, and the monitor retries on the next poll. A reply whose re-read faulted is
+retired and its thread requeued, so the retry posts a fresh reply and re-reads
+that one.
 
 On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
 comment carrying the marker; the resolution audit is reported unsupported, so
