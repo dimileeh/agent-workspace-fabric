@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import monitor_handoff, monitor_resume_runtime
+from awf.control.executor import (
+    monitor_handoff,
+    monitor_resume_restart_flow,
+    monitor_resume_runtime,
+)
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import (
     COMPANION_SPECS_UNRESOLVED,
@@ -250,6 +254,41 @@ async def test_resume_never_recreates_a_rewritten_companion_outside_the_active_p
 
     # Explicitly targeting a profiled service starts it even with its profile
     # disabled, so a rewritten ``extra`` must not be force-recreated.
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+    recreate = [call for call in compose.calls if call.get("force_recreate")]
+    assert [call["services"] for call in recreate] == [("backend",), ("agent",)]
+
+
+@pytest.mark.unit
+async def test_resume_never_recreates_an_unsettled_dependency_outside_the_active_profiles(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        _COMPOSE + "  extra:\n    image: extra\n    profiles: [extra]\n", encoding="utf-8"
+    )
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+    # ``extra`` was unsettled at the park, then its profile was disabled before the retry.
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+
+    async def _unsettled(_self: Any, *, workspace_id: str) -> tuple[str, ...]:
+        return ("backend", "extra")
+
+    monkeypatch.setattr(
+        monitor_resume_restart_flow, "dependencies_to_recreate_after_exhaustion", _unsettled
+    )
+    compose = _RecordingCompose()
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
     assert await executor.resume_pr_monitor_handoff(ws_id) is not None
     recreate = [call for call in compose.calls if call.get("force_recreate")]
     assert [call["services"] for call in recreate] == [("backend",), ("agent",)]

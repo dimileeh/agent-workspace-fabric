@@ -96,8 +96,13 @@ async def _restart_compose_runtime_for_monitor_resume(
             )
             if requirements is None or name in requirements.service_names
         }
-        unsettled_services = await dependencies_to_recreate_after_exhaustion(
-            self, workspace_id=workspace_id
+        # The park persisted these names, so a profile disabled since then is refiltered.
+        unsettled_services = tuple(
+            name
+            for name in await dependencies_to_recreate_after_exhaustion(
+                self, workspace_id=workspace_id
+            )
+            if requirements is None or name in requirements.service_names
         )
         recreate_services = tuple(sorted(secret_companions | set(unsettled_services)))
         pending_dependency_recreates = unsettled_services
