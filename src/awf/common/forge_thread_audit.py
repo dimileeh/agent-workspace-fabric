@@ -14,7 +14,10 @@ class AuditedReviewThread:
     """One review thread as the disposition gate needs it, resolved ones included.
 
     ``viewer_comment_bodies`` holds the raw markdown of comments the token's own
-    identity authored (only those can carry AWF's disposition marker), oldest first.
+    identity authored (only those can carry AWF's disposition marker), oldest first;
+    ``viewer_comment_ids`` holds their ids, in the same order, as ``reply_to_thread``
+    returns them (``""`` when the forge gave none), so a re-read can tell the reply
+    AWF just posted from an older one.
     The first ``superseded_viewer_comments`` of them predate the thread's newest
     comment by anyone else (or the newest edit to any comment), so they answered earlier
     feedback, not the current one.
@@ -33,6 +36,7 @@ class AuditedReviewThread:
     is_outdated: bool
     resolved_by: str | None
     viewer_comment_bodies: tuple[str, ...] = ()
+    viewer_comment_ids: tuple[str, ...] = ()
     superseded_viewer_comments: int = 0
     conversation_digest: str = ""
     conversation_digest_before_reply: str = ""

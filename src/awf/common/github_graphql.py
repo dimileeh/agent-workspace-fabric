@@ -304,7 +304,7 @@ query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int
           isOutdated
           resolvedBy { login }
           comments(first: 100) {
-            nodes { body bodyText viewerDidAuthor createdAt lastEditedAt }
+            nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -321,7 +321,7 @@ query ReviewThreadDispositionAuditComments($threadId: ID!, $cursor: String!) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $cursor) {
-        nodes { body bodyText viewerDidAuthor createdAt lastEditedAt }
+        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
       }
     }

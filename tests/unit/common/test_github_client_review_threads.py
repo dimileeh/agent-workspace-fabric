@@ -251,6 +251,24 @@ async def test_audit_keeps_only_viewer_authored_bodies_and_null_resolver() -> No
     assert audit.threads[0].viewer_comment_bodies == ("awf reply",)
 
 
+async def test_audit_ids_viewer_comments_as_reply_to_thread_returns_them() -> None:
+    # PRRT_kwDOSJAM6s6veO2F: the post-reply re-read finds the reply it just posted
+    # by id, never by taking an older AWF marker for it.
+    fake = FakeCommandRunner()
+    thread = _audit_thread(
+        "PRRT_test_a",
+        comments=[
+            {"id": "PRRC_feedback", "databaseId": 990, "body": "P1", "viewerDidAuthor": False},
+            {"id": "PRRC_1", "databaseId": 991, "body": "awf reply", "viewerDidAuthor": True},
+            {"id": "PRRC_2", "body": "node id only", "viewerDidAuthor": True},
+            {"body": "no id", "viewerDidAuthor": True},
+        ],
+    )
+    fake.queue_result(stdout=_audit_page([thread], cursor=None))
+    audit = await GitHubClient(fake).fetch_review_thread_audit(repo=_REPO, pr_number=7)
+    assert audit.threads[0].viewer_comment_ids == ("991", "PRRC_2", "")
+
+
 async def test_audit_lists_comments_from_outside_awfs_identity_as_status_does() -> None:
     """``fetch_pr_status`` lists exactly these comments, by ``bodyText`` (and only a thread
     with any), so an edit keeping the count still differs (PRRT_kwDOSJAM6s6vWLkv)."""

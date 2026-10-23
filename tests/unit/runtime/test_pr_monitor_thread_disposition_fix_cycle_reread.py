@@ -86,6 +86,7 @@ def _serve_live_thread(
     error: GitHubClientError | None = None,
     before_reply: str = "",
     viewer_bodies: tuple[str, ...] = (),
+    viewer_ids: tuple[str, ...] = (),
     superseded: int = 0,
 ) -> list[int]:
     """Make the audit list ``thread_id`` with ``bodies``; return the PRs it audited."""
@@ -102,6 +103,7 @@ def _serve_live_thread(
             is_outdated=False,
             resolved_by=None,
             viewer_comment_bodies=viewer_bodies,
+            viewer_comment_ids=viewer_ids,
             superseded_viewer_comments=superseded,
             conversation_digest_before_reply=before_reply,
             external_comment_bodies=bodies,
@@ -229,6 +231,13 @@ async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
 _OPERATOR_ASK = "also cover empty payloads"
 
 
+def _own_comment_ids(names: tuple[str, ...]) -> tuple[str, ...]:
+    """The audit's ids for AWF's identity's comments: ``reply`` is the one just posted."""
+    return tuple(
+        "reply-1" if name == "reply" else f"own-{index}" for index, name in enumerate(names)
+    )
+
+
 @pytest.mark.parametrize(
     ("viewer_bodies", "superseded"),
     [
@@ -236,12 +245,14 @@ _OPERATOR_ASK = "also cover empty payloads"
         ((_OPERATOR_ASK, "reply"), 1),
         ((_OPERATOR_ASK, "parked-reply", "reply"), 2),
         ((_OPERATOR_ASK,), 0),
+        (("earlier-reply", _OPERATOR_ASK), 0),
     ],
     ids=[
         "right-before-the-reply",
         "before-outside-feedback",
         "before-a-superseded-awf-reply",
         "reply-not-yet-in-the-re-read",
+        "after-an-earlier-reply-in-a-stale-re-read",
     ],
 )
 async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_reply(
@@ -261,7 +272,9 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
     # such feedback superseded bounds nothing (PRRT_kwDOSJAM6s6vbrwH): the one an
     # earlier park retired, say, before a reviewer reply re-triaged the thread.
     # A stale re-read that does not show the reply yet bounds nothing either:
-    # every comment of that identity it shows is unread (PRRT_kwDOSJAM6s6vc8M9).
+    # every comment of that identity it shows is unread (PRRT_kwDOSJAM6s6vc8M9),
+    # and an earlier AWF reply it does show is not the reply, so the comment after
+    # it precedes the reply too (PRRT_kwDOSJAM6s6veO2F).
     # The thread is parked for a human instead of resolved, and the reply retired
     # (saved at once) so its marker never certifies that feedback.
     gh = OrderedForge(FakeCommandRunner())
@@ -276,6 +289,7 @@ async def test_fix_cycle_parks_on_unmarked_own_identity_feedback_before_the_repl
         (_ASK,),
         before_reply=followed,
         viewer_bodies=tuple(marker if body.endswith("reply") else body for body in viewer_bodies),
+        viewer_ids=_own_comment_ids(viewer_bodies),
         superseded=superseded,
     )
 
@@ -359,6 +373,7 @@ async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_
         (_ASK,),
         before_reply=before_reply,
         viewer_bodies=bodies,
+        viewer_ids=_own_comment_ids(viewer_bodies),
         superseded=superseded,
     )
 
@@ -407,6 +422,7 @@ async def test_fix_cycle_re_reads_a_reply_to_a_thread_the_settle_feed_does_not_l
         (_ASK, "and cover empty payloads too"),
         before_reply="f" * 64,
         viewer_bodies=tuple(marker if body == "reply" else body for body in viewer_bodies),
+        viewer_ids=_own_comment_ids(viewer_bodies),
     )
 
     _, state, _ = await _run_cycle(

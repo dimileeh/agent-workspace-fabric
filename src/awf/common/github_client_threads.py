@@ -47,10 +47,7 @@ async def reply_to_thread(self: GitHubClient, *, thread_id: str, body: str) -> s
         retry_policy=RetryPolicy.NEVER,
     )
     comment = _dig(payload, "data", "addPullRequestReviewThreadReply", "comment") or {}
-    database_id = comment.get("databaseId")
-    comment_id = (
-        str(database_id) if database_id is not None else _clean_optional_str(comment.get("id"))
-    )
+    comment_id = _comment_id(comment)
     if not comment_id:
         raise GitHubClientError(
             operation="reply_to_thread",
@@ -58,6 +55,12 @@ async def reply_to_thread(self: GitHubClient, *, thread_id: str, body: str) -> s
             stderr="addPullRequestReviewThreadReply returned no comment id",
         )
     return comment_id
+
+
+def _comment_id(comment: dict[str, Any]) -> str | None:
+    """A review comment's id as ``reply_to_thread`` returns it: database id, else node id."""
+    database_id = comment.get("databaseId")
+    return str(database_id) if database_id is not None else _clean_optional_str(comment.get("id"))
 
 
 async def fetch_review_thread_audit(
@@ -147,6 +150,7 @@ async def _audited_thread(
         comment_nodes.extend(_connection_nodes(page))
         cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
     viewer_bodies: list[str] = []
+    viewer_ids: list[str] = []
     viewer_posted_at: list[datetime | None] = []
     superseded = 0
     latest_edit: datetime | None = None
@@ -160,6 +164,7 @@ async def _audited_thread(
             superseded = len(viewer_bodies)  # newer feedback outdates earlier replies
         elif isinstance(body := comment.get("body"), str):
             viewer_bodies.append(body)
+            viewer_ids.append(_comment_id(comment) or "")
             viewer_posted_at.append(_parse_github_datetime(comment.get("createdAt")))
     if latest_edit is not None:
         # An edit keeps the feedback's place in the list, so a reply posted before
@@ -173,6 +178,7 @@ async def _audited_thread(
         is_outdated=node.get("isOutdated") is True,
         resolved_by=_clean_optional_str(_dig(node, "resolvedBy", "login")),
         viewer_comment_bodies=tuple(viewer_bodies),
+        viewer_comment_ids=tuple(viewer_ids),
         superseded_viewer_comments=superseded,
         conversation_digest=_conversation_digest(comment_nodes),
         conversation_digest_before_reply=_conversation_digest(comment_nodes[:-1])

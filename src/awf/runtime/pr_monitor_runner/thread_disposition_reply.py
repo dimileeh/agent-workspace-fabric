@@ -158,6 +158,7 @@ async def reply_before_resolve(
                 pr_number=pr_number,
                 thread_id=thread_id,
                 thread=thread,
+                reply_comment_id=posted.reply_comment_id,
                 retry=retry,
             )
         except ForgeClientError as exc:
@@ -291,6 +292,7 @@ async def _reread_thread_after_reply(
     pr_number: int,
     thread_id: str,
     thread: ReviewThread | None,
+    reply_comment_id: str | None,
     retry: bool,
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
@@ -310,13 +312,16 @@ async def _reread_thread_after_reply(
     live = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if not audit.supported or live is None:
         return None, None
+    moved = _conversation_moved(thread, live, reply_comment_id)
     newest = live.viewer_comment_bodies[-1:]
     if newest and disposition_marker_class(newest, thread_id=thread_id) is None:
-        return _conversation_moved(thread, live), None
-    return _conversation_moved(thread, live), live.conversation_digest_before_reply or None
+        return moved, None
+    return moved, live.conversation_digest_before_reply or None
 
 
-def _conversation_moved(thread: ReviewThread | None, live: AuditedReviewThread) -> str | None:
+def _conversation_moved(
+    thread: ReviewThread | None, live: AuditedReviewThread, reply_comment_id: str | None
+) -> str | None:
     """Why the full conversation before AWF's reply is not the one ``thread`` shows.
 
     The triage behind the reply read ``thread``'s outside comments, as
@@ -342,10 +347,12 @@ def _conversation_moved(thread: ReviewThread | None, live: AuditedReviewThread) 
         for index, body in enumerate(bodies)
         if disposition_marker_class((body,), thread_id=live.thread_id) is not None
     }
-    # The newest marker is this reply; scan back over what precedes it. A re-read
-    # showing no marker does not hold the reply yet: the reply follows every
-    # comment it shows (PRRT_kwDOSJAM6s6vc8M9).
-    for index in range(max(marked, default=len(bodies)) - 1, -1, -1):
+    # Scan back over what precedes this reply, found by its comment id. A re-read
+    # too stale to show it bounds nothing with an older marker: the reply follows
+    # every comment it shows (PRRT_kwDOSJAM6s6vc8M9, PRRT_kwDOSJAM6s6veO2F).
+    ids = live.viewer_comment_ids
+    reply = ids.index(reply_comment_id) if reply_comment_id in ids else len(bodies)
+    for index in range(reply - 1, -1, -1):
         if index not in marked:
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:

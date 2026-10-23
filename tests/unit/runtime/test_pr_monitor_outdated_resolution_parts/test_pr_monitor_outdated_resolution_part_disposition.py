@@ -547,6 +547,7 @@ async def test_a_requeued_reply_parks_on_own_identity_feedback_its_re_read_finds
             is_outdated=True,
             resolved_by=None,
             viewer_comment_bodies=("also cover empty payloads", gh.events[0][2]),
+            viewer_comment_ids=("own-0", "reply-1"),
             conversation_digest_before_reply="f" * 64,
         )
         return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot", threads=(live,))
