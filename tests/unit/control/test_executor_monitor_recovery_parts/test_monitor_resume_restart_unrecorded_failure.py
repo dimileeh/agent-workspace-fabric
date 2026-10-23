@@ -25,11 +25,14 @@ from awf.control.executor.constants import (
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from tests.unit.control.test_executor_monitor_recovery_parts.test_monitor_resume_restart_escalation import (  # noqa: E501
+    _POSTGRES_COMPOSE,
     _SECRET,
+    _dependency_health,
     _events,
     _executor,
     _fail_failure_event_writes,
     _fail_the_next_streak_count,
+    _guide,
     _noop_persist,
     _runtime_unusable,
     _ScriptedCompose,
@@ -241,3 +244,44 @@ async def test_unrecorded_failure_after_an_unrecorded_recovery_still_counts(
     exhausted = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE)
     assert exhausted[0].payload is not None
     assert exhausted[0].payload["consecutive_failures"] == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT
+
+
+@pytest.mark.unit
+async def test_park_on_an_unrecorded_timeout_keeps_its_unsettled_dependencies(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guided retry still recreates what the unrecorded parking timeout left wedged."""
+    (tmp_path / "compose.yml").write_text(_POSTGRES_COMPOSE, encoding="utf-8")
+    ws_id = await _seed(factory, tmp_path)
+    compose = _ScriptedCompose()
+    executor = _executor(fake, factory, tmp_path, compose)
+    for _ in range(MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1):
+        assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    compose.fail = False
+    _dependency_health(monkeypatch, {"postgres": "unhealthy"})
+    _fail_failure_event_writes(monkeypatch, times=1)
+
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+
+    assert await _status(factory, ws_id) == WorkspaceStatus.blocked.value
+    failed = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE)
+    assert len(failed) == MONITOR_RUNTIME_RESTART_FAILURE_LIMIT - 1
+    assert all(
+        event.payload is not None and "unsettled_dependencies" not in event.payload
+        for event in failed
+    )
+    exhausted = await _events(factory, ws_id, MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE)
+    assert exhausted[0].payload is not None
+    assert exhausted[0].payload["pending_dependency_recreates"] == ["postgres"]
+    assert executor._restart_streak_unrecorded_failures == {}
+
+    await _guide(factory, ws_id)
+    compose.calls.clear()
+    _dependency_health(monkeypatch, {"postgres": "healthy"})
+    assert await executor.resume_pr_monitor_handoff(ws_id) is not None
+
+    assert compose.calls[0]["services"] == ("postgres",)
+    assert compose.calls[0]["force_recreate"] is True

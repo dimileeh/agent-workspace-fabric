@@ -299,6 +299,7 @@ async def dependencies_to_recreate_after_exhaustion(
     them as still pending, so the next retry recreates them again. A precheck
     failure never reached the restart, so it and any park it caused are skipped.
     A usable resume whose ``recovered`` write failed closes the park all the same.
+    A park reached by an unrecorded failure carries its dependencies as pending.
     """
     since = _unpersisted_recoveries(self).get(workspace_id)
     try:
@@ -393,6 +394,9 @@ async def escalate_monitor_resume_restart_failure(
             "stderr": stderr,
         },
     }
+    # The park drops the unrecorded failures, so it keeps their dependency evidence.
+    if unsettled := _unrecorded_unsettled_dependencies(self, workspace_id=workspace_id):
+        payload[MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY] = unsettled
     try:
         parked = await _park_blocked(
             self, workspace_id=workspace_id, monitor_owner_id=monitor_owner_id, payload=payload
@@ -417,6 +421,19 @@ async def escalate_monitor_resume_restart_failure(
         last_error_reason_code=error.reason_code,
     )
     return True
+
+
+def _unrecorded_unsettled_dependencies(self: Any, *, workspace_id: str) -> list[str]:
+    """Return the newest unrecorded restart failure's dependencies left to recreate."""
+    for event in reversed(_unrecorded_failures(self).get(workspace_id, ())):
+        # A precheck failure carries neither key, so it never supplies the names.
+        payload = event.get("payload") or {}
+        unsettled = payload.get(
+            MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY
+        ) or payload.get(MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY)
+        if unsettled:
+            return sorted(str(name) for name in unsettled)
+    return []
 
 
 async def _park_blocked(
