@@ -76,11 +76,67 @@ RUNTIME_SETUP_REPLAYED_EVENT_TYPE = "workspace.runtime_setup_replayed"
 
 RUNTIME_SETUP_REPLAY_FAILED_EVENT_TYPE = "workspace.runtime_setup_replay_failed"
 
+# Minimum gap, in seconds, before the next restart after the 1st and the 2nd
+# consecutive failure, so a transient error cannot use every strike in seconds.
+MONITOR_RUNTIME_RESTART_BACKOFF_SECONDS = (60, 120)
+
 # Monitor-origin (``monitor_`` prefix) resume phase of the block a failed PR-monitor
 # setup replay parks in, so ``guide`` resumes it back into the PR monitor.
 MONITOR_RUNTIME_SETUP_REPLAY_RESUME_PHASE = "monitor_runtime_setup_replay"
 
 RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE = "RUNTIME_IDENTITY_PROBE_TIMEOUT"
+
+# Monitor resume runtime restart (#936). A running dependency that is still
+# ``starting``/``unhealthy`` is waited on, never recreated; the wait is bounded by
+# the stack's startup budget.
+MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT_REASON_CODE = "MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT"
+
+# A prerequisite of a dependency the resume must force-recreate failed (exited
+# non-zero or never started), so its ``--no-deps`` recreate would bypass the gate.
+MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE = (
+    "MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED"
+)
+
+MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE = "workspace.monitor_runtime_restart_failed"
+
+# Payload key marking a restart-failure event as counted toward the streak. Events
+# recorded before the streak rule lack it and act as a boundary instead.
+MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY = "counts_toward_restart_streak"
+
+# Payload key listing the dependencies still ``starting``/``unhealthy`` when a
+# restart failed on the dependency wait; the guided retry after the park
+# force-recreates them.
+MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY = "unsettled_dependencies"
+
+# Payload key listing the dependencies a restart was to force-recreate after a
+# park but failed before recreating, so the next retry still recreates them.
+MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY = "pending_dependency_recreates"
+
+# Payload key marking a restart-failure event whose precheck failed before any
+# restart ran, so it leaves the dependencies a park left unsettled pending.
+MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY = "failed_before_restart"
+
+MONITOR_RUNTIME_RESTART_RECOVERED_EVENT_TYPE = "workspace.monitor_runtime_restart_recovered"
+
+MONITOR_RUNTIME_RESTART_EXHAUSTED_EVENT_TYPE = "workspace.monitor_runtime_restart_exhausted"
+
+MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE = "MONITOR_RUNTIME_RESTART_EXHAUSTED"
+
+# Consecutive failed monitor-resume runtime restarts before the workspace is parked
+# in ``blocked`` instead of being retried forever.
+MONITOR_RUNTIME_RESTART_FAILURE_LIMIT = 3
+
+# Monitor-origin (``monitor_`` prefix) resume phase, so ``guide`` resumes the park
+# back into the PR monitor.
+MONITOR_RUNTIME_RESTART_RESUME_PHASE = "monitor_runtime_restart"
+
+MONITOR_RUNTIME_RESTART_BLOCK_TYPE = "monitor_runtime_restart_failure"
+
+# Block reasons a monitor resume parks ``monitoring_pr -> blocked`` with; the worker
+# finalizes the recovery operation as failed with them rather than cancelled.
+MONITOR_RESUME_PARK_BLOCK_REASON_CODES = frozenset(
+    {RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE, MONITOR_RUNTIME_RESTART_EXHAUSTED_REASON_CODE}
+)
 
 # Adopt-pr handoff skips the coding agent (PR_ADOPTION_SKIP_AGENT), so the
 # profile's ``setup`` phase is the only thing that provisions the workspace. If

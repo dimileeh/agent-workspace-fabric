@@ -96,9 +96,11 @@ class _NoopResumeCompose:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-        del force_recreate, services
+        del force_recreate, services, no_recreate, no_deps
 
 
 async def _seed_ready(
@@ -356,6 +358,8 @@ class TestPrMonitorResume:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 call_order.append("compose")
                 assert project_name == "persisted_project"
@@ -363,15 +367,19 @@ class TestPrMonitorResume:
                 assert workspace_id == ws_id
                 assert wait is True
                 assert compose_up_timeout_seconds == 300
-                assert force_recreate is True
-                assert services == ()
+                # Dependencies come up without recreation, then only the agent is
+                # recreated (#936).
+                assert (force_recreate, no_recreate, no_deps, services) in {
+                    (False, True, False, ()),
+                    (True, False, True, ("agent",)),
+                }
 
         class _Monitor:
             async def run(
                 self, *, workspace_id: str, compose_project: str, compose_file: Path
             ) -> None:
                 call_order.append("monitor")
-                assert call_order == ["compose", "monitor"]
+                assert call_order == ["compose", "compose", "monitor"]
                 assert workspace_id == ws_id
                 assert compose_project == "persisted_project"
                 assert compose_file == compose_file_path
@@ -391,7 +399,7 @@ class TestPrMonitorResume:
 
         await executor.resume_pr_monitor(ws_id)
 
-        assert call_order == ["compose", "monitor"]
+        assert call_order == ["compose", "compose", "monitor"]
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_recovers_feature_branch_remote_push_branch(
@@ -509,9 +517,11 @@ class TestPrMonitorResume:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 raise AssertionError("compose must not restart after recovery skips")
 
         ws_id = await _seed_monitoring_pr(

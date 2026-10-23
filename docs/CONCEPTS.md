@@ -1036,6 +1036,80 @@ have a PR but no Compose metadata; AWF rejects Remonitor with
 `WORKSPACE_REMONITOR_METADATA_MISSING`, and the operator should use Retry so a
 replacement attempt can reprovision the runtime and reattach the existing PR.
 
+### Runtime restart on monitor resume
+
+Restart recovery, `remonitor` and `guide` resume the PR monitor through one
+handoff that brings the local runtime back without disturbing dependencies that
+are recovering on their own (#936):
+
+1. **Recreate and start prerequisites first, without waiting.** Each dependency
+   the resume must recreate is force-recreated (`compose up --force-recreate
+   --no-deps`): a companion whose environment the optional companion env-secret
+   refresh rewrote or that has a set env-backed secret (a rotated value keeps the
+   same `${SOURCE}` placeholder), since `--no-recreate` would never apply either,
+   and, on the first resume after a restart park, the dependencies still
+   unsettled at the last dependency-wait timeout. Every other exited or absent
+   declared dependency is started alone with `--no-recreate --no-deps`. None of
+   these calls waits, so nothing is waited on before every prerequisite is
+   started or recreated. A failed recreate fails the restart, and so does a
+   prerequisite of a forced recreate that exited non-zero or never started
+   (`MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED`): `--no-deps` would skip its
+   `depends_on` condition and the later `--no-recreate` up would never recreate
+   the dependent, so it stays pending for the next resume.
+2. **Wait for recovering dependencies.** Every running non-agent service declared
+   in compose.yml, including the ones just recreated, whose Docker health is
+   `starting` or `unhealthy` is polled every 5 s until it is healthy; one-off
+   `compose run` containers and orphans are ignored. Docker keeps probing an `unhealthy`
+   container and flips it back on success, so waiting is correct even after the
+   container's rendered healthcheck retries ran out. The wait is bounded by the
+   stack's startup budget (`docker.startup_timeout_seconds`, or a larger companion
+   `compose_up_timeout_seconds`), read from the profile rather than from the
+   already-rendered compose.yml, so existing workspaces get it too. When the
+   budget runs out the restart fails with `MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT`
+   naming each unsettled service. An unreadable Docker runtime skips the wait and
+   lets the compose call surface the real error.
+3. **Bring dependencies up without recreating them**
+   (`compose up --no-recreate --wait`): exited or absent containers are started
+   or created; a running one is never recreated. If a start in step 1 or this
+   call exits non-zero but the runtime is still usable, the failure is recorded
+   and step 4 still runs.
+4. **Recreate only the agent** (`compose up --force-recreate --no-deps --wait agent`).
+   The per-workspace auth overlay mounts are bound only when the container is
+   created, and the setup replay below keys off the agent's new identity.
+
+A resume passes only when step 4 ran and succeeded in the same attempt. Every
+other outcome (a failed recreate, a dependency wait timeout, an unusable runtime
+after a failed start or up, or a failed agent recreate, however healthy the old
+stack or whatever the agent's identity looks like afterwards) counts as a failed
+restart below, and only a passed resume resets the streak.
+
+Required companion secrets are still prechecked before any compose call. An exited dependency on a compose.yml
+rendered before the healthcheck budget rule starts with its stored 60 retries; if
+its recovery outlasts them, that resume fails once and the next one finds it
+running and waits with the full budget.
+
+**Repeated failures are surfaced, never looped.** Each failed restart (compose
+error, dependency wait timeout, failed agent recreate or a required companion
+secret precheck) records `workspace.monitor_runtime_restart_failed`. The
+consecutive failures are counted from these events, so a worker or control-plane
+restart does not reset the count. The next restart waits until 60 s after the
+first consecutive failure and 120 s after the second, so a transient error cannot
+use every attempt in seconds. After 3 in a row the workspace is parked in
+`blocked` (`block_type=monitor_runtime_restart_failure`, block reason
+`MONITOR_RUNTIME_RESTART_EXHAUSTED`, a monitor-origin `block_resume_phase`) with a
+`workspace.monitor_runtime_restart_exhausted` event carrying the count and the last
+redacted compose error. It is never failed for this. A passed resume closes the
+streak with `workspace.monitor_runtime_restart_recovered`; the exhausted event is
+a boundary too, so `guide` (`blocked -> monitoring_pr`) gives the resume a fresh
+set of attempts. A pending `remonitor` operation finalizes as failed with
+`MONITOR_RUNTIME_RESTART_EXHAUSTED`. Hosted workspaces have no local compose
+restart and are unchanged.
+
+The other two compose recoveries keep their behaviour: the executor's
+agent-service recovery already recreates only `agent`, and the PR monitor's
+agent-service recovery rebuilds the whole stack because a broken dependency may
+be why the agent became unhealthy; it is bounded by its own restart attempts.
+
 ### Runtime setup replay on resume
 
 Restart recovery, `remonitor` (`failed -> monitoring_pr`) and `guide` on a
@@ -1065,7 +1139,7 @@ head, not on `base_commit`.
 A failed replay is not retried in place and carries `RUNTIME_SETUP_REPLAY_FAILED`
 with the failing command, its redacted output tail and, for an ownership-repair,
 mirror hooks-path or exec-cleanup failure, the underlying `cause_reason_code`.
-Because every monitor resume recreates the runtime, a failed replay on the PR
+Because every monitor resume recreates the agent, a failed replay on the PR
 monitor side (restart recovery, remonitor, guide, or the monitor's agent-service
 recovery) does not fail the workspace: it parks it in `blocked`
 (`block_type=resume_setup_failure`, a monitor-origin `block_resume_phase`) with a
@@ -1351,7 +1425,13 @@ By default, `docker.startup_timeout_seconds` from the resolved workspace profile
 controls the stack `docker compose up --wait-timeout` value. A companion can
 raise that stack-level startup budget with `compose_up_timeout_seconds` when its
 Dockerfile needs extra cold-cache build time; AWF uses the maximum companion
-override and adds a small subprocess capture buffer.
+override and adds a small subprocess capture buffer. The same budget sizes the
+rendered dependency healthchecks: `retries` is `ceil(budget / 5)` at the fixed
+5 s interval, so the default 300 s keeps today's 60 retries and a larger budget
+gives a slow dependency (for example Postgres crash recovery) proportionally
+longer before Docker marks it `unhealthy`. A monitor resume applies the budget
+to stacks rendered before this rule too, through its dependency wait (see
+"Runtime restart on monitor resume").
 
 Companions share the parent workspace resource reservation and lifecycle. AWF
 keeps companion worktrees while the parent workspace is active, removes them

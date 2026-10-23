@@ -66,6 +66,11 @@ class FakeCompose:
 
     async def ensure_project_up(self, **kwargs: Any) -> None:
         self.calls.append(kwargs)
+        if kwargs.get("no_recreate"):
+            # ``--no-recreate`` only creates an absent container (#936).
+            if not self.container.present:
+                self.container.recreate()
+            return
         if self.recreate or not self.container.present:
             self.container.recreate()
 

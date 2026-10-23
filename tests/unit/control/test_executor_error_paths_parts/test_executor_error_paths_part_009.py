@@ -12,8 +12,12 @@ from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge import ForgeNotSupportedError
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
+from awf.control.executor import monitor_resume_restart_flow
+from awf.control.executor.constants import MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE
+from awf.control.executor.monitor_resume_restart_escalation import consecutive_restart_failures
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.node.companion_services import COMPANION_SPECS_UNRESOLVED
 from awf.profiles.models import ProfileDocker, WorkspaceProfile
 from awf.runtime.pr_creator import PullRequestResult
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_006 import (
@@ -30,37 +34,21 @@ _IMPORTED_FIXTURES = (factory, fake)
 
 class TestExecutorCoverageEdgesPart003:
     @pytest.mark.unit
-    async def test_resume_pr_monitor_preserves_profile_compose_timeout_when_companion_resolution_fails(
+    async def test_resume_pr_monitor_fails_closed_with_profile_timeout_when_companion_resolution_fails(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        captured: dict[str, Any] = {}
+        compose_calls: list[dict[str, Any]] = []
+        monitor_runs: list[str] = []
+        restart_calls: list[dict[str, Any]] = []
+        escalations: list[str | None] = []
 
         class _RecordingCompose:
-            async def ensure_project_up(
-                self,
-                *,
-                project_name: str,
-                compose_file: Path,
-                workspace_id: str,
-                wait: bool = True,
-                compose_up_timeout_seconds: int = 300,
-                force_recreate: bool = False,
-                services: tuple[str, ...] = (),
-            ) -> None:
-                captured.update(
-                    {
-                        "project_name": project_name,
-                        "compose_file": compose_file,
-                        "workspace_id": workspace_id,
-                        "wait": wait,
-                        "compose_up_timeout_seconds": compose_up_timeout_seconds,
-                        "force_recreate": force_recreate,
-                        "services": services,
-                    }
-                )
+            async def ensure_project_up(self, **kwargs: Any) -> None:
+                compose_calls.append(kwargs)
 
         class _Monitor:
             async def run(
@@ -70,7 +58,8 @@ class TestExecutorCoverageEdgesPart003:
                 compose_project: str,
                 compose_file: Path,
             ) -> None:
-                del workspace_id, compose_project, compose_file
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
 
         ws_id = await _seed_monitoring_pr(
             factory,
@@ -87,11 +76,49 @@ class TestExecutorCoverageEdgesPart003:
             compose=_RecordingCompose(),
             pr_monitor_factory=lambda *_args: _Monitor(),
         )
+        restart = executor._restart_compose_runtime_for_monitor_resume
+
+        async def _recording_restart(**kwargs: Any) -> bool:
+            restart_calls.append(kwargs)
+            return bool(await restart(**kwargs))
+
+        escalate = monitor_resume_restart_flow.escalate_monitor_resume_restart_failure
+
+        async def _recording_escalate(self: Any, **kwargs: Any) -> bool:
+            escalations.append(kwargs["error"].reason_code)
+            return bool(await escalate(self, **kwargs))
+
+        monkeypatch.setattr(
+            executor, "_restart_compose_runtime_for_monitor_resume", _recording_restart
+        )
+        monkeypatch.setattr(
+            monitor_resume_restart_flow,
+            "escalate_monitor_resume_restart_failure",
+            _recording_escalate,
+        )
 
         await executor.resume_pr_monitor(ws_id)
 
-        assert captured["workspace_id"] == ws_id
-        assert captured["compose_up_timeout_seconds"] == 720
+        # The profile timeout is still the fallback handed to the restart, but
+        # unresolvable specs fail the restart closed before compose is touched.
+        assert [call["compose_up_timeout_seconds"] for call in restart_calls] == [720]
+        assert restart_calls[0]["companion_specs"] is None
+        assert compose_calls == []
+        assert monitor_runs == []
+        assert escalations == [COMPANION_SPECS_UNRESOLVED]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr
+            events = [
+                event
+                for event in ws.events
+                if event.event_type == MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE
+            ]
+            # The recorded failure is the strike that sizes the next resume's backoff.
+            assert await consecutive_restart_failures(s, ws_id, None) == 1
+        assert [event.reason_code for event in events] == ["MONITOR_RECOVERY_PRECHECK_FAILED"]
+        assert events[0].payload["reason_code"] == COMPANION_SPECS_UNRESOLVED
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_retries_profile_sync_before_monitor_factory(

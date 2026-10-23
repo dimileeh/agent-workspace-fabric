@@ -111,9 +111,11 @@ class _RecordingCompose:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         del project_name, compose_file, wait, compose_up_timeout_seconds
-        del force_recreate, services
+        del force_recreate, services, no_recreate, no_deps
         self.ensure_project_up_calls.append(workspace_id)
 
 
@@ -130,6 +132,8 @@ class _FailingCompose(_RecordingCompose):
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         await super().ensure_project_up(
             project_name=project_name,
@@ -268,7 +272,7 @@ class TestResumeHandoffHostedSeam:
         await executor_obj.resume_pr_monitor(ws_id)
 
         # Injection alone does not opt a workspace into hosted mode.
-        assert compose.ensure_project_up_calls == [ws_id]
+        assert compose.ensure_project_up_calls == [ws_id, ws_id]
         assert len(monitor.run_calls) == 1
         assert monitor.run_calls[0]["workspace_id"] == ws_id
 
@@ -285,7 +289,9 @@ class TestResumeHandoffHostedSeam:
         executor = _RecordingExecutor()
         monitor = _RecordingMonitor()
 
-        async def _runtime_unusable(_compose_project: str, _compose_file: Path) -> bool:
+        async def _runtime_unusable(
+            _compose_project: str, _compose_file: Path, **_kwargs: Any
+        ) -> bool:
             return False
 
         monkeypatch.setattr(
@@ -332,8 +338,8 @@ class TestResumeHandoffHostedSeam:
 
         await executor_obj.resume_pr_monitor(ws_id)
 
-        # Local path still restarts compose exactly once.
-        assert compose.ensure_project_up_calls == [ws_id]
+        # Local path still restarts compose: dependencies, then the agent (#936).
+        assert compose.ensure_project_up_calls == [ws_id, ws_id]
         assert len(monitor.run_calls) == 1
 
 
@@ -1170,6 +1176,19 @@ services:
     image: malformed
     profiles: ["worker", 7]
   scalar: scalar-service
+  worker:
+    image: worker
+    depends_on: [migrate, 7, skipped]
+  lonely:
+    image: lonely
+    depends_on:
+      external:
+        condition: service_healthy
+  api:
+    image: api
+    depends_on:
+      migrate:
+        required: false
 """,
         encoding="utf-8",
     )
@@ -1178,8 +1197,23 @@ services:
     requirements = monitor_handoff_module._compose_runtime_requirements_from_file(compose_file)
 
     assert requirements is not None
-    assert requirements.service_names == {"app", "migrate", "cache", "malformed", "scalar"}
+    assert requirements.service_names == {
+        "app",
+        "migrate",
+        "cache",
+        "malformed",
+        "scalar",
+        "worker",
+        "lonely",
+        "api",
+    }
     assert requirements.successful_completion_services == {"migrate"}
+    # Inactive or undeclared prerequisites never gate a monitor resume start.
+    assert requirements.dependency_conditions == {
+        "app": {"migrate": "service_completed_successfully", "cache": "service_started"},
+        "worker": {"migrate": "service_started"},
+        "api": {"migrate": "service_started"},
+    }
 
 
 @pytest.mark.unit

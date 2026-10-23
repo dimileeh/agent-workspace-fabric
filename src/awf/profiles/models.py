@@ -192,6 +192,8 @@ class ProfileDocker(BaseModel):
     mode: DockerMode = DockerMode.none
     compose_files: list[str] = Field(default_factory=list)
     project_directory: str = "."
+    # Stack startup budget: ``compose up --wait-timeout``, the rendered dependency
+    # healthcheck retries (``ceil(budget / 5)``) and the monitor-resume dependency wait.
     startup_timeout_seconds: int = Field(default=300, ge=1, le=7200)
     # Interpolated unescaped into image: "{{ s.image }}" in the compose Jinja
     # template (autoescape=False), so guard the canonical image-reference grammar

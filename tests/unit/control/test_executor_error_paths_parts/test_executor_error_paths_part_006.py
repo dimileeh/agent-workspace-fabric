@@ -162,9 +162,11 @@ class _NoopResumeCompose:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-        del force_recreate, services
+        del force_recreate, services, no_recreate, no_deps
 
 
 class _RecordingValidation:
@@ -968,9 +970,11 @@ class TestExecutorCoverageEdgesPart002:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
@@ -1019,6 +1023,7 @@ class TestExecutorCoverageEdgesPart002:
             "returncode": 1,
             "stderr": "network unavailable",
             "reason_code": "COMPOSE_UP_FAILED",
+            "counts_toward_restart_streak": True,
         }
 
     @pytest.mark.unit
@@ -1029,11 +1034,15 @@ class TestExecutorCoverageEdgesPart002:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Compose restart failures must not skip monitor when the stack is still running."""
+        """Compose restart failures must not skip monitor when the stack is still running.
+
+        Only the dependency up may fail: a failed agent recreate is a counted
+        restart failure however usable the old stack looks (PR #1097).
+        """
         _patch_compose_runtime_inspect(monkeypatch, stack_state="running")
 
         class _FailingCompose:
-            """Compose stub that raises on ensure_project_up."""
+            """Compose stub whose dependency up fails and agent recreate succeeds."""
 
             async def ensure_project_up(
                 self,
@@ -1045,10 +1054,14 @@ class TestExecutorCoverageEdgesPart002:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 """Raise or record a compose restart for the test."""
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del services, no_recreate, no_deps
+                if force_recreate:
+                    return
                 raise ComposeOperationError(
                     operation="up",
                     returncode=1,
@@ -1127,9 +1140,11 @@ class TestExecutorCoverageEdgesPart002:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 session_factory.fail_next = True
                 raise ComposeOperationError(
                     operation="up",

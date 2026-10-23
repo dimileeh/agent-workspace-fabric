@@ -5,10 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
+from awf.common.audit import redact_audit_text
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
+    MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY,
+    MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+    MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY,
+    MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY,
+    MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
@@ -18,6 +24,8 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_event_payload,
 )
 from awf.control.executor.metadata import _metadata_int
+from awf.control.executor.monitor_resume_restart_escalation import remember_unrecorded_failure
+from awf.control.executor.monitor_resume_runtime import DependencyWaitTimeoutError
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -298,29 +306,60 @@ async def _record_monitor_runtime_restart_failed(
     compose_file_path: str,
     error: ComposeOperationError,
     event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
+    before_restart: bool = False,
+    pending_dependency_recreates: tuple[str, ...] = (),
 ) -> None:
-    """Persist an audit event when compose restart fails during monitor resume handoff."""
+    """Persist an audit event when compose restart fails during monitor resume handoff.
+
+    The event counts toward the restart-failure streak, so a failed write keeps it
+    in memory: escalation still counts it and the next restart attempt retries it.
+    ``pending_dependency_recreates`` are the dependencies this attempt was to
+    force-recreate after a park but failed before recreating.
+    """
+    event: dict[str, Any] = {
+        "event_type": MONITOR_RUNTIME_RESTART_FAILED_EVENT_TYPE,
+        "reason_code": event_reason_code,
+        "payload": {
+            "compose_project_name": compose_project,
+            "compose_file_path": compose_file_path,
+            "operation": error.operation,
+            "returncode": error.returncode,
+            "stderr": redact_audit_text(error.stderr, limit=1000),
+            "reason_code": error.reason_code,
+            MONITOR_RUNTIME_RESTART_STREAK_PAYLOAD_KEY: True,
+            **(
+                {
+                    MONITOR_RUNTIME_RESTART_UNSETTLED_DEPENDENCIES_PAYLOAD_KEY: list(
+                        error.unsettled_services
+                    )
+                }
+                if isinstance(error, DependencyWaitTimeoutError)
+                else {}
+            ),
+            **(
+                {MONITOR_RUNTIME_RESTART_BEFORE_RESTART_PAYLOAD_KEY: True} if before_restart else {}
+            ),
+            **(
+                {
+                    MONITOR_RUNTIME_RESTART_PENDING_RECREATES_PAYLOAD_KEY: list(
+                        pending_dependency_recreates
+                    )
+                }
+                if pending_dependency_recreates
+                else {}
+            ),
+        },
+    }
     try:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
                 return
-            await repo.add_event(
-                ws,
-                event_type="workspace.monitor_runtime_restart_failed",
-                reason_code=event_reason_code,
-                payload={
-                    "compose_project_name": compose_project,
-                    "compose_file_path": compose_file_path,
-                    "operation": error.operation,
-                    "returncode": error.returncode,
-                    "stderr": error.stderr[:1000],
-                    "reason_code": error.reason_code,
-                },
-            )
+            await repo.add_event(ws, **event)
             await session.commit()
     except Exception:
+        remember_unrecorded_failure(self, workspace_id=workspace_id, event=event)
         _log.exception(
             "executor.monitor_runtime_restart_failed_record_failed",
             workspace_id=workspace_id,
