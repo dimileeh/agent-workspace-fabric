@@ -94,9 +94,10 @@ async def reply_before_resolve(
 ) -> ThreadDisposition | None:
     """Post the thread's disposition reply; ``None`` means do NOT resolve.
 
-    ``thread`` is the thread as the monitor listed it. With ``repo`` too, a fresh
-    reply is checked against the live thread before it is returned
-    (:func:`_reread_thread_after_reply`). ``retry=False`` (outdated hygiene under
+    With ``repo``, a fresh reply is checked against the live thread before it is
+    returned (:func:`_reread_thread_after_reply`); ``thread`` is the thread as the
+    monitor listed it, whose outside comments that check compares when given.
+    ``retry=False`` (outdated hygiene under
     ``serialized_merge``) makes that re-read fail fast, and a fault requeues the
     thread for the next poll instead of parking it.
     """
@@ -148,11 +149,16 @@ async def reply_before_resolve(
         """Check the posted reply against the live thread; ``None`` means do NOT resolve."""
         nonlocal disposition
         disposition = posted
-        if repo is None or thread is None:
+        if repo is None:
             return posted
         try:
             moved, followed = await _reread_thread_after_reply(
-                self, repo=repo, pr_number=pr_number, thread=thread, retry=retry
+                self,
+                repo=repo,
+                pr_number=pr_number,
+                thread_id=thread_id,
+                thread=thread,
+                retry=retry,
             )
         except ForgeClientError as exc:
             if not retry:
@@ -276,7 +282,8 @@ async def _reread_thread_after_reply(
     *,
     repo: RepoRef,
     pr_number: int,
-    thread: ReviewThread,
+    thread_id: str,
+    thread: ReviewThread | None,
     retry: bool,
 ) -> tuple[str | None, str | None]:
     """Re-read the live thread after a fresh reply: ``(moved, followed)``.
@@ -292,13 +299,13 @@ async def _reread_thread_after_reply(
     audit = await self._deps.gh.fetch_review_thread_audit(
         repo=repo, pr_number=pr_number, retry=retry
     )
-    live = next((t for t in audit.threads if t.thread_id == thread.thread_id), None)
+    live = next((t for t in audit.threads if t.thread_id == thread_id), None)
     if not audit.supported or live is None:
         return None, None
     return _conversation_moved(thread, live), live.conversation_digest_before_reply or None
 
 
-def _conversation_moved(thread: ReviewThread, live: AuditedReviewThread) -> str | None:
+def _conversation_moved(thread: ReviewThread | None, live: AuditedReviewThread) -> str | None:
     """Why the full conversation before AWF's reply is not the one ``thread`` shows.
 
     The triage behind the reply read ``thread``'s outside comments, as
@@ -314,8 +321,9 @@ def _conversation_moved(thread: ReviewThread, live: AuditedReviewThread) -> str 
     the re-triage behind this reply may answer only that feedback, as after a park
     that a reviewer reply re-triaged (PRRT_kwDOSJAM6s6vbrwH). Otherwise outside
     comments that differ from the listed ones are
-    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; a snapshot without comments proves
-    no such difference.
+    ``REVIEW_THREAD_FEEDBACK_AFTER_DECISION``; a snapshot without comments, or no
+    listed copy at all, proves no such difference. The unread check needs only
+    ``live``, so it runs without one too (PRRT_kwDOSJAM6s6vc8M9).
     """
     bodies = live.viewer_comment_bodies
     marked = {
@@ -331,7 +339,7 @@ def _conversation_moved(thread: ReviewThread, live: AuditedReviewThread) -> str 
             return THREAD_DISPOSITION_UNREAD_FEEDBACK
         if index >= live.superseded_viewer_comments:
             break  # AWF's previous reply, still current
-    listed = tuple(comment.body for comment in thread.comments)
+    listed = tuple(comment.body for comment in thread.comments) if thread is not None else ()
     if listed and live.external_comment_bodies != listed:
         return _FEEDBACK_AFTER_DECISION
     return None

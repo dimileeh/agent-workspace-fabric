@@ -1204,6 +1204,53 @@ async def test_fix_cycle_resolves_when_no_unread_own_identity_feedback_precedes_
     assert state.threads_addressed_ids[tid] == "false_positive"
 
 
+@pytest.mark.parametrize(
+    ("viewer_bodies", "events", "verdict"),
+    [
+        ((_OPERATOR_ASK, "reply"), ["reply"], "needs_human"),
+        (("reply",), ["reply", "resolve"], "false_positive"),
+    ],
+    ids=["unread-own-identity-feedback", "no-listed-copy-to-compare"],
+)
+async def test_fix_cycle_re_reads_a_reply_to_a_thread_the_settle_feed_does_not_list(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    viewer_bodies: tuple[str, ...],
+    events: list[str],
+    verdict: str,
+) -> None:
+    # PRRT_kwDOSJAM6s6vc8M9: with no listed copy of the thread the confirm was
+    # skipped, so the reply was resolved, and later certified, over the operator's
+    # unmarked feedback. That check needs only the live thread; the outside
+    # comments, with no listed copy to compare them with, prove no difference.
+    gh = OrderedForge(FakeCommandRunner())
+    tid = "PRRT_test_unlisted_thread"
+    marker = _MARKER.format(cls="false_positive", tid=tid)
+    audited = _serve_live_thread(
+        gh,
+        monkeypatch,
+        tid,
+        (_ASK, "and cover empty payloads too"),
+        before_reply="f" * 64,
+        viewer_bodies=tuple(marker if body == "reply" else body for body in viewer_bodies),
+    )
+
+    _, state, _ = await _run_cycle(
+        factory=factory,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        gh=gh,
+        verdict="false_positive",
+        on_address=lambda s, t: seed_resolvable_disposition(s, t.thread_id, "false_positive"),
+        thread=_commented_thread(tid, _ASK),
+    )
+
+    assert [event[0] for event in gh.events] == events
+    assert audited == [42]
+    assert state.threads_addressed_ids[tid] == verdict
+
+
 async def test_a_landed_reply_keeps_the_conversation_it_followed_for_its_tombstone(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
