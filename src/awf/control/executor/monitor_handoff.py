@@ -379,7 +379,7 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 monitor_owner_id=monitor_owner_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                companion_specs=companion_specs,
+                companion_specs=companion_specs if companion_specs_resolved else None,
                 compose_up_timeout_seconds=compose_up_timeout_seconds,
             ):
                 return None

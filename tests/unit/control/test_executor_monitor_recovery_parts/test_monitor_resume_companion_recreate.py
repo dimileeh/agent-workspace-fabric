@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import monitor_handoff, monitor_resume_runtime
-from awf.node.companion_services import WorkspaceCompanionSpec, companion_specs_from_task_policy
+from awf.db.repositories import WorkspaceRepository
+from awf.node.companion_services import (
+    COMPANION_SPECS_UNRESOLVED,
+    WorkspaceCompanionSpec,
+    companion_specs_from_task_policy,
+)
 from awf.node.compose_manager import ComposeOperationError
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
@@ -659,3 +664,43 @@ async def test_resume_leaves_the_pending_recreate_alone_when_nothing_was_recreat
     assert [call["services"] for call in recreate] == [("agent",)]
     assert clears == []
     assert marker.read_text(encoding="utf-8") == "extra\n"
+
+
+@pytest.mark.unit
+async def test_resume_fails_closed_when_companion_specs_cannot_be_resolved(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(_COMPOSE, encoding="utf-8")
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(compose_file))
+
+    def _unresolvable(_task_policy: object) -> tuple[WorkspaceCompanionSpec, ...]:
+        raise ValueError("malformed companion policy")
+
+    monkeypatch.setattr(monitor_handoff, "companion_specs_from_task_policy", _unresolvable)
+    compose = _RecordingCompose()
+    executor = _make_executor(
+        fake,
+        factory,
+        tmp_path,
+        compose=compose,
+        pr_monitor_factory=lambda *_a, **_k: _IdleMonitor(),
+    )
+
+    # Without the specs no secret-bearing companion is known, so a selective
+    # restart could keep a rotated or revoked value: nothing is restarted.
+    assert await executor.resume_pr_monitor_handoff(ws_id) is None
+    assert compose.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        events = [
+            event
+            for event in ws.events
+            if event.event_type == "workspace.monitor_runtime_restart_failed"
+        ]
+    assert [event.reason_code for event in events] == ["MONITOR_RECOVERY_PRECHECK_FAILED"]
+    assert events[0].payload["reason_code"] == COMPANION_SPECS_UNRESOLVED

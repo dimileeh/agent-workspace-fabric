@@ -27,7 +27,7 @@ from awf.control.executor.monitor_resume_runtime import (
     restart_runtime_for_monitor_resume,
 )
 from awf.control.executor.quality_gates import _log
-from awf.node.companion_services import WorkspaceCompanionSpec
+from awf.node.companion_services import COMPANION_SPECS_UNRESOLVED, WorkspaceCompanionSpec
 from awf.node.compose_manager import ComposeOperationError
 
 
@@ -38,15 +38,23 @@ async def _restart_compose_runtime_for_monitor_resume(
     monitor_owner_id: str | None,
     compose_project: str,
     compose_file: Path,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    companion_specs: tuple[WorkspaceCompanionSpec, ...] | None,
     compose_up_timeout_seconds: int,
 ) -> bool:
     """Restart the compose runtime for monitor resume; ``False`` means stop the resume.
 
     ``True`` only when the final agent recreate ran and succeeded in this attempt,
     which is also the only path that resets the restart streak.
+    ``companion_specs`` is ``None`` when the stored companion policy could not be
+    resolved; the restart then fails closed, since only the specs say which
+    companions carry env secrets that a selective restart must recreate.
     """
     try:
+        if companion_specs is None:
+            raise _monitor_handoff.CompanionEnvSecretPrecheckError(
+                stderr="companion specs could not be resolved from the stored task policy",
+                reason_code=COMPANION_SPECS_UNRESOLVED,
+            )
         _monitor_handoff._precheck_required_companion_env_secrets_for_resume(
             companion_specs=companion_specs,
             environ=os.environ,
