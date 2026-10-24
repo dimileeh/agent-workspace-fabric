@@ -15,13 +15,15 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+from awf.control.executor.state_ops import enter_blocked_for_monitor_setup_replay_failure
 from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
 from awf.control.worker import claims as worker_claims
 from awf.control.worker import dispatch_methods as worker_dispatch_methods
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitManager
@@ -136,6 +138,57 @@ async def test_monitor_recovery_terminal_finalize_status_preserves_handoff_failu
     assert status == OperationStatus.failed
     assert error_code == "UNSUPPORTED_TASK_KIND"
     assert error_message == "Task kind is not supported for monitor recovery."
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_terminal_finalize_status_preserves_setup_replay_block_reason(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A setup-replay park into ``blocked`` must keep its reason on the finalize retry."""
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="https://github.com/example/repo.git",
+            branch_base="main",
+            task_title="monitor-recovery-terminal-setup-replay-blocked",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace_id = ws.id
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await session.commit()
+    parked = await enter_blocked_for_monitor_setup_replay_failure(
+        session_factory,
+        workspace_id=workspace_id,
+        message="uv sync failed during setup replay",
+        failure_reason=FailureReason.profile_resolution_failure,
+        details=None,
+        monitor_owner_id=None,
+    )
+    assert parked is True
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+    (
+        status,
+        error_code,
+        error_message,
+    ) = await worker_claims._monitor_recovery_terminal_finalize_status(  # noqa: SLF001
+        worker,
+        workspace_id,
+    )
+    assert status == OperationStatus.failed
+    assert error_code == RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
+    assert error_message == "uv sync failed during setup replay"
 
 
 @pytest.mark.unit

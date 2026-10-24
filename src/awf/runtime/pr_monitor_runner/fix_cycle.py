@@ -42,6 +42,7 @@ from awf.runtime.pr_monitor_runner.comment_repair_provenance import (
     _clear_published_item_commit_provenance_chain,
     _complete_pending_item_commit_provenance,
     _settle_pending_item_commit_provenance,
+    chain_from_state,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict import AgentVerdictProtocolError
 from awf.runtime.pr_monitor_runner.comments import (
@@ -104,6 +105,12 @@ from awf.runtime.pr_monitor_runner.helpers import (
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
+)
+from awf.runtime.pr_monitor_runner.thread_disposition import attach_item_commits
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import (
+    persist_parked_thread,
+    record_resolve_landed,
+    reply_before_resolve,
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -482,7 +489,7 @@ async def _run_fix_cycle(
             _mark_review_thread_addressed(state, t, verdict)
             if verdict == "defer":
                 # Follow-up defer (#305): durably capture the deferred work
-                # (explanatory comment + tracking issue) before the thread is
+                # (tracking issue, then the disposition reply) before the thread is
                 # resolved. On capture failure, downgrade to needs_human so the
                 # merge gate keeps blocking instead of silently resolving.
                 captured = await _capture_deferred_review_thread(
@@ -937,6 +944,9 @@ async def _run_fix_cycle(
             evidence=push_result.failure_evidence(),
         )
         return await _return_failed_fix_cycle_result(push_result)
+    # #1018: FIXED dispositions cite their item commit; take any still-pending one
+    # from the #935 chain before the publish below clears it.
+    attach_item_commits(state, chain_from_state(state))
     # Record the pushed HEAD before resolving review threads. The
     # pushed commit is local git state; a transient GraphQL resolve
     # failure should not affect the monitor's push bookkeeping.
@@ -1095,6 +1105,8 @@ async def _run_fix_cycle(
         workspace_id=workspace_id,
         pr_number=pr_number,
     )
+    # The settle feed's copy of each thread: its reply is checked against it.
+    listed_threads = {t.thread_id: t for t in settle_feed or ()}
     for tid in threads_to_resolve:
         if tid in stale_thread_ids:
             continue
@@ -1106,6 +1118,32 @@ async def _run_fix_cycle(
         # could proceed past unaddressed feedback (the #305 failure mode).
         if state.threads_addressed_ids.get(tid) not in _RESOLVABLE_THREAD_VERDICTS:
             continue
+        disposition = await reply_before_resolve(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=tid,
+            state=state,
+            action="resolve_thread",
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            thread=listed_threads.get(tid),
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            source_head_sha=pushed_head_sha,
+            repo=repo,
+        )
+        if disposition is None:
+            # #1018: parked needs_human, or its feedback moved on before the reply
+            # landed — never resolve without the reply. Persist only this park
+            # now: a later transient ``_execute`` fault skips
+            # ``_persist_state`` and would reload the resolvable verdict, so the
+            # reply could be re-posted. A full flush would leak the other threads'
+            # unconfirmed verdicts (#305).
+            await persist_parked_thread(self, workspace_id=workspace_id, state=state, thread_id=tid)
+            continue
+        dispositions = [disposition.as_payload()]
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)
         except ForgeClientError as exc:
@@ -1143,9 +1181,10 @@ async def _run_fix_cycle(
                 # the permanent path below special-cases tasks to needs_human).
                 # #484: an already-OUTDATED-only thread is the exception — preserve
                 # its verdict so the next poll's outdated-resolution step retries it,
-                # since it can never re-route through AddressComments.
+                # since it can never re-route through AddressComments. #1018: the
+                # posted disposition reply is kept so the re-address never re-posts it.
                 if tid not in outdated_only_thread_ids:
-                    _clear_addressed_state_by_id(state, tid)
+                    _clear_addressed_state_by_id(state, tid, keep_posted_reply=True)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -1165,6 +1204,7 @@ async def _run_fix_cycle(
                         "resolved_thread_count": 0,
                         "requeued_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": dispositions,
                     },
                 )
                 continue
@@ -1206,6 +1246,7 @@ async def _run_fix_cycle(
                         "resolved_thread_count": 0,
                         "needs_human_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": dispositions,
                     },
                 )
                 continue
@@ -1255,6 +1296,7 @@ async def _run_fix_cycle(
                         "resolved_thread_count": 0,
                         "needs_human_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": dispositions,
                     },
                 )
                 continue
@@ -1266,9 +1308,9 @@ async def _run_fix_cycle(
             # strands it (it can never re-route through AddressComments), so preserve
             # its verdict and let the next poll's outdated-resolution step retry the
             # resolve or escalate it to ``needs_human`` via that path's own permanent
-            # arm — never silently merging over it.
+            # arm — never silently merging over it. The posted reply is kept (#1018).
             if tid not in outdated_only_thread_ids:
-                _clear_addressed_state_by_id(state, tid)
+                _clear_addressed_state_by_id(state, tid, keep_posted_reply=True)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -1292,9 +1334,14 @@ async def _run_fix_cycle(
                     "resolved_thread_count": 0,
                     "failed_thread_count": 1,
                     "error_message": str(exc),
+                    "dispositions": dispositions,
                 },
             )
         else:
+            # #1018: a reopen of this thread now retires its reply, never reuses it.
+            await record_resolve_landed(
+                self, workspace_id=workspace_id, state=state, disposition=disposition
+            )
             # The resolve landed: clear any stale ``resolve_thread`` retry count so a
             # recovered transient blip never accumulates toward the bounded budget.
             await self._clear_forge_transient_retry_state_on_success(
@@ -1319,6 +1366,7 @@ async def _run_fix_cycle(
                 evidence={
                     "thread_ids": [tid],
                     "resolved_thread_count": 1,
+                    "dispositions": dispositions,
                 },
             )
     return await _return_failed_fix_cycle_result(push_result)

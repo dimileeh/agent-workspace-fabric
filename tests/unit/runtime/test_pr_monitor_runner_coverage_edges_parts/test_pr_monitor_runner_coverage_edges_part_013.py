@@ -15,7 +15,7 @@ from awf.common.bitbucket_client import (
     BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -49,6 +49,7 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.merge_queue import MergeQueueBlocker
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -1174,7 +1175,8 @@ async def test_merge_queue_blocker_after_lock_defers_merge_without_calling_githu
         session_factory=factory,
         runner=cmd,
         adapter=FakeAdapter(),
-        gh=GitHubClient(cmd),
+        # #1018: the merge gate's thread audit must not consume the scripted queue.
+        gh=DefaultMergeMethodGitHubClient(cmd),
         monitor_config=MonitorConfig(
             auto_merge=True,
             poll_interval_seconds=60,

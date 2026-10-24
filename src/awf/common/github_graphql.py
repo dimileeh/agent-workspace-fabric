@@ -275,3 +275,56 @@ mutation($threadId: ID!) {
   }
 }
 """.strip()
+
+
+# GraphQL: post a reply INSIDE a review thread (#1018). AWF's disposition reply
+# precedes every ``resolveReviewThread`` it issues.
+_GQL_ADD_REVIEW_THREAD_REPLY = """
+mutation AddReviewThreadReply($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
+    comment { id databaseId }
+  }
+}
+""".strip()
+
+
+# GraphQL: enumerate EVERY review thread (resolved ones included) for the
+# READY_TO_MERGE disposition audit (#1018). Raw ``body`` — not ``bodyText`` — is
+# required: ``bodyText`` strips HTML comments, so the AWF marker would vanish.
+# ``bodyText`` is read too, to match outside feedback to what ``fetch_pr_status`` lists.
+_GQL_REVIEW_THREAD_AUDIT = """
+query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  viewer { login }
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          resolvedBy { login }
+          comments(first: 100) {
+            nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
+_GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE = """
+query ReviewThreadDispositionAuditComments($threadId: ID!, $cursor: String!) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $cursor) {
+        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()

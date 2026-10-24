@@ -208,7 +208,7 @@ class TestResumePrMonitorStatusRechecks:
 
         await executor.resume_pr_monitor(ws_id)
 
-        assert compose_calls == [ws_id]
+        assert compose_calls == [ws_id, ws_id]  # dependencies, then the agent (#936)
         assert monitor_calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -320,7 +320,7 @@ class TestResumePrMonitorStatusRechecks:
 
         await executor.resume_pr_monitor(ws_id)
 
-        assert compose_calls == [ws_id]
+        assert compose_calls == [ws_id, ws_id]  # dependencies, then the agent (#936)
         assert monitor_calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)

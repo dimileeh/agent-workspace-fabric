@@ -14,7 +14,7 @@ import shlex as shlex
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +25,7 @@ from awf.common.forge import ForgeNotSupportedError
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
+from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.executor.constants import (
     _DEPRECATED_TASK_KIND_REASON_CODE,
     _MONITOR_ONLY_TASK_KINDS,
@@ -46,6 +47,10 @@ from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
     _run_hosted_monitor_handoff_profile_setup,
 )
+from awf.control.executor.monitor_resume_restart_escalation import (
+    pace_monitor_resume_restart,
+)
+from awf.control.executor.monitor_resume_setup_replay import replay_setup_on_monitor_resume
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _log,
@@ -62,16 +67,14 @@ from awf.db.enums import (
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.companion_services import (
-    COMPANION_ENV_SECRET_SOURCE_EMPTY,
-    COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
 )
-from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import GitOperationError
 from awf.node.stack_launcher import effective_compose_up_timeout_seconds
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _add_executor_pr_audit_event = _monitor_handoff_audit._add_executor_pr_audit_event
 _record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_audit_event
@@ -79,6 +82,9 @@ _record_setup_dependency_network_events = (
     _monitor_handoff_audit._record_setup_dependency_network_events
 )
 _record_runtime_toolchain_findings = _monitor_handoff_audit._record_runtime_toolchain_findings
+_record_monitor_runtime_restart_failed = (
+    _monitor_handoff_audit._record_monitor_runtime_restart_failed
+)
 _record_runtime_toolchain_findings_safe = (
     _monitor_handoff_audit._record_runtime_toolchain_findings_safe
 )
@@ -95,6 +101,20 @@ _present_optional_companion_env_secret_refs = (
 )
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
+)
+_companions_with_set_env_secrets_for_resume = (
+    _companion_env._companions_with_set_env_secrets_for_resume
+)
+_companions_with_stale_optional_env_secret_targets_for_resume = (
+    _companion_env._companions_with_stale_optional_env_secret_targets_for_resume
+)
+_pending_companion_recreates_for_resume = _companion_env._pending_companion_recreates_for_resume
+_clear_pending_companion_recreates_for_resume = (
+    _companion_env._clear_pending_companion_recreates_for_resume
+)
+CompanionEnvSecretPrecheckError = _companion_env.CompanionEnvSecretPrecheckError
+_precheck_required_companion_env_secrets_for_resume = (
+    _companion_env._precheck_required_companion_env_secrets_for_resume
 )
 
 
@@ -124,26 +144,12 @@ class ResumeHandoff:
 class _ComposeRuntimeRequirements:
     service_names: set[str]
     successful_completion_services: set[str]
+    # service -> prerequisite -> compose ``depends_on`` condition, active services only.
+    dependency_conditions: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 class MonitorResumePreStartError(Exception):
     """Raised when resumed monitor setup fails before entering the monitor loop."""
-
-
-class CompanionEnvSecretPrecheckError(ComposeOperationError):
-    """Raised when monitor resume cannot satisfy required companion env secrets."""
-
-    def __init__(self, *, stderr: str, reason_code: str) -> None:
-        self.operation = "companion_env_secret_precheck"
-        self.returncode = 1
-        self.stdout = ""
-        self.stderr = stderr
-        self.reason_code = reason_code
-        Exception.__init__(
-            self,
-            "companion env secret precheck failed "
-            f"(reason={reason_code}): {stderr.strip() or '<no output>'}",
-        )
 
 
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
@@ -349,72 +355,47 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
     ):
         return None
 
+    identity_before: _runtime_setup_replay.AgentIdentityObservation = None
     if not workspace_is_hosted:
-        try:
-            _precheck_required_companion_env_secrets_for_resume(
-                companion_specs=companion_specs,
-                environ=os.environ,
-            )
-            _refresh_optional_companion_env_secrets_for_resume(
-                workspace_id=workspace_id,
-                compose_file=compose_file,
-                companion_specs=companion_specs,
-                environ=os.environ,
-            )
-            await self._compose.ensure_project_up(
-                project_name=compose_project,
-                compose_file=compose_file,
-                workspace_id=workspace_id,
-                wait=True,
-                compose_up_timeout_seconds=compose_up_timeout_seconds,
-                force_recreate=True,
-            )
-        except CompanionEnvSecretPrecheckError as exc:
-            _log.error(
-                "executor.resume_companion_env_secret_precheck_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                stderr=exc.stderr[:1000],
-            )
-            await self._record_monitor_runtime_restart_failed(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file_path=str(compose_file),
-                error=exc,
-                event_reason_code="MONITOR_RECOVERY_PRECHECK_FAILED",
-            )
-            return None
-        except ComposeOperationError as exc:
-            _log.error(
-                "executor.resume_compose_up_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                stderr=exc.stderr[:1000],
-            )
-            await self._record_monitor_runtime_restart_failed(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file_path=str(compose_file),
-                error=exc,
-            )
-            runtime_usable = await _compose_runtime_usable_after_restart_failure(
-                compose_project,
-                compose_file,
-            )
-            if not runtime_usable:
-                _log.warning(
-                    "executor.resume_compose_up_failed_runtime_unusable",
-                    workspace_id=workspace_id,
-                    compose_project_name=compose_project,
-                    reason_code=exc.reason_code,
-                )
+        # Back off after a failed restart before the next one, outside the
+        # writer lock; the locked recheck below fences the wait.
+        await pace_monitor_resume_restart(self, workspace_id=workspace_id)
+        # Monitor agent-service recovery replays setup under this lock; holding it
+        # across identity capture, restart and replay keeps a reclaimed lease's
+        # resume from replaying concurrently with the old runner's recovery.
+        async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+            # The claim may have been reclaimed while waiting for the lock; fence
+            # again so a superseded resume cannot force-recreate the new owner's runtime.
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_compose_locked",
+                monitor_owner_id=monitor_owner_id,
+            ):
                 return None
-            _log.warning(
-                "executor.resume_compose_up_failed_runtime_still_usable",
-                workspace_id=workspace_id,
-                compose_project_name=compose_project,
-                reason_code=exc.reason_code,
+            identity_before = await _runtime_setup_replay.capture_agent_container_identity(
+                compose_project
             )
+            if not await self._restart_compose_runtime_for_monitor_resume(
+                workspace_id=workspace_id,
+                monitor_owner_id=monitor_owner_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                companion_specs=companion_specs if companion_specs_resolved else None,
+                compose_up_timeout_seconds=compose_up_timeout_seconds,
+            ):
+                return None
+            if not await replay_setup_on_monitor_resume(
+                self,
+                ws=ws,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                identity_before=identity_before,
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
 
     monitor: _MonitorRunnerProto | None = self._pr_monitor
     try:
@@ -614,8 +595,14 @@ async def _inspect_compose_runtime(compose_project: str) -> RuntimeSnapshot:
 async def _compose_runtime_usable_after_restart_failure(
     compose_project: str,
     compose_file: Path,
+    *,
+    ignored_services: frozenset[str] = frozenset(),
 ) -> bool:
-    """Return whether monitor resume can proceed after a compose restart failure."""
+    """Return whether monitor resume can proceed after a compose restart failure.
+
+    ``ignored_services`` need not be running yet, such as the agent a later step
+    recreates. A ``compose run`` container never stands in for its service.
+    """
     try:
         snapshot = await _inspect_compose_runtime(compose_project)
     except Exception:
@@ -645,12 +632,13 @@ async def _compose_runtime_usable_after_restart_failure(
     ready_services = {
         service.name
         for service in snapshot.services
-        if _compose_runtime_service_satisfied_after_restart_failure(
+        if not service.one_off
+        and _compose_runtime_service_satisfied_after_restart_failure(
             service,
             successful_completion_services=requirements.successful_completion_services,
         )
     }
-    missing_services = expected_services - ready_services
+    missing_services = expected_services - ready_services - ignored_services
     if missing_services:
         _log.warning(
             "executor.resume_compose_runtime_partial_stack",
@@ -704,7 +692,38 @@ def _compose_runtime_requirements_from_file(
             active_services,
             service_names=service_names,
         ),
+        dependency_conditions=_compose_dependency_conditions(
+            active_services, service_names=service_names
+        ),
     )
+
+
+def _compose_dependency_conditions(
+    services: Mapping[str, object],
+    *,
+    service_names: set[str],
+) -> dict[str, dict[str, str]]:
+    """Map each service to its active ``depends_on`` prerequisites and their conditions."""
+    conditions: dict[str, dict[str, str]] = {}
+    for name, service in services.items():
+        depends_on = service.get("depends_on") if isinstance(service, dict) else None
+        if isinstance(depends_on, list):
+            depends_on = {item: {} for item in depends_on if isinstance(item, str)}
+        if not isinstance(depends_on, dict):
+            continue
+        edges: dict[str, str] = {}
+        for dependency_name, dependency_config in depends_on.items():
+            if not isinstance(dependency_name, str) or dependency_name not in service_names:
+                continue
+            condition = (
+                dependency_config.get("condition") if isinstance(dependency_config, dict) else None
+            )
+            edges[dependency_name] = (
+                condition.strip().lower() if isinstance(condition, str) else "service_started"
+            )
+        if edges:
+            conditions[name] = edges
+    return conditions
 
 
 def _compose_service_enabled_for_active_profiles(
@@ -776,40 +795,6 @@ def _compose_runtime_service_completed_successfully(service: RuntimeService) -> 
         return False
     status = (service.status or "").strip().lower()
     return re.match(r"^exited\s*\(\s*0\s*\)(?:\s|$)", status) is not None
-
-
-def _precheck_required_companion_env_secrets_for_resume(
-    *,
-    companion_specs: tuple[WorkspaceCompanionSpec, ...],
-    environ: Mapping[str, str],
-) -> None:
-    """Fail monitor resume early when a required env-backed companion secret is unavailable."""
-    failures: list[tuple[str, str]] = []
-    for spec in companion_specs:
-        for secret in spec.environment_secrets:
-            if not secret.required or secret.provider != "env" or secret.kind != "env":
-                continue
-            source_is_set = secret.value_from in environ
-            source_is_empty = source_is_set and environ[secret.value_from] == ""
-            if source_is_set and not source_is_empty:
-                continue
-            reason_code = (
-                COMPANION_ENV_SECRET_SOURCE_EMPTY
-                if source_is_empty
-                else COMPANION_ENV_SECRET_SOURCE_MISSING
-            )
-            failures.append(
-                (
-                    reason_code,
-                    f"{reason_code}: companion={spec.name}, target={secret.target}, "
-                    f"provider={secret.provider}, source={secret.value_from}",
-                )
-            )
-    if failures:
-        raise CompanionEnvSecretPrecheckError(
-            stderr="\n".join(stderr for _reason_code, stderr in failures),
-            reason_code=failures[0][0],
-        )
 
 
 async def _reject_unsupported_task_kind(
@@ -1456,43 +1441,3 @@ async def _build_handoff_pr_monitor(
     ):
         return None
     return monitor
-
-
-async def _record_monitor_runtime_restart_failed(
-    self: Any,
-    *,
-    workspace_id: str,
-    compose_project: str,
-    compose_file_path: str,
-    error: ComposeOperationError,
-    event_reason_code: str = "MONITOR_RECOVERY_COMPOSE_FAILED",
-) -> None:
-    """Persist an audit event when compose restart fails during monitor resume handoff."""
-    try:
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
-                return
-            await repo.add_event(
-                ws,
-                event_type="workspace.monitor_runtime_restart_failed",
-                reason_code=event_reason_code,
-                payload={
-                    "compose_project_name": compose_project,
-                    "compose_file_path": compose_file_path,
-                    "operation": error.operation,
-                    "returncode": error.returncode,
-                    "stderr": error.stderr[:1000],
-                    "reason_code": error.reason_code,
-                },
-            )
-            await session.commit()
-    except Exception:
-        _log.exception(
-            "executor.monitor_runtime_restart_failed_record_failed",
-            workspace_id=workspace_id,
-            compose_project_name=compose_project,
-            compose_file_path=compose_file_path,
-            reason_code=error.reason_code,
-        )

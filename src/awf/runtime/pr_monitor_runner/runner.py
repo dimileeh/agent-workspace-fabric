@@ -60,6 +60,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
+from awf.runtime.pr_monitor_runner.thread_disposition import retire_reopened_dispositions
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -391,6 +392,10 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     return
 
                 remote_push_url = _remote_push_url_for_workspace(ws, base_repo=repo)
+                # #1018: a thread an audit saw resolved with AWF's reply and this
+                # poll lists open again was reopened, which retires that reply
+                # before anything can resolve the thread again on it.
+                retire_reopened_dispositions(state, status, workspace_id=workspace_id)
                 # Resolve threads the monitor already addressed that have since
                 # gone OUTDATED (addressed by an edit elsewhere). They drop out of
                 # ``unresolved_inline_threads`` — so ``decide()`` never re-runs the

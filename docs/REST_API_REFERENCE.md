@@ -29,6 +29,25 @@ Common response patterns:
 
 ---
 
+## Protected Hosted Node (Foundation)
+
+The `/v1/hosted-node` API provides identity bootstrap and acknowledgement,
+preparation registration, and material install, status, refresh and revoke
+operations. It is disabled by default (routes return `404`); enabling the
+foundation does not enable workspace execution. Runtime activation remains closed.
+
+Existing APIs retain operator bearer authentication; hosted mutations require a
+separate controller bearer. When hosted mode is enabled, HTTP routes and
+WebSocket handshakes require exact expected owner, incarnation, recovery
+generation and boot epoch headers, except for `GET /healthz` and authenticated
+`GET /v1/hosted-node/identity` bootstrap. This also fences the discovery and
+readiness routes described below.
+
+See the [protected node identity and material receiver contract](contracts/hosted-node-material.md)
+for endpoint schemas, identity headers, private transport requirements and
+material lifecycle semantics. A `503 AUTHORITY_UNAVAILABLE` response means
+acceptance is unknown, not that material was rejected.
+
 ## Health and Readiness
 
 ### Core discovery

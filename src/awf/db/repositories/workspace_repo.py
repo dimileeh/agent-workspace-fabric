@@ -132,6 +132,13 @@ def new_workspace_id() -> str:
     return cast(str, _repo_proxy.new_workspace_id())
 
 
+def _transition_invalidates_filesystem_reclamation(old_state: str, to: WorkspaceStatus) -> bool:
+    # Filesystem GC terminal states include completed/failed/cancelled, unlike
+    # the state machine's final (destroyed-only) terminal definition.
+    terminal = {"completed", "failed", "cancelled", "destroyed", "superseded"}
+    return old_state in terminal and to.value not in terminal
+
+
 class WorkspaceRepository:
     """CRUD + state transitions for workspaces.
 
@@ -801,6 +808,8 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_invalidates_filesystem_reclamation(old_state, to):
+            workspace.filesystem_reclaimed_at = None
         if _transition_releases_provisioning_execution_claim(old_state, to):
             workspace.execution_claimed_by = None
             workspace.execution_claim_expires_at = None
@@ -879,6 +888,8 @@ class WorkspaceRepository:
         )
         old_state = workspace.status
         workspace.status = to.value
+        if _transition_invalidates_filesystem_reclamation(old_state, to):
+            workspace.filesystem_reclaimed_at = None
         workspace.updated_at = now
         if _transition_releases_provisioning_execution_claim(old_state, to):
             workspace.execution_claimed_by = None
@@ -911,6 +922,8 @@ class WorkspaceRepository:
             "event_sequence": Workspace.event_sequence + 1,
             "version": Workspace.version + 1,
         }
+        if _transition_invalidates_filesystem_reclamation(from_status.value, to):
+            values["filesystem_reclaimed_at"] = None
         if to == WorkspaceStatus.monitoring_pr:
             values["monitor_started_at"] = case(
                 (Workspace.monitor_started_at.is_(None), now),

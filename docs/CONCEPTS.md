@@ -275,11 +275,24 @@ What each stage means:
 | `validating` | AWF is running profile/request validation. |
 | `pushing` | AWF is pushing the task branch and creating a PR. |
 | `monitoring_pr` | AWF owns the PR until it merges, closes, or fails. |
-| `completed` | The PR merged or was observed as merged. Compose teardown ran best-effort; filesystem pressure-dir cleanup is retention-based. |
+| `completed` | The PR merged or was observed as merged. Compose teardown ran best-effort; filesystem pressure directories are reclaimed immediately after merge, with retention-based GC as a fallback. |
 | `failed` | A terminal failure occurred. The workspace is preserved for inspection. |
 | `cancelled` | Operator or orchestrator cancelled the workspace. |
 | `destroying` | Cleanup requested. |
 | `destroyed` | Workspace resources removed. |
+
+Filesystem GC records `filesystem_reclaimed_at` only after every planned workspace
+path was deleted or already absent, with no workspace cleanup failure. Dry runs
+and partial cleanup leave it unset. The marker leaves status and retention age
+unchanged; terminal GC excludes marked rows before applying its oldest-first batch
+limit, so even an already-empty legacy workspace advances out of the queue on its
+next successful execute pass. Cleanup readiness counts only unmarked candidates.
+Leaving a GC terminal state clears the marker through the state machine, including
+failed-workspace remonitoring, so recreated files can be reclaimed later. The
+periodic worker backstop logs one structured summary per sweep, including zero
+reclaimed paths, with the cleanup reason code and counts (warning on partial
+cleanup). Retention ages, cleanup order, shared-base pin protection, and durable
+rows, events, logs, and artifacts retain their existing policies.
 
 ## PR Monitor Actions
 
@@ -327,7 +340,16 @@ When meaningful bot or human feedback appears, AWF:
 4. Re-polls GitHub.
 5. Repeats if more new comments arrived.
 6. Pushes the accumulated fix commits.
-7. Resolves fixed GitHub review threads.
+7. Posts one in-thread disposition reply per thread (machine marker, class, fix
+   commit / reason / issue link), then resolves it; a thread whose reply cannot
+   be posted stays open and is parked `needs_human`. A fresh reply is checked
+   against the full live conversation before it first: feedback added or edited
+   since the thread was listed retires the reply and leaves the thread open for
+   re-triage. An unmarked comment by AWF's own account parks the thread
+   `THREAD_DISPOSITION_UNREAD_FEEDBACK` instead: it is the operator's, and the
+   monitor never reads it. The exception is a comment that comes before AWF's
+   previous reply in the thread while that reply is still current, meaning no
+   newer outside comment or edit has superseded it.
 8. Re-enters normal PR monitoring.
 
 Per-comment CLI output uses an explicit `AWF-VERDICT:` record on the final
@@ -381,10 +403,145 @@ its push. On the operator-hint path it is an ordinary parked hint with nothing
 to push. The rollback paths that need that baseline still refuse to park
 without it. Provider execution
 failures do not consume this correction retry. `FALSE POSITIVE` and `DEFER` resolve
-without a commit.
+without a commit, after the disposition reply carrying the agent's reason is posted.
+
+The correction's last evidence gate is cross-file callee evidence: a fix counts
+when the item's range edits the definition of a function called on the anchored
+line, even though that definition lives in another file. Touching the file is
+not enough. The diff must overlap the definition, and the definition must still
+exist after the correction. A Python callee is tied to a file through the call
+site's own imports: it is held to the module its `from` or `import` statement
+names. A JS/TS call site (`.js .jsx .mjs .cjs .ts .tsx .mts .cts`) never accepts
+cross-file evidence: without a real ES-module parser its callee cannot be tied
+to one file, and matching by name let an edit to an unrelated same-named export
+count as the fix (#1047). Only languages with no binding reader keep the
+name-only match. A name that a scope binds shadows the import for the anchored
+call. In a Python class body, which runs top to bottom, a binding in a later
+top-level statement does not count. Every binding in the statement holding the
+anchored line does, even one that runs after the call, so such a call fails
+closed. Every rejection keeps the item's
+`AGENT_FIXED_WITHOUT_EVIDENCE` outcome and parks it as `needs_human`.
 
 This is why AWF workspaces must stay alive after PR creation. The agent that
 created the PR is also responsible for repairing it.
+
+### Review-thread dispositions
+
+AWF never resolves a review thread silently (#1018). Immediately before every
+resolve — fix-cycle FIXED / FALSE POSITIVE / DEFER, outdated-thread hygiene, and
+branch-evidence seeding alike — it posts exactly one concise reply inside the
+thread. Its first line is a stable machine marker that names the thread, so a
+copy pasted into another thread is no evidence:
+
+```text
+<!-- AWF:thread-disposition:v1 class=<class> thread=<thread id> -->
+```
+
+| Class | Reply carries |
+| --- | --- |
+| `fixed` | the item's fix commit sha(s) (its #935 provenance commit; when the chain no longer holds it, the item commit this cycle durably recorded) |
+| `fixed_branch_evidence` | the branch commit an outdated thread's evidence grep matched |
+| `false_positive` | the agent's one-line reason (required by the prompt) |
+| `deferred` | the agent's reason and the tracking-issue link |
+
+Reason text is redacted and markdown-escaped: replies never contain `@`, so no
+bot or human is summoned, and a pasted marker cannot be forged. The record
+(class, reason, commits, issue URL, reply comment id) is kept per item in
+monitor state and copied into the resolve audit event's evidence. The thread is
+resolved only after the reply succeeded; otherwise it stays open and is parked
+`needs_human` — the workspace keeps monitoring and pushed commits stay pushed:
+
+- `THREAD_DISPOSITION_REASON_MISSING` — FALSE POSITIVE / DEFER without a reason;
+- `THREAD_DISPOSITION_EVIDENCE_MISSING` — FIXED without a commit, DEFER without
+  an issue;
+- `THREAD_DISPOSITION_REPLY_FAILED` — the forge rejected the reply (never retried
+  blindly, since a retry could post twice);
+- `THREAD_DISPOSITION_UNREAD_FEEDBACK` — an unmarked comment by AWF's own account
+  precedes the reply. That account can be the operator's, and
+  `fetch_pr_status` never lists its comments, so the triage never read it. This
+  holds even when newer outside feedback followed it, and even when an earlier AWF
+  reply that such feedback superseded sits in between. The reply is retired.
+
+DEFER no longer posts a separate top-level PR comment: the in-thread reply is
+the explanation. A newly posted reply id is saved durably right after the reply
+(the fix cycle writes only that record, never its unconfirmed verdicts), and a
+record whose reply landed survives every rollback and re-triage of the item, so
+a failed resolve never posts a second reply. Only fresh reviewer feedback in the
+thread drops it, because that feedback is owed its own reply — or a reopen, below.
+
+Before READY_TO_MERGE (release monitors) and before merging (feature
+monitors), AWF re-enumerates every review thread with exhaustive pagination,
+failing closed on a truncated page. Every thread resolved by AWF's own forge
+identity must carry the marker in a comment that identity authored — the
+marker, not the login, is the evidence, because that identity can be the
+operator's own account. The marker must also follow the thread's newest comment
+by anyone else, and be posted after the newest edit to such a comment: an older
+one answered feedback that has since moved on, so a reopened thread resolved
+silently after new or edited feedback blocks. Threads resolved
+by any other login are that person's or bot's disposition and never block.
+
+One invariant governs every disposition the monitor records, posted or not: it
+is bound to the conversation it answers once a gate audit first sees its reply
+resolved, and holds only while an audit shows the thread still resolved by AWF's
+identity with that conversation before its reply. A reopen, a resolution by
+someone else, or a new or edited comment retires it for good: its marker then
+certifies nothing — the monitor
+remembers a retired reply by the conversation it followed, whatever later
+happens to the record — so a silent re-resolve blocks. A reply whose AWF
+resolve landed is recorded as such (saved at once), so it is retired by a reopen
+just like a bound one even before any audit binds it. Every poll whose status
+lists such a reply's thread open again retires it too, as do an audit seeing it
+open, a re-triage and outdated hygiene reaching that thread, so a reopen counts
+even when no gate audit runs before the thread is resolved again. Only a failed
+resolve's reply is reused, by its retry. A retired disposition loses its reply
+id, so the monitor's next resolve of the thread posts a fresh reply instead of
+resolving on the old one. With no record at all
+(a re-adopted PR whose record did not cross), an agent's marker is still the
+evidence. A failing thread is
+`NotifyHuman` with `REVIEW_THREAD_DISPOSITION_UNVERIFIED` listing the thread
+ids (never a workspace failure); a failed enumeration is
+`REVIEW_THREAD_AUDIT_UNAVAILABLE`, whose public text stays stable across an
+outage (the raw forge error goes to the log and one audit event per outage).
+Once READY_TO_MERGE has been posted for a head, an outage on a later poll at
+that same head is log-only: the cert stands and the monitor waits and re-polls. The certificate's first gate line shows
+counts per disposition class and "resolved by others".
+
+Rollout: a workspace's first gate run records the threads it finds resolved
+by AWF's identity without a marker as a legacy baseline — they predate
+reply-before-resolve — in state and in one audit event with their ids
+(`REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE`). Baseline threads do not block and
+the certificate lists their count separately; every unmarked resolution after
+that first run still blocks. Each exemption is tied to the thread's
+conversation as that first run saw it: once the thread reopens or gains (or
+edits) a comment, the exemption is retired for good, and a later silent
+resolution needs a marker like any other. A PR AWF opens itself (a feature PR, or a release
+PR it creates) has no pre-rollout history, so its handoff settles the baseline
+empty: no first-run exemption, and every unmarked resolution blocks. On a
+reused or adopted PR, a thread the monitor already recorded a disposition for
+(or that carries an AWF marker at all) was handled after the rollout, so no
+baseline ever exempts it.
+
+There is no acknowledgement directive: an operator clears a flagged thread by
+reopening it. The next poll that lists the thread open clears its verdict, so
+`decide()` re-triages it through the normal fix cycle, which posts a fresh
+disposition reply before resolving it. Without this, a FIXED or FALSE POSITIVE
+thread whose comments did not change would never re-enter triage. The flag then
+reads `reopened` until the gate certifies the thread's new disposition. While it
+does, outdated hygiene does not re-seed the thread's verdict from branch
+evidence in the re-triage's place, and that poll step never clears the
+re-triage's own verdict again. The flag crosses a PR re-adoption. The gate itself
+never writes to the forge. It decides on ONE complete audit. Under the merge
+lock that audit fails fast, and so does outdated hygiene's re-read after a fresh
+reply: no transport retry or sleep holds the lock. A fault releases the lock,
+and the monitor retries on the next poll. A reply whose in-lock re-read faulted,
+or was too stale to show that reply (so it could miss feedback before it too),
+is kept but marked unconfirmed, and its thread is requeued. The retry re-reads
+that same reply before resolving on it and never posts a second one, and the
+gate certifies nothing on the reply until a re-read confirms it.
+
+On Bitbucket, comment threads get a child-comment reply and reviewer tasks a PR
+comment carrying the marker; the resolution audit is reported unsupported, so
+the Bitbucket certificate keeps its original text.
 
 ### Auto-merge (opt-in, default off)
 
@@ -879,6 +1036,118 @@ have a PR but no Compose metadata; AWF rejects Remonitor with
 `WORKSPACE_REMONITOR_METADATA_MISSING`, and the operator should use Retry so a
 replacement attempt can reprovision the runtime and reattach the existing PR.
 
+### Runtime restart on monitor resume
+
+Restart recovery, `remonitor` and `guide` resume the PR monitor through one
+handoff that brings the local runtime back without disturbing dependencies that
+are recovering on their own (#936):
+
+1. **Recreate and start prerequisites first, without waiting.** Each dependency
+   the resume must recreate is force-recreated (`compose up --force-recreate
+   --no-deps`): a companion whose environment the optional companion env-secret
+   refresh rewrote or that has a set env-backed secret (a rotated value keeps the
+   same `${SOURCE}` placeholder), since `--no-recreate` would never apply either,
+   and, on the first resume after a restart park, the dependencies still
+   unsettled at the last dependency-wait timeout. Every other exited or absent
+   declared dependency is started alone with `--no-recreate --no-deps`. None of
+   these calls waits, so nothing is waited on before every prerequisite is
+   started or recreated. A failed recreate fails the restart, and so does a
+   prerequisite of a forced recreate that exited non-zero or never started
+   (`MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED`): `--no-deps` would skip its
+   `depends_on` condition and the later `--no-recreate` up would never recreate
+   the dependent, so it stays pending for the next resume.
+2. **Wait for recovering dependencies.** Every running non-agent service declared
+   in compose.yml, including the ones just recreated, whose Docker health is
+   `starting` or `unhealthy` is polled every 5 s until it is healthy; one-off
+   `compose run` containers and orphans are ignored. Docker keeps probing an `unhealthy`
+   container and flips it back on success, so waiting is correct even after the
+   container's rendered healthcheck retries ran out. The wait is bounded by the
+   stack's startup budget (`docker.startup_timeout_seconds`, or a larger companion
+   `compose_up_timeout_seconds`), read from the profile rather than from the
+   already-rendered compose.yml, so existing workspaces get it too. When the
+   budget runs out the restart fails with `MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT`
+   naming each unsettled service. An unreadable Docker runtime skips the wait and
+   lets the compose call surface the real error.
+3. **Bring dependencies up without recreating them**
+   (`compose up --no-recreate --wait`): exited or absent containers are started
+   or created; a running one is never recreated. If a start in step 1 or this
+   call exits non-zero but the runtime is still usable, the failure is recorded
+   and step 4 still runs.
+4. **Recreate only the agent** (`compose up --force-recreate --no-deps --wait agent`).
+   The per-workspace auth overlay mounts are bound only when the container is
+   created, and the setup replay below keys off the agent's new identity.
+
+A resume passes only when step 4 ran and succeeded in the same attempt. Every
+other outcome (a failed recreate, a dependency wait timeout, an unusable runtime
+after a failed start or up, or a failed agent recreate, however healthy the old
+stack or whatever the agent's identity looks like afterwards) counts as a failed
+restart below, and only a passed resume resets the streak.
+
+Required companion secrets are still prechecked before any compose call. An exited dependency on a compose.yml
+rendered before the healthcheck budget rule starts with its stored 60 retries; if
+its recovery outlasts them, that resume fails once and the next one finds it
+running and waits with the full budget.
+
+**Repeated failures are surfaced, never looped.** Each failed restart (compose
+error, dependency wait timeout, failed agent recreate or a required companion
+secret precheck) records `workspace.monitor_runtime_restart_failed`. The
+consecutive failures are counted from these events, so a worker or control-plane
+restart does not reset the count. The next restart waits until 60 s after the
+first consecutive failure and 120 s after the second, so a transient error cannot
+use every attempt in seconds. After 3 in a row the workspace is parked in
+`blocked` (`block_type=monitor_runtime_restart_failure`, block reason
+`MONITOR_RUNTIME_RESTART_EXHAUSTED`, a monitor-origin `block_resume_phase`) with a
+`workspace.monitor_runtime_restart_exhausted` event carrying the count and the last
+redacted compose error. It is never failed for this. A passed resume closes the
+streak with `workspace.monitor_runtime_restart_recovered`; the exhausted event is
+a boundary too, so `guide` (`blocked -> monitoring_pr`) gives the resume a fresh
+set of attempts. A pending `remonitor` operation finalizes as failed with
+`MONITOR_RUNTIME_RESTART_EXHAUSTED`. Hosted workspaces have no local compose
+restart and are unchanged.
+
+The other two compose recoveries keep their behaviour: the executor's
+agent-service recovery already recreates only `agent`, and the PR monitor's
+agent-service recovery rebuilds the whole stack because a broken dependency may
+be why the agent became unhealthy; it is bounded by its own restart attempts.
+
+### Runtime setup replay on resume
+
+Restart recovery, `remonitor` (`failed -> monitoring_pr`) and `guide` on a
+monitor-origin block (`blocked -> monitoring_pr`) all resume through the same
+monitor handoff, which brings the local runtime back with `compose up`. A new
+agent container has lost anything the profile's `setup` phase installed inside
+it, such as a tool under `/tmp`. AWF therefore reads the agent container's
+identity (container id and `State.StartedAt`) before and after the `up`. When
+the identity changed, or there was no agent container before (a runtime
+released on block or failure), AWF replays the profile's `setup` and `pre_agent`
+phases before the monitor loop, its pre-push validation or any agent run
+continues. Both agent-service recoveries replay setup the same way after they
+recreate the agent: the monitor's whole-project recreate and the executor's
+agent-service recreate.
+
+The decision is based on identity, never on the `force_recreate` flag. If the
+identity cannot be read, or the Docker probe times out
+(`RUNTIME_IDENTITY_PROBE_TIMEOUT`), AWF replays setup: the blocked-resume
+env-health probe only checks that validate executables resolve, so it cannot
+prove that packages setup installed survived. Each recreation gets at most one replay and one
+`workspace.runtime_setup_replayed` event (`RUNTIME_SETUP_REPLAYED`). Like
+first-run setup, the replay repairs a poisoned mirror `core.hooksPath` before
+and after the phases, and recovers a missing `HEAD` after an exec cleanup
+failure; on a PR-monitor workspace that recovery rebuilds on the PR's pushed
+head, not on `base_commit`.
+
+A failed replay is not retried in place and carries `RUNTIME_SETUP_REPLAY_FAILED`
+with the failing command, its redacted output tail and, for an ownership-repair,
+mirror hooks-path or exec-cleanup failure, the underlying `cause_reason_code`.
+Because every monitor resume recreates the agent, a failed replay on the PR
+monitor side (restart recovery, remonitor, guide, or the monitor's agent-service
+recovery) does not fail the workspace: it parks it in `blocked`
+(`block_type=resume_setup_failure`, a monitor-origin `block_resume_phase`) with a
+`workspace.runtime_setup_replay_failed` event, keeping the worktree, its commits
+and the stack. A later `guide` resumes `blocked -> monitoring_pr` and replays
+setup again. The pre-PR executor agent-service recovery still fails the
+workspace. Hosted workspaces have no local `compose up` and are unchanged.
+
 ### Operator guidance (`guide`/`instruct`)
 
 `remonitor` recovers a *lost* monitor; to **steer a live one**, use the
@@ -1156,7 +1425,13 @@ By default, `docker.startup_timeout_seconds` from the resolved workspace profile
 controls the stack `docker compose up --wait-timeout` value. A companion can
 raise that stack-level startup budget with `compose_up_timeout_seconds` when its
 Dockerfile needs extra cold-cache build time; AWF uses the maximum companion
-override and adds a small subprocess capture buffer.
+override and adds a small subprocess capture buffer. The same budget sizes the
+rendered dependency healthchecks: `retries` is `ceil(budget / 5)` at the fixed
+5 s interval, so the default 300 s keeps today's 60 retries and a larger budget
+gives a slow dependency (for example Postgres crash recovery) proportionally
+longer before Docker marks it `unhealthy`. A monitor resume applies the budget
+to stacks rendered before this rule too, through its dependency wait (see
+"Runtime restart on monitor resume").
 
 Companions share the parent workspace resource reservation and lifecycle. AWF
 keeps companion worktrees while the parent workspace is active, removes them

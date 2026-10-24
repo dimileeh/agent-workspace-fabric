@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 from collections.abc import Callable, Mapping
@@ -15,9 +16,12 @@ from yaml.nodes import MappingNode, ScalarNode
 
 from awf.common.logging import get_logger
 from awf.node.companion_services import (
+    COMPANION_ENV_SECRET_SOURCE_EMPTY,
+    COMPANION_ENV_SECRET_SOURCE_MISSING,
     WorkspaceCompanionSpec,
     optional_env_secret_compose_placeholder,
 )
+from awf.node.compose_manager import ComposeOperationError
 
 # Own module logger so these moved helpers log under their actual module name
 # (per the get_logger(__name__) convention) rather than inheriting the
@@ -243,8 +247,12 @@ def _refresh_optional_companion_env_secrets_for_resume(
     compose_file: Path,
     companion_specs: tuple[WorkspaceCompanionSpec, ...],
     environ: Mapping[str, str],
-) -> None:
-    """Refresh optional companion env-secret targets before compose resume."""
+) -> tuple[str, ...]:
+    """Refresh optional companion env-secret targets before compose resume.
+
+    Returns the services whose environment was rewritten; the resume
+    force-recreates them, since ``--no-recreate`` never applies the new env.
+    """
     missing_targets = _missing_optional_companion_env_secret_targets(
         companion_specs=companion_specs,
         environ=environ,
@@ -254,7 +262,7 @@ def _refresh_optional_companion_env_secrets_for_resume(
         environ=environ,
     )
     if not missing_targets and not present_refs:
-        return
+        return ()
 
     try:
         payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
@@ -264,23 +272,45 @@ def _refresh_optional_companion_env_secrets_for_resume(
             workspace_id=workspace_id,
             compose_file=str(compose_file),
         )
-        return
+        return ()
     except yaml.YAMLError:
         _log.warning(
             "executor.resume_companion_env_secret_refresh_parse_failed",
             workspace_id=workspace_id,
             compose_file=str(compose_file),
         )
-        return
+        return ()
 
     # This best-effort resume repair uses PyYAML, which preserves Compose
     # interpolation via the custom dumper but not comments or block-scalar style.
+    environment_before = _service_environments(payload)
     removed_count = _remove_compose_environment_targets(payload, missing_targets)
     restored_count = _restore_compose_environment_refs(payload, present_refs)
     if removed_count == 0 and restored_count == 0:
-        return
+        return ()
+    environment_after = _service_environments(payload)
+    rewritten = tuple(
+        sorted(
+            name
+            for name in environment_after
+            if environment_after[name] != environment_before.get(name)
+        )
+    )
 
+    # Record the pending recreate before compose.yml drops the evidence: once a
+    # target is omitted, only this marker tells a later resume that a companion
+    # whose recreate failed still runs with the old env.
+    pending = set(
+        _pending_companion_recreates_for_resume(
+            workspace_id=workspace_id, compose_file=compose_file
+        )
+    )
     try:
+        _atomic_write_text(
+            _pending_companion_recreates_path(compose_file),
+            "".join(f"{name}\n" for name in sorted(pending | set(rewritten))),
+            encoding="utf-8",
+        )
         _atomic_write_text(
             compose_file,
             _safe_dump_compose_payload_for_resume(payload),
@@ -292,7 +322,7 @@ def _refresh_optional_companion_env_secrets_for_resume(
             workspace_id=workspace_id,
             compose_file=str(compose_file),
         )
-        return
+        return ()
     _log.warning(
         "executor.resume_companion_env_secret_refresh_reformatted",
         workspace_id=workspace_id,
@@ -318,6 +348,66 @@ def _refresh_optional_companion_env_secrets_for_resume(
             compose_file=str(compose_file),
             restored_count=restored_count,
         )
+    return rewritten
+
+
+def _pending_companion_recreates_path(compose_file: Path) -> Path:
+    return compose_file.with_name(f".{compose_file.name}.pending-recreate")
+
+
+def _pending_companion_recreates_for_resume(
+    *, workspace_id: str, compose_file: Path
+) -> tuple[str, ...]:
+    """Return companions whose env the refresh rewrote but no resume has recreated yet."""
+    try:
+        text = _pending_companion_recreates_path(compose_file).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_pending_recreate_read_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+        return ()
+    return tuple(sorted({line.strip() for line in text.splitlines() if line.strip()}))
+
+
+def _clear_pending_companion_recreates_for_resume(
+    *, workspace_id: str, compose_file: Path, keep: tuple[str, ...] = ()
+) -> None:
+    """Drop the marker once the resume recreated the pending companions.
+
+    ``keep`` names pending companions this resume did not recreate; they stay
+    pending. A marker that cannot be updated only makes the next resume recreate
+    them again.
+    """
+    marker = _pending_companion_recreates_path(compose_file)
+    try:
+        if keep:
+            _atomic_write_text(
+                marker, "".join(f"{name}\n" for name in sorted(set(keep))), encoding="utf-8"
+            )
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError:
+        _log.warning(
+            "executor.resume_companion_pending_recreate_clear_failed",
+            workspace_id=workspace_id,
+            compose_file=str(compose_file),
+        )
+
+
+def _service_environments(payload: object) -> dict[str, object]:
+    """Snapshot each compose service's ``environment`` so rewrites can be diffed."""
+    services = payload.get("services") if isinstance(payload, dict) else None
+    if not isinstance(services, dict):
+        return {}
+    return {
+        str(name): copy.deepcopy(service.get("environment"))
+        for name, service in services.items()
+        if isinstance(service, dict)
+    }
 
 
 def _missing_optional_companion_env_secret_targets(
@@ -336,6 +426,38 @@ def _missing_optional_companion_env_secret_targets(
     return missing_targets
 
 
+def _companions_with_stale_optional_env_secret_targets_for_resume(
+    *,
+    compose_file: Path,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Return companions whose compose.yml still carries an unset optional target.
+
+    The refresh omits these targets; when it could not persist that, only a
+    recreate resolves ``${SOURCE:-}`` empty and drops the revoked value. An
+    already-omitted target is the steady state and needs no recreate.
+    """
+    missing_targets = _missing_optional_companion_env_secret_targets(
+        companion_specs=companion_specs,
+        environ=environ,
+    )
+    if not missing_targets:
+        return ()
+    try:
+        payload = _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return ()
+    # The payload is a throwaway copy; removal counts which targets remain.
+    return tuple(
+        sorted(
+            name
+            for name, targets in missing_targets.items()
+            if _remove_compose_environment_targets(payload, {name: targets})
+        )
+    )
+
+
 def _present_optional_companion_env_secret_refs(
     *,
     companion_specs: tuple[WorkspaceCompanionSpec, ...],
@@ -352,3 +474,78 @@ def _present_optional_companion_env_secret_refs(
                 optional_env_secret_compose_placeholder(secret.value_from)
             )
     return present_refs
+
+
+def _companions_with_set_env_secrets_for_resume(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> tuple[str, ...]:
+    """Return companions with an env-backed secret whose source is set.
+
+    Compose resolves the ``${SOURCE}`` placeholder at ``up`` time, so a rotated
+    value leaves compose.yml unchanged; ``--no-recreate`` would keep the old
+    value, so the resume force-recreates these companions.
+    """
+    return tuple(
+        sorted(
+            {
+                spec.name
+                for spec in companion_specs
+                for secret in spec.environment_secrets
+                if secret.provider == "env"
+                and secret.kind == "env"
+                and secret.value_from in environ
+            }
+        )
+    )
+
+
+class CompanionEnvSecretPrecheckError(ComposeOperationError):
+    """Raised when monitor resume cannot satisfy required companion env secrets."""
+
+    def __init__(self, *, stderr: str, reason_code: str) -> None:
+        self.operation = "companion_env_secret_precheck"
+        self.returncode = 1
+        self.stdout = ""
+        self.stderr = stderr
+        self.reason_code = reason_code
+        Exception.__init__(
+            self,
+            "companion env secret precheck failed "
+            f"(reason={reason_code}): {stderr.strip() or '<no output>'}",
+        )
+
+
+def _precheck_required_companion_env_secrets_for_resume(
+    *,
+    companion_specs: tuple[WorkspaceCompanionSpec, ...],
+    environ: Mapping[str, str],
+) -> None:
+    """Fail monitor resume early when a required env-backed companion secret is unavailable."""
+    failures: list[tuple[str, str]] = []
+    for spec in companion_specs:
+        for secret in spec.environment_secrets:
+            if not secret.required or secret.provider != "env" or secret.kind != "env":
+                continue
+            source_is_set = secret.value_from in environ
+            source_is_empty = source_is_set and environ[secret.value_from] == ""
+            if source_is_set and not source_is_empty:
+                continue
+            reason_code = (
+                COMPANION_ENV_SECRET_SOURCE_EMPTY
+                if source_is_empty
+                else COMPANION_ENV_SECRET_SOURCE_MISSING
+            )
+            failures.append(
+                (
+                    reason_code,
+                    f"{reason_code}: companion={spec.name}, target={secret.target}, "
+                    f"provider={secret.provider}, source={secret.value_from}",
+                )
+            )
+    if failures:
+        raise CompanionEnvSecretPrecheckError(
+            stderr="\n".join(stderr for _reason_code, stderr in failures),
+            reason_code=failures[0][0],
+        )

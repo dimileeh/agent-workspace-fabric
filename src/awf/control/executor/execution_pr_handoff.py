@@ -17,6 +17,7 @@ from awf.control.executor.helpers import (
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.monitor_state_keys import _with_settled_disposition_baseline
 
 
 async def persist_pr_and_handoff(
@@ -100,6 +101,10 @@ async def persist_pr_and_handoff(
             )
 
         if monitor is not None:
+            if not had_existing_pr_url:
+                persisted.monitor_threads_addressed = _with_settled_disposition_baseline(
+                    persisted.monitor_threads_addressed
+                )
             await repo.transition(
                 persisted,
                 to=WorkspaceStatus.monitoring_pr,

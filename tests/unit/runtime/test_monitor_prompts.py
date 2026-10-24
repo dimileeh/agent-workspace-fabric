@@ -84,7 +84,7 @@ class TestAddressThread:
         assert "AWF-VERDICT: NEEDS_HUMAN:" in prompt
         assert "AWF-VERDICT: DEFER:" in prompt
         assert "public commit-resolution reply" not in prompt
-        assert "Do not write any PR comment for verdict bookkeeping." in prompt
+        assert "Do not write any PR comment or thread reply yourself" in prompt
         assert "fail closed" in prompt
         assert "HEAD advances for this item" in prompt
         assert "already satisfied before this invocation" in prompt

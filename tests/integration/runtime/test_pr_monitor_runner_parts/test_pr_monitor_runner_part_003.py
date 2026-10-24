@@ -43,7 +43,15 @@ from tests.integration.runtime.test_pr_monitor_runner_parts._helpers import (
 from tests.shared.monitor_runner import (
     DefaultMergeMethodGitHubClient,
     mock_completed_compose_manager,
+    supply_fixed_item_commit,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
+
 
 pytest_plugins = ["tests.integration.runtime._pr_monitor_runner_fixtures"]
 
@@ -896,10 +904,10 @@ class TestDeferredThreadCapture:
         """A follow-up ``DEFER`` is durably captured then resolved (#305).
 
         Two-kind defer: a ``defer`` verdict is a capturable follow-up. The
-        runner files a tracking issue and posts an explanatory PR comment, and
-        only **then** resolves the thread — so the thread leaves GitHub's
-        unresolved set, the merge gate clears, and the deferred work survives in
-        the filed issue.
+        runner files a tracking issue and only **then** resolves the thread —
+        so the thread leaves GitHub's unresolved set, the merge gate clears, and
+        the deferred work survives in the filed issue. No top-level PR comment
+        is posted: the explanation is the in-thread disposition reply (#1018).
         """
         ws_id = await _seed_monitoring_workspace(factory)
         thread = {
@@ -917,7 +925,6 @@ class TestDeferredThreadCapture:
         cmd.queue_result(  # gh issue create -> tracking issue URL (capture)
             returncode=0, stdout="https://github.com/o/r/issues/77\n"
         )
-        cmd.queue_result(returncode=0)  # gh pr comment (explanatory capture comment)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle fetch
         _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
@@ -962,6 +969,9 @@ class TestDeferredThreadCapture:
         ), "captured defer must resolve the thread"
         assert any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
             "PR should merge once the captured defer thread is resolved"
+        )
+        assert not any(c.args[:3] == ["gh", "pr", "comment"] for c in cmd.calls), (
+            "the defer explanation is no longer a top-level PR comment"
         )
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -1122,11 +1132,10 @@ class TestDeferredThreadCapture:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Filing the tracking issue is the durable capture; the explanatory PR
-        comment is best-effort. If ``gh issue create`` succeeds but the comment
-        fails, capture still succeeds — the thread is resolved and the issue is
-        recorded as filed so a retry never opens a duplicate (idempotency on
-        partial success).
+        """Filing the tracking issue is the durable capture. The old best-effort
+        top-level PR comment is gone (#1018): its failure used to be swallowed
+        and the thread resolved anyway. Exactly one issue is filed and no PR
+        comment is attempted.
         """
         ws_id = await _seed_monitoring_workspace(factory)
         thread = {
@@ -1144,7 +1153,6 @@ class TestDeferredThreadCapture:
         cmd.queue_result(  # gh issue create succeeds (durable capture)
             returncode=0, stdout="https://github.com/o/r/issues/88\n"
         )
-        cmd.queue_result(returncode=1, stderr="HTTP 502")  # gh pr comment FAILS (best-effort)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle fetch
         _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push
@@ -1181,9 +1189,10 @@ class TestDeferredThreadCapture:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        # Exactly one tracking issue filed despite the comment failure.
+        # Exactly one tracking issue filed and no top-level PR comment attempted.
         issue_creates = [c for c in cmd.calls if c.args[:3] == ["gh", "issue", "create"]]
-        assert len(issue_creates) == 1, "comment failure must not re-file the issue"
+        assert len(issue_creates) == 1, "a filed issue must never be re-filed"
+        assert not any(c.args[:3] == ["gh", "pr", "comment"] for c in cmd.calls)
         # Capture succeeded → thread resolved → PR merged.
         assert any(
             any(a.startswith("query=") and "resolveReviewThread" in a for a in c.args)
@@ -1241,7 +1250,6 @@ class TestDeferredThreadCapture:
         cmd.queue_result(
             returncode=0, stdout="https://github.com/o/r/issues/91\n"
         )  # gh issue create
-        cmd.queue_result(returncode=0)  # gh pr comment (capture)
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #1: new reply
         adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: design decision required")  # pass 2
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle #2: quiet

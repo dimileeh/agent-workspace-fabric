@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 
@@ -19,6 +20,8 @@ class RuntimeService:
     ports: list[str] = field(default_factory=list)
     started_at: str | None = None
     service_label_available: bool = True
+    one_off: bool = False
+    """A ``docker compose run`` container rather than the service's own container."""
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class RuntimeInspector:
                     if isinstance(state_data, dict)
                     else None,
                     service_label_available=_service_label_available(inspect_data),
+                    one_off=_compose_label(inspect_data, "com.docker.compose.oneoff") == "True",
                 )
             )
         if not services:
@@ -142,7 +146,14 @@ async def _run(args: list[str]) -> _ProcessResult:
             stdout="",
             stderr=f"{args[0]} executable is not available: {exc}",
         )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await proc.communicate()
+    except asyncio.CancelledError:
+        # A caller-imposed timeout (``asyncio.wait_for``) cancels us here; kill
+        # the Docker CLI so a wedged daemon call does not outlive its caller.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise
     assert proc.returncode is not None
     return _ProcessResult(
         returncode=proc.returncode,
@@ -177,14 +188,18 @@ def _service_label_available(inspect_data: dict[str, object]) -> bool:
 
 
 def _compose_service_label(inspect_data: dict[str, object]) -> str | None:
+    return _compose_label(inspect_data, "com.docker.compose.service")
+
+
+def _compose_label(inspect_data: dict[str, object], name: str) -> str | None:
     labels: object = {}
     config = inspect_data.get("Config") if inspect_data else None
     if isinstance(config, dict):
         labels = config.get("Labels", {})
     if isinstance(labels, dict):
-        service = labels.get("com.docker.compose.service")
-        if isinstance(service, str) and service:
-            return service
+        value = labels.get(name)
+        if isinstance(value, str) and value:
+            return value
     return None
 
 

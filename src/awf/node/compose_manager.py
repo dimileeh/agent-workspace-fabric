@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
@@ -48,6 +49,8 @@ COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
 COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS = 60.0
 COMPANION_BUILD_CAPTURE_TIMEOUT_SECONDS = 1800.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
+HEALTHCHECK_INTERVAL_SECONDS = 5
+"""Rendered dependency healthcheck ``interval``; retries scale the budget by it."""
 
 # Labels stamped on pre-built companion images so image GC can scope its prune
 # to AWF-managed companion builds without touching unrelated images.
@@ -243,6 +246,16 @@ def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
     return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
 
 
+def healthcheck_retries_for_budget(budget_seconds: int) -> int:
+    """Return the dependency healthcheck retries that span ``budget_seconds``.
+
+    The stack's startup budget (``docker.startup_timeout_seconds`` or a larger
+    companion ``compose_up_timeout_seconds``) also bounds how long Docker probes a
+    dependency before marking it ``unhealthy``. The default 300 s keeps 60 retries.
+    """
+    return max(1, math.ceil(budget_seconds / HEALTHCHECK_INTERVAL_SECONDS))
+
+
 def compose_up_capture_timeout_seconds(compose_up_timeout_seconds: int, *, wait: bool) -> float:
     """Return AWF's outer timeout for ``docker compose up``.
 
@@ -355,6 +368,7 @@ class ComposeManager:
             agent_depends_on=agent_depends_on,
             network_internal=spec.network_internal,
             host_gateway_enabled=spec.host_gateway_enabled,
+            healthcheck_retries=healthcheck_retries_for_budget(spec.compose_up_timeout_seconds),
         )
         compose_file.write_text(rendered, encoding="utf-8")
 
@@ -396,6 +410,8 @@ class ComposeManager:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         """Start an already-rendered compose project without re-rendering.
 
@@ -403,10 +419,20 @@ class ComposeManager:
         compose project and compose.yml path that were active before the
         service restart. Re-rendering from a profile at resume time risks
         drifting from the stack the monitor originally owned.
+
+        ``no_recreate`` starts exited or absent containers but never recreates an
+        existing one, so a dependency in its own crash recovery keeps running.
+        ``no_deps`` limits the call to the listed ``services``.
         """
+        if force_recreate and no_recreate:
+            raise ValueError("force_recreate and no_recreate are mutually exclusive")
         args = ["up", "-d", "--remove-orphans"]
         if force_recreate:
             args.append("--force-recreate")
+        if no_recreate:
+            args.append("--no-recreate")
+        if no_deps:
+            args.append("--no-deps")
         if wait:
             args.extend(["--wait", "--wait-timeout", str(compose_up_timeout_seconds)])
         args.extend(services)
@@ -417,6 +443,8 @@ class ComposeManager:
             compose_file=str(compose_file),
             wait=wait,
             force_recreate=force_recreate,
+            no_recreate=no_recreate,
+            no_deps=no_deps,
             services=services,
         )
         await self._compose(

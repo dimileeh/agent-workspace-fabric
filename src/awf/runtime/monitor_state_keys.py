@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 # Reserved ``MonitorState.threads_addressed_ids`` key holding the commit-time
@@ -137,3 +138,76 @@ def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime)
     if started_dt.tzinfo is None:
         started_dt = started_dt.replace(tzinfo=UTC)
     return _initial_review_grace_wall_started_value(started_dt.timestamp())
+
+
+def _item_disposition_key(item_id: str) -> str:
+    """Build state key holding a review item's disposition record (#1018).
+
+    The JSON sidecar records the disposition class, the agent's reason, the fix
+    commit(s), the tracking-issue URL and — once posted — the id of AWF's
+    in-thread disposition reply. A resolve is only ever issued after that reply,
+    so the record is both the reply's input and its audit evidence.
+    """
+    return f"__awf_item_disposition__:{item_id}"
+
+
+def _disposition_unverified_key(thread_id: str) -> str:
+    """Build state key flagging a thread the READY_TO_MERGE audit could not verify.
+
+    Set when a thread resolved by AWF's own identity carries no AWF disposition
+    marker (#1018). The operator clears it by reopening the thread: the poll that
+    lists it open clears its verdict for re-triage and sets the flag to
+    ``reopened``, which keeps branch evidence from re-seeding that verdict. The
+    flag is dropped once the thread carries a marker the gate certifies.
+    """
+    return f"__awf_disposition_unverified__:{thread_id}"
+
+
+def _disposition_retired_key(thread_id: str, conversation_digest: str) -> str:
+    """Build state key recording an AWF disposition reply that was retired (#1018).
+
+    Keyed by the conversation that reply followed: while the thread's newest
+    marker still follows exactly that conversation, it is the retired reply,
+    which certifies nothing even once the thread has no disposition record left.
+    The empty digest records a retired reply whose conversation AWF never read:
+    then no marker in the thread certifies without a record (PRRT_kwDOSJAM6s6vc8NC).
+    """
+    return f"__awf_disposition_retired__:{thread_id}:{conversation_digest}"
+
+
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the summary of the
+# current review-thread audit outage (#1018). The disposition gate records its
+# ``REVIEW_THREAD_AUDIT_UNAVAILABLE`` audit event once per outage, not once per
+# poll, and clears the key on the next successful audit.
+_REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY = "__awf_review_thread_audit_unavailable__"
+
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON list of
+# review threads the workspace's FIRST disposition-gate run found resolved by
+# AWF's identity without a marker (#1018 rollout). Those predate reply-before-
+# resolve: they are counted as a legacy baseline and do not block while their
+# conversation stands (see the conversations key below). Its presence also marks
+# the first run as done, so every later unmarked resolution blocks.
+# A PR AWF opens itself has no such history: its handoff seeds the key empty.
+_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY = "__awf_review_thread_disposition_baseline__"
+
+# Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON object
+# that ties each legacy-baseline thread to its conversation digest at baseline
+# time (#1018). The exemption holds only while that thread stays resolved with
+# that same conversation: a reopen or any changed comment retires it for good,
+# so new feedback on a grandfathered thread needs a marker like any other.
+_REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY = (
+    "__awf_review_thread_disposition_baseline_conversations__"
+)
+
+
+def _with_settled_disposition_baseline(
+    threads_addressed: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Persisted monitor state for a PR AWF just opened, its baseline settled empty.
+
+    Only a PR that predates reply-before-resolve can hold unmarked AWF
+    resolutions worth grandfathering. A PR opened now has none, so its first
+    disposition-gate run must not take a legacy baseline: every unmarked AWF
+    resolution blocks from the first audit on. An existing record is kept.
+    """
+    return {_REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY: "[]", **(threads_addressed or {})}

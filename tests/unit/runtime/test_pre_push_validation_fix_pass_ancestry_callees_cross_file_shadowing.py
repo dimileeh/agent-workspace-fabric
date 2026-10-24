@@ -725,3 +725,255 @@ def test_delete_targets_of_the_anchored_scope_are_read() -> None:
     assert cross_file._locally_rebound_names_at_line(text, 6, path=_CALLER) == frozenset(
         {"pool", "record"}
     )
+
+
+# --- class bodies execute top to bottom (issue #1045 item 2) ------------------
+
+# The class body calls the imported name on line 5 and only rebinds it on line
+# 6, so the call reaches the import: the class namespace does not hold the name
+# yet when line 5 runs.
+_CLASS_BODY_CALL_BEFORE_BINDING_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "class Pools:\n"
+    "    depth = record_ready_queue_depth(1)\n"
+    "    record_ready_queue_depth = staticmethod(len)\n"
+)
+
+# The mirror: the class body binds the name on line 5, so the call on line 6
+# reaches the class attribute, not the import.
+_CLASS_BODY_CALL_AFTER_BINDING_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "class Pools:\n"
+    "    record_ready_queue_depth = staticmethod(len)\n"
+    "    depth = record_ready_queue_depth(1)\n"
+)
+
+# The reviewer's case: the loop target binds ``record_ready_queue_depth`` before
+# the call inside its second target element runs, so the call on line 5 reaches
+# the loop variable, not the import (PRRT_kwDOSJAM6s6vWtm4).
+_CLASS_BODY_CALL_IN_LOOP_TARGET_TEXT = (
+    f"{_IMPORT_LINE}"
+    "\n"
+    "\n"
+    "class Pools:\n"
+    "    for record_ready_queue_depth, sink[record_ready_queue_depth(1)] in pairs:\n"
+    "        depth = 1\n"
+)
+
+# The class body calls the name on line 2 and only imports it on line 3, so the
+# call reaches whatever the module scope binds — here nothing but a builtin —
+# and never the import below it.
+_CLASS_BODY_CALL_BEFORE_IMPORT_TEXT = (
+    "class Pools:\n"
+    "    depth = record_ready_queue_depth(1)\n"
+    "    from pkg_b.observability.execution_platform_metrics import record_ready_queue_depth\n"
+)
+
+
+@pytest.mark.unit
+def test_a_class_body_binding_after_the_anchor_does_not_shadow() -> None:
+    """A class body runs top to bottom, so a later binding cannot reach an earlier call.
+
+    ``class C: result = validate(); validate = local`` calls the imported
+    ``validate``: the class namespace only gains the name on the line after the
+    call. Reading the whole body regardless of position rejected a correct fix
+    to the imported definition (issue #1045 item 2). The mirror, where the
+    binding comes first, still shadows.
+    """
+    text = "from m import validate\nclass C:\n    result = validate()\n    validate = local\n"
+    mirror = "from m import validate\nclass C:\n    validate = local\n    result = validate()\n"
+
+    assert cross_file._locally_rebound_names_at_line(text, 3, path=_CALLER) == frozenset({"result"})
+    assert cross_file._locally_rebound_names_at_line(mirror, 4, path=_CALLER) == frozenset(
+        {"validate", "result"}
+    )
+
+
+@pytest.mark.unit
+def test_class_body_ordering_keeps_its_conservative_edges() -> None:
+    """Statements sharing the anchor line, or enclosing it, still count.
+
+    A same-line binding may run before the call, and a loop that starts
+    before the anchor may rebind the name on a later pass, so both stay
+    shadows rather than being read as ordered after the call. A decorated
+    definition starts at its first decorator, so an anchor inside its decorator
+    stack still sees what that stack binds (a ``:=`` in an earlier decorator),
+    while a decorated definition entirely below the anchor does not shadow it.
+    """
+    same_line = "class C:\n    validate = local; result = validate()\n"
+    loop = (
+        "class C:\n    for item in items:\n        result = validate()\n        validate = item\n"
+    )
+    walrus = (
+        "class C:\n"
+        "    @register(validate := local)\n"
+        "    @wrap(validate())\n"
+        "    def method(self):\n"
+        "        return 1\n"
+    )
+    later = "class C:\n    result = validate()\n\n    @wrap\n    def validate(self):\n        return 1\n"
+
+    assert "validate" in cross_file._locally_rebound_names_at_line(same_line, 2, path=_CALLER)
+    assert "validate" in cross_file._locally_rebound_names_at_line(loop, 3, path=_CALLER)
+    assert "validate" in cross_file._locally_rebound_names_at_line(walrus, 3, path=_CALLER)
+    assert cross_file._locally_rebound_names_at_line(later, 2, path=_CALLER) == frozenset(
+        {"result"}
+    )
+
+
+@pytest.mark.unit
+def test_the_class_body_statement_holding_the_anchor_keeps_every_binding() -> None:
+    """Nothing in the top-level class-body statement holding the anchor is trimmed.
+
+    Ordering a call against the bindings of its own statement is where a trim
+    error drops a real shadow: ``for validate, sink[validate()] in pairs:``
+    binds the loop's ``validate`` before the call in its target runs
+    (PRRT_kwDOSJAM6s6vWtm4). So every binding in that statement counts — a
+    compound body below the anchor, a mutually exclusive arm, a header target,
+    a ``with`` / ``except`` ``as`` name, a walrus in a handler type and a
+    ``case`` capture alike — and a call that does run before one of them fails
+    closed. Only top-level statements below it are dropped (see
+    ``test_a_class_body_binding_after_the_anchor_does_not_shadow``).
+    """
+    holding_anchor = {
+        "for_target_call": (
+            "class C:\n    for validate, sink[validate()] in pairs:\n        result = 1\n",
+            2,
+        ),
+        "with_target_call": (
+            "class C:\n    with local() as (validate, sink[validate()]):\n        result = 1\n",
+            2,
+        ),
+        "for_header": ("class C:\n    for validate in validate():\n        result = 1\n", 2),
+        "with_header": ("class C:\n    with validate() as validate:\n        result = 1\n", 2),
+        "handler_header": (
+            "class C:\n"
+            "    try:\n"
+            "        before = 1\n"
+            "    except validate() as validate:\n"
+            "        result = 1\n",
+            4,
+        ),
+        "body_below_anchor": (
+            "class C:\n"
+            "    with ctx:\n"
+            "        if enabled:\n"
+            "            result = validate()\n"
+            "            validate = local\n",
+            4,
+        ),
+        "exclusive_arm": (
+            "class C:\n"
+            "    if enabled:\n"
+            "        validate = local\n"
+            "    else:\n"
+            "        result = validate()\n",
+            5,
+        ),
+        "handler_type_walrus": (
+            "class C:\n"
+            "    try:\n"
+            "        before = 1\n"
+            "    except (validate := ValueError):\n"
+            "        skipped = 1\n"
+            "    else:\n"
+            "        result = validate()\n",
+            7,
+        ),
+        "later_case": (
+            "class C:\n"
+            "    match subject:\n"
+            "        case [first]:\n"
+            "            result = validate()\n"
+            "        case validate:\n"
+            "            other = 1\n",
+            4,
+        ),
+    }
+
+    for name, (text, line) in holding_anchor.items():
+        assert "validate" in cross_file._locally_rebound_names_at_line(text, line, path=_CALLER), (
+            name
+        )
+
+
+@pytest.mark.unit
+def test_a_class_body_import_after_the_anchor_does_not_bind_it() -> None:
+    """A class-body import below the anchor has not run when the call does.
+
+    ``class C: size = len(items); from helpers import len`` calls the builtin
+    ``len``, so the import must not be read as that call's binding: the name is
+    reported here, which holds it to the unmatchable target instead of
+    ``helpers`` (PRRT_kwDOSJAM6s6vLRfX). An import at or above the anchor does
+    bind it and is not reported, and neither is one in a method below, which
+    binds a local of that method only. An import inside the statement holding
+    the anchor is reported too, wherever it sits: a loop's first pass calls the
+    builtin before an import below it has run (PRRT_kwDOSJAM6s6vLnh5), and an
+    import above it in that statement is not ordered against the call, so it
+    fails closed (PRRT_kwDOSJAM6s6vWtm4).
+    """
+    later = "class C:\n    size = len(items)\n    if ok:\n        from helpers import len\n"
+    loop_later = (
+        "class C:\n"
+        "    for item in items:\n"
+        "        size = len(item)\n"
+        "        from helpers import len\n"
+    )
+    loop_earlier = (
+        "class C:\n"
+        "    while pending:\n"
+        "        from helpers import len\n"
+        "        size = len(pending)\n"
+    )
+    earlier = "class C:\n    from helpers import len\n    size = len(items)\n"
+    method = "class C:\n    size = len(items)\n    def m(self):\n        from helpers import len\n"
+
+    assert cross_file._locally_rebound_names_at_line(later, 2, path=_CALLER) == frozenset(
+        {"size", "len"}
+    )
+    assert cross_file._locally_rebound_names_at_line(earlier, 3, path=_CALLER) == frozenset(
+        {"size"}
+    )
+    assert cross_file._locally_rebound_names_at_line(method, 2, path=_CALLER) == frozenset({"size"})
+    assert cross_file._locally_rebound_names_at_line(loop_later, 3, path=_CALLER) == frozenset(
+        {"item", "size", "len"}
+    )
+    assert cross_file._locally_rebound_names_at_line(loop_earlier, 4, path=_CALLER) == frozenset(
+        {"size", "len"}
+    )
+
+
+@pytest.mark.unit
+async def test_a_correction_to_an_import_the_class_body_rebinds_later_is_evidence() -> None:
+    """End to end: the earlier class-body call reaches the import, so its fix counts."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_BEFORE_BINDING_TEXT)
+
+    assert await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_correction_to_an_import_the_class_body_rebound_earlier_fails_closed() -> None:
+    """End to end: a call after the class-body binding reaches the attribute instead."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_AFTER_BINDING_TEXT)
+
+    assert not await _probe(probe, item_line=6)
+
+
+@pytest.mark.unit
+async def test_a_correction_to_an_import_a_class_body_loop_target_rebinds_fails_closed() -> None:
+    """End to end: a call inside the loop's own target reaches the loop variable."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_IN_LOOP_TARGET_TEXT)
+
+    assert not await _probe(probe, item_line=5)
+
+
+@pytest.mark.unit
+async def test_a_correction_to_a_class_body_import_below_the_call_fails_closed() -> None:
+    """End to end: the earlier class-body call never reaches the later import."""
+    probe = _cross_package_probe(caller_text=_CLASS_BODY_CALL_BEFORE_IMPORT_TEXT)
+
+    assert not await _probe(probe, item_line=2)

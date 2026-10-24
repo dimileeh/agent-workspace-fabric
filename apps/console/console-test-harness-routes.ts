@@ -21,3 +21,13 @@ export function resolveConsolePageExtensions(env: EnvLike = process.env): string
   }
   return [...DEFAULT_PAGE_EXTENSIONS, HARNESS_PAGE_EXTENSION];
 }
+
+/**
+ * Hide the Next.js dev indicator on Playwright harness dev servers. It loads
+ * its own font and re-renders on client URL changes (e.g. the workspaceId
+ * replaceState), adding dev-only main-thread work inside pane timing budgets.
+ * `undefined` keeps Next's default indicator for developers.
+ */
+export function resolveConsoleDevIndicators(env: EnvLike = process.env): false | undefined {
+  return isConsoleTestHarnessRouteBuildEnabled(env) ? false : undefined;
+}

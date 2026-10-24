@@ -59,9 +59,11 @@ class TestExecutorCoverageEdgesPart010:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, compose_file, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 compose_calls.append(workspace_id)
                 raise ComposeOperationError(
                     operation="up",
@@ -174,9 +176,11 @@ services:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 parsed = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
                 assert parsed["services"]["backend"]["environment"] == {
                     "APP_ENV": "test",
@@ -264,9 +268,11 @@ services:
                 compose_up_timeout_seconds: int = 300,
                 force_recreate: bool = False,
                 services: tuple[str, ...] = (),
+                no_recreate: bool = False,
+                no_deps: bool = False,
             ) -> None:
                 del project_name, workspace_id, wait, compose_up_timeout_seconds
-                del force_recreate, services
+                del force_recreate, services, no_recreate, no_deps
                 parsed = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
                 assert parsed["services"]["backend"]["environment"] == {
                     "APP_ENV": "test",

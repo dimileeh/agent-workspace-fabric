@@ -912,6 +912,11 @@ def _apply_service_git_environment(env: dict[str, str]) -> None:
 async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
     """Run the control worker, disposing the DB engine on exit."""
 
+    from awf.common.config import get_settings
+
+    if get_settings().hosted_node is not None:
+        raise ValueError("HOSTED_RUNTIME_INTEGRATION_REQUIRED")
+
     runtime = build_worker_runtime(settings)
     try:
         if once:

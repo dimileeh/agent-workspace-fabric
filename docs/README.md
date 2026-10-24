@@ -10,5 +10,8 @@
 - [Recipe: DinD private-registry Docker auth](recipes/dind-private-registry-auth.md)
 - [Console Backend Contract](CONSOLE_BACKEND_CONTRACT.md)
 - [Console Workspace Telemetry Contract](CONSOLE_WORKSPACE_TELEMETRY_CONTRACT.md)
+- [Protected Node Identity and Material Receiver](contracts/hosted-node-material.md) (foundation; runtime activation closed).
+- [Opt-In Node Idle Gate](contracts/node-idle-gate.md) (idle-stop/restart contract; runtime activation closed).
+- [Closed Linux Host Composition](contracts/closed-host-composition.md) (opt-in host evidence; no execution).
 
 The repository README links the primary public guides and references.

@@ -48,7 +48,7 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.target_branch_monitor import TargetBranchMonitorError
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit._validation_git_probes import answer_validation_git_probes
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -58,6 +58,12 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     review_node,
     seed_monitoring_workspace,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 class _BitbucketPostCommentClient(DefaultMergeMethodGitHubClient):

@@ -14,7 +14,7 @@ Database wiring:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -46,6 +46,8 @@ from awf.api.routes import (
 )
 from awf.common.config import Settings, get_settings, validate_production_settings
 from awf.db.session import make_engine, make_session_factory
+from awf.hosted_node.api import configure as configure_hosted
+from awf.hosted_node.host_startup import start_hosted
 from awf.service.callbacks import shutdown_callback_target_validation_executor
 from awf.service.core_discovery import CORE_DISCOVERY_STATE_ATTR, build_core_discovery_payload
 
@@ -80,16 +82,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     factory = make_session_factory(engine)
     configure_database(app, factory, engine=engine, database_url=settings.database_url)
 
+    stack = AsyncExitStack()
     try:
+        if settings.hosted_node is not None:
+            app.state.hosted_receiver = await stack.enter_async_context(
+                start_hosted(settings.hosted_node, factory)
+            )
         yield
     finally:
         try:
-            current_engine = getattr(app.state, "db_engine", engine)
-            await current_engine.dispose()
-            if current_engine is not engine:
-                await engine.dispose()
+            await stack.aclose()
         finally:
-            shutdown_callback_target_validation_executor(wait=False)
+            try:
+                current_engine = getattr(app.state, "db_engine", engine)
+                await current_engine.dispose()
+                if current_engine is not engine:
+                    await engine.dispose()
+            finally:
+                shutdown_callback_target_validation_executor(wait=False)
 
 
 def create_app(*, use_lifespan: bool = True) -> FastAPI:
@@ -136,4 +146,5 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     app.include_router(service.router)
     app.include_router(ws.router)
 
+    configure_hosted(app)
     return app

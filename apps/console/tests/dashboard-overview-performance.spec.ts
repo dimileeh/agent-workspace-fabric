@@ -215,10 +215,14 @@ test("1,301-row fleet paints its first page before history and keeps routine wor
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
   await expect(kpi(page, "Active").locator(".kpi-value")).toHaveText("1301");
 
+  // Locate Close by its attribute, not by role: each role query computes the
+  // accessible name of every node in the 100-card page, and on shared CI CPUs
+  // that harness work alone took about 200 ms of the pane budget. The click
+  // proves the pane opened: the closed panel's button is off-screen and inert.
+  const closeInspector = page.locator('button[aria-label="Close inspector"]');
   const inspectorStartedAt = Date.now();
   await page.getByTestId("workspace-card-ws_perf_0001").click();
-  await expect(page.getByRole("button", { name: "Close inspector" })).toBeVisible();
-  await page.getByRole("button", { name: "Close inspector" }).click();
+  await closeInspector.click();
   await expect(page.locator(".fixed.inset-y-0.right-0").first()).toHaveClass(/translate-x-full/);
   const inspectorOpenCloseMs = Date.now() - inspectorStartedAt;
   expect(inspectorOpenCloseMs).toBeLessThan(1_000);
@@ -276,6 +280,24 @@ test("scroll loads one history page and refresh preserves the bounded loaded win
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
   const scrollTopBeforeRefresh = await list.evaluate((element) => element.scrollTop);
 
+  // Open the 5.5 s window when a routine first-page load settles. The poll
+  // timer starts only after loadOverview() settles, and the retained-window
+  // batch refresh is the last request that load awaits. Anchoring on a
+  // request-start callback instead lets slow response processing under
+  // shared CI CPUs push the next poll past the window, so wait for the batch
+  // response body to reach the page and then drain a page task so the loader
+  // applies it before the window opens.
+  const retainedRefresh = await page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/workspaces/overview/batch"),
+  );
+  await retainedRefresh.finished();
+  await page.evaluate(
+    () => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => window.setTimeout(resolve, 0));
+    }),
+  );
   const requestsAfterHistory = overviewRequests.length;
   await page.waitForTimeout(5_500);
   expect(overviewRequests).toHaveLength(requestsAfterHistory + 1);
@@ -895,13 +917,16 @@ test("scroll traverses bounded history windows in both directions", async ({ pag
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
 
+  // Routine first-page polls may interleave on shared CI CPUs; traversal must
+  // request exactly these continuation pages and nothing more.
+  const continuations = () => overviewRequests.filter((cursor) => cursor !== null);
   await scrollTo("bottom");
-  await expect.poll(() => overviewRequests).toEqual([null, String(PAGE_SIZE)]);
+  await expect.poll(continuations).toEqual([String(PAGE_SIZE)]);
   await scrollTo("bottom");
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
-  await expect.poll(() => overviewRequests).toEqual([null, "100", "200"]);
+  await expect.poll(continuations).toEqual(["100", "200"]);
 
   await scrollTo("later");
   await expect(page.getByTestId("workspace-card-ws_perf_0201")).toBeVisible();
@@ -915,7 +940,7 @@ test("scroll traverses bounded history windows in both directions", async ({ pag
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0101")).toHaveCount(0);
   await expect(page.locator('[data-testid^="workspace-card-"]')).toHaveCount(PAGE_SIZE);
-  expect(overviewRequests).toEqual([null, "100", "200"]);
+  expect(continuations()).toEqual(["100", "200"]);
 });
 
 test("virtualization keeps the viewport covered while crossing a row-window boundary", async ({
@@ -1174,10 +1199,16 @@ test("selecting a visible workspace keeps a boundary viewport covered", async ({
 
   await page.goto("/");
   await waitForConsoleReady(page);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
   // Wait for the continuation request before asserting the loaded summary so
   // shared CI CPUs do not flake on paint alone after a heavy sibling file.
-  await expect.poll(() => overviewCursors).toEqual([null, String(PAGE_SIZE)]);
+  // Routine first-page polls may interleave; only one continuation is allowed.
+  await expect
+    .poll(() => overviewCursors.filter((cursor) => cursor !== null))
+    .toEqual([String(PAGE_SIZE)]);
   await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
     .toBeVisible();
 
@@ -1824,8 +1855,16 @@ test("fullscreen logs cap retained selections across overview windows", async ({
     await page.getByLabel(`Select Performance workspace ${index} for fullscreen logs`).check();
   }
 
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history or move the virtual page, so Next would
+  // skip past rows 101-103 under shared CI CPUs.
+  await page.getByRole("button", { name: "Load more workspaces" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
   await page.getByRole("button", { name: "Next workspace results" }).click();
+  await expect(page.getByText(`101–${PAGE_SIZE * 2} of ${PAGE_SIZE * 2} loaded`, { exact: true }))
+    .toBeVisible();
   for (const index of [101, 102, 103]) {
     await page.getByLabel(`Select Performance workspace ${index} for fullscreen logs`).check();
   }
@@ -1975,10 +2014,15 @@ test("stalled retained history does not block first-page publication or the next
   await waitForConsoleReady(page);
   const loadMore = page.getByRole("button", { name: "Load more workspaces" });
   await expect(loadMore).toBeVisible();
-  await loadMore.click();
+  // Load exactly one page without Playwright scrolling to the footer first:
+  // that scroll can autoload history before the click requests another page.
+  await loadMore.evaluate((button: HTMLButtonElement) => button.click());
   // Wait for the continuation request before asserting the loaded summary so
   // shared CI CPUs do not flake on paint alone after a heavy sibling file.
-  await expect.poll(() => overviewCursors).toEqual([null, String(PAGE_SIZE)]);
+  // Routine first-page polls may interleave; only one continuation is allowed.
+  await expect
+    .poll(() => overviewCursors.filter((cursor) => cursor !== null))
+    .toEqual([String(PAGE_SIZE)]);
   await expect(
     page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
   ).toBeVisible();

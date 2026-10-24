@@ -31,12 +31,14 @@ def workspace_gc_candidate_predicate(
         if WorkspaceStatus.completed.value not in eligible_statuses:
             return None
         return and_(
+            Workspace.filesystem_reclaimed_at.is_(None),
             Workspace.status == WorkspaceStatus.completed.value,
             Workspace.updated_at <= cutoff_at,
             workspace_has_pr_metadata_predicate(),
             workspace_has_pr_merge_predicate(),
         )
     return and_(
+        Workspace.filesystem_reclaimed_at.is_(None),
         Workspace.status.in_(sorted(eligible_statuses)),
         Workspace.updated_at <= cutoff_at,
     )
@@ -50,7 +52,10 @@ def workspace_gc_preserved_predicate(
     cleanup_enabled: bool,
 ) -> ColumnElement[bool] | None:
     if not cleanup_enabled:
-        return Workspace.status.in_(sorted(eligible_statuses))
+        return and_(
+            Workspace.filesystem_reclaimed_at.is_(None),
+            Workspace.status.in_(sorted(eligible_statuses)),
+        )
     if default_policy:
         clauses: list[ColumnElement[bool]] = []
         if WorkspaceStatus.failed.value in eligible_statuses:
@@ -70,8 +75,9 @@ def workspace_gc_preserved_predicate(
             )
         if not clauses:
             return None
-        return or_(*clauses)
+        return and_(Workspace.filesystem_reclaimed_at.is_(None), or_(*clauses))
     return and_(
+        Workspace.filesystem_reclaimed_at.is_(None),
         Workspace.status.in_(sorted(eligible_statuses)),
         Workspace.updated_at > cutoff_at,
     )
@@ -103,6 +109,7 @@ def workspace_gc_age_capped_predicate(
     if not statuses:
         return None
     return and_(
+        Workspace.filesystem_reclaimed_at.is_(None),
         Workspace.status.in_(sorted(statuses)),
         Workspace.updated_at <= preserved_failed_cutoff_at,
     )
