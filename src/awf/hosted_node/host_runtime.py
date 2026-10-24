@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.logging import get_logger
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.host_database import no_work_history, validate_database
 from awf.hosted_node.host_docker import DockerObservation
@@ -16,6 +17,40 @@ from awf.hosted_node.lifecycle import fresh
 from awf.hosted_node.lifecycle_schemas import HostBootObservation, HostObservation, RecoveryEvidence
 from awf.hosted_node.lifecycle_store import database_quiescent, locked
 from awf.hosted_node.schemas import Identity
+
+_log = get_logger(__name__)
+_DENIAL_CODES = frozenset(
+    {
+        "HOST_OBSERVATION_BUSY",
+        "HOST_PATH_UNAVAILABLE",
+        "TRUSTED_HOST_DIRECTORY_REQUIRED",
+        "HOST_OBSERVATION_TOO_LARGE",
+        "TRUSTED_HOST_METADATA_REQUIRED",
+        "RETAINED_BLOCK_DEVICE_REQUIRED",
+        "LINUX_HOST_REQUIRED",
+        "RETAINED_DISK_MISMATCH",
+        "RETAINED_MARKER_MISMATCH",
+        "NESTED_STORAGE_MISMATCH",
+        "HOST_BOOT_IDENTITY_MISMATCH",
+        "CGROUP_V2_REQUIRED",
+        "UNKNOWN_TASK_OBSERVATION",
+        "HOST_TASKS_ACTIVE",
+        "HOST_DATABASE_UNSAFE",
+        "DOCKER_OBSERVATION_UNAVAILABLE",
+    }
+)
+
+
+def _log_denial(operation: str, exc: Exception) -> None:
+    # Exception messages may contain DB parameters, paths, or credentials.
+    code = exc.args[0] if type(exc) is ValueError and len(exc.args) == 1 else None
+    _log.warning(
+        f"hosted_node.{operation}_denied",
+        error_type=type(exc).__name__,
+        reason_code=code
+        if isinstance(code, str) and code in _DENIAL_CODES
+        else "HOST_OBSERVATION_FAILED",
+    )
 
 
 @dataclass(frozen=True)
@@ -109,8 +144,8 @@ class HostRuntime:
                     return HostObservation(
                         identity, datetime.now(UTC) + timedelta(seconds=30), True, True
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_denial("observe", exc)
         return None
 
     async def observe_boot(self, identity: Identity) -> HostBootObservation | None:
@@ -126,8 +161,8 @@ class HostRuntime:
                         self.config.lifecycle.database_ref,
                         datetime.now(UTC) + timedelta(seconds=30),
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_denial("observe_boot", exc)
         return None
 
     async def recover(
@@ -177,6 +212,6 @@ class HostRuntime:
                     receipt_ref,
                     datetime.now(UTC) + timedelta(seconds=10),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_denial("recover", exc)
         return None

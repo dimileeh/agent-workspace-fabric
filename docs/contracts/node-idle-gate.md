@@ -72,10 +72,15 @@ are opaque lookup keys, not retained claims or authorization in themselves.
 Evidence must match exactly and expire within 60 seconds. Exceptions/timeouts
 produce no positive acknowledgement and never serialize exception text.
 
-The stock FastAPI lifespan does not install these verifiers. Trusted bootstrap
-composition must do that. A separate worker process must be given its trusted
-boot identity and bound factory through that same composition. No automatic
-I3 credential integration or Google verifier is provided here.
+When `AWF_HOSTED_NODE` includes trusted `host` settings, the stock FastAPI
+lifespan uses `start_hosted` to install `HostRuntime`'s `observe_host`,
+`observe_boot` and `verify_recovery` callbacks. See
+[Closed Linux Host Composition](closed-host-composition.md) for the required
+provisioning and evidence boundaries. Without `host`, the callbacks still
+default to no evidence; there is no automatic activation. A separate worker
+process still requires trusted boot identity and a bound factory through its
+own composition. Hosted worker execution remains closed. No automatic I3
+credential integration or Google verifier is provided here.
 
 ## HTTP Contract
 

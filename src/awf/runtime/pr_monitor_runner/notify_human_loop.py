@@ -234,6 +234,8 @@ async def handle_notify_human_action(
             monitor_log=monitor_log,
         )
         if gate.retry:
+            if gate.feedback_changed:
+                await self._deps.sleep(self._config.poll_interval_seconds)
             return False
         if gate.audit_unavailable and _ready_cert_posted_at_head(state, status.head_sha):
             # The cert at this head was earned on a complete audit; an outage on a

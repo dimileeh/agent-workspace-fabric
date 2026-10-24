@@ -2,12 +2,13 @@ import asyncio
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from sqlalchemy import inspect
 
 from awf.db.session import make_engine
 from awf.hosted_node.models import Receipt
-from tests.postgres import postgres_empty_test_url
+from tests.postgres import postgres_alembic_subprocess_lock, postgres_empty_test_url
 
 
 def test_receipt_metadata_indexes_grant():
@@ -24,13 +25,17 @@ async def test_upgrade_downgrade_upgrade():
     async with postgres_empty_test_url() as url:
 
         async def migrate(*args):
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, "-m", "alembic", *args],
-                env={**os.environ, "AWF_DATABASE_URL": url},
-                capture_output=True,
-                timeout=90,
-            )
+            def run():
+                with postgres_alembic_subprocess_lock(url):
+                    return subprocess.run(
+                        [sys.executable, "-m", "alembic", *args],
+                        cwd=Path(__file__).resolve().parents[3],
+                        env={**os.environ, "AWF_DATABASE_URL": url},
+                        capture_output=True,
+                        timeout=90,
+                    )
+
+            result = await asyncio.to_thread(run)
             assert result.returncode == 0, result.stderr.decode()[-2000:]
 
         await migrate("upgrade", "a875b1c2d3e4")

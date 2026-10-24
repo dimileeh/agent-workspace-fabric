@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     ReviewThreadComment,
     _mark_review_thread_addressed,
 )
+from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 from awf.runtime.pr_monitor_runner.outdated_resolution import _grep_id_pattern
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._thread_disposition_fixtures import seed_resolvable_disposition
@@ -334,14 +335,19 @@ def _resolution_events(ws: object, *, outcome: str | None = None) -> list:
 
 
 async def _call_resolve(
-    runner: object,
+    runner: PullRequestMonitorRunner,
     *,
     workspace_id: str,
     status: PRStatus,
     state: MonitorState,
     wait_on_transient: bool = True,
 ) -> PRStatus:
-    return await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
+    gh = runner._deps.gh
+    if isinstance(gh, DefaultMergeMethodGitHubClient):
+        gh.remember_review_threads(
+            status.unresolved_inline_threads + status.outdated_unresolved_inline_threads
+        )
+    return await runner._resolve_addressed_outdated_threads(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,

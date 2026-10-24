@@ -26,6 +26,7 @@ from awf.common.github_graphql import (
     _GQL_ADD_REVIEW_THREAD_REPLY,
     _GQL_REVIEW_THREAD_AUDIT,
     _GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
+    _GQL_REVIEW_THREAD_AUDIT_ONE,
 )
 from awf.common.github_retry import RetryPolicy
 
@@ -69,8 +70,9 @@ async def fetch_review_thread_audit(
     repo: RepoRef,
     pr_number: int,
     retry: bool = True,
+    thread_id: str | None = None,
 ) -> ReviewThreadAudit:
-    """Enumerate EVERY review thread (resolved included) with exhaustive pagination.
+    """Audit every thread, or one repository/PR-bound thread, with all comments.
 
     Fails closed (``GitHubClientError``) when a page claims ``hasNextPage`` without
     a cursor, so the gate can never certify a PR from a truncated list.
@@ -80,6 +82,10 @@ async def fetch_review_thread_audit(
     from awf.common.github_client import GitHubClientError
 
     retry_policy = RetryPolicy.READ if retry else RetryPolicy.NEVER
+    if thread_id is not None:
+        return await _fetch_one_thread_audit(
+            self, repo=repo, pr_number=pr_number, thread_id=thread_id, retry_policy=retry_policy
+        )
     threads: list[AuditedReviewThread] = []
     viewer_login: str | None = None
     cursor: str | None = None
@@ -114,6 +120,46 @@ async def fetch_review_thread_audit(
             )
 
 
+async def _fetch_one_thread_audit(
+    self: GitHubClient,
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    thread_id: str,
+    retry_policy: RetryPolicy,
+) -> ReviewThreadAudit:
+    from awf.common.github_client import GitHubClientError
+
+    payload = await self._graphql(
+        query=_GQL_REVIEW_THREAD_AUDIT_ONE,
+        variables={"threadId": thread_id},
+        retry_policy=retry_policy,
+    )
+    node = _dig(payload, "data", "node")
+    slug = _dig(node, "pullRequest", "repository", "nameWithOwner")
+    if (
+        not thread_id
+        or thread_id != thread_id.strip()
+        or not isinstance(node, dict)
+        or node.get("id") != thread_id
+        or _dig(node, "pullRequest", "number") != pr_number
+        or not isinstance(slug, str)
+        or slug.casefold() != repo.slug().casefold()
+    ):
+        raise GitHubClientError(
+            operation="fetch_review_thread_audit",
+            returncode=0,
+            stderr=f"Review thread {thread_id} not found in {repo.slug()}#{pr_number}",
+        )
+    thread = await _audited_thread(self, node, retry_policy=retry_policy)
+    assert thread is not None  # Its exact nonempty id was checked above.
+    return ReviewThreadAudit(
+        supported=True,
+        viewer_login=_clean_optional_str(_dig(payload, "data", "viewer", "login")),
+        threads=(thread,),
+    )
+
+
 def _next_cursor(connection: Any, *, operation: str) -> str | None:
     """Return the next page cursor, ``None`` on the last page; fail closed otherwise."""
     from awf.common.github_client import GitHubClientError
@@ -138,7 +184,7 @@ async def _audited_thread(
     if thread_id is None:
         return None
     comments = node.get("comments")
-    comment_nodes = _connection_nodes(comments)
+    comment_nodes = _audit_comment_nodes(comments)
     cursor = _next_cursor(comments, operation="fetch_review_thread_audit comments")
     while cursor is not None:
         payload = await self._graphql(
@@ -147,7 +193,7 @@ async def _audited_thread(
             retry_policy=retry_policy,
         )
         page = _dig(payload, "data", "node", "comments")
-        comment_nodes.extend(_connection_nodes(page))
+        comment_nodes.extend(_audit_comment_nodes(page))
         cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
     viewer_bodies: list[str] = []
     viewer_ids: list[str] = []
@@ -190,6 +236,18 @@ async def _audited_thread(
             if comment.get("viewerDidAuthor") is not True
         ),
     )
+
+
+def _audit_comment_nodes(connection: Any) -> list[dict[str, Any]]:
+    from awf.common.github_client import GitHubClientError
+
+    if not isinstance(connection, dict):
+        raise GitHubClientError(
+            operation="fetch_review_thread_audit comments",
+            returncode=0,
+            stderr="Review thread comment page is missing",
+        )
+    return _connection_nodes(connection)
 
 
 def _conversation_digest(comment_nodes: list[dict[str, Any]]) -> str:
