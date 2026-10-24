@@ -27,6 +27,7 @@ from awf.db.enums import (
     TaskKind,
     WorkspaceStatus,
 )
+from awf.hosted_node.runtime_schemas import HostedWorkspace
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = _schemas_operations.OwnedPath
@@ -301,6 +302,7 @@ class WorkspaceCreateRequest(BaseModel):
     )
     preflight: WorkspaceLaunchPreflight = Field(default_factory=lambda: WorkspaceLaunchPreflight())
     companions: list[WorkspaceCompanionRequest] = Field(default_factory=list, max_length=16)
+    hosted: HostedWorkspace | None = None
 
     @model_validator(mode="before")
     @classmethod

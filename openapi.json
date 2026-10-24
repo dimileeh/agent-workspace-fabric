@@ -2928,6 +2928,40 @@
         "title": "HostHomeAuthMountPolicy",
         "type": "object"
       },
+      "HostedErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "title": "Error Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_code"
+        ],
+        "title": "HostedErrorResponse",
+        "type": "object"
+      },
+      "HostedWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "credentials": {
+            "$ref": "#/components/schemas/RuntimeCredentials"
+          },
+          "workspace_id": {
+            "maxLength": 128,
+            "pattern": "^ws_[A-Za-z0-9_-]+$",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "credentials"
+        ],
+        "title": "HostedWorkspace",
+        "type": "object"
+      },
       "HttpExceptionErrorResponse": {
         "description": "FastAPI HTTPException envelope carrying AWF's structured error detail.",
         "properties": {
@@ -3187,7 +3221,6 @@
             "type": "boolean"
           },
           "runtime_ready": {
-            "const": false,
             "default": false,
             "title": "Runtime Ready",
             "type": "boolean"
@@ -7279,6 +7312,23 @@
         "title": "RootCauseClusterResponse",
         "type": "object"
       },
+      "RuntimeCredentials": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/Binding"
+          },
+          "github": {
+            "$ref": "#/components/schemas/Binding"
+          }
+        },
+        "required": [
+          "agent",
+          "github"
+        ],
+        "title": "RuntimeCredentials",
+        "type": "object"
+      },
       "RuntimeHealthSummaryResponse": {
         "properties": {
           "fail_candidate_count": {
@@ -10159,6 +10209,16 @@
             "maxItems": 16,
             "title": "Companions",
             "type": "array"
+          },
+          "hosted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedWorkspace"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "preflight": {
             "$ref": "#/components/schemas/WorkspaceLaunchPreflight"
@@ -14964,24 +15024,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },
@@ -15059,24 +15168,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },
@@ -15153,15 +15311,75 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/HostedErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
           }
         },
         "security": [
@@ -15237,15 +15455,75 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/HostedErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
           }
         },
         "security": [
@@ -15321,15 +15599,75 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/HostedErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
           }
         },
         "security": [
@@ -15395,15 +15733,75 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/HostedErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
           }
         },
         "security": [
@@ -15479,15 +15877,75 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/HostedErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
           }
         },
         "security": [
@@ -15564,24 +16022,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },
@@ -15659,24 +16166,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },
@@ -15754,24 +16310,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },
@@ -15849,24 +16454,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },
@@ -15948,24 +16602,73 @@
             "description": "Successful Response"
           },
           "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Bearer denied"
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Identity or controller role denied"
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Disabled or preparation absent"
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Exact binding or monotonic authority conflict"
           },
           "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Body exceeds 128 KiB"
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Sanitized invalid request"
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
             "description": "Authority unavailable; acceptance is unknown"
           }
         },

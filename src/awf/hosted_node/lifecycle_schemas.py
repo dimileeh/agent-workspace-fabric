@@ -60,7 +60,7 @@ class LifecycleStatus(StrictModel):
     identity: Identity
     state: Literal["recovering", "ready", "draining", "drained"]
     admission_closed: bool
-    runtime_ready: Literal[False] = False
+    runtime_ready: bool = False
     node_ready: bool
     quiescent: bool
     database_quiescent: bool

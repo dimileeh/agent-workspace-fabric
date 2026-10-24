@@ -12,6 +12,8 @@ def _configured_node_id(value: str | None) -> str:
 
 def effective_worker_node_id(settings: Settings) -> str:
     """Return the node id used for create-time admission and reservations."""
+    if settings.hosted_node is not None and settings.hosted_node.runtime_enabled:
+        return settings.hosted_node.owner
     return _configured_node_id(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
 
 

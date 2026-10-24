@@ -6,12 +6,12 @@ import asyncio
 import os
 import shlex
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -27,18 +27,20 @@ from awf.common.git_auth import apply_bitbucket_git_auth
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import pr_adoption_is_hosted
+from awf.common.workspace_scope import WorkspaceScope
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import TaskKind
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
+from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
 from awf.node.auth_mounts import ServiceAuthMountResolver
 from awf.node.cleanup import WorkspaceCleaner
 from awf.node.companion_images import CompanionImageBuilder
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import AGENT_RUNTIME_GID, AGENT_RUNTIME_UID, GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
-from awf.node.secret_mounts import LocalSecretLeaseMountResolver
+from awf.node.secret_mounts import LocalSecretLeaseMountResolver, LocalSecretLeaseResolution
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver, WorkspaceRuntimeDriver
@@ -98,6 +100,21 @@ from awf.service.usage_collection import CcusageCollector
 _log = get_logger(__name__)
 
 
+class _HostedStackOptions(TypedDict, total=False):
+    protected_profile_mounts: Callable[
+        [WorkspaceProfile, str], Awaitable[LocalSecretLeaseResolution]
+    ]
+    resource_limits: Callable[[str], Awaitable[tuple[float, float]]]
+
+
+class _HostedConsumerOptions(TypedDict, total=False):
+    workspace_scope: WorkspaceScope
+
+
+class _HostedWorkerOptions(TypedDict, total=False):
+    admission_check: Callable[[], Awaitable[bool]]
+
+
 @dataclass(frozen=True)
 class WorkerRuntime:
     """Wired control-worker dependencies returned by ``build_worker_runtime``."""
@@ -146,11 +163,26 @@ def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
     closer.add_done_callback(_PENDING_FORGE_CLIENT_CLOSERS.discard)
 
 
-def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
+def build_worker_runtime(
+    settings: ServiceSettings,
+    *,
+    hosted: WorkspaceConsumers | None = None,
+) -> WorkerRuntime:
     """Construct the DB/session, provisioner, executor, and worker."""
 
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
+    if hosted is not None:
+        from awf.hosted_node.lifecycle_barrier import bind_factory
+        from awf.hosted_node.runtime_authority import SESSION_KEY
+
+        if settings.github_token or settings.hosted_delegation_base_url:
+            raise ValueError("HOSTED_GLOBAL_CREDENTIALS_FORBIDDEN")
+        bind_factory(session_factory, hosted.authority.receiver.identity)
+        session_factory.configure(
+            info={**session_factory.kw["info"], SESSION_KEY: hosted.authority}
+        )
+        settings = replace(settings, node_id=hosted.authority.receiver.identity.owner)
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
     gitconfig_source_socket = (
@@ -168,11 +200,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         "host_gitconfig" if (host_home / ".gitconfig").is_file() else "no_global_gitconfig"
     )
     try:
-        gitconfig_snapshot = _materialize_service_gitconfig(
-            host_home=gitconfig_source_home,
-            work_dir=work_dir,
-            owner_uid=AGENT_RUNTIME_UID,
-            owner_gid=AGENT_RUNTIME_GID,
+        gitconfig_snapshot = (
+            None
+            if hosted is not None
+            else _materialize_service_gitconfig(
+                host_home=gitconfig_source_home,
+                work_dir=work_dir,
+                owner_uid=AGENT_RUNTIME_UID,
+                owner_gid=AGENT_RUNTIME_GID,
+            )
         )
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         _log.warning(
@@ -188,21 +224,48 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                 source_home=str(gitconfig_source_home),
                 fallback=gitconfig_fallback,
             )
-    git_env = _service_git_environment(
-        host_home,
-        github_token=settings.github_token,
-        gitconfig_path=gitconfig_snapshot,
+    git_env = (
+        dict(hosted.base_environment)
+        if hosted is not None
+        else _service_git_environment(
+            host_home,
+            github_token=settings.github_token,
+            gitconfig_path=gitconfig_snapshot,
+        )
     )
-    _apply_service_git_environment(git_env)
+    if hosted is None:
+        _apply_service_git_environment(git_env)
+    git_options: dict[str, Any] = {}
+    compose_options: dict[str, Any] = {}
+    if hosted is not None:
+        git_options = {
+            "command_environment": hosted.git_environment,
+            "prepare_shared_checkout": hosted.share_checkout,
+        }
+        compose_options = {"command_environment": hosted.compose_environment}
+        host = hosted.authority.receiver.config.host
+        if host is not None:
+            compose_options["cgroup_parent"] = "/" + str(
+                host.execution_cgroup.relative_to("/sys/fs/cgroup")
+            )
     git = GitManager(
         work_dir / "git",
         env=git_env,
         worktree_owner_uid=AGENT_RUNTIME_UID,
         worktree_owner_gid=AGENT_RUNTIME_GID,
+        **git_options,
     )
-    compose = ComposeManager(work_dir=work_dir, template_path=template)
+    compose = ComposeManager(
+        work_dir=work_dir,
+        template_path=template,
+        **compose_options,
+    )
     runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
-    runner = AsyncioSubprocessRunner()
+    runner = (
+        HostedCommandRunner(hosted, AsyncioSubprocessRunner())
+        if hosted is not None
+        else AsyncioSubprocessRunner()
+    )
     usage_collector = CcusageCollector(runner=runner, work_dir=work_dir)
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
@@ -364,18 +427,33 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                     git.reset_task_env(git_env_token)
             _release_superseded_gitconfig_leases()
 
-    secret_lease_resolver = LocalSecretLeaseMountResolver(
-        host_home=host_home,
-        work_dir=work_dir,
-        host_env=os.environ,
+    secret_lease_resolver = (
+        None
+        if hosted is not None
+        else LocalSecretLeaseMountResolver(
+            host_home=host_home,
+            work_dir=work_dir,
+            host_env=os.environ,
+        )
     )
     companion_image_builder = _companion_image_builder_for(settings, compose)
+    stack_options: _HostedStackOptions = {}
+    consumer_options: _HostedConsumerOptions = {}
+    worker_options: _HostedWorkerOptions = {}
+    if hosted is not None:
+        stack_options = {
+            "protected_profile_mounts": hosted.authority.profile_mounts,
+            "resource_limits": hosted.authority.resource_limits,
+        }
+        consumer_options = {"workspace_scope": hosted.scope}
+        worker_options = {"admission_check": hosted.admission_check}
     stack_launcher = ComposeStackLauncher(
         compose=compose,
         agent_runtime_image=settings.agent_runtime_image,
-        auth_mount_resolver=auth_mount_resolver,
+        auth_mount_resolver=auth_mount_resolver if hosted is None else None,
         secret_lease_resolver=secret_lease_resolver,
         companion_image_builder=companion_image_builder,
+        **stack_options,
     )
     executor_config = ExecutorConfig(
         worktrees_root=work_dir / "git" / "worktrees",
@@ -394,8 +472,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         git=git,
         stack_launcher=stack_launcher,
         service_diagnostics=compose,
-        before_provision=_refresh_service_gitconfig,
-        after_provision=_release_service_gitconfig,
+        before_provision=_refresh_service_gitconfig if hosted is None else None,
+        after_provision=_release_service_gitconfig if hosted is None else None,
+        **consumer_options,
         config=ProvisionerConfig(
             node_id=node_id,
             branch_prefix=settings.branch_prefix,
@@ -517,6 +596,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         # pod-local checkout before the monitor loop's first git I/O.
         ensure_hosted_monitor_checkout=_ensure_hosted_monitor_checkout,
         worktree_activity_git_roots=git.worktree_activity_git_roots,
+        **consumer_options,
     )
     runtime_driver = LocalRuntimeDriver(
         provisioner=provisioner,
@@ -750,6 +830,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         return _combine_terminal_gc_reports(default_result.to_dict(), discarded_result.to_dict())
 
     worker = ControlWorker(
+        **worker_options,
         session_factory=session_factory,
         provisioner=provisioner,
         executor=executor,
@@ -794,6 +875,20 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             workspace_peak_memory_gb=settings.workspace_peak_memory_gb,
         ),
     )
+    if hosted is not None:
+
+        async def stop_workspace(workspace_id: str) -> None:
+            # Never stop a successor's workload after losing this boot identity.
+            await hosted.authority.receiver.identity_status()
+            await compose.down_project(
+                project_name=f"awf_{workspace_id}",
+                compose_file=work_dir / "compose" / workspace_id / "compose.yml",
+                workspace_id=workspace_id,
+                remove_volumes=False,
+            )
+            await asyncio.to_thread(hosted.authority.views.remove, workspace_id)
+
+        hosted.stop_workspace = stop_workspace
     return WorkerRuntime(engine=engine, worker=worker, runtime_driver=runtime_driver)
 
 

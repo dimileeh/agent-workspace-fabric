@@ -203,6 +203,7 @@ class WorkspaceComposeSpec:
     postgres_password: str | None = None  # None → generate one
     cpu_limit: str | None = None
     memory_limit: str | None = None
+    reservation_limits: tuple[float, float] | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
     git_name: str | None = None
     git_email: str | None = None
@@ -273,9 +274,18 @@ def compose_up_capture_timeout_seconds(compose_up_timeout_seconds: int, *, wait:
 class ComposeManager:
     """Renders, launches, and tears down per-workspace compose stacks."""
 
-    def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        work_dir: Path,
+        template_path: Path,
+        command_environment: Callable[[], Awaitable[Mapping[str, str]]] | None = None,
+        cgroup_parent: str | None = None,
+    ) -> None:
         """Prepare the compose project directory and Jinja template loader."""
         self._projects_dir = work_dir / "compose"
+        self._command_environment = command_environment
+        self._cgroup_parent = cgroup_parent
         template_dir = template_path.parent
         self._env = Environment(
             loader=FileSystemLoader(str(template_dir)),
@@ -335,6 +345,22 @@ class ComposeManager:
             for c in spec.companions
         ]
         services.extend(companions)
+        service_resources = None
+        if spec.reservation_limits is not None:
+            import math
+
+            cpu, memory = spec.reservation_limits
+            if not all(math.isfinite(value) and value > 0 for value in (cpu, memory)):
+                raise ValueError("INVALID_WORKSPACE_RESERVATION")
+            count = len(services) + 1
+            cpu_nanos = math.floor(cpu * 1_000_000_000 / count)
+            memory_bytes = math.floor(memory * 1024**3 / count)
+            if cpu_nanos <= 0 or memory_bytes <= 0:
+                raise ValueError("INVALID_WORKSPACE_RESERVATION")
+            service_resources = resources = {
+                "cpu_limit": format(cpu_nanos / 1_000_000_000, ".9f").rstrip("0").rstrip("."),
+                "memory_limit": str(memory_bytes),
+            }
         named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
 
         # Agent waits for profile services that expose healthchecks. Services
@@ -350,6 +376,7 @@ class ComposeManager:
 
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
+            cgroup_parent=self._cgroup_parent,
             worktree_host_path=str(spec.worktree_host_path),
             agent_runtime_image=spec.agent_runtime_image,
             postgres_image=spec.postgres_image,
@@ -357,6 +384,7 @@ class ComposeManager:
             postgres_password=password,
             postgres_db=spec.postgres_db,
             resources=resources,
+            service_resources=service_resources,
             auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
@@ -902,7 +930,11 @@ class ComposeManager:
             *args,
         ]
         env = {
-            **os.environ,
+            **(
+                await self._command_environment()
+                if self._command_environment is not None
+                else os.environ
+            ),
             "COMPOSE_PROJECT_NAME": project_name,
             "COMPOSE_FILE": str(compose_file),
         }
@@ -1019,11 +1051,15 @@ class ComposeManager:
         # diagnostics capture folds stderr into stdout to avoid empty logs on
         # exactly the failing-companion case we care about.
         stderr_target = asyncio.subprocess.STDOUT if combine_stderr else asyncio.subprocess.PIPE
+        environment: dict[str, Any] = (
+            {"env": dict(await self._command_environment())} if self._command_environment else {}
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr_target,
+                **environment,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),

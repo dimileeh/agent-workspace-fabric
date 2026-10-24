@@ -48,6 +48,7 @@ class NodeLifecycle:
         self.verify_recovery: Callable[
             [Identity, Identity | None, str], Awaitable[RecoveryEvidence | None]
         ] = _deny
+        self.observe_runtime: Callable[[Identity], Awaitable[bool | None]] = _deny
 
     async def boot_evidence(self, challenge: str) -> BootEvidence:
         host = await _bounded(self.observe_boot(self.identity))
@@ -101,9 +102,13 @@ class NodeLifecycle:
 
     async def readiness(self) -> LifecycleStatus:
         host = await _bounded(self.observe_host(self.identity))
+        runtime = await _bounded(self.observe_runtime(self.identity))
         async with self.factory.begin() as session:
             row = await locked(session, self.identity)
-            return self.status(row, await database_quiescent(session), host)
+            status = self.status(row, await database_quiescent(session), host)
+            return status.model_copy(
+                update={"runtime_ready": runtime is True and status.node_ready}
+            )
 
     async def acknowledge(self, value: RecoveryAcknowledgement) -> LifecycleStatus:
         async with self.factory.begin() as session:

@@ -110,6 +110,7 @@ class LinuxSnapshot:
     state_inode: int
     cgroup_inode: int
     workspaces_empty: bool
+    execution_quiescent: bool = True
 
 
 class LinuxObservation:
@@ -117,7 +118,7 @@ class LinuxObservation:
         self.config, self.identity = config, identity
         self.disk_ref, self.database_ref = disk_ref, database_ref
 
-    def sample(self) -> LinuxSnapshot:
+    def sample(self, *, require_quiescent: bool = True) -> LinuxSnapshot:
         if not linux_host():
             raise ValueError("LINUX_HOST_REQUIRED")
         config = self.config
@@ -164,10 +165,17 @@ class LinuxObservation:
             ]
             if any(len(line) != 2 for line in events) or len(dict(events)) != len(events):
                 raise ValueError("UNKNOWN_TASK_OBSERVATION")
-            if dict(events).get("populated") != "0" or dict(events).get("frozen") != "0":
+            populated = dict(events).get("populated")
+            if (
+                populated not in {"0", "1"}
+                or dict(events).get("frozen") != "0"
+                or (require_quiescent and populated != "0")
+            ):
                 raise ValueError("HOST_TASKS_ACTIVE")
             group_inode = os.fstat(group).st_ino
-        return LinuxSnapshot(boot_id, info.st_dev, info.st_ino, group_inode, empty)
+        return LinuxSnapshot(
+            boot_id, info.st_dev, info.st_ino, group_inode, empty, populated == "0"
+        )
 
     def bootstrap_approved(self, receipt_ref: str) -> bool:
         config = self.config

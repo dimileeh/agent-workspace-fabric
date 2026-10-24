@@ -124,6 +124,32 @@ class MaterialStore:
     def path(self, workspace: str, slot: str) -> Path:
         return self.root / workspace / (slot + ".material")
 
+    def read(self, workspace: str, slot: str) -> bytes:
+        """Read a verified private slot only for an authorized in-process consumer."""
+        with self._directory(workspace, slot) as directory:
+            fd = os.open(
+                slot + ".material",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            try:
+                info = os.fstat(fd)
+                if not (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_nlink == 1
+                    and info.st_uid == os.geteuid()
+                    and stat.S_IMODE(info.st_mode) == 0o400
+                    and 1 <= info.st_size <= 65536
+                ):
+                    raise MaterialDeniedError("INVALID_MATERIAL_SLOT")
+                with os.fdopen(os.dup(fd), "rb") as stream:
+                    value = stream.read(65537)
+                if len(value) != info.st_size:
+                    raise MaterialDeniedError("INVALID_MATERIAL_SLOT")
+                return value
+            finally:
+                os.close(fd)
+
     def exists(self, workspace: str, slot: str) -> bool:
         try:
             with self._directory(workspace, slot) as directory:

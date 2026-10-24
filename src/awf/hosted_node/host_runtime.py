@@ -2,12 +2,13 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.logging import get_logger
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.host_database import no_work_history, validate_database
 from awf.hosted_node.host_docker import DockerObservation
@@ -16,6 +17,40 @@ from awf.hosted_node.lifecycle import fresh
 from awf.hosted_node.lifecycle_schemas import HostBootObservation, HostObservation, RecoveryEvidence
 from awf.hosted_node.lifecycle_store import database_quiescent, locked
 from awf.hosted_node.schemas import Identity
+
+_log = get_logger(__name__)
+_DENIAL_CODES = frozenset(
+    {
+        "HOST_OBSERVATION_BUSY",
+        "HOST_PATH_UNAVAILABLE",
+        "TRUSTED_HOST_DIRECTORY_REQUIRED",
+        "HOST_OBSERVATION_TOO_LARGE",
+        "TRUSTED_HOST_METADATA_REQUIRED",
+        "RETAINED_BLOCK_DEVICE_REQUIRED",
+        "LINUX_HOST_REQUIRED",
+        "RETAINED_DISK_MISMATCH",
+        "RETAINED_MARKER_MISMATCH",
+        "NESTED_STORAGE_MISMATCH",
+        "HOST_BOOT_IDENTITY_MISMATCH",
+        "CGROUP_V2_REQUIRED",
+        "UNKNOWN_TASK_OBSERVATION",
+        "HOST_TASKS_ACTIVE",
+        "HOST_DATABASE_UNSAFE",
+        "DOCKER_OBSERVATION_UNAVAILABLE",
+    }
+)
+
+
+def _log_denial(operation: str, exc: Exception) -> None:
+    # Exception messages may contain DB parameters, paths, or credentials.
+    code = exc.args[0] if type(exc) is ValueError and len(exc.args) == 1 else None
+    _log.warning(
+        f"hosted_node.{operation}_denied",
+        error_type=type(exc).__name__,
+        reason_code=code
+        if isinstance(code, str) and code in _DENIAL_CODES
+        else "HOST_OBSERVATION_FAILED",
+    )
 
 
 @dataclass(frozen=True)
@@ -76,15 +111,27 @@ class HostRuntime:
         )
 
     async def _observe(
-        self, identity: Identity, *, require_database_quiescent: bool = True
+        self,
+        identity: Identity,
+        *,
+        require_database_quiescent: bool = True,
+        allow_busy: bool = False,
     ) -> LinuxSnapshot | None:
         if identity != self.identity:
             return None
         async with self._observation_lock:
-            before = await self.host_io(self.linux.sample)
+            sample = (
+                (lambda: self.linux.sample(require_quiescent=False))
+                if allow_busy
+                else self.linux.sample
+            )
+            before = await self.host_io(sample)
             if self.baseline is not None and not self.same_host(self.baseline, before):
                 return None
-            if not await self.docker.quiescent(identity.owner):
+            docker_idle = await self.docker.quiescent(identity.owner)
+            if not docker_idle and (
+                not allow_busy or not await self.docker.healthy(identity.owner)
+            ):
                 return None
             async with self.factory.begin() as session:
                 assert self.config.host and self.config.lifecycle
@@ -96,21 +143,29 @@ class HostRuntime:
                     or (require_database_quiescent and not await database_quiescent(session))
                 ):
                     return None
-            after = await self.host_io(self.linux.sample)
+            after = await self.host_io(sample)
             if before != after:
                 return None
             self.baseline = after
-            return after
+            return replace(after, execution_quiescent=after.execution_quiescent and docker_idle)
 
     async def observe(self, identity: Identity) -> HostObservation | None:
         try:
             async with asyncio.timeout(4):
-                if await self._observe(identity) is not None:
+                sample = await self._observe(
+                    identity,
+                    allow_busy=self.config.runtime_enabled,
+                    require_database_quiescent=not self.config.runtime_enabled,
+                )
+                if sample is not None:
                     return HostObservation(
-                        identity, datetime.now(UTC) + timedelta(seconds=30), True, True
+                        identity,
+                        datetime.now(UTC) + timedelta(seconds=30),
+                        sample.execution_quiescent,
+                        True,
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_denial("observe", exc)
         return None
 
     async def observe_boot(self, identity: Identity) -> HostBootObservation | None:
@@ -126,8 +181,8 @@ class HostRuntime:
                         self.config.lifecycle.database_ref,
                         datetime.now(UTC) + timedelta(seconds=30),
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_denial("observe_boot", exc)
         return None
 
     async def recover(
@@ -177,6 +232,6 @@ class HostRuntime:
                     receipt_ref,
                     datetime.now(UTC) + timedelta(seconds=10),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_denial("recover", exc)
         return None

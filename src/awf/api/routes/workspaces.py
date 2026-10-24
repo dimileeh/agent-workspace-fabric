@@ -245,6 +245,14 @@ async def create_workspace(
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
     """Create a new workspace, returning 202 on acceptance or 409 on host-port conflict."""
+    from awf.hosted_node.identity import MaterialDeniedError
+    from awf.hosted_node.runtime_authority import SESSION_KEY, WorkspaceAuthority
+
+    hosted_authority = session.info.get(SESSION_KEY)
+    if isinstance(hosted_authority, WorkspaceAuthority):
+        await hosted_authority.admit(payload)
+    elif payload.hosted is not None or settings.hosted_node is not None:
+        raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
     repo = WorkspaceRepository(session)
     replay_key_cache = _workspace_create_idempotency_replay_key_cache(request)
     known_replay_key = False

@@ -338,3 +338,101 @@ async def test_absent_prerequisite_behind_a_running_prerequisite_is_started(
     # backend is recreated only after the poll that follows the postgres start.
     assert runtime.inspected_after[:2] == [0, 1]
     assert clock.sleeps == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("initial_state", ["running", "exited"])
+async def test_one_shot_completed_during_recreate_is_not_started_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initial_state: str
+) -> None:
+    running = RuntimeSnapshot(
+        stack_state="running", services=[_service("backend"), _service("migrate")]
+    )
+    completed = RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            _service("backend"),
+            _service("migrate", state="exited", status="Exited (0) 1 second ago"),
+        ],
+    )
+    # An exited job at entry still needs its intentional start. Only a job seen
+    # running during this resume is protected from replay across the two phases.
+    snapshots = [running, completed, completed]
+    if initial_state == "exited":
+        snapshots.insert(0, completed)
+    runtime = _Runtime(*snapshots)
+    clock = _install(monkeypatch, runtime)
+    recreated: list[str] = []
+
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        runtime,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=12,
+        dependency_services=("backend", "migrate"),
+        recreate_services=("backend",),
+        dependency_conditions={"backend": {"migrate": "service_completed_successfully"}},
+        on_recreated=recreated.append,
+    )
+
+    starts = [("migrate",)] if initial_state == "exited" else []
+    assert [call["services"] for call in runtime.calls] == [
+        *starts,
+        ("backend",),
+        ("backend",),
+        ("agent",),
+    ]
+    assert recreated == ["backend"]
+    assert clock.sleeps == [5.0]
+    assert all(call["no_deps"] for call in runtime.calls)
+    if starts:
+        assert runtime.calls[0]["no_recreate"] and not runtime.calls[0]["wait"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tolerate", [False, True])
+@pytest.mark.parametrize("outcome", ["failed", "timeout"])
+async def test_one_shot_recreate_prerequisite_failure_is_never_tolerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, tolerate: bool
+) -> None:
+    running = RuntimeSnapshot(
+        stack_state="running", services=[_service("backend"), _service("migrate")]
+    )
+    failed = RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            _service("backend"),
+            _service("migrate", state="exited", status="Exited (1) 1 second ago"),
+        ],
+    )
+    runtime = _Runtime(running, running if outcome == "timeout" else failed)
+    clock = _install(monkeypatch, runtime)
+    tolerance_calls: list[bool] = []
+
+    async def usable() -> bool:
+        tolerance_calls.append(tolerate)
+        return tolerate
+
+    with pytest.raises(ComposeOperationError) as raised:
+        await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+            runtime,
+            compose_project="awf_ws",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws",
+            budget_seconds=12,
+            dependency_services=("backend", "migrate"),
+            recreate_services=("backend",),
+            dependency_conditions={"backend": {"migrate": "service_completed_successfully"}},
+            runtime_usable=usable,
+        )
+
+    if outcome == "timeout":
+        assert isinstance(raised.value, monitor_resume_runtime.DependencyWaitTimeoutError)
+        assert raised.value.unsettled_services == ("migrate",)
+        assert clock.sleeps == [5.0, 5.0, 2.0]
+    else:
+        assert raised.value.reason_code == MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE
+        assert clock.sleeps == [5.0]
+    assert runtime.calls == []
+    assert tolerance_calls == []

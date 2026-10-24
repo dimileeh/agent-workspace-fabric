@@ -88,6 +88,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.hosted_receiver = await stack.enter_async_context(
                 start_hosted(settings.hosted_node, factory)
             )
+            if settings.hosted_node.runtime_enabled:
+                from awf.hosted_node.runtime_worker import start_runtime
+                from awf.service.config import resolve_service_settings
+
+                app.state.hosted_runtime = await stack.enter_async_context(
+                    start_runtime(app.state.hosted_receiver, resolve_service_settings(settings))
+                )
         yield
     finally:
         try:

@@ -79,6 +79,7 @@ class DispositionGateResult:
     blocker: str | None = None  # NotifyHuman message (reason-coded)
     count_rows: tuple[tuple[str, int], ...] | None = None  # cert line 1; None = unsupported
     audit_unavailable: bool = False  # ``blocker`` is REVIEW_THREAD_AUDIT_UNAVAILABLE
+    feedback_changed: bool = False  # caller must wait outside the merge lock
 
 
 async def review_thread_disposition_gate(
@@ -261,7 +262,7 @@ async def _verify_audit(
                 thread_ids=undecided,
                 reason_code="REVIEW_THREAD_FEEDBACK_AFTER_DECISION",
             )
-            return DispositionGateResult(retry=True)
+            return DispositionGateResult(retry=True, feedback_changed=True)
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
     newly_flagged = [
         thread_id

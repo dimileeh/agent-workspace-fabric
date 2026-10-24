@@ -196,7 +196,9 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     sync_item_disposition(
         state, tid, VerdictResult(verdict="false_positive", reason="still handled"), thread=moved
     )
-    runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
+    runner = SimpleNamespace(
+        _monitor_owner_id=None, _deps=SimpleNamespace(gh=gh, session_factory=factory)
+    )
     replied = await reply_before_resolve(
         runner,
         workspace_id=workspace_id,
