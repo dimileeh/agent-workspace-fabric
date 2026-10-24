@@ -145,7 +145,7 @@ class WorkspaceConsumers:
                 retained = await self.authority.retained_workspaces()
             for workspace_id in retained:
                 try:
-                    await self.authority.workspace(workspace_id)
+                    await self.authority.reconcile_workspace(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                     await self._stop(workspace_id)
                 self._retained_cursor = workspace_id

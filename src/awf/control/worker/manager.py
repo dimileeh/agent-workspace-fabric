@@ -31,6 +31,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
+from awf.common.workspace_scope import WorkspaceScope
 from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
@@ -102,11 +103,13 @@ class ControlWorker(WorkerDelegatesMixin):
         terminal_gc_reaper: Callable[..., Awaitable[dict[str, object]]] | None = None,
         auth_overlay_work_dir: Path | None = None,
         admission_check: Callable[[], Awaitable[bool]] | None = None,
+        workspace_scope: WorkspaceScope | None = None,
         config: WorkerConfig,
     ) -> None:
         """Wire dependencies and initialize claim-tracking, dispatch, and cooldown state."""
         self._session_factory = session_factory
         self._admission_check = admission_check
+        self._workspace_scope = workspace_scope
         self._provisioner = provisioner
         self._executor = executor
         self._runtime_inspector = runtime_inspector or RuntimeInspector()

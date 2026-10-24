@@ -175,7 +175,7 @@ async def test_obsolete_process_cannot_stop_successor_or_remove_its_view(authori
         current = WorkspaceAuthority(successor)
         new_path = current.views.publish(
             "ws_cloud_stable", {"openai.api-key": b"new-agent", "github.api-key": b"new-github"}
-        )
+        ).path
         scope = WorkspaceConsumers(runtime, tmp_path)
         stopped = []
 

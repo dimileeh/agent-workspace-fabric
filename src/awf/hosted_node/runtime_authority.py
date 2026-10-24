@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository
@@ -82,6 +82,8 @@ class WorkspaceAuthority:
             row = await session.get(Workspace, workspace_id)
             if row is None or POLICY_KEY not in (row.task_policy or {}):
                 raise MaterialDeniedError("HOSTED_WORKSPACE_REQUIRED", 403)
+            if row.status == "destroyed" or row.filesystem_reclaimed_at is not None:
+                raise MaterialDeniedError("HOSTED_WORKSPACE_INACTIVE", 403)
             association = HostedWorkspace.model_validate(row.task_policy[POLICY_KEY])
             agent = row.agent
         if association.workspace_id != workspace_id:
@@ -95,8 +97,11 @@ class WorkspaceAuthority:
                     select(Workspace.id)
                     .where(
                         Workspace.node_id == self.receiver.identity.owner,
-                        Workspace.compose_project_name.is_not(None),
-                        Workspace.status != "destroyed",
+                        or_(
+                            Workspace.compose_project_name.is_not(None),
+                            Workspace.status == "destroyed",
+                            Workspace.filesystem_reclaimed_at.is_not(None),
+                        ),
                         Workspace.task_policy[POLICY_KEY].is_not(None),
                         Workspace.id > after,
                     )
@@ -104,6 +109,19 @@ class WorkspaceAuthority:
                     .limit(64)
                 )
             )
+
+    async def reconcile_workspace(self, workspace_id: str) -> None:
+        async with self.receiver.factory() as session:
+            row = await session.get(Workspace, workspace_id)
+            if row is None or row.node_id != self.receiver.identity.owner:
+                return
+            inactive = row.status == "destroyed" or row.filesystem_reclaimed_at is not None
+        if inactive:
+            # Destroy/GC already completed runtime cleanup. Reclaim only the
+            # readable view; never republish or restart an inactive workspace.
+            await self.retract(workspace_id)
+        else:
+            await self.workspace(workspace_id)
 
     async def retract(self, workspace_id: str) -> None:
         await asyncio.to_thread(self.views.remove, workspace_id)
@@ -293,6 +311,10 @@ class WorkspaceAuthority:
                 if (await self.receiver.status(binding)).status != "current":
                     raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
             await self.admission()
+            if publish_view:
+                latest, latest_agent = await self.association(association.workspace_id)
+                if latest != association or latest_agent != agent:
+                    raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
             if expires_at <= datetime.now(UTC):
                 raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
         except BaseException:
@@ -300,12 +322,12 @@ class WorkspaceAuthority:
                 raise
 
             # A cancelled to_thread await does not stop its writer. Finish that
-            # exact publication before retracting its boot-scoped readable view.
+            # exact publication and retract only if it is still the current view.
             async def retract() -> None:
-                try:
-                    await publication
-                finally:
-                    await asyncio.to_thread(self.views.remove, association.workspace_id)
+                published = await publication
+                await asyncio.to_thread(
+                    self.views.remove, association.workspace_id, publication=published
+                )
 
             cleanup = asyncio.create_task(retract())
             while not cleanup.done():

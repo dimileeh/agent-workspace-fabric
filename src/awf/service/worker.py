@@ -113,6 +113,7 @@ class _HostedConsumerOptions(TypedDict, total=False):
 
 class _HostedWorkerOptions(TypedDict, total=False):
     admission_check: Callable[[], Awaitable[bool]]
+    workspace_scope: WorkspaceScope
 
 
 @dataclass(frozen=True)
@@ -446,7 +447,10 @@ def build_worker_runtime(
             "resource_limits": hosted.authority.resource_limits,
         }
         consumer_options = {"workspace_scope": hosted.scope}
-        worker_options = {"admission_check": hosted.admission_check}
+        worker_options = {
+            "admission_check": hosted.admission_check,
+            "workspace_scope": hosted.scope,
+        }
     stack_launcher = ComposeStackLauncher(
         compose=compose,
         agent_runtime_image=settings.agent_runtime_image,

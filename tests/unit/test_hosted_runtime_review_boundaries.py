@@ -481,7 +481,7 @@ async def test_unexpected_view_file_fails_closed_without_deleting_or_replacing(
 ):
     runtime, _, _ = authority
     files = {"openai.api-key": secrets.token_bytes(16), "github.api-key": secrets.token_bytes(16)}
-    path = runtime.views.publish("ws_boundary", files)
+    path = runtime.views.publish("ws_boundary", files).path
     path.chmod(0o710 | 0o200)
     unexpected = path / "unexpected"
     unexpected.write_bytes(b"preserve")
