@@ -18,7 +18,7 @@ class MaterialDeniedError(ValueError):
 
 async def boot(config: HostedSettings, factory: async_sessionmaker[AsyncSession]) -> Identity:
     async with factory.begin() as session:
-        await session.execute(
+        inserted = await session.scalar(
             insert(Owner)
             .values(
                 owner=config.owner,
@@ -27,12 +27,23 @@ async def boot(config: HostedSettings, factory: async_sessionmaker[AsyncSession]
                 boot_epoch=1,
             )
             .on_conflict_do_nothing()
+            .returning(Owner.owner)
         )
         row = (
             await session.scalars(
                 select(Owner).where(Owner.owner == config.owner).with_for_update()
             )
         ).one()
+        previous = (
+            None
+            if inserted
+            else Identity(
+                owner=row.owner,
+                incarnation=row.incarnation,
+                recovery_generation=row.recovery_generation,
+                boot_epoch=row.boot_epoch,
+            )
+        )
         if config.recovery_generation < row.recovery_generation or (
             config.recovery_generation == row.recovery_generation
             and config.incarnation != row.incarnation
@@ -42,12 +53,20 @@ async def boot(config: HostedSettings, factory: async_sessionmaker[AsyncSession]
         row.recovery_generation = config.recovery_generation
         row.boot_epoch += 1
         row.acknowledgement = None
-        return Identity(
+        identity = Identity(
             owner=row.owner,
             incarnation=row.incarnation,
             recovery_generation=row.recovery_generation,
             boot_epoch=row.boot_epoch,
         )
+        from awf.hosted_node.lifecycle_store import reset_boot
+
+        await reset_boot(session, config, identity, previous)
+    if config.lifecycle is not None:
+        from awf.hosted_node.lifecycle_barrier import bind_factory
+
+        bind_factory(factory, identity)
+    return identity
 
 
 async def check(session: AsyncSession, identity: Identity, *, lock: bool = False) -> Owner:

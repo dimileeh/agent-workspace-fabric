@@ -158,6 +158,92 @@
         "title": "Binding",
         "type": "object"
       },
+      "BootChallenge": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge": {
+            "title": "Challenge",
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge"
+        ],
+        "title": "BootChallenge",
+        "type": "object"
+      },
+      "BootEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_closed": {
+            "title": "Admission Closed",
+            "type": "boolean"
+          },
+          "challenge": {
+            "title": "Challenge",
+            "type": "string"
+          },
+          "database_ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Database Ref",
+            "type": "string"
+          },
+          "disk_ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Disk Ref",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "kernel_boot_id": {
+            "title": "Kernel Boot Id",
+            "type": "string"
+          },
+          "previous_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Identity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recovery_acknowledged": {
+            "title": "Recovery Acknowledged",
+            "type": "boolean"
+          },
+          "runtime_ready": {
+            "const": false,
+            "default": false,
+            "title": "Runtime Ready",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "challenge",
+          "identity",
+          "previous_identity",
+          "kernel_boot_id",
+          "disk_ref",
+          "database_ref",
+          "recovery_acknowledged",
+          "admission_closed",
+          "expires_at"
+        ],
+        "title": "BootEvidence",
+        "type": "object"
+      },
       "CallbackSubscriptionCreateRequest": {
         "additionalProperties": false,
         "description": "Register an external callback target for sanitized AWF event envelopes.",
@@ -2393,6 +2479,22 @@
         "title": "DockerMode",
         "type": "string"
       },
+      "Drain": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "title": "Drain",
+        "type": "object"
+      },
       "EgressAllowlistTemplate": {
         "description": "Reusable restricted egress allowlist categories for common destinations.",
         "enum": [
@@ -2858,7 +2960,7 @@
           "owner": {
             "maxLength": 128,
             "minLength": 1,
-            "pattern": "^[A-Za-z0-9_-]+$",
+            "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$",
             "title": "Owner",
             "type": "string"
           },
@@ -2907,7 +3009,7 @@
           "owner": {
             "maxLength": 128,
             "minLength": 1,
-            "pattern": "^[A-Za-z0-9_-]+$",
+            "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$",
             "title": "Owner",
             "type": "string"
           },
@@ -3025,6 +3127,94 @@
           "material"
         ],
         "title": "Install",
+        "type": "object"
+      },
+      "LifecycleStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "admission_closed": {
+            "title": "Admission Closed",
+            "type": "boolean"
+          },
+          "database_quiescent": {
+            "title": "Database Quiescent",
+            "type": "boolean"
+          },
+          "drain_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drain Generation"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "idle_since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Since"
+          },
+          "node_ready": {
+            "title": "Node Ready",
+            "type": "boolean"
+          },
+          "quiescent": {
+            "title": "Quiescent",
+            "type": "boolean"
+          },
+          "runtime_ready": {
+            "const": false,
+            "default": false,
+            "title": "Runtime Ready",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "recovering",
+              "ready",
+              "draining",
+              "drained"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "state",
+          "admission_closed",
+          "node_ready",
+          "quiescent",
+          "database_quiescent",
+          "idle_since",
+          "drain_generation",
+          "expires_at"
+        ],
+        "title": "LifecycleStatus",
         "type": "object"
       },
       "LocalCapacitySourceResponse": {
@@ -6502,6 +6692,31 @@
           "agent_readiness"
         ],
         "title": "ReadyResponse",
+        "type": "object"
+      },
+      "RecoveryAcknowledgement": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "receipt_ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Receipt Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "receipt_ref"
+        ],
+        "title": "RecoveryAcknowledgement",
         "type": "object"
       },
       "Refresh": {
@@ -14863,6 +15078,416 @@
           },
           "503": {
             "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Acknowledge",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/boot/evidence": {
+      "post": {
+        "operationId": "boot_evidence_v1_hosted_node_lifecycle_boot_evidence_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BootChallenge"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootEvidence"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Boot Evidence",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/drain": {
+      "post": {
+        "operationId": "drain_v1_hosted_node_lifecycle_drain_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Drain"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Drain",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/drain/abort": {
+      "post": {
+        "operationId": "abort_v1_hosted_node_lifecycle_drain_abort_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Drain"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Abort",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/readiness": {
+      "get": {
+        "operationId": "readiness_v1_hosted_node_lifecycle_readiness_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Readiness",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/recovery/acknowledge": {
+      "post": {
+        "operationId": "acknowledge_v1_hosted_node_lifecycle_recovery_acknowledge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryAcknowledgement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
