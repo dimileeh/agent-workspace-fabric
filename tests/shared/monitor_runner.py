@@ -105,6 +105,11 @@ class DefaultMergeMethodGitHubClient(GitHubClient):
         )
         return reply_id
 
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        """Preserve queued mutation failures and reflect successful resolution in audits."""
+        await super().resolve_thread(thread_id=thread_id)
+        self._review_thread(thread_id).update(isResolved=True, resolvedBy={"login": "awf-test-bot"})
+
     async def fetch_review_thread_audit(
         self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
     ) -> ReviewThreadAudit:

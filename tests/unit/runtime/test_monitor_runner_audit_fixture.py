@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.pr_monitor import ReviewThread, ReviewThreadComment
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 
@@ -57,3 +57,48 @@ async def test_audit_fixture_filters_real_posted_threads_but_never_invents_a_mis
         repo=_REPO, pr_number=7, thread_id="PRRT_missing"
     )
     assert missing.supported and missing.threads == ()
+
+
+@pytest.mark.parametrize("resolve_succeeds", [True, False])
+async def test_audit_fixture_records_only_successful_resolutions(resolve_succeeds: bool) -> None:
+    cmd = FakeCommandRunner()
+    fake = DefaultMergeMethodGitHubClient(cmd)
+    thread = ReviewThread(
+        thread_id="PRRT_target",
+        path="example.py",
+        line=1,
+        body_excerpt="question",
+        author="reviewer",
+        comments=(ReviewThreadComment(comment_id="c1", body="question", author="reviewer"),),
+    )
+    fake.remember_review_threads((thread,))
+    reply = await fake.reply_to_thread(thread_id=thread.thread_id, body="answer")
+    cmd.queue_result(
+        returncode=0 if resolve_succeeds else 1,
+        stdout='{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}',
+        stderr="" if resolve_succeeds else "missing resolve permission",
+    )
+    if resolve_succeeds:
+        await fake.resolve_thread(thread_id=thread.thread_id)
+    else:
+        with pytest.raises(GitHubClientError, match="missing resolve permission"):
+            await fake.resolve_thread(thread_id=thread.thread_id)
+
+    for thread_id in (None, thread.thread_id):
+        audit = await fake.fetch_review_thread_audit(repo=_REPO, pr_number=7, thread_id=thread_id)
+        assert len(audit.threads) == 1
+        observed = audit.threads[0]
+        assert observed.is_resolved is resolve_succeeds
+        assert observed.resolved_by == (audit.viewer_login if resolve_succeeds else None)
+        assert observed.external_comment_bodies == ("question",)
+        assert observed.viewer_comment_ids == (reply,)
+        assert observed.current_viewer_comment_bodies == ("answer",)
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args[:3] == ["gh", "api", "graphql"]
+    assert f"threadId={thread.thread_id}" in cmd.calls[0].args
+
+    # A later observed reopen still overrides the successful mutation.
+    fake.remember_review_threads((thread,))
+    reopened = await fake.fetch_review_thread_audit(repo=_REPO, pr_number=7)
+    assert not reopened.threads[0].is_resolved
+    assert reopened.threads[0].viewer_comment_ids == (reply,)
