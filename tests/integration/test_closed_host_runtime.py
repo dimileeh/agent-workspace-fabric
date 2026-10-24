@@ -137,6 +137,52 @@ async def test_reboot_fresh_observation_not_old_boot_or_bootstrap_receipt(compos
     assert await runtime.recover(identity, previous, "host-quiescence") is None
 
 
+@pytest.mark.parametrize("host_failure", [None, "container", "observation", "storage"])
+async def test_reboot_unresolved_work_is_409_only_with_valid_host_proof(
+    composed, monkeypatch, host_failure
+):
+    client, receiver, runtime, state = composed
+    assert (await ack(client)).status_code == 200
+    await create(receiver.factory)
+    identity = await boot(receiver.config, receiver.factory)
+    restarted = Receiver(receiver.config, receiver.factory, identity, Mock())
+    fresh_runtime = HostRuntime(receiver.config, receiver.factory, identity, runtime.docker)
+    assert restarted.lifecycle is not None
+    restarted.lifecycle.observe_host = fresh_runtime.observe
+    restarted.lifecycle.observe_boot = fresh_runtime.observe_boot
+    restarted.lifecycle.verify_recovery = fresh_runtime.recover
+    if host_failure == "container":
+        state["containers"] = [{"Id": "unknown-container"}]
+    elif host_failure == "observation":
+
+        def unavailable():
+            raise OSError("synthetic host observation unavailable")
+
+        monkeypatch.setattr(fresh_runtime.linux, "sample", unavailable)
+    elif host_failure == "storage":
+        fresh_runtime.config = receiver.config.model_copy(
+            update={"lifecycle": receiver.config.lifecycle.model_copy(update={"disk_ref": "wrong"})}
+        )
+    app = create_app(use_lifespan=False)
+    configure_database(app, receiver.factory)
+    app.state.hosted_receiver = restarted
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://core.test",
+        headers={"Authorization": "Bearer synthetic-controller", **identity.headers()},
+    ) as rebooted:
+        response = await ack(rebooted, "host-quiescence")
+        assert response.status_code == (503 if host_failure else 409)
+        assert response.json()["error_code"] == (
+            "RECOVERY_EVIDENCE_UNAVAILABLE" if host_failure else "RECOVERY_OUTCOME_UNRESOLVED"
+        )
+        assert (await rebooted.get(PREFIX + "/readiness")).json()["admission_closed"]
+        assert await fresh_runtime.observe(identity) is None
+        assert await fresh_runtime.observe_boot(identity) is None
+        with pytest.raises(DBAPIError, match="NODE_ADMISSION_CLOSED"):
+            await create(receiver.factory)
+
+
 async def test_replacement_requires_fresh_exact_external_physical_fence(composed):
     _, receiver, runtime, _ = composed
     identity = receiver.identity

@@ -15,11 +15,16 @@ from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories.service_gc_request_repo import ServiceGCRequestRepository
 from awf.db.session import make_session_factory
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import boot
 from awf.hosted_node.lifecycle_barrier import bind_factory, install_barrier
-from awf.hosted_node.lifecycle_schemas import HostObservation, RecoveryEvidence
+from awf.hosted_node.lifecycle_schemas import (
+    HostObservation,
+    RecoveryAcknowledgement,
+    RecoveryEvidence,
+)
 from awf.hosted_node.receiver import Receiver
 
 PREFIX = "/v1/hosted-node/lifecycle"
@@ -157,6 +162,51 @@ async def test_verified_recovery_drain_abort_and_replayed_generation(node):
     assert (await client.post(PREFIX + "/drain/abort", json={"generation": 1})).json()[
         "admission_closed"
     ]
+
+
+async def test_expired_unclaimed_gc_allows_idle_drain_and_reboot_recovery(node):
+    client, receiver, engine = node
+    evidence(receiver)
+    assert (await acknowledge(client)).status_code == 200
+    now = datetime.now(UTC)
+    async with receiver.factory.begin() as session:
+        repository = ServiceGCRequestRepository(session)
+        request = await repository.create_pending(
+            node_id=None,
+            requested_at=now - timedelta(minutes=2),
+            deadline_at=now - timedelta(minutes=1),
+        )
+        assert request.claimed_at is None
+        assert await repository.expire_stale_requests(node_id="nodea", now=now) == [request.id]
+        assert request.status == "expired"
+    assert (await client.get(PREFIX + "/readiness")).json()["quiescent"]
+    assert (await client.post(PREFIX + "/drain", json={"generation": 1})).json()[
+        "state"
+    ] == "drained"
+    factory = make_session_factory(engine)
+    identity = await boot(receiver.config, factory)
+    restarted = evidence(Receiver(receiver.config, factory, identity, Mock()))
+    recovered = await restarted.acknowledge(
+        RecoveryAcknowledgement(idempotency_key="reboot", receipt_ref="verified-recovery-receipt")
+    )
+    assert recovered.node_ready and not recovered.admission_closed
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "unknown"])
+async def test_nonterminal_gc_still_blocks_idle_and_drain(node, status):
+    client, receiver, _ = node
+    evidence(receiver)
+    assert (await acknowledge(client)).status_code == 200
+    now = datetime.now(UTC)
+    async with receiver.factory.begin() as session:
+        request = await ServiceGCRequestRepository(session).create_pending(
+            node_id=None, requested_at=now, deadline_at=now + timedelta(minutes=1)
+        )
+        request.status = status
+    assert not (await client.get(PREFIX + "/readiness")).json()["quiescent"]
+    response = await client.post(PREFIX + "/drain", json={"generation": 1})
+    assert response.status_code == 200
+    assert response.json()["state"] == "ready" and not response.json()["quiescent"]
 
 
 @pytest.mark.parametrize(

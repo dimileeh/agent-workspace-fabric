@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,7 +54,6 @@ def synthetic_linux(monkeypatch):
             "receipt_ref": "first-node",
         },
     }
-    from contextlib import contextmanager
 
     @contextmanager
     def directory(path, **kwargs):
@@ -71,7 +71,7 @@ def synthetic_linux(monkeypatch):
         "small_read",
         lambda path: BOOT if "boot_id" in str(path) else "populated 0\nfrozen 0\n",
     )
-    monkeypatch.setattr(linux.os, "listdir", lambda _: [])
+    monkeypatch.setattr(linux.os, "scandir", lambda _: nullcontext(iter(())))
     monkeypatch.setattr(linux.sys, "platform", "linux")
     return linux.LinuxObservation(config, IDENTITY, "disk", "db"), files, info, mount
 
@@ -82,6 +82,43 @@ def test_linux_device_boot_cgroup_and_operator_first_node(synthetic_linux):
     assert value.boot_id == BOOT and value.workspaces_empty
     assert probe.bootstrap_approved("first-node")
     assert not probe.bootstrap_approved("caller-key")
+
+
+@pytest.mark.parametrize("has_entries", [False, True])
+def test_retained_directory_probe_reads_at_most_one_entry(
+    synthetic_linux, monkeypatch, has_entries
+):
+    probe, _, _, _ = synthetic_linux
+    reads = 0
+    closed = False
+
+    class Entries:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal reads
+            reads += 1
+            assert reads == 1, "the emptiness probe must not enumerate retained worktrees"
+            if not has_entries:
+                raise StopIteration
+            return object()
+
+    @contextmanager
+    def scan(fd):
+        nonlocal closed
+        assert fd == 1
+        try:
+            yield Entries()
+        finally:
+            closed = True
+
+    monkeypatch.setattr(linux.os, "scandir", scan)
+    monkeypatch.setattr(
+        linux.os, "listdir", lambda _: pytest.fail("retained directories must not be materialized")
+    )
+    assert probe.sample().workspaces_empty is not has_entries
+    assert reads == 1 and closed
 
 
 @pytest.mark.parametrize(

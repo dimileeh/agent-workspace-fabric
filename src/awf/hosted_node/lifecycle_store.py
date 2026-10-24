@@ -87,7 +87,9 @@ async def database_quiescent(session: AsyncSession) -> bool:
         select(Operation.id).where(Operation.status.not_in(("succeeded", "failed", "cancelled"))),
         select(ValidationRun.id).where(ValidationRun.status.not_in(("succeeded", "failed"))),
         select(ResourceReservation.id).where(ResourceReservation.released_at.is_(None)),
-        select(ServiceGCRequest.id).where(ServiceGCRequest.status.not_in(("completed", "failed"))),
+        select(ServiceGCRequest.id).where(
+            ServiceGCRequest.status.not_in(("completed", "failed", "expired"))
+        ),
         select(CallbackDelivery.id).where(
             CallbackDelivery.status.not_in(("succeeded", "failed", "skipped"))
         ),

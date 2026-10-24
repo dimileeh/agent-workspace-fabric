@@ -75,7 +75,9 @@ class HostRuntime:
             right.cgroup_inode,
         )
 
-    async def _observe(self, identity: Identity) -> LinuxSnapshot | None:
+    async def _observe(
+        self, identity: Identity, *, require_database_quiescent: bool = True
+    ) -> LinuxSnapshot | None:
         if identity != self.identity:
             return None
         async with self._observation_lock:
@@ -91,7 +93,7 @@ class HostRuntime:
                 if (
                     row.disk_ref != self.config.lifecycle.disk_ref
                     or row.database_ref != self.config.lifecycle.database_ref
-                    or not await database_quiescent(session)
+                    or (require_database_quiescent and not await database_quiescent(session))
                 ):
                     return None
             after = await self.host_io(self.linux.sample)
@@ -133,7 +135,8 @@ class HostRuntime:
     ) -> RecoveryEvidence | None:
         try:
             async with asyncio.timeout(4):
-                sample = await self._observe(identity)
+                # Acknowledge checks unresolved work under its admission lock.
+                sample = await self._observe(identity, require_database_quiescent=False)
                 if sample is None:
                     return None
                 if previous is None:

@@ -145,7 +145,8 @@ class LinuxObservation:
             with directory(config.workspaces_root) as work, directory(config.docker_root) as docker:
                 if os.fstat(work).st_dev != info.st_dev or os.fstat(docker).st_dev != info.st_dev:
                     raise ValueError("NESTED_STORAGE_MISMATCH")
-                empty = not os.listdir(work)  # noqa: PTH208 -- descriptor-relative
+                with os.scandir(work) as entries:
+                    empty = next(entries, None) is None
         boot_id = small_read(Path("/proc/sys/kernel/random/boot_id"))
         if str(UUID(boot_id)) != boot_id or secure_json(config.identity_file) != {
             "owner": self.identity.owner,
