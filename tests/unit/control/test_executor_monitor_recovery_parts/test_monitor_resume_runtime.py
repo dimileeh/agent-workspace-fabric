@@ -818,10 +818,15 @@ async def test_final_up_cannot_expand_a_completed_prerequisite(tmp_path, monkeyp
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("already_running", [False, True])
 @pytest.mark.parametrize("tolerate", [False, True])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "timeout"])
 async def test_final_up_waits_for_later_one_shot_before_recreating_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tolerate: bool, outcome: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tolerate: bool,
+    outcome: str,
+    already_running: bool,
 ) -> None:
     first_done = _service("first", state="exited", status="Exited (0) 1 second ago")
     running = _running(first_done, _service("later"), _service("app"))
@@ -843,7 +848,7 @@ async def test_final_up_waits_for_later_one_shot_before_recreating_agent(
         _ScriptedInspector(
             _running(
                 _service("first", state="exited"),
-                _service("later", state="exited"),
+                _service("later", state="running" if already_running else "exited"),
                 _service("app"),
             ),
             running,
@@ -897,11 +902,45 @@ async def test_final_up_waits_for_later_one_shot_before_recreating_agent(
 
     assert clock.sleeps == [5.0]
     assert inspector.calls == 3
-    assert [call["services"] for call in compose.calls[:2]] == [("first",), ("later",)]
+    starts = [("first",)] if already_running else [("first",), ("later",)]
+    assert [call["services"] for call in compose.calls[: len(starts)]] == starts
     if outcome == "completed" or (outcome == "failed" and tolerate):
         assert compose.calls[-1]["services"] == ("agent",)
     else:
-        assert len(compose.calls) == 2
+        assert len(compose.calls) == len(starts)
+
+
+@pytest.mark.unit
+async def test_already_running_one_shot_is_waited_without_another_completed_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inspector = _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(
+            _running(_service("migrate"), _service("app")),
+            _running(
+                _service("migrate", state="exited", status="Exited (0) 1 second ago"),
+                _service("app"),
+            ),
+        ),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+    await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+        compose,
+        compose_project="awf_ws",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id="ws",
+        budget_seconds=5,
+        dependency_services=("migrate", "app"),
+        dependency_conditions={"app": {"migrate": "service_completed_successfully"}},
+    )
+    assert inspector.calls == 2
+    assert clock.sleeps == [5.0]
+    assert [call["services"] for call in compose.calls] == [("app",), ("agent",)]
+    assert compose.calls[0]["no_deps"] is True
 
 
 @pytest.mark.unit

@@ -238,21 +238,39 @@ def _prerequisite_progress(
 def _completed_dependencies(
     snapshot: RuntimeSnapshot | None,
     declared_services: tuple[str, ...] | None,
-    started_services: set[str],
+    executed_services: set[str],
 ) -> set[str]:
-    """Return the dependencies this resume started that have since exited with code 0.
+    """Return started or observed-running dependencies that have since exited 0.
 
-    A one-shot job (``service_completed_successfully``) started or recreated by
-    the resume has already run; another ``up`` would start its container again.
+    A one-shot job (``service_completed_successfully``) started, recreated or
+    observed running during resume has already run; another ``up`` would replay it.
     """
     if snapshot is None:
         return set()
     return {
         service.name
         for service in _dependency_containers(snapshot, declared_services)
-        if service.name in started_services
+        if service.name in executed_services
         and service.state.strip().lower() == "exited"
         and _EXITED_SUCCESSFULLY.match((service.status or "").strip().lower()) is not None
+    }
+
+
+def _running_one_shots(
+    snapshot: RuntimeSnapshot,
+    declared_services: tuple[str, ...] | None,
+    dependency_conditions: Mapping[str, Mapping[str, str]],
+) -> set[str]:
+    one_shots = {
+        name
+        for prerequisites in dependency_conditions.values()
+        for name, condition in prerequisites.items()
+        if condition == "service_completed_successfully"
+    }
+    return {
+        service.name
+        for service in _dependency_containers(snapshot, declared_services)
+        if service.name in one_shots and service.state.strip().lower() == "running"
     }
 
 
@@ -266,6 +284,7 @@ async def wait_for_recovering_dependencies(
     recreated_services: tuple[str, ...] = (),
     dependency_conditions: Mapping[str, Mapping[str, str]] | None = None,
     deadline: float | None = None,
+    observed_one_shots: set[str] | None = None,
 ) -> RuntimeSnapshot | None:
     """Wait until no running dependency is ``starting``/``unhealthy``, within the budget.
 
@@ -281,12 +300,15 @@ async def wait_for_recovering_dependencies(
     is logged and skipped: the compose call that follows surfaces the real error.
     Returns the settled snapshot, or ``None`` when the runtime was unreadable.
     ``deadline`` (a ``_monotonic`` instant) lets an earlier step share the budget.
+    ``observed_one_shots`` records prerequisites seen running so the caller can
+    avoid replaying them if they finish during this wait, even if started earlier.
     """
     if deadline is None:
         deadline = _monotonic() + budget_seconds
     conditions = dependency_conditions or {}
     pending: set[str] | None = None
-    started = set(recreated_services)
+    if observed_one_shots is None:
+        observed_one_shots = set()
     while True:
         try:
             snapshot = await inspect_resume_runtime(compose_project)
@@ -306,12 +328,15 @@ async def wait_for_recovering_dependencies(
                 stack_state=snapshot.stack_state,
             )
             return None
-        settling: dict[str, str] = {}
+        settling = dict.fromkeys(
+            _running_one_shots(snapshot, declared_services, conditions), "running"
+        )
+        observed_one_shots.update(settling)
         if start_stopped is not None:
             if pending is None:
                 pending = set(
                     _stopped_dependencies(snapshot, declared_services, recreated_services)
-                )
+                ) - _completed_dependencies(snapshot, declared_services, observed_one_shots)
             containers = {
                 service.name: service
                 for service in _dependency_containers(snapshot, declared_services)
@@ -329,25 +354,8 @@ async def wait_for_recovering_dependencies(
                 settling.update(waiting_on)
             if ready:
                 pending.difference_update(ready)
-                started.update(ready)
                 await start_stopped(tuple(ready))
                 continue
-        completed = _completed_dependencies(snapshot, declared_services, started)
-        if completed and declared_services is not None:
-            # Final up must use --no-deps to preserve completed jobs, so this
-            # same bounded wait also covers prerequisites of running dependents.
-            containers = {
-                service.name: service
-                for service in _dependency_containers(snapshot, declared_services)
-            }
-            for name in set(declared_services) - completed - {AGENT_SERVICE_NAME}:
-                _, waiting_on, _ = _prerequisite_progress(
-                    name,
-                    containers=containers,
-                    pending=pending or set(),
-                    dependency_conditions=conditions,
-                )
-                settling.update(waiting_on)
         recovering = {**settling, **_recovering_dependencies(snapshot, declared_services)}
         if not recovering:
             return snapshot
@@ -375,6 +383,7 @@ async def _recreate_in_dependency_order(
     deadline: float,
     declared_services: tuple[str, ...] | None,
     dependency_conditions: Mapping[str, Mapping[str, str]],
+    observed_one_shots: set[str],
 ) -> None:
     """Force-recreate ``services``, each after the prerequisites it depends on.
 
@@ -417,6 +426,9 @@ async def _recreate_in_dependency_order(
             if snapshot is None or snapshot.stack_state in _UNREADABLE_STACK_STATES:
                 gated = False
                 continue
+            observed_one_shots.update(
+                _running_one_shots(snapshot, declared_services, dependency_conditions)
+            )
             if starts is None:
                 starts = _stopped_prerequisites(
                     snapshot, declared_services, services, dependency_conditions
@@ -513,6 +525,7 @@ async def restart_runtime_for_monitor_resume(
     deadline = _monotonic() + budget_seconds
     recreated = tuple(sorted(set(recreate_services) - {AGENT_SERVICE_NAME}))
     started = set(recreated)
+    observed_one_shots: set[str] = set()
 
     async def _start_stopped(services: tuple[str, ...]) -> None:
         started.update(services)
@@ -560,6 +573,7 @@ async def restart_runtime_for_monitor_resume(
             deadline=deadline,
             declared_services=dependency_services,
             dependency_conditions=dependency_conditions or {},
+            observed_one_shots=observed_one_shots,
         )
 
     tolerated: ComposeOperationError | None = None
@@ -573,12 +587,15 @@ async def restart_runtime_for_monitor_resume(
             recreated_services=tuple(sorted(started)),
             dependency_conditions=dependency_conditions,
             deadline=deadline,
+            observed_one_shots=observed_one_shots,
         )
         if dependency_services is None:
             await compose.ensure_project_up(**common, no_recreate=True)
         else:
             # A one-shot dependency the resume already ran to completion is not started again.
-            completed = _completed_dependencies(settled, dependency_services, started)
+            completed = _completed_dependencies(
+                settled, dependency_services, started | observed_one_shots
+            )
             dependencies = tuple(
                 name
                 for name in dependency_services
