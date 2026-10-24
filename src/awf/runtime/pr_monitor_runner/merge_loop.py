@@ -294,6 +294,8 @@ async def handle_merge_action(
             monitor_log=monitor_log,
         )
         if disposition_gate.retry:
+            if disposition_gate.feedback_changed:
+                await self._deps.sleep(self._config.poll_interval_seconds)
             return False
         if disposition_gate.blocker is not None:
             return cast(
@@ -1097,6 +1099,8 @@ async def handle_merge_action(
         if disposition_gate_after_lock is None:  # pragma: no cover - defensive invariant
             raise RuntimeError("merge critical section exited without a disposition audit")
         if disposition_gate_after_lock.retry:
+            if disposition_gate_after_lock.feedback_changed:
+                await self._deps.sleep(self._config.poll_interval_seconds)
             return False
         if disposition_gate_after_lock.blocker is not None:
             return cast(

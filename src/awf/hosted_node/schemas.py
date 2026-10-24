@@ -17,6 +17,10 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
 
+class HostedErrorResponse(StrictModel):
+    error_code: str
+
+
 class Identity(StrictModel):
     owner: LogicalOwner
     incarnation: Opaque

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -13,8 +14,10 @@ import pytest
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client_threads import _audited_thread
+from awf.common.github_retry import RetryPolicy
 from awf.node.compose_manager import ComposeTeardownResult
-from awf.runtime.pr_monitor import MonitorState, ReviewThread
+from awf.runtime.pr_monitor import MonitorState, PRStatus, ReviewThread
 from awf.runtime.pr_monitor_runner import comments as _comments
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import (
     MonitorVerdictResult,
@@ -36,18 +39,91 @@ class DefaultMergeMethodGitHubClient(GitHubClient):
     def __init__(self, runner: AsyncCommandRunner, **kwargs: Any) -> None:
         super().__init__(runner, **kwargs)
         self.thread_replies: list[tuple[str, str]] = []
+        self.review_threads: dict[str, dict[str, Any]] = {}
+
+    def _review_thread(self, thread_id: str) -> dict[str, Any]:
+        return self.review_threads.setdefault(
+            thread_id,
+            {
+                "id": thread_id,
+                "isResolved": False,
+                "isOutdated": False,
+                "comments": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            },
+        )
+
+    def remember_review_threads(self, threads: tuple[ReviewThread, ...]) -> None:
+        """Keep observed comments in order, retaining replies across status refreshes."""
+        for thread in threads:
+            node = self._review_thread(thread.thread_id)
+            node.update(isResolved=thread.is_resolved, isOutdated=thread.is_outdated)
+            comments = node["comments"]["nodes"]
+            by_id = {comment["id"]: comment for comment in comments}
+            for comment in thread.comments:
+                current = by_id.get(comment.comment_id)
+                if current is None:
+                    current = {"id": comment.comment_id}
+                    comments.append(current)
+                current.update(
+                    body=comment.body,
+                    bodyText=comment.body,
+                    viewerDidAuthor=comment.viewer_did_author,
+                    createdAt=comment.created_at.isoformat() if comment.created_at else None,
+                    lastEditedAt=(
+                        comment.updated_at.isoformat()
+                        if comment.updated_at and comment.updated_at != comment.created_at
+                        else None
+                    ),
+                )
+
+    async def fetch_pr_status(
+        self, *, repo: RepoRef, pr_number: int, base_behind_count: int, retry: bool = True
+    ) -> PRStatus:
+        status = await super().fetch_pr_status(
+            repo=repo, pr_number=pr_number, base_behind_count=base_behind_count, retry=retry
+        )
+        self.remember_review_threads(
+            status.unresolved_inline_threads + status.outdated_unresolved_inline_threads
+        )
+        return status
 
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         """Record the disposition reply instead of shelling ``gh``."""
         self.thread_replies.append((thread_id, body))
-        return f"reply-{len(self.thread_replies)}"
+        reply_id = f"reply-{len(self.thread_replies)}"
+        self._review_thread(thread_id)["comments"]["nodes"].append(
+            {
+                "id": reply_id,
+                "body": body,
+                "bodyText": body,
+                "viewerDidAuthor": True,
+                "createdAt": datetime.now(UTC).isoformat(),
+            }
+        )
+        return reply_id
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        """Preserve queued mutation failures and reflect successful resolution in audits."""
+        await super().resolve_thread(thread_id=thread_id)
+        self._review_thread(thread_id).update(isResolved=True, resolvedBy={"login": "awf-test-bot"})
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
     ) -> ReviewThreadAudit:
-        """A clean audit (no AWF-resolved threads) for tests that do not exercise the gate."""
+        """Audit the fixture's observed comments and actual recorded replies."""
         del repo, pr_number, retry
-        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot")
+        threads = []
+        for tid, node in self.review_threads.items():
+            if thread_id is None or tid == thread_id:
+                thread = await _audited_thread(self, node, retry_policy=RetryPolicy.NEVER)
+                assert thread is not None
+                threads.append(thread)
+        return ReviewThreadAudit(
+            supported=True, viewer_login="awf-test-bot", threads=tuple(threads)
+        )
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return all legacy repository merge methods for older runner tests."""

@@ -162,6 +162,7 @@ async def _run_cycle(
         return verdict
 
     async def _settle(**_kwargs: object) -> PRStatus:
+        gh.remember_review_threads(settle_threads)
         return _status(_START, settle_threads)
 
     async def _push(**_kwargs: object) -> _GitPushResult:
@@ -945,7 +946,9 @@ async def test_re_resolving_a_reopened_thread_posts_a_fresh_reply(
     state.mark_addressed(tid, "fix_committed")
     disposition = seed_resolvable_disposition(state, tid, "fix_committed")
     record_item_disposition(state, replace(disposition, reply_comment_id="reply-0", **resolution))
-    runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
+    runner = SimpleNamespace(
+        _monitor_owner_id=None, _deps=SimpleNamespace(gh=gh, session_factory=factory)
+    )
 
     replied = await reply_before_resolve(
         runner,
@@ -1007,7 +1010,9 @@ async def test_a_landed_resolve_is_saved_so_a_reopen_owes_a_fresh_reply(
     assert retire_reopened_dispositions(
         state, _status(_PUSHED, (thread,)), workspace_id=workspace_id
     ) == [tid]
-    runner = SimpleNamespace(_deps=SimpleNamespace(gh=gh, session_factory=factory))
+    runner = SimpleNamespace(
+        _monitor_owner_id=None, _deps=SimpleNamespace(gh=gh, session_factory=factory)
+    )
     replied = await reply_before_resolve(
         runner,
         workspace_id=workspace_id,

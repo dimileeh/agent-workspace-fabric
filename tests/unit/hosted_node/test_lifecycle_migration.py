@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -9,20 +10,27 @@ from awf.db.session import make_engine, make_session_factory
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import boot
 from awf.hosted_node.lifecycle_barrier import GUARDED_TABLES
-from tests.postgres import postgres_empty_test_url
+from tests.postgres import postgres_alembic_subprocess_lock, postgres_empty_test_url
+
+_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _migrate(url, *args):
+    with postgres_alembic_subprocess_lock(url):
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=_ROOT,
+            env={**os.environ, "AWF_DATABASE_URL": url},
+            capture_output=True,
+            timeout=90,
+        )
 
 
 async def test_lifecycle_migration_roundtrip():
     async with postgres_empty_test_url() as url:
 
         async def migrate(*args):
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, "-m", "alembic", *args],
-                env={**os.environ, "AWF_DATABASE_URL": url},
-                capture_output=True,
-                timeout=90,
-            )
+            result = await asyncio.to_thread(_migrate, url, *args)
             assert result.returncode == 0, result.stderr.decode()[-2000:]
 
         await migrate("upgrade", "head")
@@ -55,13 +63,7 @@ async def test_lifecycle_migration_roundtrip():
                 ),
                 make_session_factory(engine),
             )
-            refused = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, "-m", "alembic", "downgrade", "b986c2d3e4f5"],
-                env={**os.environ, "AWF_DATABASE_URL": url},
-                capture_output=True,
-                timeout=90,
-            )
+            refused = await asyncio.to_thread(_migrate, url, "downgrade", "b986c2d3e4f5")
             assert refused.returncode != 0
             assert b"NODE_LIFECYCLE_STILL_ENABLED" in refused.stderr
             assert await guards() == len(GUARDED_TABLES)
