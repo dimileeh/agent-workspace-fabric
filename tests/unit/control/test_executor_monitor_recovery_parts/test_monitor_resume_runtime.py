@@ -818,6 +818,93 @@ async def test_final_up_cannot_expand_a_completed_prerequisite(tmp_path, monkeyp
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("tolerate", [False, True])
+@pytest.mark.parametrize("outcome", ["completed", "failed", "timeout"])
+async def test_final_up_waits_for_later_one_shot_before_recreating_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tolerate: bool, outcome: str
+) -> None:
+    first_done = _service("first", state="exited", status="Exited (0) 1 second ago")
+    running = _running(first_done, _service("later"), _service("app"))
+    terminal = (
+        running
+        if outcome == "timeout"
+        else _running(
+            first_done,
+            _service(
+                "later",
+                state="exited",
+                status=f"Exited ({0 if outcome == 'completed' else 1}) 1 second ago",
+            ),
+            _service("app"),
+        )
+    )
+    inspector = _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(
+            _running(
+                _service("first", state="exited"),
+                _service("later", state="exited"),
+                _service("app"),
+            ),
+            running,
+            terminal,
+        ),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(monitor_resume_runtime, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
+    compose = _RecordingCompose()
+    tolerance_checks: list[int] = []
+
+    async def _usable() -> bool:
+        tolerance_checks.append(inspector.calls)
+        return tolerate
+
+    async def _run() -> ComposeOperationError | None:
+        return await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+            compose,
+            compose_project="awf_ws",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws",
+            budget_seconds=5,
+            dependency_services=("first", "later", "app"),
+            dependency_conditions={"app": {"later": "service_completed_successfully"}},
+            runtime_usable=_usable,
+        )
+
+    if outcome == "timeout":
+        with pytest.raises(monitor_resume_runtime.DependencyWaitTimeoutError) as caught:
+            await _run()
+        assert caught.value.unsettled_services == ("later",)
+        assert tolerance_checks == []
+    elif outcome == "failed":
+        if tolerate:
+            result = await _run()
+            assert result is not None
+            assert result.reason_code == "MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED"
+        else:
+            with pytest.raises(ComposeOperationError) as caught_failure:
+                await _run()
+            assert (
+                caught_failure.value.reason_code == "MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED"
+            )
+        assert tolerance_checks == [3]
+    else:
+        assert await _run() is None
+        assert tolerance_checks == []
+        assert compose.calls[-2]["services"] == ("app",)
+        assert compose.calls[-2]["no_deps"] is True
+
+    assert clock.sleeps == [5.0]
+    assert inspector.calls == 3
+    assert [call["services"] for call in compose.calls[:2]] == [("first",), ("later",)]
+    if outcome == "completed" or (outcome == "failed" and tolerate):
+        assert compose.calls[-1]["services"] == ("agent",)
+    else:
+        assert len(compose.calls) == 2
+
+
+@pytest.mark.unit
 async def test_unreadable_runtime_after_the_start_keeps_every_dependency_in_the_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

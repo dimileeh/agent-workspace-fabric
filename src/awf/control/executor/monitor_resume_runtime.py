@@ -286,6 +286,7 @@ async def wait_for_recovering_dependencies(
         deadline = _monotonic() + budget_seconds
     conditions = dependency_conditions or {}
     pending: set[str] | None = None
+    started = set(recreated_services)
     while True:
         try:
             snapshot = await inspect_resume_runtime(compose_project)
@@ -328,8 +329,25 @@ async def wait_for_recovering_dependencies(
                 settling.update(waiting_on)
             if ready:
                 pending.difference_update(ready)
+                started.update(ready)
                 await start_stopped(tuple(ready))
                 continue
+        completed = _completed_dependencies(snapshot, declared_services, started)
+        if completed and declared_services is not None:
+            # Final up must use --no-deps to preserve completed jobs, so this
+            # same bounded wait also covers prerequisites of running dependents.
+            containers = {
+                service.name: service
+                for service in _dependency_containers(snapshot, declared_services)
+            }
+            for name in set(declared_services) - completed - {AGENT_SERVICE_NAME}:
+                _, waiting_on, _ = _prerequisite_progress(
+                    name,
+                    containers=containers,
+                    pending=pending or set(),
+                    dependency_conditions=conditions,
+                )
+                settling.update(waiting_on)
         recovering = {**settling, **_recovering_dependencies(snapshot, declared_services)}
         if not recovering:
             return snapshot
