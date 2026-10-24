@@ -7,6 +7,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Opaque = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
+LogicalOwner = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$")
+]
 Generation = Annotated[int, Field(strict=True, ge=1, le=9223372036854775807)]
 
 
@@ -15,7 +18,7 @@ class StrictModel(BaseModel):
 
 
 class Identity(StrictModel):
-    owner: Opaque
+    owner: LogicalOwner
     incarnation: Opaque
     recovery_generation: Generation
     boot_epoch: Generation

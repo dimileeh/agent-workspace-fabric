@@ -142,6 +142,7 @@ async def validation_error(request: Request, exc: Exception) -> JSONResponse:
 
 def configure(app: FastAPI) -> None:
     from awf.hosted_node.auth import HostedGuard
+    from awf.hosted_node.lifecycle_api import router as lifecycle_router
 
     app.description += (
         "\n\nProtected hosted-node mode is default-disabled and runtime activation is CLOSED. "
@@ -155,6 +156,7 @@ def configure(app: FastAPI) -> None:
     )
     app.add_middleware(HostedGuard)
     app.include_router(router)
+    app.include_router(lifecycle_router)
     app.add_exception_handler(MaterialDeniedError, denial_error)
     # Database errors are sanitized only on receiver routes by MaterialRoute.
     app.add_exception_handler(RequestValidationError, validation_error)

@@ -35,6 +35,9 @@ class Receiver:
     ):
         self.config, self.factory, self.identity, self.store = config, factory, identity, store
         self.closed = False
+        from awf.hosted_node.lifecycle import NodeLifecycle
+
+        self.lifecycle = NodeLifecycle(factory, identity) if config.lifecycle else None
 
     @classmethod
     async def start(
@@ -437,6 +440,14 @@ class Receiver:
                     and owner.incarnation == self.identity.incarnation
                     and owner.recovery_generation == self.identity.recovery_generation
                 ):
+                    if self.lifecycle is not None:
+                        from awf.hosted_node.lifecycle_store import locked
+
+                        gate = await locked(session, self.identity)
+                        if gate.recovery_key is not None:
+                            gate.previous_identity = gate.identity
+                        gate.phase = "recovering"
+                        gate.recovery_key = gate.receipt_ref = gate.idle_since = None
                     owner.boot_epoch += 1
                 rows = (
                     await session.execute(
