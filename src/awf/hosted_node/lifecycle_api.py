@@ -5,7 +5,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from fastapi.security import HTTPBearer
 
-from awf.hosted_node.api import MaterialRoute, ReceiverDependency, expected_identity_headers
+from awf.hosted_node.api import (
+    HOSTED_RESPONSES,
+    MaterialRoute,
+    ReceiverDependency,
+    expected_identity_headers,
+)
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.lifecycle import NodeLifecycle
 from awf.hosted_node.lifecycle_schemas import (
@@ -20,6 +25,7 @@ router = APIRouter(
     prefix="/v1/hosted-node/lifecycle",
     tags=["hosted-node"],
     route_class=MaterialRoute,
+    responses=HOSTED_RESPONSES,
     dependencies=[
         Depends(expected_identity_headers),
         Depends(HTTPBearer(auto_error=False, scheme_name="bearerAuth")),

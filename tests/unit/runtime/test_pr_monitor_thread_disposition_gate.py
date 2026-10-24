@@ -1113,6 +1113,7 @@ async def test_cert_waits_for_a_poll_that_lists_feedback_opened_after_its_snapsh
 
     assert terminal is False
     assert gh.comments == []  # no READY_TO_MERGE cert over the unseen feedback
+    assert runner._deps.sleep.calls == [runner._config.poll_interval_seconds]
 
 
 async def test_gate_transient_audit_fault_waits_and_does_not_notify(

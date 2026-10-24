@@ -260,12 +260,13 @@ async def test_feature_merge_waits_for_a_poll_that_lists_feedback_opened_after_i
     )
     gh = _SequencedAuditMergeClient(*[clean] * fresh_audit, fresh)
 
-    terminal, _, _, _ = await _execute_merge(factory=factory, tmp_path=tmp_path, gh=gh)
+    terminal, _, lock, _ = await _merge_under_lock_log(factory, tmp_path, gh)
 
     assert terminal is False
     assert gh.status_refreshes_at_audit == [0, 1][: fresh_audit + 1]
     assert gh.merge_calls == []
     assert gh.comments == []
+    assert lock.sleeps_under_lock == [False]
 
 
 async def test_feature_merge_in_lock_reaudit_fails_fast(

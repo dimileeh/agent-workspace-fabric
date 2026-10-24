@@ -726,10 +726,10 @@ async def test_stopped_dependents_start_only_after_their_prerequisites_settle(
 async def test_dependents_wait_for_a_one_shot_and_skip_a_failed_prerequisite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A dependent waits for a one-shot job to exit 0; a failed prerequisite never blocks.
+    """A completed one-shot stays completed while a failed prerequisite blocks recovery.
 
     ``app`` waits while ``migrate`` runs; ``worker`` depends on ``broken``, which
-    exits non-zero, so it is left to the dependency ``up`` that honors depends_on.
+    exits non-zero, so skipping Compose's dependency expansion must not start worker.
     """
     stopped = _running(
         _service("app", state="exited"),
@@ -763,27 +763,58 @@ async def test_dependents_wait_for_a_one_shot_and_skip_a_failed_prerequisite(
     monkeypatch.setattr(monitor_resume_runtime, "_sleep", clock.sleep)
     compose = _RecordingCompose()
 
+    with pytest.raises(ComposeOperationError) as caught:
+        await monitor_resume_runtime.restart_runtime_for_monitor_resume(
+            compose,
+            compose_project="awf_ws",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id="ws",
+            budget_seconds=300,
+            dependency_services=("agent", "app", "broken", "migrate", "worker"),
+            dependency_conditions={
+                "app": {"migrate": "service_completed_successfully"},
+                "worker": {"broken": "service_started"},
+            },
+        )
+
+    assert caught.value.reason_code == "MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED"
+    assert [call.get("services") for call in compose.calls] == [
+        ("broken",),
+        ("migrate",),
+        ("app",),
+    ]
+    assert clock.sleeps == [5.0]
+
+
+async def test_final_up_cannot_expand_a_completed_prerequisite(tmp_path, monkeypatch):
+    completed = _service("migrate", state="exited", status="Exited (0) 1 second ago")
+    _install_inspector(
+        monkeypatch,
+        _ScriptedInspector(
+            _running(_service("migrate", state="exited"), _service("app", state="exited")),
+            _running(completed, _service("app", state="exited")),
+            _running(completed, _service("app")),
+        ),
+    )
+    compose = _RecordingCompose()
     await monitor_resume_runtime.restart_runtime_for_monitor_resume(
         compose,
         compose_project="awf_ws",
         compose_file=tmp_path / "compose.yml",
         workspace_id="ws",
         budget_seconds=300,
-        dependency_services=("agent", "app", "broken", "migrate", "worker"),
-        dependency_conditions={
-            "app": {"migrate": "service_completed_successfully"},
-            "worker": {"broken": "service_started"},
-        },
+        dependency_services=("agent", "migrate", "app"),
+        dependency_conditions={"app": {"migrate": "service_completed_successfully"}},
     )
-
-    assert [call.get("services") for call in compose.calls] == [
-        ("broken",),
+    assert [call["services"] for call in compose.calls] == [
         ("migrate",),
         ("app",),
-        ("app", "broken", "worker"),
+        ("app",),
         ("agent",),
     ]
-    assert clock.sleeps == [5.0]
+    final_dependencies = compose.calls[-2]
+    assert final_dependencies["no_recreate"] is True
+    assert final_dependencies.get("no_deps") is True
 
 
 @pytest.mark.unit

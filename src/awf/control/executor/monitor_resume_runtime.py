@@ -567,7 +567,34 @@ async def restart_runtime_for_monitor_resume(
                 if name != AGENT_SERVICE_NAME and name not in completed
             )
             if dependencies:
-                await compose.ensure_project_up(**common, no_recreate=True, services=dependencies)
+                final_options: dict[str, Any] = {}
+                if completed:
+                    # Compose otherwise expands depends_on and restarts completed
+                    # jobs. Retain its prerequisite gate before disabling expansion.
+                    assert settled is not None
+                    containers = {
+                        service.name: service
+                        for service in _dependency_containers(settled, dependency_services)
+                    }
+                    for name in dependencies:
+                        ready, _, _ = _prerequisite_progress(
+                            name,
+                            containers=containers,
+                            pending=set(),
+                            dependency_conditions=dependency_conditions or {},
+                        )
+                        if not ready:
+                            raise ComposeOperationError(
+                                operation="dependency_up",
+                                returncode=1,
+                                stdout="",
+                                stderr=f"dependency prerequisites failed: {name}",
+                                reason_code=MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED_REASON_CODE,
+                            )
+                    final_options["no_deps"] = True
+                await compose.ensure_project_up(
+                    **common, no_recreate=True, services=dependencies, **final_options
+                )
     except DependencyWaitTimeoutError:
         # Never tolerated: the restart streak escalates its unsettled dependencies.
         raise

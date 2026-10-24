@@ -16,6 +16,7 @@ from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.schemas import (
     Acknowledgement,
     Binding,
+    HostedErrorResponse,
     IdentityStatus,
     Install,
     MaterialStatus,
@@ -47,20 +48,26 @@ def expected_identity_headers(
     return
 
 
+HOSTED_RESPONSES: dict[int | str, dict[str, Any]] = {
+    code: {"description": description, "model": HostedErrorResponse}
+    for code, description in {
+        401: "Bearer denied",
+        403: "Identity or controller role denied",
+        404: "Disabled or preparation absent",
+        409: "Exact binding or monotonic authority conflict",
+        413: "Body exceeds 128 KiB",
+        422: "Sanitized invalid request",
+        503: "Authority unavailable; acceptance is unknown",
+    }.items()
+}
+
+
 router = APIRouter(
     route_class=MaterialRoute,
     prefix=PREFIX,
     tags=["hosted-node"],
     dependencies=[Depends(HTTPBearer(auto_error=False, scheme_name="bearerAuth"))],
-    responses={
-        401: {"description": "Bearer denied"},
-        403: {"description": "Identity or controller role denied"},
-        404: {"description": "Disabled or preparation absent"},
-        409: {"description": "Exact binding or monotonic authority conflict"},
-        413: {"description": "Body exceeds 128 KiB"},
-        422: {"description": "Sanitized invalid request"},
-        503: {"description": "Authority unavailable; acceptance is unknown"},
-    },
+    responses=HOSTED_RESPONSES,
 )
 
 

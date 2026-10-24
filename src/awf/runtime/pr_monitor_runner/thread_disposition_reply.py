@@ -40,6 +40,7 @@ from awf.runtime.pr_monitor_runner.fix_cycle_deferred import (
     _deferred_issue_url,
 )
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
+from awf.runtime.pr_monitor_runner.lifecycle import _superseded_monitor_owner
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.notify_human_details import _needs_human_reason_state_key
 from awf.runtime.pr_monitor_runner.thread_disposition import (
@@ -582,10 +583,15 @@ async def _persist_item_keys(
     keys: tuple[str, ...],
 ) -> None:
     """Mirror ``keys`` from the in-memory map onto the row (absent keys are dropped)."""
+    if state.monitor_writes_suppressed:
+        return
     try:
         async with self._deps.session_factory() as session:
             ws = await WorkspaceRepository(session).get_for_update(workspace_id)
             if ws is None:
+                return
+            if _superseded_monitor_owner(self, ws):
+                state.monitor_writes_suppressed = True
                 return
             threads_addressed = dict(ws.monitor_threads_addressed or {})
             for key in keys:
