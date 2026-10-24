@@ -16,7 +16,7 @@ from sqlalchemy import text
 from awf.common.commands import FakeCommandRunner
 from awf.common.workspace_scope import workspace_consumer
 from awf.db.models import Workspace
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.models import Grant
 from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
@@ -312,23 +312,24 @@ async def test_nested_scope_reauthorizes_and_rejects_cross_workspace(workspace, 
     runtime, association, _ = workspace
     scope = WorkspaceConsumers(runtime, tmp_path)
     workspace_id = association.workspace_id
-    async with scope.scope(workspace_id):
+    with pytest.raises(WorkspaceScopeDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
         async with scope.scope(workspace_id):
-            assert scope.workspace_id.get() == workspace_id
-        with pytest.raises(MaterialDeniedError, match="WORKSPACE_SCOPE_MISMATCH"):
-            async with scope.scope("ws_foreign"):
-                pytest.fail("cross-workspace body executed")
-        await runtime.receiver.revoke(
-            association.credentials.agent.model_copy(
-                update={
-                    "idempotency_key": "nested-revoke",
-                    "fence": 2,
-                }
-            )
-        )
-        with pytest.raises(MaterialDeniedError):
             async with scope.scope(workspace_id):
-                pytest.fail("revoked nested body executed")
+                assert scope.workspace_id.get() == workspace_id
+            with pytest.raises(MaterialDeniedError, match="WORKSPACE_SCOPE_MISMATCH"):
+                async with scope.scope("ws_foreign"):
+                    pytest.fail("cross-workspace body executed")
+            await runtime.receiver.revoke(
+                association.credentials.agent.model_copy(
+                    update={
+                        "idempotency_key": "nested-revoke",
+                        "fence": 2,
+                    }
+                )
+            )
+            with pytest.raises(MaterialDeniedError):
+                async with scope.scope(workspace_id):
+                    pytest.fail("revoked nested body executed")
     assert scope.workspace_id.get() is None
 
 

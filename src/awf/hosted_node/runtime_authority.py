@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import or_, select
 
+from awf.control.state_machine import WorkspaceStateMachine
+from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository
 from awf.hosted_node.identity import MaterialDeniedError
@@ -32,6 +34,9 @@ AGENT_TARGETS = {
     "codex": ("/run/awf/secrets/openai.api-key", "CODEX_API_KEY"),
     "claude_code": ("/run/awf/secrets/anthropic.api-key", "ANTHROPIC_API_KEY"),
 }
+_HISTORICAL_STATUSES = tuple(
+    status.value for status in WorkspaceStatus if WorkspaceStateMachine.is_callback_terminal(status)
+)
 
 
 @dataclass(frozen=True)
@@ -90,38 +95,46 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
         return association, agent
 
-    async def retained_workspaces(self, after: str = "") -> list[str]:
+    async def retained_workspaces(
+        self, after: str = "", *, historical: bool = False, limit: int = 64
+    ) -> list[str]:
+        retired = or_(
+            Workspace.status.in_(_HISTORICAL_STATUSES),
+            Workspace.filesystem_reclaimed_at.is_not(None),
+        )
         async with self.receiver.factory() as session:
             return list(
                 await session.scalars(
                     select(Workspace.id)
                     .where(
                         Workspace.node_id == self.receiver.identity.owner,
-                        or_(
-                            Workspace.compose_project_name.is_not(None),
-                            Workspace.status == "destroyed",
-                            Workspace.filesystem_reclaimed_at.is_not(None),
-                        ),
+                        retired if historical else ~retired,
                         Workspace.task_policy[POLICY_KEY].is_not(None),
                         Workspace.id > after,
                     )
                     .order_by(Workspace.id)
-                    .limit(64)
+                    .limit(limit)
                 )
             )
 
-    async def reconcile_workspace(self, workspace_id: str) -> None:
+    async def reconcile_workspace(self, workspace_id: str) -> bool:
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
-                return
+                return False
             inactive = row.status == "destroyed" or row.filesystem_reclaimed_at is not None
         if inactive:
             # Destroy/GC already completed runtime cleanup. Reclaim only the
             # readable view; never republish or restart an inactive workspace.
             await self.retract(workspace_id)
         else:
-            await self.workspace(workspace_id)
+            association, agent = await self.association(workspace_id)
+            # Checkout can publish before Compose placement. Sweep every owned
+            # association, but never create a readable view just by polling.
+            path = self.receiver.store.root / self.views._key(workspace_id) / "view"
+            published = await asyncio.to_thread(path.exists)
+            await self.materials(association, agent, current=True, publish_view=published)
+        return True
 
     async def retract(self, workspace_id: str) -> None:
         await asyncio.to_thread(self.views.remove, workspace_id)

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.runtime_authority import AuthorizedMaterials
 from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
 
@@ -53,10 +53,11 @@ async def test_revoked_material_denies_next_consumer_before_delegate(tmp_path, m
     delegate = FakeCommandRunner()
     runner = HostedCommandRunner(scope, delegate)
     scope.stop_workspace = AsyncMock()
-    async with scope.scope("ws_exact"):
-        authority.workspace.side_effect = MaterialDeniedError("GRANT_REVOKED")
-        with pytest.raises(MaterialDeniedError):
-            await runner.run(["gh", "pr", "create"])
+    with pytest.raises(WorkspaceScopeDeniedError, match="GRANT_REVOKED"):
+        async with scope.scope("ws_exact"):
+            authority.workspace.side_effect = MaterialDeniedError("GRANT_REVOKED")
+            with pytest.raises(MaterialDeniedError):
+                await runner.run(["gh", "pr", "create"])
     assert not delegate.calls
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
 

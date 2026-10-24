@@ -19,7 +19,7 @@ from awf.common.commands import (
 )
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
-from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.service.logs import _stream_redaction_flushable_length
@@ -37,6 +37,9 @@ class WorkspaceConsumers:
         self.stop_workspace: Callable[[str], Awaitable[None]] = _no_stop
         self.poll_seconds = 2.0
         self._retained_cursor = ""
+        self._history_cursor = ""
+        self._retry_cursor = ""
+        self._retained_stop_failures: set[str] = set()
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": "C.UTF-8",
@@ -74,18 +77,21 @@ class WorkspaceConsumers:
             return
         try:
             await self.authority.workspace(workspace_id)
-        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
             await self._stop(workspace_id)
+            if isinstance(error, MaterialDeniedError):
+                raise WorkspaceScopeDeniedError(error.reason, error.status) from error
             raise
         token = self.workspace_id.set(workspace_id)
         parent = asyncio.current_task()
         assert parent is not None
-        denied = False
+        failure: Exception | None = None
         cancelled = False
+        caller_cancelled = False
         finished = asyncio.Event()
 
         async def watch() -> None:
-            nonlocal denied
+            nonlocal failure
             try:
                 while True:
                     try:
@@ -94,8 +100,8 @@ class WorkspaceConsumers:
                     except TimeoutError:
                         pass
                     await self.authority.workspace(workspace_id)
-            except Exception:
-                denied = True
+            except Exception as error:
+                failure = error
                 parent.cancel()
 
         watcher = asyncio.create_task(watch(), name=f"hosted-authority-{workspace_id}")
@@ -103,9 +109,8 @@ class WorkspaceConsumers:
             yield
         except asyncio.CancelledError:
             cancelled = True
-            if not denied:
-                raise
-            raise MaterialDeniedError("HOSTED_AUTHORITY_REVOKED", 403) from None
+            caller_cancelled = failure is None
+            raise
         finally:
             finished.set()
             with suppress(asyncio.CancelledError):
@@ -113,10 +118,15 @@ class WorkspaceConsumers:
             self.workspace_id.reset(token)
             try:
                 await self.authority.workspace(workspace_id)
-            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                denied = True
-            if denied or cancelled:
+            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                if failure is None or isinstance(failure, MaterialDeniedError):
+                    failure = error
+            if failure is not None or cancelled:
                 await self._stop(workspace_id)
+            if failure is not None and not caller_cancelled:
+                if isinstance(failure, MaterialDeniedError):
+                    raise WorkspaceScopeDeniedError(failure.reason, failure.status) from failure
+                raise failure
 
     async def _stop(self, workspace_id: str) -> None:
         token = self.workspace_id.set(None)
@@ -138,19 +148,54 @@ class WorkspaceConsumers:
     async def admission_check(self) -> bool:
         try:
             # Reuse the normal worker poll, including after restart. Retained
-            # paused/blocked stacks outlive the scope's active-task watcher.
-            retained = await self.authority.retained_workspaces(self._retained_cursor)
+            # views and stacks outlive the scope's active-task watcher.
+            # Retry known stop failures even if a row left the owned query.
+            # Reconciliation rechecks ownership and never stops a successor.
+            pending = sorted(self._retained_stop_failures)
+            retry = [item for item in pending if item > self._retry_cursor][:16]
+            if not retry:
+                retry = pending[:16]
+            # Retry/history together get at most half the same 64-row budget;
+            # independent cursors cannot delay or reset the live sweep.
+            history_limit = 32 - len(retry)
+            history = await self.authority.retained_workspaces(
+                self._history_cursor, historical=True, limit=history_limit
+            )
+            if not history and self._history_cursor:
+                self._history_cursor = ""
+                history = await self.authority.retained_workspaces(
+                    historical=True, limit=history_limit
+                )
+            limit = 64 - len(retry) - len(history)
+            retained = await self.authority.retained_workspaces(self._retained_cursor, limit=limit)
             if not retained and self._retained_cursor:
                 self._retained_cursor = ""
-                retained = await self.authority.retained_workspaces()
-            for workspace_id in retained:
+                retained = await self.authority.retained_workspaces(limit=limit)
+            for workspace_id in dict.fromkeys([*retry, *retained, *history]):
                 try:
-                    await self.authority.reconcile_workspace(workspace_id)
+                    try:
+                        owned = await self.authority.reconcile_workspace(workspace_id)
+                    except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                        await self._stop(workspace_id)
+                    else:
+                        if not owned and workspace_id in retry:
+                            # Finish this identity's failed retraction, without
+                            # stopping or touching a successor identity's view.
+                            await self.authority.retract(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                    await self._stop(workspace_id)
-                self._retained_cursor = workspace_id
+                    # Keep admission closed across pages without starving later
+                    # cleanup. The bounded cursor wraps and retries each failure.
+                    self._retained_stop_failures.add(workspace_id)
+                else:
+                    self._retained_stop_failures.discard(workspace_id)
+            if retained:
+                self._retained_cursor = retained[-1]
+            if history:
+                self._history_cursor = history[-1]
+            if retry:
+                self._retry_cursor = retry[-1]
             await self.authority.admission()
-            return True
+            return not self._retained_stop_failures
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
             return False
 
