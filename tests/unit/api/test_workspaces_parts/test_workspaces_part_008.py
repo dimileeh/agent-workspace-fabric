@@ -146,6 +146,7 @@ class TestCreateWorkspacePart002:
         )
         existing = SimpleNamespace(
             id="ws_v1_stale_hash_replay",
+            task_policy=None,
             status=WorkspaceStatus.requested.value,
             version=3,
             created_at=datetime(2026, 5, 15, tzinfo=UTC),
@@ -273,6 +274,7 @@ class TestCreateWorkspacePart002:
         idempotency_key = "gemini-replay-key"
         existing = SimpleNamespace(
             id="ws_gemini_replay",
+            task_policy=None,
             status=WorkspaceStatus.requested.value,
             version=1,
             created_at=datetime(2026, 1, 15, tzinfo=UTC),

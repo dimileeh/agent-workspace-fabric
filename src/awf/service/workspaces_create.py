@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import text
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -203,8 +204,18 @@ async def create_workspace_row(
     workspace_id = (
         payload.hosted.workspace_id if payload.hosted else repositories.new_workspace_id()
     )
-    if payload.hosted and await session.get(Workspace, workspace_id) is not None:
-        raise MaterialDeniedError("HOSTED_WORKSPACE_ID_CONFLICT", 409)
+    if payload.hosted:
+        # Different request keys still address one actual workspace. Use the
+        # separate two-key advisory namespace, held through the caller's commit.
+        await session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtext('awf:hosted-workspace'), hashtext(:workspace_id))"
+            ),
+            {"workspace_id": workspace_id},
+        )
+        if await session.get(Workspace, workspace_id) is not None:
+            raise MaterialDeniedError("HOSTED_WORKSPACE_ID_CONFLICT", 409)
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,

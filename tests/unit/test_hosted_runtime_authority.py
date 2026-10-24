@@ -129,11 +129,13 @@ async def test_authority_resolves_both_current_credentials_and_actual_workspace(
     assert "OPENAI_API_KEY" not in material.environment
     assert material.environment["GH_TOKEN"] == "synthetic-github-key"
     assert "synthetic-agent-key" not in repr(material)
+    assert not (
+        runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
+    ).exists()
 
 
-async def test_runtime_profile_uses_only_readable_workspace_view(authority):
-    from awf.profiles.models import WorkspaceProfile
-
+@pytest.fixture
+async def bound_workspace(authority):
     runtime, value, factory = authority
     async with factory.begin() as session:
         session.add(
@@ -152,6 +154,13 @@ async def test_runtime_profile_uses_only_readable_workspace_view(authority):
                 },
             )
         )
+    return runtime, value, factory
+
+
+async def test_runtime_profile_uses_only_readable_workspace_view(bound_workspace):
+    from awf.profiles.models import WorkspaceProfile
+
+    runtime, _, _ = bound_workspace
     resolved = await runtime.profile_mounts(WorkspaceProfile(name="synthetic"), "ws_cloud_stable")
     assert len(resolved.mounts) == 1
     mount = resolved.mounts[0]
@@ -210,8 +219,8 @@ async def test_oauth_json_is_not_converted_to_an_api_key(authority):
         await runtime.admit(WorkspaceCreateRequest.model_validate(value))
 
 
-async def test_cancelled_publication_cannot_restore_a_readable_view(authority, monkeypatch):
-    runtime, value, _ = authority
+async def test_cancelled_publication_cannot_restore_a_readable_view(bound_workspace, monkeypatch):
+    runtime, _, _ = bound_workspace
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     publish = runtime.views.publish
 
@@ -224,7 +233,7 @@ async def test_cancelled_publication_cannot_restore_a_readable_view(authority, m
             finished.set()
 
     monkeypatch.setattr(runtime.views, "publish", delayed)
-    pending = asyncio.create_task(runtime.admit(WorkspaceCreateRequest.model_validate(value)))
+    pending = asyncio.create_task(runtime.workspace("ws_cloud_stable"))
     try:
         assert await asyncio.to_thread(entered.wait, 5)
         pending.cancel()
@@ -239,8 +248,8 @@ async def test_cancelled_publication_cannot_restore_a_readable_view(authority, m
     ).exists()
 
 
-async def test_final_admission_denial_removes_already_published_view(authority, monkeypatch):
-    runtime, value, _ = authority
+async def test_final_admission_denial_removes_already_published_view(bound_workspace, monkeypatch):
+    runtime, _, _ = bound_workspace
     original = runtime.admission
     calls = 0
 
@@ -253,7 +262,7 @@ async def test_final_admission_denial_removes_already_published_view(authority, 
 
     monkeypatch.setattr(runtime, "admission", admission)
     with pytest.raises(MaterialDeniedError, match="NODE_ADMISSION_CLOSED"):
-        await runtime.admit(WorkspaceCreateRequest.model_validate(value))
+        await runtime.workspace("ws_cloud_stable")
     assert not (
         runtime.receiver.store.root / runtime.views._key("ws_cloud_stable") / "view"
     ).exists()

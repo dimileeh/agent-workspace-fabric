@@ -144,10 +144,15 @@ class HostRuntime:
                 ):
                     return None
             after = await self.host_io(sample)
-            if before != after:
+            if before != after and not (allow_busy and self.same_host(before, after)):
                 return None
             self.baseline = after
-            return replace(after, execution_quiescent=after.execution_quiescent and docker_idle)
+            return replace(
+                after,
+                execution_quiescent=(
+                    before.execution_quiescent and after.execution_quiescent and docker_idle
+                ),
+            )
 
     async def observe(self, identity: Identity) -> HostObservation | None:
         try:

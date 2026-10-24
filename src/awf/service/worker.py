@@ -880,13 +880,20 @@ def build_worker_runtime(
         async def stop_workspace(workspace_id: str) -> None:
             # Never stop a successor's workload after losing this boot identity.
             await hosted.authority.receiver.identity_status()
-            await compose.down_project(
+            async with session_factory() as session:
+                workspace = await session.get(Workspace, workspace_id)
+                if workspace is None or workspace.node_id != node_id:
+                    return
+            result = await compose.teardown_project(
                 project_name=f"awf_{workspace_id}",
                 compose_file=work_dir / "compose" / workspace_id / "compose.yml",
                 workspace_id=workspace_id,
                 remove_volumes=False,
             )
-            await asyncio.to_thread(hosted.authority.views.remove, workspace_id)
+            if not result.ok:
+                from awf.hosted_node.identity import MaterialDeniedError
+
+                raise MaterialDeniedError("HOSTED_RUNTIME_STOP_FAILED", 503)
 
         hosted.stop_workspace = stop_workspace
     return WorkerRuntime(engine=engine, worker=worker, runtime_driver=runtime_driver)

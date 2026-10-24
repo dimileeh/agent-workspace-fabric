@@ -71,6 +71,10 @@ async def test_normal_provisioner_and_executor_consumer_hooks_deny_before_work(
     runtime = worker.build_worker_runtime(
         replace(_settings(tmp_path), github_token=None), hosted=consumers
     )
+    # This wiring-only fixture has no database; the real cleanup callback is
+    # exercised with PostgreSQL by test_hosted_runtime_review_retained.
+    stopped = AsyncMock()
+    consumers.stop_workspace = stopped
     try:
         for component, method, args in (
             (runtime.worker._provisioner, "provision_claimed", ("ws_target",)),
@@ -80,5 +84,8 @@ async def test_normal_provisioner_and_executor_consumer_hooks_deny_before_work(
         ):
             with pytest.raises(MaterialDeniedError, match="GRANT_REVOKED"):
                 await getattr(component, method)(*args)
+        assert stopped.await_count == 4
+        assert authority.retract.await_count == 4
+        assert all(call.args == ("ws_target",) for call in stopped.await_args_list)
     finally:
         await runtime.engine.dispose()

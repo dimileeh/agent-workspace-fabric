@@ -178,7 +178,10 @@ async def test_canonical_create_drives_real_worker_to_pr_monitor_completion(
                 assert workspace.pr_number == 42
                 assert workspace.pr_merge_sha == "mergecommit1234567890"
                 assert workspace.node_id == authority.receiver.identity.owner
-            status = await client.get("/v1/workspaces/ws_cloud_stable", headers=headers)
+            status = await client.get(
+                "/v1/workspaces/ws_cloud_stable",
+                headers={**headers, "Authorization": "Bearer synthetic-operator"},
+            )
             assert status.status_code == 200, status.text
             assert status.json()["status"] == "completed"
         assert len(rendered_manifests) == 1

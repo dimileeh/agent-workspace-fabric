@@ -116,7 +116,12 @@ def require_api_token(
     request: Request = _DIRECT_REQUEST_DEFAULT,
 ) -> None:
     """Require the local AWF bearer token for sensitive operator APIs."""
-    if request.scope.get("state", {}).get("hosted_controller_verified") is True:
+    if (
+        request is not None
+        and request.method == "POST"
+        and request.url.path == "/v1/workspaces"
+        and request.scope.get("state", {}).get("hosted_create_verified") is True
+    ):
         mark_bearer_auth_verified(request)
         return
     _require_authorization_header(

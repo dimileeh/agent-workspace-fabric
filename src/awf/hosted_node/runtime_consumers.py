@@ -22,6 +22,7 @@ from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
+from awf.service.logs import _stream_redaction_flushable_length
 
 
 async def _no_stop(_workspace_id: str) -> None:
@@ -35,6 +36,7 @@ class WorkspaceConsumers:
         self.workspace_id: ContextVar[str | None] = ContextVar("hosted_workspace", default=None)
         self.stop_workspace: Callable[[str], Awaitable[None]] = _no_stop
         self.poll_seconds = 2.0
+        self._retained_cursor = ""
         self.base_environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "LANG": "C.UTF-8",
@@ -70,7 +72,11 @@ class WorkspaceConsumers:
             await self.authority.workspace(workspace_id)
             yield
             return
-        await self.authority.workspace(workspace_id)
+        try:
+            await self.authority.workspace(workspace_id)
+        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+            await self._stop(workspace_id)
+            raise
         token = self.workspace_id.set(workspace_id)
         parent = asyncio.current_task()
         assert parent is not None
@@ -110,7 +116,17 @@ class WorkspaceConsumers:
             except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                 denied = True
             if denied or cancelled:
+                await self._stop(workspace_id)
+
+    async def _stop(self, workspace_id: str) -> None:
+        token = self.workspace_id.set(None)
+        try:
+            try:
                 await self.stop_workspace(workspace_id)
+            finally:
+                await self.authority.retract(workspace_id)
+        finally:
+            self.workspace_id.reset(token)
 
     async def environment(self) -> dict[str, str]:
         workspace_id = self.workspace_id.get()
@@ -121,6 +137,18 @@ class WorkspaceConsumers:
 
     async def admission_check(self) -> bool:
         try:
+            # Reuse the normal worker poll, including after restart. Retained
+            # paused/blocked stacks outlive the scope's active-task watcher.
+            retained = await self.authority.retained_workspaces(self._retained_cursor)
+            if not retained and self._retained_cursor:
+                self._retained_cursor = ""
+                retained = await self.authority.retained_workspaces()
+            for workspace_id in retained:
+                try:
+                    await self.authority.workspace(workspace_id)
+                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                    await self._stop(workspace_id)
+                self._retained_cursor = workspace_id
             await self.authority.admission()
             return True
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
@@ -140,9 +168,12 @@ class WorkspaceConsumers:
 
 
 class _Output:
+    _MAX_PENDING = 65536
+
     def __init__(self, callback: StreamCallback | None, secrets: tuple[str, ...]):
         self.callback, self.secrets, self.pending = callback, secrets, ""
-        self.tail = max(map(len, secrets), default=1)
+        self.discarding = False
+        self.discarding_multiline = False
 
     async def emit(self, text: str) -> None:
         if self.callback is not None and text:
@@ -151,13 +182,34 @@ class _Output:
                 await result
 
     async def write(self, text: str) -> None:
-        safe = redact_secrets(self.pending + text, extra_secrets=self.secrets)
-        split = max(0, len(safe) - self.tail)
-        self.pending = safe[split:]
-        await self.emit(safe[:split])
+        # Keep the raw record tail: redacting an incomplete token destroys its
+        # prefix and lets a later chunk's suffix escape recognition. An oversized
+        # unterminated record is suppressed, not emitted in unsafe fragments.
+        for record in text.splitlines(keepends=True):
+            complete = record.endswith(("\n", "\r"))
+            if not self.discarding:
+                if len(self.pending) + len(record) > self._MAX_PENDING:
+                    self.discarding_multiline = "\n" in self.pending or "\r" in self.pending
+                    self.pending = ""
+                    self.discarding = True
+                    await self.emit("<redacted>")
+                else:
+                    self.pending += record
+                    if complete:
+                        split = _stream_redaction_flushable_length(self.pending, self.secrets)
+                        await self.emit(
+                            redact_secrets(self.pending[:split], extra_secrets=self.secrets)
+                        )
+                        self.pending = self.pending[split:]
+            if complete and self.discarding and not self.discarding_multiline:
+                self.discarding = False
+                await self.emit("\n")
 
     async def flush(self) -> None:
-        await self.emit(redact_secrets(self.pending, extra_secrets=self.secrets))
+        split = _stream_redaction_flushable_length(self.pending, self.secrets)
+        await self.emit(redact_secrets(self.pending[:split], extra_secrets=self.secrets))
+        if split < len(self.pending):
+            await self.emit("<redacted>")
         self.pending = ""
 
 

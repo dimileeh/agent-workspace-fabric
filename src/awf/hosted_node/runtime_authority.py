@@ -75,7 +75,7 @@ class WorkspaceAuthority:
 
     async def workspace(self, workspace_id: str) -> AuthorizedMaterials:
         association, agent = await self.association(workspace_id)
-        return await self.materials(association, agent, current=True)
+        return await self.materials(association, agent, current=True, publish_view=True)
 
     async def association(self, workspace_id: str) -> tuple[HostedWorkspace, str]:
         async with self.receiver.factory() as session:
@@ -87,6 +87,42 @@ class WorkspaceAuthority:
         if association.workspace_id != workspace_id:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
         return association, agent
+
+    async def retained_workspaces(self, after: str = "") -> list[str]:
+        async with self.receiver.factory() as session:
+            return list(
+                await session.scalars(
+                    select(Workspace.id)
+                    .where(
+                        Workspace.node_id == self.receiver.identity.owner,
+                        Workspace.compose_project_name.is_not(None),
+                        Workspace.status != "destroyed",
+                        Workspace.task_policy[POLICY_KEY].is_not(None),
+                        Workspace.id > after,
+                    )
+                    .order_by(Workspace.id)
+                    .limit(64)
+                )
+            )
+
+    async def retract(self, workspace_id: str) -> None:
+        await asyncio.to_thread(self.views.remove, workspace_id)
+        # A restarted owner can encounter a retained stack with its previous
+        # boot's readable view. Only that row's exact older binding is removable.
+        await self.receiver.identity_status()
+        async with self.receiver.factory() as session:
+            row = await session.get(Workspace, workspace_id)
+            if row is None or row.node_id != self.receiver.identity.owner:
+                return
+            association = HostedWorkspace.model_validate((row.task_policy or {}).get(POLICY_KEY))
+        previous = association.credentials.agent.identity
+        if (
+            association.workspace_id == workspace_id
+            and previous.owner == self.receiver.identity.owner
+            and previous.boot_epoch < self.receiver.identity.boot_epoch
+        ):
+            views = RuntimeViews(self.receiver.store, identity=previous)
+            await asyncio.to_thread(views.remove, workspace_id)
 
     async def profile_mounts(
         self,
@@ -178,7 +214,12 @@ class WorkspaceAuthority:
         return binding
 
     async def materials(
-        self, association: HostedWorkspace, agent: str, *, current: bool
+        self,
+        association: HostedWorkspace,
+        agent: str,
+        *,
+        current: bool,
+        publish_view: bool = False,
     ) -> AuthorizedMaterials:
         await self.admission()
         pair = AGENT_TARGETS.get(agent)
@@ -236,11 +277,18 @@ class WorkspaceAuthority:
         expires_at = min(value.expires_at for value in bindings.values())
         if expires_at <= datetime.now(UTC):
             raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
-        publication = asyncio.create_task(
-            asyncio.to_thread(self.views.publish, association.workspace_id, files)
+        # Admission precedes durable create/replay checks and may still fail.
+        # Only a consumer loaded from the persisted association owns this view.
+        publication = (
+            asyncio.create_task(
+                asyncio.to_thread(self.views.publish, association.workspace_id, files)
+            )
+            if publish_view
+            else None
         )
         try:
-            await asyncio.shield(publication)
+            if publication is not None:
+                await asyncio.shield(publication)
             for binding in bindings.values():
                 if (await self.receiver.status(binding)).status != "current":
                     raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
@@ -248,6 +296,9 @@ class WorkspaceAuthority:
             if expires_at <= datetime.now(UTC):
                 raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
         except BaseException:
+            if publication is None:
+                raise
+
             # A cancelled to_thread await does not stop its writer. Finish that
             # exact publication before retracting its boot-scoped readable view.
             async def retract() -> None:

@@ -47,6 +47,16 @@ FORBIDDEN_MCP_INPUTS = {
 CREATE_FULL_PARITY_FIELDS = frozenset(
     {"cpu", "priority", "human_boost", "memory", "out_of_scope_changes", "provider_recovery"}
 )
+
+
+def test_hosted_create_metadata_does_not_expose_controller_material_or_activation() -> None:
+    capability = CAPABILITIES_BY_NAME["create_workspace"]
+    assert "hosted" in capability.rest_body_fields
+    assert "hosted" not in capability.mcp_request_fields
+    assert "--hosted" not in capability.cli_options
+    assert not {"runtime_enabled", "controller_token", "material"} & capability.rest_body_fields
+
+
 STATUS_FILTER_PARITY_CAPABILITIES = (
     "workspace_overview",
     "merge_queue",

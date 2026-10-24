@@ -111,7 +111,7 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_flat
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key="route-flat-key",
         settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
+        session=SimpleNamespace(info={}),  # type: ignore[arg-type]
     )
 
     assert response.workspace_id == "ws_locked_flat"
@@ -166,7 +166,7 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_rich
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key="route-rich-key",
         settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
+        session=SimpleNamespace(info={}),  # type: ignore[arg-type]
     )
 
     assert response.workspace_id == "ws_locked_rich"
@@ -299,7 +299,7 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
-    session = SimpleNamespace(rollback=AsyncMock())
+    session = SimpleNamespace(info={}, rollback=AsyncMock())
 
     response = await workspace_routes.create_workspace(
         payload,

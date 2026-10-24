@@ -78,8 +78,6 @@ class HostedGuard:
                 raise MaterialDeniedError("IDENTITY_MISMATCH", 403)
             await receiver.identity_status()
             runtime = getattr(application.state, "hosted_runtime", None)
-            if controller:
-                scope.setdefault("state", {})["hosted_controller_verified"] = True
             safe = False
             if not dedicated and scope["type"] == "http" and scope["method"] not in {"GET", "HEAD"}:
                 safe = (
@@ -103,6 +101,7 @@ class HostedGuard:
                 if create:
                     assert runtime is not None
                     await runtime.admission()
+                    scope.setdefault("state", {})["hosted_create_verified"] = True
                     safe = True
                 if not safe:
                     raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
