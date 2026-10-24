@@ -6,12 +6,32 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from awf.db.models import Base
+from awf.db.models import Base, Task
 from awf.db.session import make_session_factory
-from awf.hosted_node.host_database import validate_database
+from awf.hosted_node.host_database import no_work_history, validate_database
 from awf.hosted_node.lifecycle_barrier import install_barrier
+from awf.hosted_node.lifecycle_store import database_quiescent
 from tests.postgres import postgres_test_database_url
 from tests.unit.hosted_node.test_host_config import host_config
+
+
+async def test_bootstrap_history_checks_beyond_empty_workspaces(engine):
+    factory = make_session_factory(engine)
+    async with factory.begin() as session:
+        assert await no_work_history(session)
+        session.add(
+            Task(
+                id=str(uuid4()),
+                repo_url="https://example.test/repo.git",
+                base_branch="main",
+                title="Unstarted prior task",
+                prompt="Synthetic task history without a workspace or attempt",
+            )
+        )
+    async with factory() as session:
+        assert await session.scalar(text("SELECT count(*) FROM workspaces")) == 0
+        assert await database_quiescent(session)
+        assert not await no_work_history(session)
 
 
 @pytest.fixture

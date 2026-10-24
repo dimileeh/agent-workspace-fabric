@@ -10,6 +10,7 @@ from awf.api.app import create_app
 from awf.db.session import make_session_factory
 from awf.hosted_node.identity import MaterialDeniedError, boot
 from awf.hosted_node.lifecycle_models import NodeLifecycleRow
+from awf.hosted_node.lifecycle_schemas import RecoveryAcknowledgement
 from tests.integration.test_node_idle_gate import (
     PREFIX,
     acknowledge,
@@ -174,6 +175,58 @@ async def test_concurrent_recovery_ack_is_idempotent_or_conflicts(node, conflict
         release.set()
     assert (await asyncio.wait_for(pending, 2)).status_code == (409 if conflict else 200)
     assert (await acknowledge(client)).status_code == (409 if conflict else 200)
+
+
+@pytest.mark.parametrize("conflicting_receipt", [False, True])
+async def test_late_recovery_completion_cannot_reopen_newer_drain(node, conflicting_receipt):
+    _, receiver, _ = node
+    service = evidence(receiver)
+    verify = service.verify_recovery
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def pause_first(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await verify(*args)
+
+    service.verify_recovery = pause_first
+    request = RecoveryAcknowledgement(idempotency_key="recovery", receipt_ref="first-receipt")
+    winner = request.model_copy(
+        update={"receipt_ref": "other-receipt" if conflicting_receipt else request.receipt_ref}
+    )
+    pending = asyncio.create_task(service.acknowledge(request))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert (await service.acknowledge(winner)).state == "ready"
+        drained = await service.drain(11)
+        assert drained.state == "drained" and drained.admission_closed
+    finally:
+        release.set()
+        result = (await asyncio.wait_for(asyncio.gather(pending, return_exceptions=True), 2))[0]
+
+    if conflicting_receipt:
+        assert isinstance(result, MaterialDeniedError)
+        assert str(result) == "RECOVERY_ACKNOWLEDGEMENT_CONFLICT"
+    else:
+        assert not isinstance(result, BaseException)
+        assert result.state == "drained" and result.admission_closed
+    replay = await service.acknowledge(winner)
+    assert replay.state == "drained" and replay.drain_generation == 11
+    assert calls == 2  # A persisted replay must not request new external evidence.
+    async with receiver.factory() as session:
+        row = await session.get(NodeLifecycleRow, 1)
+        assert (row.phase, row.drain_generation, row.recovery_key, row.receipt_ref) == (
+            "drained",
+            11,
+            winner.idempotency_key,
+            winner.receipt_ref,
+        )
+    with pytest.raises(DBAPIError, match="NODE_ADMISSION_CLOSED"):
+        await create(receiver.factory)
 
 
 async def test_response_loss_and_restart_keep_drain_closed(node):

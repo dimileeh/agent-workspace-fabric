@@ -109,26 +109,44 @@ async def test_production_docker_client_is_fixed_uds_no_proxy():
         assert client._transport._pool._uds == "/run/docker.sock"
 
 
-@pytest.mark.parametrize("cause", ["device", "mode", "owner"])
+@pytest.mark.parametrize(
+    "cause", ["device", "inode", "mode", "owner", "links", "file_device", "type"]
+)
 def test_host_lease_rejects_changed_mount_or_untrusted_file(tmp_path, monkeypatch, cause):
+    # Exercise the writable temporary-parent condition on Linux runners too.
+    tmp_path.chmod(0o777)
     path = tmp_path / ".awf-host.lock"
     path.touch(mode=0o444)
     config = host_config().model_copy(update={"state_root": tmp_path})
     info = tmp_path.stat()
-    baseline = LinuxSnapshot("boot", info.st_dev + (cause == "device"), info.st_ino, 1, True)
+    baseline = LinuxSnapshot(
+        "boot", info.st_dev + (cause == "device"), info.st_ino + (cause == "inode"), 1, True
+    )
     real = os.fstat
+    lease_fds = []
 
     def root_owned(fd):
         value = real(fd)
         file = stat.S_ISREG(value.st_mode)
+        if file:
+            lease_fds.append(fd)
+        mode = value.st_mode & ~0o022 if stat.S_ISDIR(value.st_mode) else value.st_mode
+        if file and cause == "type":
+            mode = stat.S_IFIFO | 0o444
         return SimpleNamespace(
             st_uid=123 if file and cause == "owner" else 0,
-            st_mode=value.st_mode | (0o002 if file and cause == "mode" else 0),
-            st_dev=value.st_dev,
+            st_mode=mode | (0o002 if file and cause == "mode" else 0),
+            st_dev=value.st_dev + (file and cause == "file_device"),
             st_ino=value.st_ino,
-            st_nlink=value.st_nlink,
+            st_nlink=2 if file and cause == "links" else value.st_nlink,
         )
 
     monkeypatch.setattr(host_startup.os, "fstat", root_owned)
-    with pytest.raises(ValueError), host_startup.host_lease(config, baseline):
+    changed_mount = cause in ("device", "inode")
+    reason = "HOST_LEASE_DEVICE_MISMATCH" if changed_mount else "HOST_LEASE_UNTRUSTED"
+    with pytest.raises(ValueError, match=f"^{reason}$"), host_startup.host_lease(config, baseline):
         pytest.fail("unsafe lease")
+    assert len(lease_fds) == (0 if changed_mount else 1)
+    for fd in lease_fds:
+        with pytest.raises(OSError):
+            real(fd)
