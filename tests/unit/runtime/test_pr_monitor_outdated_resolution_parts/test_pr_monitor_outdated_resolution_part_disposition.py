@@ -412,8 +412,11 @@ async def test_outdated_reply_after_unseen_feedback_leaves_the_thread_open(
         reply_at=datetime(2026, 10, 2, tzinfo=UTC),
     )
 
-    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+    async def _audit(
+        *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
         del repo, pr_number, retry
+        assert thread_id == tid
         live = AuditedReviewThread(
             thread_id=tid,
             is_resolved=False,
@@ -468,11 +471,14 @@ async def test_outdated_reply_reread_fails_fast_under_the_merge_lock(
     retries: list[bool] = []
     clean = gh.fetch_review_thread_audit
 
-    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+    async def _audit(
+        *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
+        assert thread_id == tid
         retries.append(retry)
         if len(retries) == 1:
             raise _TRANSIENT
-        return await clean(repo=repo, pr_number=pr_number, retry=retry)
+        return await clean(repo=repo, pr_number=pr_number, retry=retry, thread_id=thread_id)
 
     monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
     state = MonitorState()
@@ -522,10 +528,12 @@ async def test_outdated_reply_reread_fails_fast_under_the_merge_lock(
     assert (confirmed.reply_comment_id, confirmed.reread_pending) == ("reply-1", False)
 
 
+@pytest.mark.parametrize("thread_present", [True, False], ids=["missing-reply", "missing-thread"])
 async def test_a_stale_re_read_under_the_merge_lock_requeues_until_it_shows_the_reply(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    thread_present: bool,
 ) -> None:
     # PRRT_kwDOSJAM6s6vexk8: a re-read too stale to show the reply just posted can
     # miss feedback that preceded it too, so it confirms nothing. Under the merge
@@ -536,10 +544,13 @@ async def test_a_stale_re_read_under_the_merge_lock_requeues_until_it_shows_the_
     tid = "PRRT_test_outdated_stale_reread"
     reads: list[bool] = []
 
-    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
-        del repo, pr_number, retry
-        shows_reply = bool(reads)
-        reads.append(shows_reply)
+    async def _audit(
+        *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
+        del repo, pr_number
+        assert thread_id == tid
+        shows_reply = len(reads) >= 2
+        reads.append(retry)
         live = AuditedReviewThread(
             thread_id=tid,
             is_resolved=False,
@@ -548,7 +559,11 @@ async def test_a_stale_re_read_under_the_merge_lock_requeues_until_it_shows_the_
             viewer_comment_bodies=(gh.events[0][2],) if shows_reply else (),
             viewer_comment_ids=("reply-1",) if shows_reply else (),
         )
-        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot", threads=(live,))
+        return ReviewThreadAudit(
+            supported=True,
+            viewer_login="awf-test-bot",
+            threads=(live,) if thread_present or shows_reply else (),
+        )
 
     monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
     state = MonitorState()
@@ -556,20 +571,33 @@ async def test_a_stale_re_read_under_the_merge_lock_requeues_until_it_shows_the_
     seed_resolvable_disposition(state, tid, "fix_committed", commits=("e" * 40,))
     status = _status_with_outdated(_outdated_thread(tid))
 
-    await _call_resolve(
-        runner, workspace_id=workspace_id, status=status, state=state, wait_on_transient=False
-    )
-
-    assert [event[0] for event in gh.events] == ["reply"]
     requeued = _outdated_resolve_requeued_key(tid)
-    assert state.threads_addressed_ids[tid] == "fix_committed"
-    assert state.threads_addressed_ids[requeued] == "requeued"
-    unconfirmed = read_item_disposition(state, tid)
-    assert unconfirmed is not None
-    assert (unconfirmed.reply_comment_id, unconfirmed.reread_pending) == ("reply-1", True)
+    for _ in range(2):
+        await _call_resolve(
+            runner, workspace_id=workspace_id, status=status, state=state, wait_on_transient=False
+        )
+
+        assert [event[0] for event in gh.events] == ["reply"]
+        assert runner._deps.sleep.calls == []
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        restored = _load_state(None, ws)
+        for kept in (state, restored):
+            assert kept.threads_addressed_ids[tid] == "fix_committed"
+            assert kept.threads_addressed_ids[requeued] == "requeued"
+            unconfirmed = read_item_disposition(kept, tid)
+            assert unconfirmed is not None
+            assert (
+                unconfirmed.reply_comment_id,
+                unconfirmed.reread_pending,
+                unconfirmed.reply_conversation_digest,
+            ) == ("reply-1", True, None)
+        state = restored
     events = await _events(factory, workspace_id)
     assert [(e.payload["outcome"], e.payload["reason_code"]) for e in events] == [
-        ("requeued", "REVIEW_THREAD_AUDIT_UNAVAILABLE")
+        ("requeued", "REVIEW_THREAD_AUDIT_UNAVAILABLE"),
+        ("requeued", "REVIEW_THREAD_AUDIT_UNAVAILABLE"),
     ]
 
     await _call_resolve(
@@ -577,17 +605,19 @@ async def test_a_stale_re_read_under_the_merge_lock_requeues_until_it_shows_the_
     )
 
     assert [event[0] for event in gh.events] == ["reply", "resolve"]
-    assert reads == [False, True]
+    assert reads == [False, False, False]
     assert requeued not in state.threads_addressed_ids
     confirmed = read_item_disposition(state, tid)
     assert confirmed is not None
     assert (confirmed.reply_comment_id, confirmed.reread_pending) == ("reply-1", False)
 
 
+@pytest.mark.parametrize("missing_thread", [False, True], ids=["transport-error", "missing-thread"])
 async def test_a_requeued_reply_parks_on_own_identity_feedback_its_re_read_finds(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    missing_thread: bool,
 ) -> None:
     # The operator's unmarked comment under AWF's account precedes a reply whose
     # in-lock re-read faulted. The next poll's re-read of that same reply finds it
@@ -598,10 +628,15 @@ async def test_a_requeued_reply_parks_on_own_identity_feedback_its_re_read_finds
     tid = "PRRT_test_outdated_requeued_unread"
     calls: list[bool] = []
 
-    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+    async def _audit(
+        *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
         del repo, pr_number
+        assert thread_id == tid
         calls.append(retry)
         if len(calls) == 1:
+            if missing_thread:
+                return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot")
             raise _TRANSIENT
         live = AuditedReviewThread(
             thread_id=tid,

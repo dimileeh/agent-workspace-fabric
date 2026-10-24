@@ -85,10 +85,11 @@ async def test_reply_raises_when_bitbucket_returns_no_comment_id() -> None:
     assert "no comment id" in str(excinfo.value)
 
 
-async def test_review_thread_audit_is_reported_unsupported() -> None:
+@pytest.mark.parametrize("thread_id", [None, "PRRT_target"])
+async def test_review_thread_audit_is_reported_unsupported(thread_id: str | None) -> None:
     fake = FakeBitbucket()
     client = make_client(fake)
-    audit = await client.fetch_review_thread_audit(repo=repo(), pr_number=42)
+    audit = await client.fetch_review_thread_audit(repo=repo(), pr_number=42, thread_id=thread_id)
     assert audit.supported is False
     assert audit.viewer_login is None
     assert audit.threads == ()

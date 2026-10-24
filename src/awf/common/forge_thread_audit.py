@@ -50,7 +50,7 @@ class AuditedReviewThread:
 
 @dataclass(frozen=True)
 class ReviewThreadAudit:
-    """Every review thread on a PR, enumerated exhaustively, plus AWF's login.
+    """An exhaustive PR audit, or one explicitly selected thread, plus AWF's login.
 
     ``supported=False`` means the forge client cannot attribute resolutions yet;
     the gate then passes and says so in its log instead of guessing.

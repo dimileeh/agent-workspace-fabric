@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -84,7 +85,8 @@ class _MergeMethodClient:
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
         self.resolved_threads: list[str] = []
-        self.thread_replies: list[tuple[str, str]] = []
+        self._audit_client = DefaultMergeMethodGitHubClient(FakeCommandRunner())
+        self.thread_replies = self._audit_client.thread_replies
         self.fetch_pr_status_calls = 0
         self.expected_repo = _TEST_REPO
         self.expected_pr_number = _TEST_PR_NUMBER
@@ -119,8 +121,12 @@ class _MergeMethodClient:
             result = self.status_results.pop(0)
             if isinstance(result, GitHubClientError | BitbucketClientError):
                 raise result
-            return result
-        return self.recheck_status if self.recheck_status is not None else _mergeable_status()
+        else:
+            result = self.recheck_status if self.recheck_status is not None else _mergeable_status()
+        self._audit_client.remember_review_threads(
+            result.unresolved_inline_threads + result.outdated_unresolved_inline_threads
+        )
+        return result
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return configured repository merge methods or raise the configured error."""
@@ -176,16 +182,17 @@ class _MergeMethodClient:
 
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         """Record the disposition reply posted before an outdated-hygiene resolve."""
-        self.thread_replies.append((thread_id, body))
-        return f"reply-{len(self.thread_replies)}"
+        return await self._audit_client.reply_to_thread(thread_id=thread_id, body=body)
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
     ) -> ReviewThreadAudit:
-        """A clean disposition audit (#1018): no AWF-resolved threads to verify."""
+        """Audit the observed threads and replies used by merge-hygiene tests."""
         assert repo == self.expected_repo
         assert pr_number == self.expected_pr_number
-        return ReviewThreadAudit(supported=True, viewer_login="awf-test-bot")
+        return await self._audit_client.fetch_review_thread_audit(
+            repo=repo, pr_number=pr_number, retry=retry, thread_id=thread_id
+        )
 
 
 async def _execute_merge(

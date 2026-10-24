@@ -66,8 +66,9 @@ class _AuditMergeClient(_MergeMethodClient):
         self.audit = audit
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
     ) -> ReviewThreadAudit:
+        assert thread_id is None
         del repo, pr_number, retry
         return self.audit
 
@@ -118,8 +119,9 @@ async def test_feature_merge_waits_on_transient_audit_fault(
 ) -> None:
     class _TransientAuditMergeClient(_AuditMergeClient):
         async def fetch_review_thread_audit(
-            self, *, repo: RepoRef, pr_number: int, retry: bool = True
+            self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
         ) -> ReviewThreadAudit:
+            assert thread_id is None
             del repo, pr_number, retry
             raise GitHubClientError(operation="gh api graphql", returncode=1, stderr="HTTP 502")
 
@@ -146,8 +148,9 @@ class _SequencedAuditMergeClient(_AuditMergeClient):
         self.audit_retries: list[bool] = []
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
     ) -> ReviewThreadAudit:
+        assert thread_id is None
         del repo, pr_number
         self.status_refreshes_at_audit.append(self.fetch_pr_status_calls)
         self.audit_retries.append(retry)

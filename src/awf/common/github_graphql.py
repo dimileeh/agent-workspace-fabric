@@ -316,6 +316,26 @@ query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int
 """.strip()
 
 
+_GQL_REVIEW_THREAD_AUDIT_ONE = """
+query ReviewThreadDispositionAuditOne($threadId: ID!) {
+  viewer { login }
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      id
+      isResolved
+      isOutdated
+      resolvedBy { login }
+      pullRequest { number repository { nameWithOwner } }
+      comments(first: 100) {
+        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
 _GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE = """
 query ReviewThreadDispositionAuditComments($threadId: ID!, $cursor: String!) {
   node(id: $threadId) {

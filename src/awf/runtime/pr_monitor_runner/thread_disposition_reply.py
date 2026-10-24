@@ -64,7 +64,7 @@ _FEEDBACK_AFTER_DECISION = "REVIEW_THREAD_FEEDBACK_AFTER_DECISION"
 
 
 class _StaleRereadError(ForgeClientError):
-    """The post-reply re-read predates the reply, so it confirms nothing.
+    """The post-reply re-read omits the thread or reply, so it confirms nothing.
 
     Raised where a re-read fault is, so it is handled as one: the reply stays
     ``reread_pending`` and the thread open, requeued or parked (PRRT_kwDOSJAM6s6vexk8).
@@ -317,17 +317,20 @@ async def _reread_thread_after_reply(
     reply, PRRT_kwDOSJAM6s6vc8NC, PRRT_kwDOSJAM6s6veO2F).
     Runs once a fresh reply has landed, so anything that arrived before the reply
     shows up here; anything later follows the reply, which the gate already
-    refuses as its answer. An unsupported audit or a thread missing from it is no
-    evidence of new feedback. A re-read too stale to show the reply can miss
-    feedback that preceded it too, so unless it already shows ``moved`` it raises
-    :class:`_StaleRereadError` (PRRT_kwDOSJAM6s6vexk8).
+    refuses as its answer. An unsupported audit is no evidence of new feedback.
+    A supported audit missing the thread raises :class:`_StaleRereadError`:
+    it cannot confirm the reply. A re-read too stale to show the reply can miss
+    feedback that preceded it too, so unless it already shows ``moved`` it also
+    raises :class:`_StaleRereadError` (PRRT_kwDOSJAM6s6vexk8).
     """
     audit = await self._deps.gh.fetch_review_thread_audit(
-        repo=repo, pr_number=pr_number, retry=retry
+        repo=repo, pr_number=pr_number, retry=retry, thread_id=thread_id
     )
-    live = next((t for t in audit.threads if t.thread_id == thread_id), None)
-    if not audit.supported or live is None:
+    if not audit.supported:
         return None, None
+    live = next((t for t in audit.threads if t.thread_id == thread_id), None)
+    if live is None:
+        raise _StaleRereadError(f"the re-read does not show thread {thread_id} yet")
     moved = _conversation_moved(thread, live, reply_comment_id)
     if moved is None and reply_comment_id not in live.viewer_comment_ids:
         raise _StaleRereadError(f"the re-read does not show reply {reply_comment_id} yet")

@@ -83,6 +83,7 @@ def _serve_live_thread(
     bodies: tuple[str, ...],
     *,
     supported: bool = True,
+    thread_present: bool = True,
     error: GitHubClientError | None = None,
     before_reply: str = "",
     viewer_bodies: tuple[str, ...] | None = None,
@@ -94,9 +95,13 @@ def _serve_live_thread(
     Without ``viewer_bodies`` the thread shows the replies AWF posted in it so far.
     """
     audited: list[int] = []
+    expected_thread_id = thread_id
 
-    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+    async def _audit(
+        *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
         del repo, retry
+        assert thread_id == expected_thread_id
         audited.append(pr_number)
         if error is not None:
             raise error
@@ -120,7 +125,11 @@ def _serve_live_thread(
             conversation_digest_before_reply=before_reply,
             external_comment_bodies=bodies,
         )
-        return ReviewThreadAudit(supported=supported, viewer_login="awf-test-bot", threads=(live,))
+        return ReviewThreadAudit(
+            supported=supported,
+            viewer_login="awf-test-bot",
+            threads=(live,) if thread_present else (),
+        )
 
     monkeypatch.setattr(gh, "fetch_review_thread_audit", _audit)
     return audited
@@ -206,19 +215,26 @@ async def test_fix_cycle_keeps_a_thread_open_when_feedback_moved_before_the_repl
     assert audited == [42, 42]
 
 
-@pytest.mark.parametrize("supported", [True, False], ids=["unchanged", "unsupported-forge"])
+@pytest.mark.parametrize(
+    ("supported", "thread_present"),
+    [(True, True), (False, True), (False, False)],
+    ids=["unchanged", "unsupported-forge", "unsupported-empty-audit"],
+)
 async def test_fix_cycle_resolves_when_the_live_thread_shows_no_new_feedback(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     supported: bool,
+    thread_present: bool,
 ) -> None:
     gh = OrderedForge(FakeCommandRunner())
     tid = "PRRT_test_feedback_unchanged"
     thread = _commented_thread(tid, _ASK)
     # An unsupported audit proves nothing, whatever it lists.
     bodies = (_ASK,) if supported else (_ASK, "unverifiable")
-    audited = _serve_live_thread(gh, monkeypatch, tid, bodies, supported=supported)
+    audited = _serve_live_thread(
+        gh, monkeypatch, tid, bodies, supported=supported, thread_present=thread_present
+    )
 
     _, state, _ = await _run_cycle(
         factory=factory,
@@ -538,13 +554,16 @@ async def test_fix_cycle_parks_when_the_thread_cannot_be_re_read_after_the_reply
 
 
 @pytest.mark.parametrize(
-    "viewer_bodies", [(), ("earlier-reply",)], ids=["no-reply-yet", "ends-on-an-earlier-reply"]
+    ("viewer_bodies", "thread_present"),
+    [((), True), (("earlier-reply",), True), ((), False)],
+    ids=["no-reply-yet", "ends-on-an-earlier-reply", "missing-thread"],
 )
 async def test_fix_cycle_parks_when_the_re_read_is_too_stale_to_show_the_reply(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     viewer_bodies: tuple[str, ...],
+    thread_present: bool,
 ) -> None:
     # PRRT_kwDOSJAM6s6vexk8: a re-read too stale to show the reply just posted can
     # miss feedback that preceded the reply as well, which a later audit then shows
@@ -562,6 +581,7 @@ async def test_fix_cycle_parks_when_the_re_read_is_too_stale_to_show_the_reply(
         before_reply="e" * 64,
         viewer_bodies=tuple(_MARKER.format(cls="false_positive", tid=tid) for _ in viewer_bodies),
         viewer_ids=_own_comment_ids(viewer_bodies),
+        thread_present=thread_present,
     )
 
     workspace_id, state, result = await _run_cycle(
@@ -579,7 +599,8 @@ async def test_fix_cycle_parks_when_the_re_read_is_too_stale_to_show_the_reply(
     assert result.failed is False
     reason = state.threads_addressed_ids["__needs_human_reason__:" + tid]
     assert reason.startswith("REVIEW_THREAD_AUDIT_UNAVAILABLE:")
-    assert "does not show reply reply-1" in reason
+    missing = "reply reply-1" if thread_present else f"thread {tid}"
+    assert f"does not show {missing}" in reason
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
@@ -612,8 +633,11 @@ async def test_a_reply_no_re_read_confirmed_stays_saved_pending(
     async def _capture_workspace(_runner: object, workspace_id: str) -> None:
         workspace_ids.append(workspace_id)
 
-    async def _audit(*, repo: RepoRef, pr_number: int, retry: bool = True) -> ReviewThreadAudit:
+    async def _audit(
+        *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
         del repo, pr_number, retry
+        assert thread_id == tid
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(workspace_ids[0])
         assert ws is not None

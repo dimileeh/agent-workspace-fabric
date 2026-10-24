@@ -117,8 +117,9 @@ class _AuditForge(DefaultMergeMethodGitHubClient):
         self.merges: list[str] = []
 
     async def fetch_review_thread_audit(
-        self, *, repo: RepoRef, pr_number: int, retry: bool = True
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
     ) -> ReviewThreadAudit:
+        assert thread_id is None  # The final gate must audit the whole PR.
         assert repo == _REPO and pr_number == 42
         if self.error is not None:
             raise self.error

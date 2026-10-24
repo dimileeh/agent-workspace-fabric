@@ -162,6 +162,7 @@ async def _run_cycle(
         return verdict
 
     async def _settle(**_kwargs: object) -> PRStatus:
+        gh.remember_review_threads(settle_threads)
         return _status(_START, settle_threads)
 
     async def _push(**_kwargs: object) -> _GitPushResult:
