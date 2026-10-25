@@ -377,6 +377,10 @@ class RuntimeViews:
         key = self._key(workspace_id)
         if publication is not None and publication.path != self.store.root / key / "view":
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+        if publication is None:
+            # Fence absent readers before directory lookup, without nesting root flocks.
+            with self.store._locked_root():
+                self._absence_tokens.pop(key, None)
         with (
             suppress(FileNotFoundError),
             self.store._directory(key, _SLOT, remove_empty=True) as parent,

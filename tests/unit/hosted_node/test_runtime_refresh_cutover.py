@@ -524,7 +524,7 @@ async def test_initial_retry_does_not_adopt_foreign_publication_before_first_wri
         await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5)
 
 
-@pytest.mark.parametrize("change", ["present", "cleared", "removed"])
+@pytest.mark.parametrize("change", ["present", "cleared", "removed", "absent"])
 @pytest.mark.parametrize("same_instance", [False, True])
 async def test_absent_publication_fence_is_checked_inside_filesystem_lock(
     authority, monkeypatch, change, same_instance
@@ -552,17 +552,122 @@ async def test_absent_publication_fence_is_checked_inside_filesystem_lock(
         try:
             assert await asyncio.to_thread(entered.wait, 5)
             other = views if same_instance else RuntimeViews(views.store, identity=views.identity)
-            foreign = other.publish(workspace_id, files)
+            foreign = other.publish(workspace_id, files) if change != "absent" else None
             if change != "present":
                 other.remove(workspace_id, preserve_directory=change == "cleared")
             release.set()
             assert await asyncio.to_thread(attempt.result, 5) is None
             actual = views.publication(workspace_id)
             assert actual == (foreign if change == "present" else None)
-            if change != "present":
+            if foreign is not None and change != "present":
                 assert not foreign.path.exists() or not list(foreign.path.iterdir())
         finally:
             release.set()
+
+
+@pytest.mark.parametrize("boundary", ["capture", "slot-read"])
+@pytest.mark.parametrize("preserve_directory", [False, True])
+async def test_absent_retraction_fences_initial_consumer_but_allows_fresh_scope(
+    cutover, tmp_path, monkeypatch, boundary, preserve_directory
+):
+    _, runtime, original, _, _, _, refresh = cutover
+    workspace_id = original["workspace_id"]
+    key = runtime.views._key(workspace_id)
+    path = runtime.receiver.store.root / key
+    scope = WorkspaceConsumers(runtime, tmp_path)
+    scope.stop_workspace = AsyncMock()
+    active = None
+    entered, release, _, _ = hold_boundary(
+        monkeypatch, runtime, boundary, lambda: asyncio.current_task() is active
+    )
+
+    async def execute():
+        async with scope.scope(workspace_id):
+            assert await runtime.publication(workspace_id) is None
+            assert not path.exists()
+
+    active = asyncio.create_task(execute())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert not path.exists()
+        original_absence = runtime.views._absence_tokens.get(key)
+        assert original_absence is not None
+        await runtime.retract(workspace_id, preserve_directory=preserve_directory)
+        await refresh()
+        release.set()
+        await asyncio.wait_for(active, 5)
+        assert not path.exists()
+        later_absence = runtime.views.absence_token(workspace_id)
+        assert later_absence is not None and later_absence is not original_absence
+        async with scope.scope(workspace_id):
+            publication = await runtime.publication(workspace_id)
+            assert publication is not None
+            assert publication.owner is owned_publication(runtime.views, workspace_id)
+            assert (publication.path / "openai.api-key").read_bytes() == b"synthetic-agent-2"
+        scope.stop_workspace.assert_not_awaited()
+    finally:
+        release.set()
+        if not active.done():
+            active.cancel()
+        await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5)
+
+
+@pytest.mark.parametrize("preserve_directory", [False, True])
+@pytest.mark.parametrize("same_instance", [False, True])
+async def test_absent_cleanup_only_invalidates_target_workspace_and_boot(
+    authority, preserve_directory, same_instance
+):
+    runtime, _, _ = authority
+    views = runtime.views
+    workspace_id = "ws_absent_cleanup"
+    peer = views if same_instance else RuntimeViews(views.store, identity=views.identity)
+    other_boot = RuntimeViews(
+        views.store,
+        identity=views.identity.model_copy(update={"boot_epoch": views.identity.boot_epoch + 1}),
+    )
+    original = views.absence_token(workspace_id)
+    sibling = views.absence_token("ws_absent_sibling")
+    foreign = other_boot.absence_token(workspace_id)
+    assert original is not None and sibling is not None and foreign is not None
+    peer.remove(workspace_id, preserve_directory=preserve_directory)
+    assert views._absence_tokens.get(views._key(workspace_id)) is None
+    assert views.absence_token("ws_absent_sibling") is sibling
+    assert other_boot.absence_token(workspace_id) is foreign
+    files = {"openai.api-key": b"synthetic-key", "github.api-key": b"synthetic-key"}
+    assert views.publish(workspace_id, files, expected_absence=original) is None
+    fresh = views.absence_token(workspace_id)
+    assert fresh is not None and fresh is not original
+    assert views.publish(workspace_id, files, expected_absence=fresh) is not None
+
+
+@pytest.mark.parametrize("cleanup", ["token-delete", "token-preserve", "owner"])
+async def test_conditional_cleanup_does_not_invalidate_later_absence_or_foreign_view(
+    authority, cleanup
+):
+    runtime, _, _ = authority
+    views = runtime.views
+    workspace_id = "ws_conditional_absence"
+    files = {"openai.api-key": b"synthetic-key", "github.api-key": b"synthetic-key"}
+    old = views.publish(workspace_id, files)
+    views.remove(workspace_id)
+    absence = views.absence_token(workspace_id)
+    assert absence is not None
+
+    def remove_old():
+        if cleanup == "owner":
+            views.remove_owned(workspace_id, old)
+        else:
+            views.remove(
+                workspace_id, publication=old, preserve_directory=cleanup == "token-preserve"
+            )
+
+    remove_old()
+    assert views.absence_token(workspace_id) is absence
+    current = views.publish(workspace_id, files, expected_absence=absence)
+    assert current is not None and current.owner is not old.owner
+    remove_old()
+    assert views.publication(workspace_id) == current
+    assert (current.path / "openai.api-key").read_bytes() == files["openai.api-key"]
 
 
 @pytest.mark.parametrize("boundary", ["capture", "slot-read"])
