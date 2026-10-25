@@ -38,15 +38,26 @@ async def test_interrupted_install_and_delayed_replay(hosted, monkeypatch):
     assert not list(receiver.store.root.glob("*/*.material"))
 
 
-async def test_missing_file_and_expiry_cleanup(hosted):
+async def test_missing_file_and_expiry_cleanup(hosted, monkeypatch):
+    from awf.hosted_node import receiver as receiver_module
+
     client, receiver, _ = hosted
     binding = await prepare(hosted)
-    binding["expires_at"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+    instant = datetime.now(UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, _tz=None):
+            return instant
+
+    monkeypatch.setattr(receiver_module, "datetime", Clock)
+    binding["expires_at"] = (instant + timedelta(seconds=1)).isoformat()
     response = await client.post(
         "/v1/hosted-node/materials/install", json={**binding, "material": "YQ=="}
     )
     assert response.json()["status"] == "current"
-    await asyncio.sleep(1.05)
+    assert list(receiver.store.root.glob("*/*.material"))
+    instant += timedelta(seconds=1.05)
     response = await client.post("/v1/hosted-node/materials/status", json=binding)
     assert response.json()["status"] == "expired"
     assert not list(receiver.store.root.glob("*/*.material"))
