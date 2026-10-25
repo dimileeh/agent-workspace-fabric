@@ -4521,6 +4521,76 @@
         "title": "Preparation",
         "type": "object"
       },
+      "PreparationRenewal": {
+        "additionalProperties": false,
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/Binding"
+          },
+          "expected_preparation_expires_at": {
+            "format": "date-time",
+            "title": "Expected Preparation Expires At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "current",
+          "expected_preparation_expires_at",
+          "expires_at"
+        ],
+        "title": "PreparationRenewal",
+        "type": "object"
+      },
+      "PreparationRenewalStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "preparation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Preparation Id",
+            "type": "string"
+          },
+          "receipt_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Receipt Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "renewed",
+            "default": "renewed",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "preparation_id",
+          "expires_at"
+        ],
+        "title": "PreparationRenewalStatus",
+        "type": "object"
+      },
       "PricingMetadata": {
         "additionalProperties": false,
         "description": "Explicit pricing metadata for a model-provider combination.\n\nA profile may optionally declare pricing so that cost estimates can be\ncomputed when both token usage data and trusted pricing metadata exist.\nWhen pricing is absent, stale, or unknown, the API and console clearly\nexplain that pricing is unavailable.",
@@ -16678,6 +16748,150 @@
           }
         ],
         "summary": "Prepare",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/preparations/renew": {
+      "post": {
+        "operationId": "renew_preparation_v1_hosted_node_preparations_renew_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreparationRenewal"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparationRenewalStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Renew Preparation",
         "tags": [
           "hosted-node"
         ]

@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
 from awf.hosted_node.identity import MaterialDeniedError
 from awf.hosted_node.material_store import MaterialStore
@@ -36,6 +37,16 @@ class PublicationOwnership:
     workspace_id: str
     publication: PublishedView | None = None
     closing: bool = False
+
+
+@dataclass(eq=False)
+class AbsentPublication:
+    key: str
+
+
+_absence_tokens: WeakKeyDictionary[MaterialStore, WeakValueDictionary[str, AbsentPublication]] = (
+    WeakKeyDictionary()
+)
 
 
 _publication_ownership: ContextVar[PublicationOwnership | None] = ContextVar(
@@ -69,6 +80,7 @@ class RuntimeViews:
         self._owners: dict[str, PublicationOwnership] = {}
         self._writers: set[asyncio.Task[PublishedView | None]] = set()
         self._closed = False
+        self._absence_tokens = _absence_tokens.setdefault(store, WeakValueDictionary())
 
     @property
     def closed(self) -> bool:
@@ -188,8 +200,25 @@ class RuntimeViews:
         finally:
             os.close(fd)
 
-    def publish(self, workspace_id: str, files: dict[str, bytes]) -> PublishedView | None:
-        return self._publish(workspace_id, files)
+    def absence_token(self, workspace_id: str) -> AbsentPublication | None:
+        key = self._key(workspace_id)
+        with self.store._locked_root() as root:
+            if self._closed or workspace_id in self._owners or key in os.listdir(root):  # noqa: PTH208 - locked root fd
+                return None
+            token = self._absence_tokens.get(key)
+            if token is None:
+                token = AbsentPublication(key)
+                self._absence_tokens[key] = token
+            return token
+
+    def publish(
+        self,
+        workspace_id: str,
+        files: dict[str, bytes],
+        *,
+        expected_absence: AbsentPublication | None = None,
+    ) -> PublishedView | None:
+        return self._publish(workspace_id, files, expected_absence=expected_absence)
 
     def publication(self, workspace_id: str) -> PublishedView | None:
         key = self._key(workspace_id)
@@ -217,6 +246,7 @@ class RuntimeViews:
         files: dict[str, bytes],
         *,
         publication: PublishedView | None = None,
+        expected_absence: AbsentPublication | None = None,
     ) -> PublishedView | None:
         if not (set(files) <= _FILES and len(files) == 2 and "github.api-key" in files):
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
@@ -232,6 +262,12 @@ class RuntimeViews:
             if self._closed:
                 # Shutdown fences publication, not still-valid authority. A
                 # queued final check may finish without recreating any view.
+                return None
+            if expected_absence is not None and (
+                self._absence_tokens.get(key) is not expected_absence
+                or workspace_id in self._owners
+                or os.listdir(parent)  # noqa: PTH208 - locked directory fd
+            ):
                 return None
             ownership = owned_publication(self, workspace_id)
             if ownership is not None and ownership.closing:
@@ -279,6 +315,9 @@ class RuntimeViews:
                         retained_directory=not new,
                         owner=ownership,
                     )
+                    # Only this workspace's in-flight absence readers are fenced;
+                    # a later clear cannot make their old token valid again.
+                    self._absence_tokens.pop(key, None)
                     ownership.publication = result
                     self._owners[workspace_id] = ownership
                     self._publication(parent, token)
@@ -338,12 +377,17 @@ class RuntimeViews:
         key = self._key(workspace_id)
         if publication is not None and publication.path != self.store.root / key / "view":
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+        if publication is None:
+            # Fence absent readers before directory lookup, without nesting root flocks.
+            with self.store._locked_root():
+                self._absence_tokens.pop(key, None)
         with (
             suppress(FileNotFoundError),
             self.store._directory(key, _SLOT, remove_empty=True) as parent,
         ):
             if publication is not None and self._publication(parent) != publication.token:
                 return
+            self._absence_tokens.pop(key, None)
             self._remove_view(parent, preserve_directory=preserve_directory)
             self._owners.pop(workspace_id, None)
 
@@ -360,6 +404,7 @@ class RuntimeViews:
                 or self._publication(parent) != current.token
             ):
                 return
+            self._absence_tokens.pop(key, None)
             self._remove_view(parent, preserve_directory=True)
             self._owners.pop(workspace_id, None)
 

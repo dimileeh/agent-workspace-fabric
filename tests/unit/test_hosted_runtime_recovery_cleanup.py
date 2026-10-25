@@ -419,8 +419,8 @@ async def test_older_cleanup_preserves_newer_publication_then_real_revocation_re
                 await asyncio.wait_for(old_task, 5)
         else:
             release.set()
-            with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
-                await asyncio.wait_for(old_task, 5)
+            followed = await asyncio.wait_for(old_task, 5)
+            assert followed.environment["CODEX_API_KEY"] == key.decode()
         association, agent = await runtime.association("ws_cloud_stable")
         current = await runtime.materials(association, agent, current=True)
         assert current.environment["CODEX_API_KEY"] == key.decode()

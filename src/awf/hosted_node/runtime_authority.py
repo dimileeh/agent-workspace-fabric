@@ -20,7 +20,7 @@ from awf.hosted_node.models import Grant, Receipt
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.resolver import ProtectedResolver
 from awf.hosted_node.runtime_schemas import POLICY_KEY, HostedWorkspace
-from awf.hosted_node.runtime_views import PublishedView, RuntimeViews
+from awf.hosted_node.runtime_views import PublishedView, RuntimeViews, owned_publication
 from awf.hosted_node.schemas import Binding
 from awf.node.compose_manager import AuthMount
 from awf.node.secret_mounts import LocalSecretLeaseResolution
@@ -51,6 +51,13 @@ def _stored_association(value: object) -> HostedWorkspace:
 class AuthorizedMaterials:
     environment: dict[str, str] = field(repr=False)
     expires_at: datetime
+
+
+class _SnapshotUnavailableError(MaterialDeniedError):
+    """An exact material read failed; only proven grant advancement may restart it."""
+
+    def __init__(self) -> None:
+        super().__init__("PROTECTED_MATERIAL_UNAVAILABLE", 503)
 
 
 class WorkspaceAuthority:
@@ -198,8 +205,8 @@ class WorkspaceAuthority:
         association, _ = await self.association(workspace_id)
         await self.workspace(workspace_id)
         bindings = {
-            "agent": await self._current(association.credentials.agent),
-            "github": await self._current(association.credentials.github),
+            "agent": association.credentials.agent,
+            "github": association.credentials.github,
         }
         if set(profile.runtime.environment) & set(AGENT_AUTH_ENV_VARS):
             raise MaterialDeniedError("HOSTED_PROFILE_AUTH_OVERRIDE", 422)
@@ -213,27 +220,8 @@ class WorkspaceAuthority:
                 or secret.target != binding.target
             ):
                 raise MaterialDeniedError("PROTECTED_DECLARATION_MISMATCH", 422)
-        protected = WorkspaceProfile.model_validate(
-            {
-                "name": "protected-runtime",
-                "secrets": [
-                    {
-                        "name": name,
-                        "provider": "protected",
-                        "kind": "mount",
-                        "mode": "ro",
-                        "target": value.target,
-                    }
-                    for name, value in bindings.items()
-                ],
-            }
-        )
-        await ProtectedResolver.resolve_current(
-            self.receiver,
-            bindings,
-            protected,
-            workspace_id,
-        )
+        # Targets are immutable in the association. Resolve actual current
+        # material through the same bounded snapshot reader as every consumer.
         material = await self.workspace(workspace_id)
         path = self.receiver.store.root / self.views._key(workspace_id) / "view"
         return LocalSecretLeaseResolution(
@@ -279,6 +267,82 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
         return binding
 
+    async def _snapshot_status(self, bindings: dict[str, Binding]) -> datetime:
+        for binding in bindings.values():
+            if (await self.receiver.status(binding)).status != "current":
+                raise _SnapshotUnavailableError()
+        await self.admission()
+        expiry = min(binding.expires_at for binding in bindings.values())
+        if expiry <= datetime.now(UTC):
+            raise _SnapshotUnavailableError()
+        return expiry
+
+    async def _snapshot_successor(
+        self, anchors: dict[str, Binding], previous: dict[str, Binding]
+    ) -> dict[str, Binding] | None:
+        # Missing/expired/revoked material is not evidence of a benign cutover.
+        for binding in previous.values():
+            status = await self.receiver.status(binding)
+            if status.status != "current" and (
+                status.status != "not_accepted" or status.reason != "SUPERSEDED"
+            ):
+                return None
+        successor = {name: await self._current(anchor) for name, anchor in anchors.items()}
+        advanced = False
+        for name, binding in successor.items():
+            prior = previous[name]
+            if binding != prior:
+                if binding.revision <= prior.revision or binding.fence <= prior.fence:
+                    return None
+                advanced = True
+        if not advanced:
+            return None
+        return successor
+
+    async def _read_snapshot(
+        self, bindings: dict[str, Binding], workspace_id: str, agent_environment: str
+    ) -> tuple[dict[str, str], dict[str, bytes]]:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "protected-runtime",
+                "secrets": [
+                    {
+                        "name": name,
+                        "provider": "protected",
+                        "kind": "mount",
+                        "mode": "ro",
+                        "target": value.target,
+                    }
+                    for name, value in bindings.items()
+                ],
+            }
+        )
+        try:
+            resolved = await ProtectedResolver.resolve_current(
+                self.receiver, bindings, profile, workspace_id
+            )
+        except MaterialDeniedError as error:
+            if error.reason == "PROTECTED_MATERIAL_UNAVAILABLE":
+                raise _SnapshotUnavailableError() from error
+            raise
+        values: dict[str, str] = {}
+        files: dict[str, bytes] = {}
+        for name, mount in zip(bindings, resolved.mounts, strict=True):
+            path = Path(mount.source)
+            try:
+                raw = await asyncio.to_thread(self.receiver.store.read, path.parent.name, path.stem)
+            except FileNotFoundError as error:
+                raise _SnapshotUnavailableError() from error
+            try:
+                value = raw.decode("ascii")
+            except UnicodeError:
+                raise MaterialDeniedError("INVALID_API_KEY_MATERIAL", 422) from None
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,512}", value) is None:
+                raise MaterialDeniedError("INVALID_API_KEY_MATERIAL", 422)
+            values[agent_environment if name == "agent" else "GH_TOKEN"] = value
+            files[Path(bindings[name].target).name] = raw
+        return values, files
+
     async def materials(
         self,
         association: HostedWorkspace,
@@ -296,82 +360,84 @@ class WorkspaceAuthority:
             or (association.credentials.github.target != "/run/awf/secrets/github.api-key")
         ):
             raise MaterialDeniedError("HOSTED_PROVIDER_BINDING_MISMATCH", 422)
-        bindings = {
+        anchors = {
             "agent": association.credentials.agent,
             "github": association.credentials.github,
         }
-        if current:
-            bindings = {name: await self._current(value) for name, value in bindings.items()}
-        profile = WorkspaceProfile.model_validate(
-            {
-                "name": "protected-runtime",
-                "secrets": [
-                    {
-                        "name": name,
-                        "provider": "protected",
-                        "kind": "mount",
-                        "mode": "ro",
-                        "target": value.target,
-                    }
-                    for name, value in bindings.items()
-                ],
-            }
+        retry_publication = refresh_publication
+        absence = None
+        if publish_view and retry_publication is None:
+            owner = owned_publication(self.views, association.workspace_id)
+            prior = owner.publication if owner is not None else None
+            if prior is not None:
+                if prior.owner is owner:
+                    retry_publication = prior
+            else:
+                absence = await asyncio.to_thread(
+                    self.views.absence_token, association.workspace_id
+                )
+        bindings = (
+            {name: await self._current(value) for name, value in anchors.items()}
+            if current
+            else anchors
         )
-        resolved = await ProtectedResolver.resolve_current(
-            self.receiver,
-            bindings,
-            profile,
-            association.workspace_id,
-        )
-        values: dict[str, str] = {}
-        files: dict[str, bytes] = {}
-        for name, mount in zip(bindings, resolved.mounts, strict=True):
-            path = Path(mount.source)
-            raw = await asyncio.to_thread(self.receiver.store.read, path.parent.name, path.stem)
-            try:
-                value = raw.decode("ascii")
-            except UnicodeError:
-                raise MaterialDeniedError("INVALID_API_KEY_MATERIAL", 422) from None
-            if re.fullmatch(r"[A-Za-z0-9_-]{1,512}", value) is None:
-                raise MaterialDeniedError("INVALID_API_KEY_MATERIAL", 422)
-            values[pair[1] if name == "agent" else "GH_TOKEN"] = value
-            files[Path(bindings[name].target).name] = raw
-        # Reading files can yield to revocation, refresh, expiry, or boot fencing.
-        for binding in bindings.values():
-            if (await self.receiver.status(binding)).status != "current":
-                raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
-        await self.admission()
-        expires_at = min(value.expires_at for value in bindings.values())
-        if expires_at <= datetime.now(UTC):
-            raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
+        publication: asyncio.Task[PublishedView | None] | None = None
+        publish_allowed = publish_view
 
-        # Admission precedes durable create/replay checks and may still fail.
-        # Only a consumer loaded from the persisted association owns this view.
-        async def publish() -> PublishedView | None:
-            if refresh_publication is not None:
+        async def publish(files: dict[str, bytes], *, retry: bool) -> PublishedView | None:
+            expected = retry_publication if retry else refresh_publication
+            if expected is not None:
                 return await asyncio.to_thread(
-                    self.views.refresh, association.workspace_id, files, refresh_publication
+                    self.views.refresh, association.workspace_id, files, expected
+                )
+            if retry:
+                if absence is None:
+                    return None
+                return await asyncio.to_thread(
+                    self.views.publish,
+                    association.workspace_id,
+                    files,
+                    expected_absence=absence,
                 )
             return await asyncio.to_thread(self.views.publish, association.workspace_id, files)
 
-        publication = (
-            asyncio.create_task(publish()) if publish_view and not self.views.closed else None
-        )
-        if publication is not None:
-            self.views.track_writer(publication)
         try:
-            if publication is not None:
-                await asyncio.shield(publication)
-            for binding in bindings.values():
-                if (await self.receiver.status(binding)).status != "current":
-                    raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
-            await self.admission()
-            if publish_view:
-                latest, latest_agent = await self.association(association.workspace_id)
-                if latest != association or latest_agent != agent:
-                    raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
-            if expires_at <= datetime.now(UTC):
-                raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    if attempt > 1:
+                        await self._snapshot_status(bindings)
+                    values, files = await self._read_snapshot(
+                        bindings, association.workspace_id, pair[1]
+                    )
+                    expires_at = await self._snapshot_status(bindings)
+                    if publish_allowed and not self.views.closed:
+                        publication = asyncio.create_task(publish(files, retry=attempt > 1))
+                        self.views.track_writer(publication)
+                        published = await asyncio.shield(publication)
+                        if published is None:
+                            publish_allowed = False
+                        else:
+                            retry_publication = published
+                    await self._snapshot_status(bindings)
+                    if publish_view:
+                        latest, latest_agent = await self.association(association.workspace_id)
+                        if latest != association or latest_agent != agent:
+                            raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
+                    if expires_at <= datetime.now(UTC):
+                        raise _SnapshotUnavailableError()
+                    values["GITHUB_TOKEN"] = values["GH_TOKEN"]
+                    return AuthorizedMaterials(values, expires_at)
+                except _SnapshotUnavailableError:
+                    if not current or attempt == 3:
+                        raise
+                    successor = await self._snapshot_successor(anchors, bindings)
+                    if successor is None:
+                        raise
+                    bindings = successor
+                    # Never return or republish bytes from the superseded read.
+                    values, files = {}, {}
         except BaseException as error:
             if publication is None:
                 raise
@@ -397,5 +463,3 @@ class WorkspaceAuthority:
                     continue
             cleanup.result()
             raise
-        values["GITHUB_TOKEN"] = values["GH_TOKEN"]
-        return AuthorizedMaterials(values, expires_at)

@@ -21,6 +21,8 @@ from awf.hosted_node.schemas import (
     Install,
     MaterialStatus,
     Preparation,
+    PreparationRenewal,
+    PreparationRenewalStatus,
     Refresh,
 )
 
@@ -96,6 +98,17 @@ async def acknowledge(value: Acknowledgement, service: ReceiverDependency) -> Id
 async def prepare(value: Preparation, service: ReceiverDependency) -> dict[str, str]:
     await service.prepare(value)
     return {"status": "prepared"}
+
+
+@router.post(
+    dependencies=[Depends(expected_identity_headers)],
+    path="/preparations/renew",
+    response_model=PreparationRenewalStatus,
+)
+async def renew_preparation(
+    value: PreparationRenewal, service: ReceiverDependency
+) -> PreparationRenewalStatus:
+    return await service.renew_preparation(value)
 
 
 @router.post(

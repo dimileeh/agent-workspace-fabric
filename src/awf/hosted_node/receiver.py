@@ -3,6 +3,8 @@
 import asyncio
 import base64
 import binascii
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -22,6 +24,8 @@ from awf.hosted_node.schemas import (
     Install,
     MaterialStatus,
     Preparation,
+    PreparationRenewal,
+    PreparationRenewalStatus,
     Refresh,
 )
 
@@ -163,6 +167,130 @@ class Receiver:
             ):
                 raise MaterialDeniedError("PREPARATION_MISMATCH")
         return row
+
+    async def _renewal_snapshot(
+        self, session: AsyncSession, value: PreparationRenewal, metadata: dict[str, Any]
+    ) -> tuple[PreparationRow, Grant, Binding, Receipt | None]:
+        await self.authority(session, lock=True)
+        recorded = await session.scalar(
+            select(Receipt).where(
+                Receipt.owner == self.identity.owner,
+                Receipt.idempotency_key == value.idempotency_key,
+            )
+        )
+        if recorded is not None and (
+            recorded.operation != "prepare_renew" or recorded.binding != metadata
+        ):
+            raise MaterialDeniedError("IDEMPOTENCY_CONFLICT")
+        prep = await self.preparation(session, value.current)
+        assert prep is not None
+        grant = await self.grant(session, prep, value.current)
+        if (
+            grant is None
+            or grant.revoked
+            or grant.pending is not None
+            or grant.current is None
+            or await self.superseded(session, grant)
+        ):
+            raise MaterialDeniedError("GRANT_CONFLICT")
+        receipt = await session.get(Receipt, grant.current)
+        if (
+            receipt is None
+            or receipt.state != "installed"
+            or receipt.operation not in {"install", "refresh"}
+        ):
+            raise MaterialDeniedError("GRANT_CONFLICT")
+        current = Binding.model_validate(receipt.binding)
+        if (grant.fence, grant.revision, grant.authorization_generation) != (
+            current.fence,
+            current.revision,
+            current.authorization_generation,
+        ):
+            raise MaterialDeniedError("GRANT_CONFLICT")
+        if recorded is None:
+            if current != value.current:
+                raise MaterialDeniedError("GRANT_CONFLICT")
+        else:
+            # Historical acknowledgement may follow a normal refresh, never a
+            # different grant, target, authorization generation or boot.
+            fields = (*Preparation.model_fields, "identity", "grant_id", "authorization_generation")
+            if (
+                recorded.grant != grant.id
+                or recorded.state != "renewed"
+                or any(
+                    getattr(current, field) != getattr(value.current, field)
+                    for field in fields
+                    if field != "expires_at"
+                )
+                or current.fence < value.current.fence
+                or current.revision < value.current.revision
+            ):
+                raise MaterialDeniedError("GRANT_CONFLICT")
+        return prep, grant, current, recorded
+
+    async def renew_preparation(self, value: PreparationRenewal) -> PreparationRenewalStatus:
+        self.expected(value.current)
+        request = value.model_dump(mode="json")
+        metadata = {
+            **self.binding(value.current),
+            "preparation_renewal": {
+                "request_sha256": hashlib.sha256(
+                    json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "expected_preparation_expires_at": request["expected_preparation_expires_at"],
+                "expires_at": request["expires_at"],
+            },
+        }
+        async with self.factory.begin() as session:
+            _, _, current, _ = await self._renewal_snapshot(session, value, metadata)
+        status = await self.status(current)
+        if status.status != "current":
+            raise MaterialDeniedError(
+                "PREPARATION_RENEWAL_UNAVAILABLE", 503 if status.status == "unavailable" else 409
+            )
+        result = None
+        async with self.factory.begin() as session:
+            prep, grant, verified, recorded = await self._renewal_snapshot(session, value, metadata)
+            if verified != current or status.receipt_id != grant.current:
+                raise MaterialDeniedError("GRANT_CONFLICT")
+            expiry = datetime.fromisoformat(prep.binding["expires_at"])
+            expired = min(current.expires_at, expiry) <= datetime.now(UTC)
+            if expired:
+                # Commit observed expiry before denying, as status() does. A
+                # later clock rollback must not make this receipt usable again.
+                receipt = await session.get(Receipt, grant.current)
+                assert receipt is not None
+                receipt.state = "expired"
+            elif recorded is None:
+                if expiry != value.expected_preparation_expires_at:
+                    raise MaterialDeniedError("PREPARATION_CONFLICT")
+                self.future(value.expires_at)
+                if value.expires_at <= expiry:
+                    raise MaterialDeniedError("INVALID_EXPIRY", 422)
+                # Fresh JSON assignment is tracked by SQLAlchemy. The tagged
+                # receipt shares this transaction but is never material authority.
+                prep.binding = {**prep.binding, "expires_at": request["expires_at"]}
+                recorded = Receipt(
+                    id=uuid4().hex,
+                    owner=self.identity.owner,
+                    idempotency_key=value.idempotency_key,
+                    grant=grant.id,
+                    binding=metadata,
+                    operation="prepare_renew",
+                    predecessor=grant.current,
+                    state="renewed",
+                )
+                session.add(recorded)
+            if not expired:
+                assert recorded is not None
+                result = PreparationRenewalStatus(
+                    receipt_id=recorded.id,
+                    preparation_id=value.current.preparation_id,
+                    expires_at=value.expires_at,
+                )
+        if result is None:
+            raise MaterialDeniedError("GRANT_CONFLICT")
+        return result
 
     async def grant(
         self, session: AsyncSession, prep: PreparationRow, value: Binding
