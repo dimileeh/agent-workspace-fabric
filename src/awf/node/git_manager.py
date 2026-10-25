@@ -1219,7 +1219,9 @@ class GitManager:
     ) -> GitResult:
         _log.debug("git.exec", operation=operation, args=args)
         if self._command_environment is not None:
-            env = await self._command_environment()
+            env = _git_manager_ownership.git_env_with_trusted_base_overrides(
+                await self._command_environment(), env
+            )
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
