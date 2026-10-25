@@ -36,8 +36,9 @@ async def cutover(renewal_workspace):
     client, runtime, original, _, slots, clock = renewal_workspace
     current = copy.deepcopy(original["credentials"])
 
-    async def refresh(*, generation=False):
-        for role, binding in current.items():
+    async def refresh(*, generation=False, roles=("agent", "github")):
+        for role in roles:
+            binding = current[role]
             binding.update(
                 idempotency_key=f"cutover-{role}-{binding['revision'] + 1}",
                 revision=binding["revision"] + 1,
@@ -107,6 +108,28 @@ def read_view(descriptor, name):
         return stream.read()
 
 
+def refresh_second_role_at_successor(
+    monkeypatch, runtime, original, refresh, *, after_refresh=None
+):
+    status = runtime._snapshot_status
+    observed = []
+
+    async def validate(bindings):
+        if (
+            not observed
+            and bindings["agent"].revision > original["credentials"]["agent"]["revision"]
+            and bindings["github"].revision == original["credentials"]["github"]["revision"]
+        ):
+            observed.append(bindings)
+            await refresh(roles=("github",))
+            if after_refresh is not None:
+                await after_refresh()
+        return await status(bindings)
+
+    monkeypatch.setattr(runtime, "_snapshot_status", validate)
+    return observed
+
+
 def hold_boundary(monkeypatch, runtime, boundary, selected):
     entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
     original_current = runtime._current
@@ -174,11 +197,12 @@ def hold_boundary(monkeypatch, runtime, boundary, selected):
 
 
 @pytest.mark.parametrize("retained", [False, True], ids=["watcher", "retained-sweep"])
+@pytest.mark.parametrize("split_roles", [False, True], ids=["together", "successor-cutover"])
 @pytest.mark.parametrize(
     "boundary", ["capture", "slot-status", "slot-read", "post-read", "post-publication"]
 )
 async def test_same_authority_cutover_keeps_consumer_and_held_view(
-    cutover, tmp_path, monkeypatch, retained, boundary
+    cutover, tmp_path, monkeypatch, retained, split_roles, boundary
 ):
     _, runtime, original, current, _, _, refresh = cutover
     async with consumer(cutover, tmp_path, retained=retained) as state:
@@ -197,11 +221,16 @@ async def test_same_authority_cutover_keeps_consumer_and_held_view(
         entered, release, finished, denials = hold_boundary(
             monkeypatch, runtime, boundary, selected
         )
+        second_role = (
+            refresh_second_role_at_successor(monkeypatch, runtime, original, refresh)
+            if split_roles
+            else None
+        )
         if retained:
             selected_task = asyncio.create_task(scope.admission_check())
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            await refresh()
+            await refresh(roles=("agent",) if split_roles else ("agent", "github"))
             release.set()
             await asyncio.wait_for(finished.wait(), 5)
             if retained:
@@ -209,6 +238,7 @@ async def test_same_authority_cutover_keeps_consumer_and_held_view(
             elif denials:
                 await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5)
             assert not denials, denials
+            assert second_role is None or len(second_role) == 1
             scope.stop_workspace.assert_not_awaited()
             assert retained or not active.done()
             publication = await runtime.publication(original["workspace_id"])
@@ -228,7 +258,7 @@ async def test_same_authority_cutover_keeps_consumer_and_held_view(
                 await asyncio.wait_for(asyncio.gather(selected_task, return_exceptions=True), 5)
 
 
-@pytest.mark.parametrize("boundary", ["slot-status", "post-publication"])
+@pytest.mark.parametrize("boundary", ["slot-status", "post-publication", "successor-validation"])
 @pytest.mark.parametrize(
     "failure",
     ["revoke", "generation", "grant", "boot", "expiry", "missing", "database", "os", "cancel"],
@@ -244,12 +274,12 @@ async def test_cutover_cannot_mask_real_loss_or_cancellation(
         entered, release, finished, _ = hold_boundary(
             monkeypatch,
             runtime,
-            boundary,
+            "capture" if boundary == "successor-validation" else boundary,
             lambda: asyncio.current_task().get_name().startswith("hosted-authority-"),
         )
-        try:
-            await asyncio.wait_for(entered.wait(), 5)
-            await refresh(generation=failure == "generation")
+
+        async def lose_authority():
+            nonlocal successor
             binding = current["agent"]
             if failure in {"revoke", "grant"}:
                 payload = {**binding, "idempotency_key": "loss", "fence": binding["fence"] + 1}
@@ -286,12 +316,30 @@ async def test_cutover_cannot_mask_real_loss_or_cancellation(
                 monkeypatch.setattr(runtime.receiver.store, "read", unreadable)
             elif failure == "cancel":
                 active.cancel()
+            elif failure == "generation" and boundary == "successor-validation":
+                await refresh(generation=True, roles=("agent",))
+
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            if boundary == "successor-validation":
+                observed = refresh_second_role_at_successor(
+                    monkeypatch, runtime, original, refresh, after_refresh=lose_authority
+                )
+                await refresh(roles=("agent",))
+            else:
+                observed = None
+                await refresh(generation=failure == "generation")
+                await lose_authority()
             release.set()
             await asyncio.wait_for(finished.wait(), 5)
             result = (await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5))[0]
-            assert isinstance(
-                result, (MaterialDeniedError, SQLAlchemyError, OSError, asyncio.CancelledError)
-            )
+            expected = {
+                "database": SQLAlchemyError,
+                "os": PermissionError,
+                "cancel": asyncio.CancelledError,
+            }.get(failure, MaterialDeniedError)
+            assert isinstance(result, expected)
+            assert observed is None or len(observed) == 1
             if failure == "cancel":
                 scope.stop_workspace.assert_awaited_once_with(
                     original["workspace_id"], authority_lost=False
@@ -309,8 +357,9 @@ async def test_cutover_cannot_mask_real_loss_or_cancellation(
 
 
 @pytest.mark.parametrize("change", ["foreign", "cleared"])
+@pytest.mark.parametrize("split_roles", [False, True], ids=["together", "successor-cutover"])
 async def test_post_publication_retry_never_adopts_successor_or_resurrects_clear(
-    cutover, tmp_path, monkeypatch, change
+    cutover, tmp_path, monkeypatch, change, split_roles
 ):
     _, runtime, original, _, _, _, refresh = cutover
     async with consumer(cutover, tmp_path, retained=True) as state:
@@ -319,10 +368,15 @@ async def test_post_publication_retry_never_adopts_successor_or_resurrects_clear
         entered, release, _, denials = hold_boundary(
             monkeypatch, runtime, "post-publication", lambda: asyncio.current_task() is selected
         )
+        observed = (
+            refresh_second_role_at_successor(monkeypatch, runtime, original, refresh)
+            if split_roles
+            else None
+        )
         selected = asyncio.create_task(scope.admission_check())
         try:
             await asyncio.wait_for(entered.wait(), 5)
-            await refresh()
+            await refresh(roles=("agent",) if split_roles else ("agent", "github"))
             if change == "foreign":
                 newer = runtime.views.publish(
                     original["workspace_id"],
@@ -337,6 +391,7 @@ async def test_post_publication_retry_never_adopts_successor_or_resurrects_clear
             release.set()
             assert await asyncio.wait_for(selected, 5)
             assert not denials
+            assert observed is None or len(observed) == 1
             scope.stop_workspace.assert_not_awaited()
             assert path.stat().st_ino == os.fstat(descriptor).st_ino
             if change == "foreign":
@@ -373,10 +428,44 @@ async def test_snapshot_attempts_are_bounded_and_exact_binding_mode_never_follow
     assert (await runtime.association(original["workspace_id"]))[0] == association
 
 
+@pytest.mark.parametrize("current_mode", [False, True])
+async def test_successor_validation_churn_spends_existing_snapshot_budget(
+    cutover, monkeypatch, current_mode
+):
+    _, runtime, original, _, _, _, refresh = cutover
+    association, agent = await runtime.association(original["workspace_id"])
+    resolve = ProtectedResolver.resolve_current
+    status = runtime._snapshot_status
+    reads, validations = 0, 0
+
+    async def first_role(*args):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            await refresh(roles=("agent",))
+        return await resolve(*args)
+
+    async def next_role(bindings):
+        nonlocal validations
+        validations += 1
+        await refresh(roles=("github" if validations % 2 else "agent",))
+        return await status(bindings)
+
+    monkeypatch.setattr(ProtectedResolver, "resolve_current", first_role)
+    monkeypatch.setattr(runtime, "_snapshot_status", next_role)
+    with pytest.raises(MaterialDeniedError, match="PROTECTED_MATERIAL_UNAVAILABLE"):
+        await runtime.materials(association, agent, current=current_mode)
+    assert reads == 1
+    assert validations == (2 if current_mode else 0)
+    assert await runtime.publication(original["workspace_id"]) is None
+    assert (await runtime.association(original["workspace_id"]))[0] == association
+
+
 @pytest.mark.parametrize("boundary", ["capture", "slot-read"])
 @pytest.mark.parametrize("change", ["foreign", "cleared", "removed", "closing"])
+@pytest.mark.parametrize("split_roles", [False, True], ids=["together", "successor-cutover"])
 async def test_initial_retry_does_not_adopt_foreign_publication_before_first_write(
-    cutover, tmp_path, monkeypatch, boundary, change
+    cutover, tmp_path, monkeypatch, boundary, change, split_roles
 ):
     _, runtime, original, _, _, _, refresh = cutover
     workspace_id = original["workspace_id"]
@@ -385,6 +474,11 @@ async def test_initial_retry_does_not_adopt_foreign_publication_before_first_wri
     active = None
     entered, release, _, _ = hold_boundary(
         monkeypatch, runtime, boundary, lambda: asyncio.current_task() is active
+    )
+    observed = (
+        refresh_second_role_at_successor(monkeypatch, runtime, original, refresh)
+        if split_roles
+        else None
     )
     body, leave = asyncio.Event(), asyncio.Event()
 
@@ -400,7 +494,7 @@ async def test_initial_retry_does_not_adopt_foreign_publication_before_first_wri
             workspace_id,
             {"openai.api-key": b"synthetic-foreign", "github.api-key": b"synthetic-foreign"},
         )
-        await refresh()
+        await refresh(roles=("agent",) if split_roles else ("agent", "github"))
         if change in {"cleared", "removed"}:
             runtime.views.remove(workspace_id, preserve_directory=change == "cleared")
         elif change == "closing":
@@ -410,6 +504,7 @@ async def test_initial_retry_does_not_adopt_foreign_publication_before_first_wri
             await asyncio.wait_for(asyncio.gather(active, return_exceptions=True), 5)
         else:
             await asyncio.wait_for(body.wait(), 5)
+            assert observed is None or len(observed) == 1
         actual = await runtime.publication(workspace_id)
         if change in {"cleared", "removed"}:
             assert actual is None

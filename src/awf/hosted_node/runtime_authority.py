@@ -297,7 +297,6 @@ class WorkspaceAuthority:
                 advanced = True
         if not advanced:
             return None
-        await self._snapshot_status(successor)
         return successor
 
     async def _read_snapshot(
@@ -407,6 +406,8 @@ class WorkspaceAuthority:
             while True:
                 attempt += 1
                 try:
+                    if attempt > 1:
+                        await self._snapshot_status(bindings)
                     values, files = await self._read_snapshot(
                         bindings, association.workspace_id, pair[1]
                     )
