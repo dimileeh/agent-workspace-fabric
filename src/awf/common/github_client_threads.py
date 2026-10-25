@@ -247,7 +247,14 @@ def _audit_comment_nodes(connection: Any) -> list[dict[str, Any]]:
             returncode=0,
             stderr="Review thread comment page is missing",
         )
-    return _connection_nodes(connection)
+    nodes = connection.get("nodes")
+    if not isinstance(nodes, list) or any(not isinstance(node, dict) for node in nodes):
+        raise GitHubClientError(
+            operation="fetch_review_thread_audit comments",
+            returncode=0,
+            stderr="Review thread comment page contains malformed nodes",
+        )
+    return nodes
 
 
 def _conversation_digest(comment_nodes: list[dict[str, Any]]) -> str:

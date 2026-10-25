@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from awf.db.models import WorkerHeartbeat
 from awf.hosted_node.identity import MaterialDeniedError
-from awf.hosted_node.receiver import Receiver
+from awf.hosted_node.receiver import Receiver, finish_cleanup
 from awf.hosted_node.runtime_authority import SESSION_KEY, WorkspaceAuthority
 from awf.hosted_node.runtime_capacity import validate_capacity
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
@@ -97,15 +97,28 @@ async def start_runtime(
     try:
         yield runtime
     finally:
-        runtime.runtime.worker.request_stop()
-        runtime.task.cancel()
-        try:
-            with suppress(asyncio.CancelledError):
-                await runtime.task
-            tasks = list(runtime.runtime.worker._execution_tasks.values())
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            await runtime.runtime.engine.dispose()
+
+        async def close() -> None:
+            try:
+                await asyncio.to_thread(receiver.views.close_admission)
+            finally:
+                runtime.runtime.worker.request_stop()
+                runtime.task.cancel()
+                try:
+                    with suppress(asyncio.CancelledError):
+                        await runtime.task
+                finally:
+                    tasks = list(runtime.runtime.worker._execution_tasks.values())
+                    for task in tasks:
+                        task.cancel()
+                    try:
+                        if tasks:
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                        await receiver.views.drain_writers()
+                    finally:
+                        try:
+                            await asyncio.to_thread(receiver.views.clear_owned)
+                        finally:
+                            await runtime.runtime.engine.dispose()
+
+        await finish_cleanup(asyncio.create_task(close(), name="hosted-runtime-close"))

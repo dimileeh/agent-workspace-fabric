@@ -14,6 +14,7 @@ from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import MaterialDeniedError, boot, check
 from awf.hosted_node.material_store import MaterialStore
 from awf.hosted_node.models import Grant, Owner, PreparationRow, Receipt
+from awf.hosted_node.runtime_views import RuntimeViews
 from awf.hosted_node.schemas import (
     Binding,
     Identity,
@@ -23,6 +24,18 @@ from awf.hosted_node.schemas import (
     Preparation,
     Refresh,
 )
+
+
+async def finish_cleanup(task: asyncio.Task[None]) -> None:
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancellation = error
+    task.result()
+    if cancellation is not None:
+        raise cancellation
 
 
 class Receiver:
@@ -35,6 +48,8 @@ class Receiver:
     ):
         self.config, self.factory, self.identity, self.store = config, factory, identity, store
         self.closed = False
+        self.views = RuntimeViews(store, identity=identity)
+        self._close_task: asyncio.Task[None] | None = None
         from awf.hosted_node.lifecycle import NodeLifecycle
 
         self.lifecycle = NodeLifecycle(factory, identity) if config.lifecycle else None
@@ -424,11 +439,16 @@ class Receiver:
         return await self.status(value)
 
     async def close(self) -> None:
-        if self.closed:
-            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close(), name="hosted-receiver-close")
+        await finish_cleanup(self._close_task)
+
+    async def _close(self) -> None:
         self.closed = True
         # Only this boot's file slots; a superseded process cannot delete successor files.
         try:
+            await asyncio.to_thread(self.views.close_admission)
+            await self.views.drain_writers()
             async with self.factory.begin() as session:
                 owner = (
                     await session.scalars(
@@ -464,4 +484,9 @@ class Receiver:
             for directory, slot in slots:
                 await asyncio.to_thread(self.store.remove, directory, slot)
         finally:
-            self.store.close()
+            try:
+                # This registry includes initial writes and retained scopes whose
+                # workspace rows are gone, even when durable shutdown failed.
+                await asyncio.to_thread(self.views.clear_owned)
+            finally:
+                await asyncio.to_thread(self.store.close)

@@ -1,12 +1,13 @@
 """Refreshable, workspace-only agent view of already authorized tmpfs material."""
 
+import asyncio
 import hashlib
 import os
 import stat
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -26,9 +27,10 @@ class PublishedView:
     path: Path
     token: str
     retained_directory: bool = False
+    owner: "PublicationOwnership | None" = field(default=None, repr=False, compare=False)
 
 
-@dataclass
+@dataclass(eq=False)
 class PublicationOwnership:
     views: "RuntimeViews"
     workspace_id: str
@@ -64,6 +66,40 @@ class RuntimeViews:
         self.store = store
         self.identity = identity
         self.gid = AGENT_GID if agent_gid is None else agent_gid
+        self._owners: dict[str, PublicationOwnership] = {}
+        self._writers: set[asyncio.Task[PublishedView | None]] = set()
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close_admission(self) -> None:
+        with self.store._locked_root():
+            self._closed = True
+
+    def track_writer(self, task: asyncio.Task[PublishedView | None]) -> None:
+        self._writers.add(task)
+        task.add_done_callback(self._writers.discard)
+
+    async def drain_writers(self) -> None:
+        while self._writers:
+            pending = tuple(self._writers)
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._writers.difference_update(pending)
+
+    def clear_owned(self) -> None:
+        with self.store._locked_root():
+            recorded = [(key, owner.publication) for key, owner in self._owners.items()]
+        errors: list[Exception] = []
+        for workspace_id, publication in recorded:
+            if publication is not None:
+                try:
+                    self.remove_owned(workspace_id, publication)
+                except Exception as error:  # noqa: BLE001 - finish other owned retractions
+                    errors.append(error)
+        if errors:
+            raise ExceptionGroup("Runtime view retraction failed", errors)
 
     def _key(self, workspace_id: str) -> str:
         if (
@@ -160,6 +196,13 @@ class RuntimeViews:
         with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
             token = self._publication(parent)
             if token is not None:
+                owner = self._owners.get(workspace_id)
+                if (
+                    owner is not None
+                    and owner.publication is not None
+                    and owner.publication.token == token
+                ):
+                    return owner.publication
                 return PublishedView(self.store.root / key / "view", token)
         return None
 
@@ -186,6 +229,10 @@ class RuntimeViews:
         failure: BaseException | None = None
         result: PublishedView | None = None
         with self.store._directory(key, _SLOT, create=True, remove_empty=True) as parent:
+            if self._closed:
+                # Shutdown fences publication, not still-valid authority. A
+                # queued final check may finish without recreating any view.
+                return None
             ownership = owned_publication(self, workspace_id)
             if ownership is not None and ownership.closing:
                 # A queued writer may reach this lock only after scope closure.
@@ -199,6 +246,14 @@ class RuntimeViews:
             # consumer's newer publication after its authority reads yielded.
             if publication is not None and self._publication(parent) != publication.token:
                 return None
+            if publication is not None:
+                if publication.owner is None or publication.owner is not self._owners.get(
+                    workspace_id
+                ):
+                    return None
+                ownership = publication.owner
+            if ownership is None:
+                ownership = PublicationOwnership(self, workspace_id)
             try:
                 os.mkdir("view", mode=0o700, dir_fd=parent)
                 new = True
@@ -218,6 +273,14 @@ class RuntimeViews:
                 try:
                     # The private token and file replacements share the root lock.
                     # Identical refreshed bytes still constitute a new publication.
+                    result = PublishedView(
+                        self.store.root / key / "view",
+                        token,
+                        retained_directory=not new,
+                        owner=ownership,
+                    )
+                    ownership.publication = result
+                    self._owners[workspace_id] = ownership
                     self._publication(parent, token)
                     for name, value in files.items():
                         temporary = name + ".pending"
@@ -242,16 +305,10 @@ class RuntimeViews:
                 except BaseException as error:
                     # No other publisher can interleave with partial-write cleanup.
                     self._remove_view(parent)
+                    self._owners.pop(workspace_id, None)
                     failure = error
             finally:
                 os.close(directory)
-            if failure is None:
-                result = PublishedView(
-                    self.store.root / key / "view", token, retained_directory=not new
-                )
-                if ownership is not None:
-                    # Record actual write order, not to_thread completion order.
-                    ownership.publication = result
         if failure is not None:
             raise failure
         assert result is not None
@@ -288,3 +345,20 @@ class RuntimeViews:
             if publication is not None and self._publication(parent) != publication.token:
                 return
             self._remove_view(parent, preserve_directory=preserve_directory)
+            self._owners.pop(workspace_id, None)
+
+    def remove_owned(self, workspace_id: str, publication: PublishedView) -> None:
+        key = self._key(workspace_id)
+        if publication.path != self.store.root / key / "view":
+            raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
+            owner = self._owners.get(workspace_id)
+            current = owner.publication if owner is not None else None
+            if (
+                owner is not publication.owner
+                or current is None
+                or self._publication(parent) != current.token
+            ):
+                return
+            self._remove_view(parent, preserve_directory=True)
+            self._owners.pop(workspace_id, None)

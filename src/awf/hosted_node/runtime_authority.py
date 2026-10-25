@@ -48,7 +48,7 @@ class AuthorizedMaterials:
 class WorkspaceAuthority:
     def __init__(self, receiver: Receiver):
         self.receiver = receiver
-        self.views = RuntimeViews(receiver.store, identity=receiver.identity)
+        self.views = receiver.views
 
     async def admission(self) -> None:
         if not self.receiver.config.runtime_enabled or self.receiver.lifecycle is None:
@@ -121,6 +121,7 @@ class WorkspaceAuthority:
             )
 
     async def reconcile_workspace(self, workspace_id: str) -> bool:
+        publication = await self.publication(workspace_id)
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
@@ -131,10 +132,9 @@ class WorkspaceAuthority:
             # readable view; never republish or restart an inactive workspace.
             await self.retract(workspace_id)
         else:
-            association, agent = await self.association(workspace_id)
             # Checkout can publish before Compose placement. Sweep every owned
             # association, but never create a readable view just by polling.
-            publication = await self.publication(workspace_id)
+            association, agent = await self.association(workspace_id)
             await self.materials(
                 association,
                 agent,
@@ -155,10 +155,9 @@ class WorkspaceAuthority:
     ) -> None:
         if publication is not None:
             await asyncio.to_thread(
-                self.views.remove,
+                self.views.remove_owned,
                 workspace_id,
-                publication=publication,
-                preserve_directory=True,
+                publication,
             )
         await self._retract_previous(workspace_id)
 
@@ -344,7 +343,11 @@ class WorkspaceAuthority:
                 )
             return await asyncio.to_thread(self.views.publish, association.workspace_id, files)
 
-        publication = asyncio.create_task(publish()) if publish_view else None
+        publication = (
+            asyncio.create_task(publish()) if publish_view and not self.views.closed else None
+        )
+        if publication is not None:
+            self.views.track_writer(publication)
         try:
             if publication is not None:
                 await asyncio.shield(publication)

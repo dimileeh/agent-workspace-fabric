@@ -256,6 +256,13 @@ async def test_pending_cleanup_rejects_unsafe_entries_before_unlinking_anything(
     assert outside.read_bytes() == b"preserve-foreign"
     assert (published.path / "openai.api-key").read_bytes() == b"synthetic-agent"
     assert (published.path.parent / "publication").read_text() == published.token
+    with pytest.raises(ExceptionGroup, match="Runtime view retraction failed") as first:
+        await runtime.receiver.close()
+    with pytest.raises(ExceptionGroup) as repeated:
+        await runtime.receiver.close()
+    assert repeated.value is first.value
+    assert valid.read_bytes() == b"partial"
+    assert bad.lstat() and outside.read_bytes() == b"preserve-foreign"
 
 
 @pytest.mark.parametrize("operation", ["refresh", "retract"])

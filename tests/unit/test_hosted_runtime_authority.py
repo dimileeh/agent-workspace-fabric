@@ -115,7 +115,8 @@ async def authority(engine, tmp_path, monkeypatch):
         yield runtime, value, factory
     finally:
         try:
-            await receiver.close()
+            if not receiver.closed:
+                await receiver.close()
         finally:
             await runtime_engine.dispose()
             temporary.cleanup()

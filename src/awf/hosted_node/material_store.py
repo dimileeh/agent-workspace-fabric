@@ -55,10 +55,8 @@ class MaterialStore:
             raise
 
     @contextmanager
-    def _directory(
-        self, workspace: str, slot: str, *, create: bool = False, remove_empty: bool = False
-    ) -> Iterator[int]:
-        if self.closed or not _SLOT.fullmatch(workspace) or not _SLOT.fullmatch(slot):
+    def _locked_root(self) -> Iterator[int]:
+        if self.closed:
             raise MaterialDeniedError("INVALID_FILE_SLOT")
         root = self._open_root()
         try:
@@ -66,6 +64,19 @@ class MaterialStore:
             if (info.st_dev, info.st_ino) != self._device_inode:
                 raise MaterialDeniedError("ROOT_REPLACED")
             fcntl.flock(root, fcntl.LOCK_EX)
+            if self.closed:
+                raise MaterialDeniedError("INVALID_FILE_SLOT")
+            yield root
+        finally:
+            os.close(root)
+
+    @contextmanager
+    def _directory(
+        self, workspace: str, slot: str, *, create: bool = False, remove_empty: bool = False
+    ) -> Iterator[int]:
+        if not _SLOT.fullmatch(workspace) or not _SLOT.fullmatch(slot):
+            raise MaterialDeniedError("INVALID_FILE_SLOT")
+        with self._locked_root() as root:
             if create:
                 entries = os.listdir(root)  # noqa: PTH208 - descriptor-relative security boundary
                 if len(entries) >= 1024 and workspace not in entries:
@@ -89,8 +100,6 @@ class MaterialStore:
                     os.fsync(root)
             finally:
                 os.close(directory)
-        finally:
-            os.close(root)
 
     def install(self, workspace: str, slot: str, material: bytes) -> Path:
         if not 1 <= len(material) <= 65536:
@@ -183,4 +192,6 @@ class MaterialStore:
             pass
 
     def close(self) -> None:
-        self.closed = True
+        if not self.closed:
+            with self._locked_root():
+                self.closed = True
