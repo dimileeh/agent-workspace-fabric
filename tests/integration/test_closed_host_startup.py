@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from threading import RLock
 from unittest.mock import Mock
 
 import httpx
@@ -39,7 +40,9 @@ def startup_config(runtime_database, monkeypatch):
 
     monkeypatch.setattr(host_startup, "host_lease", lease)
     monkeypatch.setattr(host_startup, "validate_socket", lambda _: None)
-    monkeypatch.setattr("awf.hosted_node.receiver.MaterialStore", lambda _: Mock())
+    store_lock = RLock()
+    store = Mock(_locked_root=Mock(side_effect=lambda: store_lock))
+    monkeypatch.setattr("awf.hosted_node.receiver.MaterialStore", lambda _: store)
     monkeypatch.setattr(LinuxObservation, "sample", lambda _: LinuxSnapshot(BOOT, 1, 2, 3, True))
     monkeypatch.setattr(
         LinuxObservation, "bootstrap_approved", lambda _, receipt: receipt == "first-node"
@@ -95,6 +98,9 @@ async def test_actual_lifespan_wires_closed_host_and_shuts_down(runtime_database
                 "state"
             ] == "drained"
     assert receiver.closed and events == ["lease", "release"]
+    assert receiver.views.closed
+    assert receiver.store._locked_root.call_count == 2
+    receiver.store.close.assert_called_once_with()
     _, _, migration, _ = runtime_database
     async with migration.connect() as connection:
         assert (

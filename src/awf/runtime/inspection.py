@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
@@ -22,6 +22,21 @@ def inspection_environment(environment: Mapping[str, str]) -> Iterator[None]:
         yield
     finally:
         _environment.reset(token)
+
+
+def command_environment(
+    environment: Mapping[str, str] | None = None,
+) -> Callable[[], Awaitable[Mapping[str, str]]] | None:
+    """Capture the trusted task endpoint for nested Docker/Compose commands."""
+    selected = environment if environment is not None else _environment.get()
+    if selected is None:
+        return None
+    captured = dict(selected)
+
+    async def resolve() -> Mapping[str, str]:
+        return dict(captured)
+
+    return resolve
 
 
 @dataclass(frozen=True)

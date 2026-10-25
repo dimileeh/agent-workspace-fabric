@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import RLock
 from unittest.mock import Mock
 
 import pytest
@@ -44,7 +45,9 @@ async def node(engine):
     )
     factory = make_session_factory(engine)
     identity = await boot(config, factory)
-    receiver = Receiver(config, factory, identity, Mock())
+    store_lock = RLock()
+    store = Mock(_locked_root=Mock(side_effect=lambda: store_lock))
+    receiver = Receiver(config, factory, identity, store)
     app = create_app(use_lifespan=False)
     configure_database(app, factory)
     app.state.hosted_receiver = receiver
@@ -257,6 +260,9 @@ async def test_receiver_shutdown_closes_database_admission(node):
     evidence(receiver)
     assert (await acknowledge(client)).status_code == 200
     await receiver.close()
+    assert receiver.views.closed
+    assert receiver.store._locked_root.call_count == 2
+    receiver.store.close.assert_called_once_with()
     with pytest.raises(DBAPIError, match="NODE_ADMISSION_CLOSED"):
         await create(receiver.factory)
 

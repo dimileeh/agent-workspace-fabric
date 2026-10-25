@@ -46,7 +46,7 @@ from awf.runtime.hosted_pr_identity import (
     _nonblank_str,
     hosted_pr_identity_for_workspace,
 )
-from awf.runtime.inspection import RuntimeInspector, probe_agent_service_health
+from awf.runtime.inspection import RuntimeInspector, command_environment, probe_agent_service_health
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
@@ -1091,10 +1091,14 @@ async def _restart_monitor_agent_service_or_fail(
         service_healthy=service_healthy,
         restart_attempts=restart_attempts,
     )
-    manager = ComposeManager(
-        work_dir=self._work_dir,
-        template_path=_monitor_agent_service_recovery_template_sentinel(self._work_dir),
-    )
+    environment = command_environment()
+    template = _monitor_agent_service_recovery_template_sentinel(self._work_dir)
+    if environment is None:
+        manager = ComposeManager(work_dir=self._work_dir, template_path=template)
+    else:
+        manager = ComposeManager(
+            work_dir=self._work_dir, template_path=template, command_environment=environment
+        )
     compose_up_timeout_seconds = await _monitor_agent_service_restart_timeout_seconds(
         self,
         workspace_id=workspace_id,

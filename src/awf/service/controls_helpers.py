@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
-from awf.common.config import get_settings
+from awf.common.config import Settings, get_settings
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace
@@ -31,6 +32,7 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
+from awf.runtime.inspection import command_environment
 from awf.runtime.operator_hints import remonitor_has_elapsed_settle
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
@@ -146,11 +148,13 @@ async def _docker_process(*args: str, operation: str) -> asyncio.subprocess.Proc
     from awf.service.controls_errors import WorkspaceStackStopError
 
     try:
+        environment = command_environment()
         return await asyncio.create_subprocess_exec(
             "docker",
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=await environment() if environment is not None else None,
         )
     except FileNotFoundError as exc:
         raise WorkspaceStackStopError(
@@ -189,13 +193,41 @@ async def _communicate(
     return stdout, stderr
 
 
-def default_cleaner() -> WorkspaceCleaner:
-    settings = get_settings()
+def default_cleaner(*, settings: Settings | None = None) -> WorkspaceCleaner:
+    settings = settings if settings is not None else get_settings()
     work_dir = Path(settings.work_dir)
+    environment = command_environment()
+    if settings.hosted_node is not None:
+        from awf.service.controls_errors import WorkspaceStackStopError
+
+        host = settings.hosted_node.host
+        if (
+            host is None
+            or not settings.docker_host.startswith("unix:///")
+            or settings.docker_host == f"unix://{host.docker_socket}"
+        ):
+            raise WorkspaceStackStopError(
+                operation="configuration",
+                returncode=1,
+                stdout="",
+                stderr="EXECUTION_DOCKER_ENDPOINT_REQUIRED",
+            )
+        # Controls need the execution endpoint, not an active material scope.
+        # Do not inherit Docker context/config or host credentials.
+        environment = command_environment(
+            {
+                "PATH": os.environ.get("PATH", os.defpath),
+                "LANG": "C.UTF-8",
+                "HOME": str(work_dir / "hosted-empty-home"),
+                "DOCKER_HOST": settings.docker_host,
+            }
+        )
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     return WorkspaceCleaner(
         git=GitManager(work_dir / "git"),
-        compose=ComposeManager(work_dir=work_dir, template_path=template),
+        compose=ComposeManager(
+            work_dir=work_dir, template_path=template, command_environment=environment
+        ),
     )
 
 

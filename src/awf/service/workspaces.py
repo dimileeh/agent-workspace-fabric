@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -605,7 +606,9 @@ class WorkspaceService:
         self._log_root = Path(log_root).resolve() if log_root is not None else None
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._project_stopper = project_stopper or stop_project_containers
-        self._cleaner_factory = cleaner_factory or default_cleaner
+        self._cleaner_factory = cleaner_factory or (
+            partial(default_cleaner, settings=settings) if settings is not None else default_cleaner
+        )
         self._pr_adoption_metadata_fetcher = pr_adoption_metadata_fetcher
 
     @property
