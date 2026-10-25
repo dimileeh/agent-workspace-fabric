@@ -197,7 +197,7 @@ def default_cleaner(*, settings: Settings | None = None) -> WorkspaceCleaner:
     settings = settings if settings is not None else get_settings()
     work_dir = Path(settings.work_dir)
     environment = command_environment()
-    if settings.hosted_node is not None:
+    if settings.hosted_node is not None and settings.hosted_node.runtime_enabled:
         from awf.service.controls_errors import WorkspaceStackStopError
 
         host = settings.hosted_node.host
