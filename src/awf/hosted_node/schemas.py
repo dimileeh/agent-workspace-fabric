@@ -82,6 +82,25 @@ class Binding(Preparation):
     fence: Generation
 
 
+class PreparationRenewal(StrictModel):
+    idempotency_key: Opaque
+    current: Binding
+    expected_preparation_expires_at: datetime
+    expires_at: datetime
+
+    @field_validator("expected_preparation_expires_at", "expires_at")
+    @classmethod
+    def aware(cls, value: datetime) -> datetime:
+        return Preparation.aware(value)
+
+
+class PreparationRenewalStatus(StrictModel):
+    status: Literal["renewed"] = "renewed"
+    receipt_id: Opaque
+    preparation_id: Opaque
+    expires_at: datetime
+
+
 class Install(Binding):
     material: str = Field(min_length=4, max_length=87384, repr=False, exclude=True)
 

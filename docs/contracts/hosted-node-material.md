@@ -95,7 +95,8 @@ generations and fences are positive signed int64 integers, not strings or boolea
   segments, trailing slash and noncanonical paths are rejected.
 - Expiry is timezone-aware RFC3339, at most one hour ahead on preparation/install.
   Material expiry cannot exceed its preparation expiry.
-- A preparation is immutable within an owner and bound to its boot. It can
+- A preparation's identity and target are immutable within an owner and bound to its boot.
+  Only the explicit bounded renewal below can extend its expiry. It can
   precede a Workspace row and does not create or admit execution. A new boot
   requires a new preparation ID.
 
@@ -107,6 +108,7 @@ generations and fences are positive signed int64 integers, not strings or boolea
 | GET /identity | None | Identity plus `acknowledged: boolean, activation: "closed"` |
 | POST /identity/acknowledge | `{idempotency_key}` | Identity response; same-key replay is safe, another key conflicts within the boot |
 | POST /preparations | Preparation | `{"status":"prepared"}`; exact replay is safe |
+| POST /preparations/renew | PreparationRenewal | `{"status":"renewed", "receipt_id":..., "preparation_id":..., "expires_at":...}`; metadata acknowledgement, not material readiness |
 | POST /materials/install | Binding plus `material` | MaterialStatus |
 | POST /materials/status | Binding | MaterialStatus for that exact operation/version |
 | POST /materials/refresh | Binding plus `material, predecessor` | MaterialStatus; predecessor is exact current receipt ID |
@@ -134,12 +136,55 @@ binding/idempotency/version/fence conflict, 413 excessive body, 422 sanitized
 invalid schema/material/expiry. Errors never serialize submitted fields.
 Identifiers are non-secret controller metadata; do not embed credentials in them.
 
+### Bounded preparation renewal
+
+`PreparationRenewal` is exactly
+`{idempotency_key, current, expected_preparation_expires_at, expires_at}`.
+`current` is the exact currently installed `Binding`; both top-level timestamps
+are timezone-aware. This controller-only operation uses the same expected-identity
+headers and body limits as the material API. It neither creates a preparation nor
+changes its identity, target, grant, workspace association or execution admission.
+Ordinary `/preparations` still rejects a different expiry under the same identity.
+
+Under the existing owner lock, a first renewal requires an unexpired preparation,
+an unrevoked, nonsuperseded grant with no pending refresh, the exact current
+installed receipt, and matching revision, fence and authorization generation.
+Private material presence is checked outside the lock and authority is checked
+again under the lock. The preparation cap must equal
+`expected_preparation_expires_at`. The new cap must strictly increase and be no more
+than one hour ahead of receiver time. The trusted controller must bound that cap
+by freshly verified underlying authority, not assume the old short material lease
+itself grants an extension. The Core one-hour ceiling is unchanged.
+
+One transaction assigns a fresh preparation JSON value and records a tagged
+`prepare_renew` receipt with a SHA-256 of canonical non-secret request metadata.
+No new table is required. This receipt is never `Grant.current` or `Grant.pending`,
+cannot serve as a material binding or runtime anchor, and retains boot/workspace
+metadata for existing cleanup. No bytes, views, grant counters or runtime anchors
+are changed. A subsequent ordinary material refresh can extend its own expiry
+within the renewed cap, keeping the original workspace preparation/grant anchors.
+
+An exact same-key retry, including after lost response or a later valid material
+refresh, returns the recorded acknowledgement without extending again or restoring
+old pointers/counters. Current material and owner authority must still be valid;
+revoked, expired, superseded or uncertain material cannot be resurrected. Changed
+requests and key collisions with material operations conflict in both directions.
+Concurrent new keys using the same old preparation cap cannot both commit.
+
+Renewal/refresh response loss never prevents cleanup: `/materials/revoke` still
+accepts the same preparation/grant with an old or expired binding expiry and a
+fence above current authority, revision at least current, and nondecreasing
+authorization generation. Revocation dominates pending or already accepted refresh
+and later renewal retries. An absent preparation remains an explicit error, not
+evidence that cleanup succeeded. HTTP 503 means unknown acceptance; reconcile or
+retry the exact renewal request rather than reassociating the workspace.
+
 ## Durability, cutover, expiry and cleanup
 
 PostgreSQL stores only non-secret metadata in independent `hosted_owners`,
 `hosted_preparations`, `hosted_grants` and `hosted_receipts` tables.
 Legacy metadata-only secret lease reissue cannot clear these tombstones.
-Idempotency keys are unique per owner across material operations and bind the
+Idempotency keys are unique per owner across renewal and material operations and bind the
 entire non-secret request plus operation/predecessor. Changed metadata conflicts.
 Same-key replay reconciles the original receipt and **never writes bytes again**;
 even different valid bytes under that key cannot replace material. Use a new
