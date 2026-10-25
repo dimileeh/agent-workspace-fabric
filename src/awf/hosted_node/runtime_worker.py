@@ -16,6 +16,7 @@ from awf.hosted_node.runtime_authority import SESSION_KEY, WorkspaceAuthority
 from awf.hosted_node.runtime_capacity import validate_capacity
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
 from awf.hosted_node.schemas import Identity
+from awf.runtime.inspection import inspection_environment
 from awf.service.config import ServiceSettings
 from awf.service.local_capacity import detect_local_capacity
 from awf.service.worker import build_worker_runtime
@@ -43,11 +44,15 @@ class HostedWorker:
         )
         self.authority = WorkspaceAuthority(receiver)
         self.consumers = WorkspaceConsumers(self.authority, Path(settings.work_dir))
-        self.consumers.base_environment["DOCKER_HOST"] = settings.docker_host
         self.runtime = build_worker_runtime(settings, hosted=self.consumers)
-        self.task = asyncio.create_task(
-            self.runtime.worker.run_forever(), name="hosted-core-worker"
-        )
+
+        async def run() -> None:
+            # Worker sweeps and their thread offloads also inspect outside an
+            # active workspace scope; inherit the same nonsecret daemon binding.
+            with inspection_environment(self.consumers.base_environment):
+                await self.runtime.worker.run_forever()
+
+        self.task = asyncio.create_task(run(), name="hosted-core-worker")
 
     async def is_ready(self, identity: Identity) -> bool:
         if self.task.done() or identity != self.authority.receiver.identity:

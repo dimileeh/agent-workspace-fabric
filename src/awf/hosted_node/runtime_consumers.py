@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import os
 from collections.abc import AsyncIterator, Awaitable, Mapping
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
@@ -27,6 +27,8 @@ from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
+from awf.hosted_node.runtime_views import owned_publication, track_publications
+from awf.runtime.inspection import inspection_environment
 from awf.service.logs import _stream_redaction_flushable_length
 
 _log = get_logger(__name__)
@@ -80,6 +82,17 @@ class WorkspaceConsumers:
 
     @asynccontextmanager
     async def scope(self, workspace_id: str) -> AsyncIterator[None]:
+        ownership = (
+            track_publications(self.authority.views, workspace_id)
+            if self.workspace_id.get() is None
+            else nullcontext()
+        )
+        with inspection_environment(self.base_environment), ownership:
+            async with self._scope(workspace_id):
+                yield
+
+    @asynccontextmanager
+    async def _scope(self, workspace_id: str) -> AsyncIterator[None]:
         existing = self.workspace_id.get()
         if existing is not None:
             if existing != workspace_id:
@@ -87,8 +100,30 @@ class WorkspaceConsumers:
             await self.authority.workspace(workspace_id)
             yield
             return
+        ownership = owned_publication(self.authority.views, workspace_id)
+        assert ownership is not None
+
+        async def snapshot() -> None:
+            ownership.publication = await self.authority.publication(workspace_id)
+
+        entry = asyncio.create_task(snapshot())
         try:
+            await asyncio.shield(entry)
             await self.authority.workspace(workspace_id)
+        except asyncio.CancelledError:
+            # Entry can be cancelled before the watcher/finalizer exists. Do
+            # not republish while deciding whether the old warm stack may stay.
+            cleanup = asyncio.create_task(
+                self._cancelled_start(workspace_id, entry),
+                name=f"hosted-initial-retract-{workspace_id}",
+            )
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
             await self._stop(workspace_id)
             if isinstance(error, MaterialDeniedError):
@@ -126,6 +161,7 @@ class WorkspaceConsumers:
         finally:
             finished.set()
             self.workspace_id.reset(token)
+            ownership.closing = True
             late_cancellation: asyncio.CancelledError | None = None
 
             async def finish() -> None:
@@ -171,16 +207,39 @@ class WorkspaceConsumers:
             if late_cancellation is not None:
                 raise late_cancellation
 
+    async def _cancelled_start(self, workspace_id: str, entry: asyncio.Task[None]) -> None:
+        authorized = False
+        try:
+            await entry
+            association, agent = await self.authority.association(workspace_id)
+            await self.authority.materials(association, agent, current=True)
+            authorized = True
+        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+            pass
+        finally:
+            await self._stop(workspace_id, authority_lost=not authorized)
+
     async def _stop(self, workspace_id: str, *, authority_lost: bool = True) -> None:
         token = self.workspace_id.set(None)
+        preserve_directory = False
         try:
             try:
                 if authority_lost:
                     await self.stop_workspace(workspace_id)
                 else:
                     await self.stop_workspace(workspace_id, authority_lost=False)
+                    preserve_directory = True
             finally:
-                await self.authority.retract(workspace_id)
+                if preserve_directory:
+                    ownership = owned_publication(self.authority.views, workspace_id)
+                    if ownership is not None:
+                        await self.authority.retract_publication(
+                            workspace_id, ownership.publication
+                        )
+                    else:
+                        await self.authority.retract(workspace_id, preserve_directory=True)
+                else:
+                    await self.authority.retract(workspace_id)
         finally:
             self.workspace_id.reset(token)
 

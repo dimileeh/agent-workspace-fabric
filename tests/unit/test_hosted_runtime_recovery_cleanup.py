@@ -326,7 +326,10 @@ async def test_inactive_reconciliation_cannot_remove_other_owner_view(authority,
     consumers.stop_workspace.assert_not_awaited()
 
 
-@pytest.mark.parametrize("termination", ["superseded", "cancelled"])
+@pytest.mark.parametrize(
+    "termination",
+    ["superseded", "cancelled", "cancelled_body", "cancelled_finalcheck", "cancelled_stop"],
+)
 @pytest.mark.parametrize("same_material", [False, True])
 async def test_older_cleanup_preserves_newer_publication_then_real_revocation_retracts(
     authority, tmp_path, monkeypatch, termination, same_material
@@ -336,7 +339,7 @@ async def test_older_cleanup_preserves_newer_publication_then_real_revocation_re
     other = await retained(runtime, value, factory, "ws_other", other=True)
     published = threading.Event()
     checking, release = asyncio.Event(), asyncio.Event()
-    publish, status = runtime.views.publish, runtime.receiver.status
+    publish, status, workspace = runtime.views.publish, runtime.receiver.status, runtime.workspace
     old_task = None
 
     def observe(workspace_id, files):
@@ -345,14 +348,50 @@ async def test_older_cleanup_preserves_newer_publication_then_real_revocation_re
         return result
 
     async def check(binding):
-        if asyncio.current_task() is old_task and published.is_set():
+        if (
+            termination in {"superseded", "cancelled"}
+            and asyncio.current_task() is old_task
+            and published.is_set()
+        ):
             checking.set()
             await release.wait()
         return await status(binding)
 
     monkeypatch.setattr(runtime.views, "publish", observe)
     monkeypatch.setattr(runtime.receiver, "status", check)
-    old_task = asyncio.create_task(runtime.workspace("ws_cloud_stable"))
+    old_consumers = WorkspaceConsumers(runtime, tmp_path)
+
+    async def stop(workspace_id, **kwargs):
+        if termination == "cancelled_stop":
+            checking.set()
+            await release.wait()
+
+    old_consumers.stop_workspace = AsyncMock(side_effect=stop)
+
+    async def check_final(workspace_id):
+        if termination == "cancelled_finalcheck" and asyncio.current_task().get_name().startswith(
+            "hosted-finalize-"
+        ):
+            checking.set()
+            await release.wait()
+        return await workspace(workspace_id)
+
+    monkeypatch.setattr(runtime, "workspace", check_final)
+
+    async def old_scope():
+        async with old_consumers.scope("ws_cloud_stable"):
+            if termination == "cancelled_body":
+                checking.set()
+                await asyncio.Event().wait()
+            if termination == "cancelled_finalcheck":
+                return
+            if termination == "cancelled_stop":
+                raise asyncio.CancelledError()
+            pytest.fail("cancelled initial authorization entered the consumer")
+
+    old_task = asyncio.create_task(
+        runtime.workspace("ws_cloud_stable") if termination == "superseded" else old_scope()
+    )
     try:
         await asyncio.wait_for(checking.wait(), 5)
         anchor = Binding.model_validate(value["hosted"]["credentials"]["agent"])
@@ -370,10 +409,12 @@ async def test_older_cleanup_preserves_newer_publication_then_real_revocation_re
         )
         assert (await runtime.receiver.install(refreshed, refresh=True)).status == "current"
         latest = await runtime.workspace("ws_cloud_stable")
+        latest_publication = runtime.views.publication("ws_cloud_stable")
         assert latest.environment["CODEX_API_KEY"] == key.decode()
         assert (path / "openai.api-key").read_bytes() == key
-        if termination == "cancelled":
+        if termination != "superseded":
             old_task.cancel()
+            release.set()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(old_task, 5)
         else:
@@ -385,6 +426,7 @@ async def test_older_cleanup_preserves_newer_publication_then_real_revocation_re
         assert current.environment["CODEX_API_KEY"] == key.decode()
         assert path.exists(), "An older request must not retract a newer authorized publication"
         assert (path / "openai.api-key").read_bytes() == key
+        assert runtime.views.publication("ws_cloud_stable").token == latest_publication.token
         assert other.is_dir()
 
         await runtime.receiver.revoke(

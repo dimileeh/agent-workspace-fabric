@@ -139,13 +139,16 @@ async def test_authorized_cancel_preserves_primary_timeout_and_cleanup_failure(
     assert caught.value is cancellation
     assert caught.value.command_reason_code == "AGENT_TIMEOUT"
     scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
-    authority.retract.assert_awaited_once_with("ws_exact")
+    authority.retract_publication.assert_awaited_once_with(
+        "ws_exact", authority.publication.return_value
+    )
 
     scope.stop_workspace.side_effect = OSError("synthetic cleanup failure")
     with pytest.raises(OSError, match="synthetic cleanup failure"):
         async with scope.scope("ws_exact"):
             raise asyncio.CancelledError()
-    assert authority.retract.await_count == 2
+    authority.retract.assert_awaited_once_with("ws_exact")
+    assert authority.retract.await_args.kwargs == {}
 
 
 async def test_agent_git_trust_is_only_the_managed_container_checkout(tmp_path, monkeypatch):

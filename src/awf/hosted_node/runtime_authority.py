@@ -19,7 +19,7 @@ from awf.hosted_node.models import Grant, Receipt
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.resolver import ProtectedResolver
 from awf.hosted_node.runtime_schemas import POLICY_KEY, HostedWorkspace
-from awf.hosted_node.runtime_views import RuntimeViews
+from awf.hosted_node.runtime_views import PublishedView, RuntimeViews
 from awf.hosted_node.schemas import Binding
 from awf.node.compose_manager import AuthMount
 from awf.node.secret_mounts import LocalSecretLeaseResolution
@@ -82,6 +82,9 @@ class WorkspaceAuthority:
         association, agent = await self.association(workspace_id)
         return await self.materials(association, agent, current=True, publish_view=True)
 
+    async def publication(self, workspace_id: str) -> PublishedView | None:
+        return await asyncio.to_thread(self.views.publication, workspace_id)
+
     async def association(self, workspace_id: str) -> tuple[HostedWorkspace, str]:
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
@@ -131,13 +134,35 @@ class WorkspaceAuthority:
             association, agent = await self.association(workspace_id)
             # Checkout can publish before Compose placement. Sweep every owned
             # association, but never create a readable view just by polling.
-            path = self.receiver.store.root / self.views._key(workspace_id) / "view"
-            published = await asyncio.to_thread(path.exists)
-            await self.materials(association, agent, current=True, publish_view=published)
+            publication = await self.publication(workspace_id)
+            await self.materials(
+                association,
+                agent,
+                current=True,
+                publish_view=publication is not None,
+                refresh_publication=publication,
+            )
         return True
 
-    async def retract(self, workspace_id: str) -> None:
-        await asyncio.to_thread(self.views.remove, workspace_id)
+    async def retract(self, workspace_id: str, *, preserve_directory: bool = False) -> None:
+        await asyncio.to_thread(
+            self.views.remove, workspace_id, preserve_directory=preserve_directory
+        )
+        await self._retract_previous(workspace_id)
+
+    async def retract_publication(
+        self, workspace_id: str, publication: PublishedView | None
+    ) -> None:
+        if publication is not None:
+            await asyncio.to_thread(
+                self.views.remove,
+                workspace_id,
+                publication=publication,
+                preserve_directory=True,
+            )
+        await self._retract_previous(workspace_id)
+
+    async def _retract_previous(self, workspace_id: str) -> None:
         # A restarted owner can encounter a retained stack with its previous
         # boot's readable view. Only that row's exact older binding is removable.
         await self.receiver.identity_status()
@@ -251,6 +276,7 @@ class WorkspaceAuthority:
         *,
         current: bool,
         publish_view: bool = False,
+        refresh_publication: PublishedView | None = None,
     ) -> AuthorizedMaterials:
         await self.admission()
         pair = AGENT_TARGETS.get(agent)
@@ -308,15 +334,17 @@ class WorkspaceAuthority:
         expires_at = min(value.expires_at for value in bindings.values())
         if expires_at <= datetime.now(UTC):
             raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
+
         # Admission precedes durable create/replay checks and may still fail.
         # Only a consumer loaded from the persisted association owns this view.
-        publication = (
-            asyncio.create_task(
-                asyncio.to_thread(self.views.publish, association.workspace_id, files)
-            )
-            if publish_view
-            else None
-        )
+        async def publish() -> PublishedView | None:
+            if refresh_publication is not None:
+                return await asyncio.to_thread(
+                    self.views.refresh, association.workspace_id, files, refresh_publication
+                )
+            return await asyncio.to_thread(self.views.publish, association.workspace_id, files)
+
+        publication = asyncio.create_task(publish()) if publish_view else None
         try:
             if publication is not None:
                 await asyncio.shield(publication)
@@ -330,17 +358,22 @@ class WorkspaceAuthority:
                     raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
             if expires_at <= datetime.now(UTC):
                 raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
-        except BaseException:
+        except BaseException as error:
             if publication is None:
                 raise
+            cancelled = isinstance(error, asyncio.CancelledError)
 
             # A cancelled to_thread await does not stop its writer. Finish that
             # exact publication and retract only if it is still the current view.
             async def retract() -> None:
                 published = await publication
-                await asyncio.to_thread(
-                    self.views.remove, association.workspace_id, publication=published
-                )
+                if published is not None:
+                    await asyncio.to_thread(
+                        self.views.remove,
+                        association.workspace_id,
+                        publication=published,
+                        preserve_directory=cancelled and published.retained_directory,
+                    )
 
             cleanup = asyncio.create_task(retract())
             while not cleanup.done():

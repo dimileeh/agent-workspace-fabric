@@ -5,7 +5,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+
+_environment: ContextVar[dict[str, str] | None] = ContextVar(
+    "runtime_inspection_environment", default=None
+)
+
+
+@contextlib.contextmanager
+def inspection_environment(environment: Mapping[str, str]) -> Iterator[None]:
+    """Bind nested probes to a trusted execution endpoint for this task only."""
+    token = _environment.set(dict(environment))
+    try:
+        yield
+    finally:
+        _environment.reset(token)
 
 
 @dataclass(frozen=True)
@@ -34,7 +50,16 @@ class RuntimeSnapshot:
 class RuntimeInspector:
     """Inspect compose-managed workspace containers through the Docker CLI."""
 
+    def __init__(self, *, environment: Mapping[str, str] | None = None):
+        self.environment = None if environment is None else dict(environment)
+
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        if self.environment is not None:
+            with inspection_environment(self.environment):
+                return await self._inspect(compose_project_name)
+        return await self._inspect(compose_project_name)
+
+    async def _inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
         if not compose_project_name:
             return RuntimeSnapshot(stack_state="unknown", reason="workspace has no compose project")
         ps = await _run(
@@ -134,11 +159,13 @@ class _ProcessResult:
 
 
 async def _run(args: list[str]) -> _ProcessResult:
+    environment = _environment.get()
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=environment,
         )
     except FileNotFoundError as exc:
         return _ProcessResult(

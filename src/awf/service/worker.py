@@ -122,6 +122,7 @@ class _HostedConsumerOptions(TypedDict, total=False):
 class _HostedWorkerOptions(TypedDict, total=False):
     admission_check: Callable[[], Awaitable[bool]]
     workspace_scope: WorkspaceScope
+    runtime_inspector: RuntimeInspector
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,7 @@ def build_worker_runtime(
             info={**session_factory.kw["info"], SESSION_KEY: hosted.authority}
         )
         settings = replace(settings, node_id=hosted.authority.receiver.identity.owner)
+        hosted.base_environment["DOCKER_HOST"] = settings.docker_host
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
     gitconfig_source_socket = (
@@ -458,6 +460,7 @@ def build_worker_runtime(
         worker_options = {
             "admission_check": hosted.admission_check,
             "workspace_scope": hosted.scope,
+            "runtime_inspector": RuntimeInspector(environment=hosted.base_environment),
         }
     stack_launcher = ComposeStackLauncher(
         compose=compose,
@@ -615,7 +618,9 @@ def build_worker_runtime(
         executor=executor,
         cleaner=runtime_cleaner,
         validation_runner=validation,
-        runtime_inspector=RuntimeInspector(),
+        runtime_inspector=RuntimeInspector(
+            environment=hosted.base_environment if hosted is not None else None
+        ),
     )
     orphan_dir_teardown = build_default_compose_teardown(compose)
     classified_orphan_teardown = build_orphan_compose_teardown(compose)

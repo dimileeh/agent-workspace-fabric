@@ -3,8 +3,9 @@
 import hashlib
 import os
 import stat
-from collections.abc import Collection
-from contextlib import suppress
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -24,6 +25,38 @@ _PUBLICATION = "publication"
 class PublishedView:
     path: Path
     token: str
+    retained_directory: bool = False
+
+
+@dataclass
+class PublicationOwnership:
+    views: "RuntimeViews"
+    workspace_id: str
+    publication: PublishedView | None = None
+    closing: bool = False
+
+
+_publication_ownership: ContextVar[PublicationOwnership | None] = ContextVar(
+    "hosted_publication_ownership", default=None
+)
+
+
+def owned_publication(views: "RuntimeViews", workspace_id: str) -> PublicationOwnership | None:
+    value = _publication_ownership.get()
+    return (
+        value
+        if value is not None and value.views is views and value.workspace_id == workspace_id
+        else None
+    )
+
+
+@contextmanager
+def track_publications(views: "RuntimeViews", workspace_id: str) -> Iterator[None]:
+    token = _publication_ownership.set(PublicationOwnership(views, workspace_id))
+    try:
+        yield
+    finally:
+        _publication_ownership.reset(token)
 
 
 class RuntimeViews:
@@ -119,15 +152,53 @@ class RuntimeViews:
         finally:
             os.close(fd)
 
-    def publish(self, workspace_id: str, files: dict[str, bytes]) -> PublishedView:
+    def publish(self, workspace_id: str, files: dict[str, bytes]) -> PublishedView | None:
+        return self._publish(workspace_id, files)
+
+    def publication(self, workspace_id: str) -> PublishedView | None:
+        key = self._key(workspace_id)
+        with suppress(FileNotFoundError), self.store._directory(key, _SLOT) as parent:
+            token = self._publication(parent)
+            if token is not None:
+                return PublishedView(self.store.root / key / "view", token)
+        return None
+
+    def refresh(
+        self, workspace_id: str, files: dict[str, bytes], publication: PublishedView
+    ) -> PublishedView | None:
+        return self._publish(workspace_id, files, publication=publication)
+
+    def _publish(
+        self,
+        workspace_id: str,
+        files: dict[str, bytes],
+        *,
+        publication: PublishedView | None = None,
+    ) -> PublishedView | None:
         if not (set(files) <= _FILES and len(files) == 2 and "github.api-key" in files):
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
         if any(not 1 <= len(value) <= 65536 for value in files.values()):
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW_MATERIAL")
         key = self._key(workspace_id)
+        if publication is not None and publication.path != self.store.root / key / "view":
+            raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
         token = uuid4().hex
         failure: BaseException | None = None
+        result: PublishedView | None = None
         with self.store._directory(key, _SLOT, create=True, remove_empty=True) as parent:
+            ownership = owned_publication(self, workspace_id)
+            if ownership is not None and ownership.closing:
+                # A queued writer may reach this lock only after scope closure.
+                # It may refresh its own publication, never adopt a successor.
+                if ownership.publication is None or (
+                    publication is not None and publication != ownership.publication
+                ):
+                    return None
+                publication = ownership.publication
+            # A retained sweep must not resurrect a cleared view or replace a
+            # consumer's newer publication after its authority reads yielded.
+            if publication is not None and self._publication(parent) != publication.token:
+                return None
             try:
                 os.mkdir("view", mode=0o700, dir_fd=parent)
                 new = True
@@ -174,11 +245,19 @@ class RuntimeViews:
                     failure = error
             finally:
                 os.close(directory)
+            if failure is None:
+                result = PublishedView(
+                    self.store.root / key / "view", token, retained_directory=not new
+                )
+                if ownership is not None:
+                    # Record actual write order, not to_thread completion order.
+                    ownership.publication = result
         if failure is not None:
             raise failure
-        return PublishedView(self.store.root / key / "view", token)
+        assert result is not None
+        return result
 
-    def _remove_view(self, parent: int) -> None:
+    def _remove_view(self, parent: int, *, preserve_directory: bool = False) -> None:
         directory = os.open("view", _DIRECTORY, dir_fd=parent)
         try:
             self._view_directory(directory)
@@ -187,11 +266,18 @@ class RuntimeViews:
                 os.unlink(name, dir_fd=directory)
         finally:
             os.close(directory)
-        os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
+        if not preserve_directory:
+            os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
         with suppress(FileNotFoundError):
             os.unlink(_PUBLICATION, dir_fd=parent)
 
-    def remove(self, workspace_id: str, *, publication: PublishedView | None = None) -> None:
+    def remove(
+        self,
+        workspace_id: str,
+        *,
+        publication: PublishedView | None = None,
+        preserve_directory: bool = False,
+    ) -> None:
         key = self._key(workspace_id)
         if publication is not None and publication.path != self.store.root / key / "view":
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
@@ -201,4 +287,4 @@ class RuntimeViews:
         ):
             if publication is not None and self._publication(parent) != publication.token:
                 return
-            self._remove_view(parent)
+            self._remove_view(parent, preserve_directory=preserve_directory)

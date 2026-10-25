@@ -174,6 +174,7 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                     # monitor recovery, without opting into a different backend.
                     (work / "compose/ws_cloud_stable/compose.yml").unlink()
                 calls_before_stop = list(agent_calls)
+                inode_before_stop = view.stat().st_ino
                 async with factory() as session:
                     row = await session.get(Workspace, "ws_cloud_stable")
                     expected = "running" if phase == "execute" else "monitoring_pr"
@@ -188,7 +189,13 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                 else:
                     await deny_agent(runtime, payload, failure, monkeypatch)
                 await built.worker.wait_for_execution_tasks()
-            assert cancelled.is_set() and not view.exists()
+            assert cancelled.is_set()
+            if failure == "authorized_cancel":
+                assert view.stat().st_ino == inode_before_stop
+                assert not list(view.iterdir())
+                assert runtime.views.publication("ws_cloud_stable") is None
+            else:
+                assert not view.exists()
             if phase != "resumed_monitor" and failure != "authorized_cancel":
                 assert any("down" in args for args in docker_calls)
             release.set()
