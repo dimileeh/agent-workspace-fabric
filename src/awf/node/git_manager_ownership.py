@@ -222,6 +222,23 @@ def git_env_for_trusted_base_materialization(
     return env
 
 
+def git_env_with_trusted_base_overrides(
+    scoped_env: Mapping[str, str],
+    requested_env: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Merge only canonical trusted-base controls into a fresh scoped Git env."""
+    env = dict(scoped_env)
+    if requested_env is not None:
+        # Keep scoped credentials; only the trusted helper's fixed
+        # hardening values may override the execution environment.
+        env.update(
+            (key, value)
+            for key, value in git_env_for_trusted_base_materialization({}).items()
+            if requested_env.get(key) == value
+        )
+    return env
+
+
 # Explicit ``-c`` overrides paired with :func:`git_env_for_trusted_base_materialization`.
 # ``core.attributesFile=/dev/null`` only clears the *external* attributes file; it does
 # **not** disable committed ``.gitattributes``. Trusted-base materialization therefore
