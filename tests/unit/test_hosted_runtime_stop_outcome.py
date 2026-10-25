@@ -49,9 +49,10 @@ async def settings_for(factory, tmp_path):
     )
 
 
-@pytest.mark.parametrize("failure", ["revoke", "expiry"])
+@pytest.mark.parametrize("failure", ["revoke", "expiry", "authorized_cancel"])
+@pytest.mark.parametrize("phase", ["execute", "monitor", "resumed_monitor"])
 async def test_actual_worker_authority_loss_persists_failed_without_replay(
-    authority, origin_repo, tmp_path, monkeypatch, failure
+    authority, origin_repo, tmp_path, monkeypatch, failure, phase
 ):
     runtime, payload, factory = authority
     settings = await settings_for(factory, tmp_path)
@@ -80,10 +81,23 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
     )
     real = AsyncioSubprocessRunner()
 
+    async def held_consumer():
+        entered.set()
+        try:
+            await asyncio.wait_for(release.wait(), 20)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        pytest.fail("held external consumer must not return")
+
     class Effects:
         async def run(self, args, **kwargs):
             if args[0] == "git":
                 return await real.run(args, **kwargs)
+            if args[:3] == ["gh", "pr", "create"] and phase != "execute":
+                return CommandResult(0, "https://github.com/example/repo/pull/42\n", "")
+            if args[:3] == ["gh", "api", "graphql"] and phase != "execute":
+                await held_consumer()
             assert args[0] == "docker", "revoked work must never reach forge"
             return CommandResult(0, "[]" if "ps" in args or "inspect" in args else "", "")
 
@@ -97,13 +111,12 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                 assert kwargs["env"]["GH_TOKEN"] == "synthetic-github-key"
                 assert view.is_dir()
                 agent_calls.append("entered")
-                entered.set()
-                try:
-                    await asyncio.wait_for(release.wait(), 20)
-                except asyncio.CancelledError:
-                    cancelled.set()
-                    raise
-                pytest.fail("revoked external agent must not return")
+                if phase == "execute":
+                    await held_consumer()
+                else:
+                    (work / "git/worktrees/ws_cloud_stable/implemented.txt").write_text(
+                        "synthetic implemented change\n"
+                    )
             return CommandResult(0, "", "")
 
     monkeypatch.setattr(worker, "AsyncioSubprocessRunner", Effects)
@@ -127,17 +140,76 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/v1/workspaces", json=payload, headers=headers)
             assert response.status_code == 202, response.text
-            async with asyncio.timeout(30):
+
+            async def enter_consumer():
                 await built.worker.run_once()
-                await entered.wait()
+                waiter = asyncio.create_task(entered.wait())
+                try:
+                    tasks = list(built.worker._execution_tasks.values())
+                    if tasks:
+                        await asyncio.wait([waiter, *tasks], return_when=asyncio.FIRST_COMPLETED)
+                    async with factory() as session:
+                        observed = await session.get(Workspace, "ws_cloud_stable")
+                        assert entered.is_set(), (
+                            observed.status,
+                            observed.failure_reason,
+                            observed.failure_message,
+                        )
+                finally:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+
+            async with asyncio.timeout(30):
+                await enter_consumer()
+                if phase == "resumed_monitor":
+                    built.worker._execution_tasks["ws_cloud_stable"].cancel()
+                    await built.worker.wait_for_execution_tasks()
+                    async with factory() as session:
+                        row = await session.get(Workspace, "ws_cloud_stable")
+                        assert row.status == "monitoring_pr" and row.failure_reason is None
+                    entered.clear()
+                    cancelled.clear()
+                    await enter_consumer()
+                    # Exercise the no-Compose cleanup path after actual ordinary
+                    # monitor recovery, without opting into a different backend.
+                    (work / "compose/ws_cloud_stable/compose.yml").unlink()
+                calls_before_stop = list(agent_calls)
                 async with factory() as session:
                     row = await session.get(Workspace, "ws_cloud_stable")
-                    assert row.status == "running" and row.execution_claimed_by is not None
-                await deny_agent(runtime, payload, failure, monkeypatch)
+                    expected = "running" if phase == "execute" else "monitoring_pr"
+                    assert row.status == expected
+                    if phase == "resumed_monitor":
+                        assert row.monitor_claimed_by is not None
+                        assert not (work / "compose/ws_cloud_stable/compose.yml").exists()
+                    else:
+                        assert row.execution_claimed_by is not None
+                if failure == "authorized_cancel":
+                    built.worker._execution_tasks["ws_cloud_stable"].cancel()
+                else:
+                    await deny_agent(runtime, payload, failure, monkeypatch)
                 await built.worker.wait_for_execution_tasks()
             assert cancelled.is_set() and not view.exists()
-            assert any("down" in args for args in docker_calls)
+            if phase != "resumed_monitor":
+                assert any("down" in args for args in docker_calls)
             release.set()
+            if failure == "authorized_cancel":
+                async with factory() as session:
+                    row = await session.get(Workspace, "ws_cloud_stable")
+                    assert row.status == expected, (row.status, row.failure_reason)
+                    assert row.failure_reason is None
+                    assert row.execution_claimed_by is None
+                    assert row.monitor_claimed_by is None
+                    assert not list(
+                        await session.scalars(
+                            select(WorkspaceEvent).where(
+                                WorkspaceEvent.workspace_id == row.id,
+                                WorkspaceEvent.reason_code == "HOSTED_RUNTIME_STOPPED",
+                            )
+                        )
+                    )
+                assert agent_calls == calls_before_stop
+                assert agent_calls
+                return
             for _ in range(2):
                 await built.worker.run_once()
                 await built.worker.wait_for_execution_tasks()
@@ -146,7 +218,7 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                 assert row.status == "failed", (row.status, row.failure_reason)
                 assert row.failure_reason == "infrastructure_failure"
                 assert row.execution_claimed_by is None
-                assert row.pr_url is None and row.pr_number is None
+                assert row.pr_number == (None if phase == "execute" else 42)
                 attempt = await session.scalar(
                     select(TaskAttempt).where(TaskAttempt.workspace_id == row.id)
                 )
@@ -165,7 +237,8 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                 headers={**headers, "Authorization": "Bearer synthetic-operator"},
             )
             assert status.status_code == 200 and status.json()["status"] == "failed"
-            assert agent_calls == ["entered"]
+            assert agent_calls == calls_before_stop
+            assert agent_calls
     finally:
         for task in built.worker._execution_tasks.values():
             if not task.done():
@@ -219,7 +292,10 @@ async def test_confirmed_stop_transitions_only_nonterminal_owned_rows(
     "change",
     ["node", "claim", "epoch", "monitor", "binding", "version", "status", "boot", "missing"],
 )
-async def test_stop_does_not_transition_a_successor_after_teardown(authority, stop_worker, change):
+@pytest.mark.parametrize("authority_lost", [True, False])
+async def test_stop_does_not_transition_a_successor_after_teardown(
+    authority, stop_worker, change, authority_lost
+):
     runtime, payload, factory = authority
     await retained(runtime, payload, factory, "ws_cloud_stable", status="running")
     scope, teardown = stop_worker
@@ -258,9 +334,9 @@ async def test_stop_does_not_transition_a_successor_after_teardown(authority, st
     try:
         if change == "boot":
             with pytest.raises(MaterialDeniedError):
-                await scope.stop_workspace("ws_cloud_stable")
+                await scope.stop_workspace("ws_cloud_stable", authority_lost=authority_lost)
         else:
-            await scope.stop_workspace("ws_cloud_stable")
+            await scope.stop_workspace("ws_cloud_stable", authority_lost=authority_lost)
         async with factory() as session:
             row = await session.get(Workspace, "ws_cloud_stable")
             if change == "missing":
@@ -306,13 +382,16 @@ async def test_stop_preserves_existing_primary_timeout_causality(authority, stop
         assert events[-1].payload["secondary_failure"]["reason_code"] == "HOSTED_RUNTIME_STOPPED"
 
 
-async def test_failed_teardown_never_claims_a_durable_stopped_outcome(authority, stop_worker):
+@pytest.mark.parametrize("authority_lost", [True, False])
+async def test_failed_teardown_never_claims_a_durable_stopped_outcome(
+    authority, stop_worker, authority_lost
+):
     runtime, payload, factory = authority
     await retained(runtime, payload, factory, "ws_cloud_stable", status="running")
     scope, teardown = stop_worker
     teardown.return_value = ComposeTeardownResult(status="failed", reason_code="synthetic")
     with pytest.raises(MaterialDeniedError, match="HOSTED_RUNTIME_STOP_FAILED"):
-        await scope.stop_workspace("ws_cloud_stable")
+        await scope.stop_workspace("ws_cloud_stable", authority_lost=authority_lost)
     async with factory() as session:
         row = await session.get(Workspace, "ws_cloud_stable")
         assert row.status == "running" and row.failure_reason is None

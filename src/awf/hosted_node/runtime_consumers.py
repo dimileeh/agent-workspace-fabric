@@ -3,11 +3,12 @@
 import asyncio
 import inspect
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -32,8 +33,12 @@ _log = get_logger(__name__)
 _TIMEOUT_REASONS = (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON)
 
 
-async def _no_stop(_workspace_id: str) -> None:
-    return None
+class _StopWorkspace(Protocol):
+    def __call__(self, workspace_id: str, *, authority_lost: bool = True) -> Awaitable[None]: ...
+
+
+async def _no_stop(workspace_id: str, *, authority_lost: bool = True) -> None:
+    del workspace_id, authority_lost
 
 
 class WorkspaceConsumers:
@@ -41,7 +46,7 @@ class WorkspaceConsumers:
         self.authority = authority
         self.work_dir = work_dir
         self.workspace_id: ContextVar[str | None] = ContextVar("hosted_workspace", default=None)
-        self.stop_workspace: Callable[[str], Awaitable[None]] = _no_stop
+        self.stop_workspace: _StopWorkspace = _no_stop
         self.poll_seconds = 2.0
         self._retained_cursor = ""
         self._history_cursor = ""
@@ -129,17 +134,20 @@ class WorkspaceConsumers:
                 if failure is None or isinstance(failure, MaterialDeniedError):
                     failure = error
             if failure is not None or cancelled:
-                await self._stop(workspace_id)
+                await self._stop(workspace_id, authority_lost=failure is not None)
             if failure is not None and not caller_cancelled:
                 if isinstance(failure, MaterialDeniedError):
                     raise WorkspaceScopeDeniedError(failure.reason, failure.status) from failure
                 raise failure
 
-    async def _stop(self, workspace_id: str) -> None:
+    async def _stop(self, workspace_id: str, *, authority_lost: bool = True) -> None:
         token = self.workspace_id.set(None)
         try:
             try:
-                await self.stop_workspace(workspace_id)
+                if authority_lost:
+                    await self.stop_workspace(workspace_id)
+                else:
+                    await self.stop_workspace(workspace_id, authority_lost=False)
             finally:
                 await self.authority.retract(workspace_id)
         finally:
@@ -303,6 +311,18 @@ class HostedCommandRunner:
             for key, value in env.items():
                 if key not in scoped and key in {"COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "TERM"}:
                     scoped[key] = value
+            # Core's object/provenance probes must ignore poisoned replace refs,
+            # grafts and system attributes/config. Only their fixed safe values
+            # survive; this is not a general Git environment passthrough.
+            if args[:1] == ["git"]:
+                for key, value in {
+                    "GIT_NO_REPLACE_OBJECTS": "1",
+                    "GIT_GRAFT_FILE": os.devnull,
+                    "GIT_ATTR_NOSYSTEM": "1",
+                    "GIT_CONFIG_SYSTEM": os.devnull,
+                }.items():
+                    if env.get(key) == value:
+                        scoped[key] = value
         command = list(args)
         if command[:2] == ["docker", "compose"] and "exec" in command:
             index = command.index("exec") + 1

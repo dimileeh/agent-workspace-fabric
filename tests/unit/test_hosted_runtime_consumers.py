@@ -107,7 +107,45 @@ async def test_worker_shutdown_cancels_only_its_scoped_runtime(tmp_path, monkeyp
     with pytest.raises(asyncio.CancelledError):
         async with scope.scope("ws_exact"):
             raise asyncio.CancelledError()
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
+
+
+@pytest.mark.parametrize(
+    "error", [MaterialDeniedError("GRANT_REVOKED"), OSError("offline"), TimeoutError()]
+)
+async def test_caller_cancellation_with_final_authority_failure_is_not_graceful(
+    tmp_path, monkeypatch, error
+):
+    scope, authority = consumers(tmp_path, monkeypatch)
+    scope.stop_workspace = AsyncMock()
+    with pytest.raises(asyncio.CancelledError):
+        async with scope.scope("ws_exact"):
+            authority.workspace.side_effect = error
+            raise asyncio.CancelledError()
     scope.stop_workspace.assert_awaited_once_with("ws_exact")
+    authority.retract.assert_awaited_once_with("ws_exact")
+
+
+async def test_authorized_cancel_preserves_primary_timeout_and_cleanup_failure(
+    tmp_path, monkeypatch
+):
+    scope, authority = consumers(tmp_path, monkeypatch)
+    scope.stop_workspace = AsyncMock()
+    cancellation = asyncio.CancelledError()
+    cancellation.command_reason_code = "AGENT_TIMEOUT"
+    with pytest.raises(asyncio.CancelledError) as caught:
+        async with scope.scope("ws_exact"):
+            raise cancellation
+    assert caught.value is cancellation
+    assert caught.value.command_reason_code == "AGENT_TIMEOUT"
+    scope.stop_workspace.assert_awaited_once_with("ws_exact", authority_lost=False)
+    authority.retract.assert_awaited_once_with("ws_exact")
+
+    scope.stop_workspace.side_effect = OSError("synthetic cleanup failure")
+    with pytest.raises(OSError, match="synthetic cleanup failure"):
+        async with scope.scope("ws_exact"):
+            raise asyncio.CancelledError()
+    assert authority.retract.await_count == 2
 
 
 async def test_agent_git_trust_is_only_the_managed_container_checkout(tmp_path, monkeypatch):

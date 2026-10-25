@@ -889,7 +889,7 @@ def build_worker_runtime(
     )
     if hosted is not None:
 
-        async def stop_workspace(workspace_id: str) -> None:
+        async def stop_workspace(workspace_id: str, *, authority_lost: bool = True) -> None:
             # Never stop a successor's workload after losing this boot identity.
             await hosted.authority.receiver.identity_status()
             async with session_factory() as session:
@@ -928,6 +928,10 @@ def build_worker_runtime(
                     return
                 status = WorkspaceStatus(current.status)
                 if WorkspaceStateMachine.is_callback_terminal(status):
+                    return
+                if not authority_lost:
+                    # A still-authorized cooperative shutdown keeps the normal
+                    # execution/monitor recovery state and claim-release path.
                     return
                 # No external I/O under the row lock. Preserve existing primary
                 # evidence and use the ordinary transition to update attempts,
