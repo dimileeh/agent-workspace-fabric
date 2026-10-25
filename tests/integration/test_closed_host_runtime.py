@@ -36,7 +36,9 @@ async def composed(runtime_database, monkeypatch):
         host=host,
     )
     identity = await boot(config, factory)
-    receiver = Receiver(config, factory, identity, Mock())
+    store_lock = threading.RLock()
+    store = Mock(_locked_root=Mock(side_effect=lambda: store_lock))
+    receiver = Receiver(config, factory, identity, store)
     state = {"linux": LinuxSnapshot(BOOT, 1, 2, 3, True), "containers": [], "approval": True}
     monkeypatch.setattr(LinuxObservation, "sample", lambda _: state["linux"])
     monkeypatch.setattr(
@@ -259,6 +261,9 @@ async def test_clean_shutdown_retains_successfully_recovered_predecessor(compose
     client, receiver, _, _ = composed
     assert (await ack(client)).status_code == 200
     await receiver.close()
+    assert receiver.views.closed
+    assert receiver.store._locked_root.call_count == 2
+    receiver.store.close.assert_called_once_with()
     await boot(receiver.config, receiver.factory)
     async with receiver.factory() as session:
         previous = await session.scalar(text("SELECT previous_identity FROM hosted_node_lifecycle"))

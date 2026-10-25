@@ -16,6 +16,10 @@ class MaterialDeniedError(ValueError):
         self.status = status
 
 
+class WorkspaceScopeDeniedError(MaterialDeniedError):
+    """A consumer was denied after its stop and credential retraction succeeded."""
+
+
 async def boot(config: HostedSettings, factory: async_sessionmaker[AsyncSession]) -> Identity:
     async with factory.begin() as session:
         inserted = await session.scalar(

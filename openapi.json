@@ -2942,6 +2942,26 @@
         "title": "HostedErrorResponse",
         "type": "object"
       },
+      "HostedWorkspace": {
+        "additionalProperties": false,
+        "properties": {
+          "credentials": {
+            "$ref": "#/components/schemas/RuntimeCredentials"
+          },
+          "workspace_id": {
+            "maxLength": 128,
+            "pattern": "^ws_[A-Za-z0-9_-]+$",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "credentials"
+        ],
+        "title": "HostedWorkspace",
+        "type": "object"
+      },
       "HttpExceptionErrorResponse": {
         "description": "FastAPI HTTPException envelope carrying AWF's structured error detail.",
         "properties": {
@@ -3201,7 +3221,6 @@
             "type": "boolean"
           },
           "runtime_ready": {
-            "const": false,
             "default": false,
             "title": "Runtime Ready",
             "type": "boolean"
@@ -7293,6 +7312,23 @@
         "title": "RootCauseClusterResponse",
         "type": "object"
       },
+      "RuntimeCredentials": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/Binding"
+          },
+          "github": {
+            "$ref": "#/components/schemas/Binding"
+          }
+        },
+        "required": [
+          "agent",
+          "github"
+        ],
+        "title": "RuntimeCredentials",
+        "type": "object"
+      },
       "RuntimeHealthSummaryResponse": {
         "properties": {
           "fail_candidate_count": {
@@ -10173,6 +10209,16 @@
             "maxItems": 16,
             "title": "Companions",
             "type": "array"
+          },
+          "hosted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedWorkspace"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "preflight": {
             "$ref": "#/components/schemas/WorkspaceLaunchPreflight"

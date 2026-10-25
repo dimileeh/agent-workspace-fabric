@@ -36,6 +36,13 @@ class DockerObservation:
             return json.loads(body)
 
     async def quiescent(self, owner: str) -> bool:
+        return await self._observe(owner, allow_workloads=False)
+
+    async def healthy(self, owner: str) -> bool:
+        """Verify retained Docker/control health without claiming workloads idle."""
+        return await self._observe(owner, allow_workloads=True)
+
+    async def _observe(self, owner: str, *, allow_workloads: bool) -> bool:
         try:
             async with asyncio.timeout(3):
                 info = await self._get("info")
@@ -45,15 +52,21 @@ class DockerObservation:
                 ):
                     return False
                 rows = await self._get("containers/json", all_containers=True)
-                if not isinstance(rows, list) or len(rows) > len(self.config.allowed_containers):
+                if not isinstance(rows, list) or len(rows) > (
+                    1024 if allow_workloads else len(self.config.allowed_containers)
+                ):
                     return False
                 allowed = {item.id: item for item in self.config.allowed_containers}
                 seen: set[str] = set()
                 for row in rows:
                     cid = row["Id"]
-                    if cid not in allowed or cid in seen:
+                    if cid in seen:
                         return False
                     seen.add(cid)
+                    if cid not in allowed:
+                        if allow_workloads:
+                            continue
+                        return False
                     item = await self._get(f"containers/{cid}/json")
                     state, labels = item["State"], item["Config"]["Labels"]
                     if (
@@ -74,6 +87,7 @@ class DockerObservation:
                     isinstance(again, list)
                     and len(again) == len(seen)
                     and {row["Id"] for row in again} == seen
+                    and (not allow_workloads or set(allowed).issubset(seen))
                 )
         except (httpx.HTTPError, OSError, TimeoutError, ValueError, KeyError, TypeError):
             return False

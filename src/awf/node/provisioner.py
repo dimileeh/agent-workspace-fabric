@@ -34,6 +34,7 @@ from awf.common.companions import companion_branch_name, companion_worktree_id
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import pr_adoption_is_hosted
+from awf.common.workspace_scope import WorkspaceScope, workspace_consumer
 from awf.db.enums import (
     EgressDecision,
     FailureReason,
@@ -170,6 +171,7 @@ class Provisioner(
         service_diagnostics: ServiceStartupDiagnosticsCapturer | None = None,
         before_provision: Callable[[], Awaitable[None]] | None = None,
         after_provision: Callable[[], Awaitable[None]] | None = None,
+        workspace_scope: WorkspaceScope | None = None,
     ) -> None:
         """Wire database, git, and optional stack-launch dependencies."""
         self._session_factory = session_factory
@@ -178,7 +180,9 @@ class Provisioner(
         self._stack_launcher = stack_launcher
         self._service_diagnostics = service_diagnostics
         self._before_provision, self._after_provision = before_provision, after_provision
+        self._workspace_scope = workspace_scope
 
+    @workspace_consumer
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
 
@@ -193,6 +197,7 @@ class Provisioner(
 
         await self._run_claimed_provision(workspace_id, ws)
 
+    @workspace_consumer
     async def provision_claimed(
         self, workspace_id: str, execution_claim_epoch: int | None = None
     ) -> None:
@@ -223,6 +228,7 @@ class Provisioner(
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
         return self._git.get_worktree_path(workspace_id)
 
+    @workspace_consumer
     async def ensure_hosted_monitor_worktree(self, workspace_id: str) -> WorktreeLayout:
         """Restore the managed checkout for a hosted ``monitoring_pr`` resume.
 

@@ -44,12 +44,14 @@ before starting applications; metadata `create_all` is not production setup.
 
 ## Trusted Composition
 
-`Receiver.lifecycle` is a `NodeLifecycle` when configured. Its two asynchronous
-callbacks default to **no evidence** and have a five-second await bound:
+`Receiver.lifecycle` is a `NodeLifecycle` when configured. Its asynchronous
+host-evidence callbacks default to **no evidence** (`None`), and each invocation
+has a five-second await bound:
 
 ```python
 receiver.lifecycle.verify_recovery = verified_receipt_lookup
 receiver.lifecycle.observe_host = trusted_host_observation
+receiver.lifecycle.observe_boot = trusted_boot_observation
 ```
 
 `verify_recovery(identity, previous_identity, receipt_ref)` returns
@@ -67,10 +69,25 @@ acceptance alone is not this proof.
 quiescent, retained_state_verified)`. It must inspect real node/runtime health,
 retained mounts/database identity, processes/containers, and maintenance,
 checkpoint, upgrade and recovery activity not represented by the database.
-Neither method accepts evidence booleans from an HTTP caller. Receipt references
-are opaque lookup keys, not retained claims or authorization in themselves.
-Evidence must match exactly and expire within 60 seconds. Exceptions/timeouts
+Receipt references are opaque lookup keys, not retained claims or authorization
+in themselves.
+
+`observe_boot(identity)` returns `HostBootObservation(identity, kernel_boot_id,
+disk_ref, database_ref, expires_at)` or `None`. The observation supplies the
+actual kernel boot ID and retained disk/database associations for that exact
+identity. Before returning `/boot/evidence`, Core requires those associations
+to match the locked lifecycle row, a quiescent database, phase `recovering` or
+`ready`, and no drain generation. Missing or invalid observation fails closed
+with 503 `BOOT_EVIDENCE_UNAVAILABLE`; boot evidence alone does not acknowledge
+recovery or authorize runtime execution.
+
+No evidence callback accepts caller-supplied evidence booleans. Evidence must
+match exactly and have a timezone-aware expiry strictly in the future and no
+more than 60 seconds ahead. The stock `HostRuntime.observe_boot` uses a
+four-second observation timeout and emits a 30-second expiry. Exceptions/timeouts
 produce no positive acknowledgement and never serialize exception text.
+Runtime readiness uses the separate `observe_runtime(identity)` callback,
+which also defaults to no evidence and does not replace `observe_boot`.
 
 When `AWF_HOSTED_NODE` includes trusted `host` settings, the stock FastAPI
 lifespan uses `start_hosted` to install `HostRuntime`'s `observe_host`,

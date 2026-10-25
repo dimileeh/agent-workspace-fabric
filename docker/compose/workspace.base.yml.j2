@@ -10,7 +10,8 @@ services:
   {% for s in services %}
   {{ s.name | tojson }}:
     container_name: {{ ("awf-" ~ workspace_id ~ "-" ~ s.name) | tojson }}
-    {% if s.image %}image: {{ s.image | tojson }}
+    {% if cgroup_parent %}cgroup_parent: {{ cgroup_parent | tojson }}
+    {% endif %}{% if s.image %}image: {{ s.image | tojson }}
     {% if s.local_image %}pull_policy: never
     {% endif %}{% elif s.build_context %}build:
       context: {{ s.build_context | tojson }}
@@ -44,12 +45,18 @@ services:
     {% endif %}networks:
       - awf_net
     restart: "no"
-
+{% if service_resources %}    deploy:
+      resources:
+        limits:
+          cpus: {{ service_resources.cpu_limit | tojson }}
+          memory: {{ service_resources.memory_limit | tojson }}
+{% endif %}
   {% endfor %}
   agent:
     image: {{ agent_runtime_image | tojson }}
     container_name: {{ ("awf-" ~ workspace_id ~ "-agent") | tojson }}
-    working_dir: /workspace
+    {% if cgroup_parent %}cgroup_parent: {{ cgroup_parent | tojson }}
+    {% endif %}working_dir: /workspace
     environment:
       WORKSPACE_ID: {{ workspace_id | tojson }}
       {% for k, v in agent_environment %}{{ k | tojson }}: {{ v | tojson }}

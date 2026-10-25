@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session, require_api_token
+from awf.api.deps import get_db_session, require_api_token, resolve_settings_dependency
 from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import (
     HttpExceptionErrorResponse,
@@ -17,6 +19,7 @@ from awf.api.schemas import (
     WorkspaceReasonWithLegacyRequestedTierRequest,
     WorkspaceReasonWithLegacyStopStackRequest,
 )
+from awf.common.config import Settings, get_settings
 from awf.service.controls import (
     ActiveWorkspaceDestroyError,
     IdempotencyConflictError,
@@ -61,9 +64,12 @@ async def cancel_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).cancel_workspace(
+        return await _controls(
+            session, settings=resolve_settings_dependency(settings)
+        ).cancel_workspace(
             workspace_id,
             reason=payload.reason,
             stop_stack=payload.stop_stack,
@@ -81,9 +87,12 @@ async def stop_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).stop_workspace(
+        return await _controls(
+            session, settings=resolve_settings_dependency(settings)
+        ).stop_workspace(
             workspace_id,
             reason=payload.reason,
             idempotency_key=_require_idempotency_key(idempotency_key),
@@ -244,9 +253,12 @@ async def destroy_workspace(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).destroy_workspace(
+        return await _controls(
+            session, settings=resolve_settings_dependency(settings)
+        ).destroy_workspace(
             workspace_id,
             force=force,
             remove_volumes=remove_volumes,
@@ -258,11 +270,17 @@ async def destroy_workspace(
         raise _http_error(exc) from exc
 
 
-def _controls(session: AsyncSession) -> WorkspaceControlService:
+def _controls(
+    session: AsyncSession, *, settings: Settings | None = None
+) -> WorkspaceControlService:
     return WorkspaceControlService(
         session,
         project_stopper=_stop_project,
-        cleaner_factory=_cleaner,
+        cleaner_factory=(
+            partial(default_cleaner, settings=settings)
+            if settings is not None and _cleaner is default_cleaner
+            else _cleaner
+        ),
     )
 
 

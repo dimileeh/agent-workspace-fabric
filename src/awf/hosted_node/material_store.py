@@ -55,10 +55,8 @@ class MaterialStore:
             raise
 
     @contextmanager
-    def _directory(
-        self, workspace: str, slot: str, *, create: bool = False, remove_empty: bool = False
-    ) -> Iterator[int]:
-        if self.closed or not _SLOT.fullmatch(workspace) or not _SLOT.fullmatch(slot):
+    def _locked_root(self) -> Iterator[int]:
+        if self.closed:
             raise MaterialDeniedError("INVALID_FILE_SLOT")
         root = self._open_root()
         try:
@@ -66,6 +64,19 @@ class MaterialStore:
             if (info.st_dev, info.st_ino) != self._device_inode:
                 raise MaterialDeniedError("ROOT_REPLACED")
             fcntl.flock(root, fcntl.LOCK_EX)
+            if self.closed:
+                raise MaterialDeniedError("INVALID_FILE_SLOT")
+            yield root
+        finally:
+            os.close(root)
+
+    @contextmanager
+    def _directory(
+        self, workspace: str, slot: str, *, create: bool = False, remove_empty: bool = False
+    ) -> Iterator[int]:
+        if not _SLOT.fullmatch(workspace) or not _SLOT.fullmatch(slot):
+            raise MaterialDeniedError("INVALID_FILE_SLOT")
+        with self._locked_root() as root:
             if create:
                 entries = os.listdir(root)  # noqa: PTH208 - descriptor-relative security boundary
                 if len(entries) >= 1024 and workspace not in entries:
@@ -89,8 +100,6 @@ class MaterialStore:
                     os.fsync(root)
             finally:
                 os.close(directory)
-        finally:
-            os.close(root)
 
     def install(self, workspace: str, slot: str, material: bytes) -> Path:
         if not 1 <= len(material) <= 65536:
@@ -123,6 +132,32 @@ class MaterialStore:
 
     def path(self, workspace: str, slot: str) -> Path:
         return self.root / workspace / (slot + ".material")
+
+    def read(self, workspace: str, slot: str) -> bytes:
+        """Read a verified private slot only for an authorized in-process consumer."""
+        with self._directory(workspace, slot) as directory:
+            fd = os.open(
+                slot + ".material",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            try:
+                info = os.fstat(fd)
+                if not (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_nlink == 1
+                    and info.st_uid == os.geteuid()
+                    and stat.S_IMODE(info.st_mode) == 0o400
+                    and 1 <= info.st_size <= 65536
+                ):
+                    raise MaterialDeniedError("INVALID_MATERIAL_SLOT")
+                with os.fdopen(os.dup(fd), "rb") as stream:
+                    value = stream.read(65537)
+                if len(value) != info.st_size:
+                    raise MaterialDeniedError("INVALID_MATERIAL_SLOT")
+                return value
+            finally:
+                os.close(fd)
 
     def exists(self, workspace: str, slot: str) -> bool:
         try:
@@ -157,4 +192,6 @@ class MaterialStore:
             pass
 
     def close(self) -> None:
-        self.closed = True
+        if not self.closed:
+            with self._locked_root():
+                self.closed = True

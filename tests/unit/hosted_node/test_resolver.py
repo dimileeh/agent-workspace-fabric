@@ -160,15 +160,24 @@ async def test_resolver_denies_unsupported_declarations(hosted, engine, change):
 
 
 @pytest.mark.parametrize("transition", ["missing", "expired", "restart", "refresh", "shutdown"])
-async def test_resolver_revalidates_receiver_transitions(hosted, engine, transition):
-    from datetime import UTC, datetime, timedelta
+async def test_resolver_revalidates_receiver_transitions(hosted, engine, transition, monkeypatch):
+    from datetime import UTC, datetime, timedelta, tzinfo
+    from typing import Self
 
     from awf.hosted_node.receiver import Receiver
 
     client, receiver, _ = hosted
     binding = await prepare(hosted)
+    clock_now = datetime.now(UTC)
     if transition == "expired":
-        binding["expires_at"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> Self:
+                return cls.fromtimestamp(clock_now.timestamp(), tz)
+
+        monkeypatch.setattr("awf.hosted_node.receiver.datetime", Clock)
+        binding["expires_at"] = (clock_now + timedelta(seconds=1)).isoformat()
     response = await client.post(
         "/v1/hosted-node/materials/install", json={**binding, "material": "YQ=="}
     )
@@ -202,7 +211,7 @@ async def test_resolver_revalidates_receiver_transitions(hosted, engine, transit
             for path in receiver.store.root.glob("*/*.material"):
                 path.unlink()
         elif transition == "expired":
-            await asyncio.sleep(1.05)
+            clock_now += timedelta(seconds=1.05)
         elif transition == "restart":
             successor = await Receiver.start(receiver.config, receiver.factory)
         elif transition == "shutdown":

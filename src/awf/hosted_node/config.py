@@ -9,6 +9,11 @@ from awf.hosted_node.lifecycle_schemas import LifecycleSettings
 from awf.hosted_node.schemas import Generation, LogicalOwner, Opaque, StrictModel
 
 
+class RuntimeCapacity(StrictModel):
+    cpu_headroom_cores: float = Field(gt=0, strict=True, allow_inf_nan=False)
+    memory_headroom_gb: float = Field(gt=0, strict=True, allow_inf_nan=False)
+
+
 class HostedSettings(StrictModel):
     owner: LogicalOwner
     incarnation: Opaque
@@ -17,9 +22,13 @@ class HostedSettings(StrictModel):
     material_root: Path
     lifecycle: LifecycleSettings | None = None
     host: HostSettings | None = None
+    runtime_enabled: bool = Field(default=False, strict=True)
+    runtime_capacity: RuntimeCapacity | None = None
 
     @model_validator(mode="after")
     def physical_identity(self) -> "HostedSettings":
+        if self.runtime_enabled and (self.host is None or self.lifecycle is None):
+            raise ValueError("RUNTIME_HOST_LIFECYCLE_REQUIRED")
         if self.host is not None and self.lifecycle is None:
             raise ValueError("HOST_LIFECYCLE_REQUIRED")
         if self.lifecycle is not None and (

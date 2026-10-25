@@ -6,6 +6,7 @@ Mechanically extracted from recovery_preserved.py; behavior is unchanged.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import (
     replace,
 )
@@ -72,6 +73,7 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
+from awf.hosted_node.identity import WorkspaceScopeDeniedError
 from awf.runtime.inspection import RuntimeSnapshot
 from awf.service.failure_causality import (
     attach_primary_failure,
@@ -315,17 +317,34 @@ async def _recover_preserved_active_execution(
         resolved_forge,
     ) = branch_recovery_context
     lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
-    branch_lookup = await self._resolve_preserved_active_branch_open_pr(
-        repo_url=repo_url,
-        branch_name=lookup_branch_name,
-        expected_head_repo_slug=expected_head_repo_slug,
-        # Honor the persisted/resolved forge so a bare-slug Bitbucket workspace
-        # fails fast instead of slipping into the GitHub-only resolver.
-        resolved_forge=resolved_forge,
-        # A preserved branch PR may have been retargeted after creation.
-        # Recover by head branch and let match/ambiguity checks below guard safety.
-        base_branch=None,
-    )
+    scope = getattr(self, "_workspace_scope", None)
+    # Recovery runs in the worker poll, outside provisioner/executor scopes.
+    # Resolve with this candidate's authority after releasing the row lock.
+    try:
+        async with scope(workspace_id) if scope is not None else nullcontext():
+            branch_lookup = await self._resolve_preserved_active_branch_open_pr(
+                repo_url=repo_url,
+                branch_name=lookup_branch_name,
+                expected_head_repo_slug=expected_head_repo_slug,
+                # Honor the persisted/resolved forge so a bare-slug Bitbucket workspace
+                # fails fast instead of slipping into the GitHub-only resolver.
+                resolved_forge=resolved_forge,
+                # A preserved branch PR may have been retargeted after creation.
+                # Recover by head branch and let match/ambiguity checks below guard safety.
+                base_branch=None,
+            )
+    except WorkspaceScopeDeniedError as error:
+        # This outcome certifies successful stop/retraction, not a cleanup
+        # failure. Block only this candidate; do not continue its salvage.
+        await self._record_preserved_active_salvage_blocked(
+            candidate,
+            preserved_event=preserved_event,
+            reason=error.reason,
+            attempt_id=attempt_id,
+            task_id=task_id,
+            preservation_expired=preservation_expired,
+        )
+        return True
     if branch_lookup is not None and branch_lookup.state == "matched":
         await self._attach_preserved_active_pr_monitor(
             candidate,

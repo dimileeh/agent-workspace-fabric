@@ -190,3 +190,78 @@ async def test_scoped_audit_accepts_github_repository_name_casing() -> None:
         repo=_REPO, pr_number=7, thread_id=_TID
     )
     assert audit.threads[0].thread_id == _TID
+
+
+def _queue_comment_page(
+    fake: FakeCommandRunner, connection: dict[str, Any], *, scoped: bool, later_page: bool
+) -> None:
+    node = _target(cursor="comments-2" if later_page else None)
+    if later_page:
+        fake.queue_result(stdout=_page(node) if scoped else _audit_page([node], cursor=None))
+        fake.queue_result(stdout=_page({"comments": connection}))
+    else:
+        node["comments"] = connection
+        fake.queue_result(stdout=_page(node) if scoped else _audit_page([node], cursor=None))
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["full", "thread-specific"])
+@pytest.mark.parametrize("later_page", [False, True], ids=["initial", "continuation"])
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "missing-nodes",
+        "null-nodes",
+        "mapping-nodes",
+        "string-nodes",
+        "null-node",
+        "string-node",
+        "number-node",
+        "list-node",
+    ],
+)
+async def test_audit_rejects_malformed_comment_nodes_without_partial_success(
+    scoped: bool, later_page: bool, malformation: str
+) -> None:
+    connection: dict[str, Any] = {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }
+    invalid: dict[str, Any] = {
+        "null-nodes": None,
+        "mapping-nodes": {},
+        "string-nodes": "missing comment list",
+        "null-node": None,
+        "string-node": "unread feedback",
+        "number-node": 42,
+        "list-node": [],
+    }
+    if malformation.endswith("-node"):
+        connection["nodes"] = [{"body": "fixed", "viewerDidAuthor": True}, invalid[malformation]]
+    elif malformation != "missing-nodes":
+        connection["nodes"] = invalid[malformation]
+    fake = FakeCommandRunner()
+    _queue_comment_page(fake, connection, scoped=scoped, later_page=later_page)
+    with pytest.raises(GitHubClientError) as caught:
+        await GitHubClient(fake).fetch_review_thread_audit(
+            repo=_REPO, pr_number=7, thread_id=_TID if scoped else None
+        )
+    assert caught.value.operation == "fetch_review_thread_audit comments"
+    assert len(fake.calls) == (2 if later_page else 1)
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["full", "thread-specific"])
+@pytest.mark.parametrize("later_page", [False, True], ids=["initial", "continuation"])
+async def test_audit_accepts_a_valid_empty_comment_page(scoped: bool, later_page: bool) -> None:
+    fake = FakeCommandRunner()
+    _queue_comment_page(
+        fake,
+        {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+        scoped=scoped,
+        later_page=later_page,
+    )
+    audit = await GitHubClient(fake).fetch_review_thread_audit(
+        repo=_REPO, pr_number=7, thread_id=_TID if scoped else None
+    )
+    assert audit.supported and len(audit.threads) == 1
+    assert audit.threads[0].viewer_comment_bodies == ()
+    assert audit.threads[0].external_comment_bodies == (("question",) if later_page else ())
+    assert len(fake.calls) == (2 if later_page else 1)

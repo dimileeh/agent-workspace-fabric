@@ -77,6 +77,7 @@ class HostedGuard:
             ):
                 raise MaterialDeniedError("IDENTITY_MISMATCH", 403)
             await receiver.identity_status()
+            runtime = getattr(application.state, "hosted_runtime", None)
             safe = False
             if not dedicated and scope["type"] == "http" and scope["method"] not in {"GET", "HEAD"}:
                 safe = (
@@ -90,6 +91,18 @@ class HostedGuard:
                     and path.startswith("/v1/workspaces/")
                     and len(path.strip("/").split("/")) == 3
                 )
+                create = (
+                    scope["method"] == "POST"
+                    and path == "/v1/workspaces"
+                    and controller
+                    and runtime is not None
+                    and receiver.config.runtime_enabled
+                )
+                if create:
+                    assert runtime is not None
+                    await runtime.admission()
+                    scope.setdefault("state", {})["hosted_create_verified"] = True
+                    safe = True
                 if not safe:
                     raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
             if (dedicated or safe) and scope["type"] == "http":
@@ -120,10 +133,14 @@ class HostedGuard:
             return
 
         async def fenced_send(message: Message) -> None:
-            if scope["type"] == "websocket" and message["type"] in {
-                "websocket.accept",
-                "websocket.send",
-            }:
+            if (scope["type"] == "http" and message["type"] == "http.response.start") or (
+                scope["type"] == "websocket"
+                and message["type"]
+                in {
+                    "websocket.accept",
+                    "websocket.send",
+                }
+            ):
                 try:
                     await receiver.identity_status()
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):

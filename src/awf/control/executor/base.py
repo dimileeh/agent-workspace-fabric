@@ -30,6 +30,7 @@ from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS, defaults_with_model
 from awf.adapters.runtime_executor import AgentRuntimeExecutor
 from awf.adapters.usage import UsageSampler
 from awf.common.commands import AsyncCommandRunner
+from awf.common.workspace_scope import WorkspaceScope, workspace_consumer
 from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import monitor_handoff as _monitor_handoff
 from awf.control.executor.config import ExecutorConfig
@@ -63,6 +64,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         hosted_validation: Any | None = None,
         ensure_hosted_monitor_checkout: Callable[[str], Awaitable[None]] | None = None,
         worktree_activity_git_roots: Callable[..., tuple[Path, Path]] | None = None,
+        workspace_scope: WorkspaceScope | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -111,7 +113,9 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._hosted_validation = hosted_validation
         self._ensure_hosted_monitor_checkout = ensure_hosted_monitor_checkout
         self._worktree_activity_git_roots = worktree_activity_git_roots
+        self._workspace_scope = workspace_scope
 
+    @workspace_consumer
     async def execute(
         self: Any,
         workspace_id: str,
@@ -127,6 +131,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             execution_lease_expires_at=execution_lease_expires_at,
         )
 
+    @workspace_consumer
     async def resume_paused_execution(
         self: Any,
         workspace_id: str,
@@ -191,6 +196,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             execution_lease_expires_at=execution_lease_expires_at,
         )
 
+    @workspace_consumer
     async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         """Resume the PR monitor for a workspace already in ``monitoring_pr``."""
         return await _monitor_handoff.resume_pr_monitor(
@@ -198,6 +204,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             workspace_id=workspace_id,
         )
 
+    @workspace_consumer
     async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> Any:
         """Prepare compose/monitor state for restart recovery; return handoff or ``None``."""
         return await _monitor_handoff.resume_pr_monitor_handoff(
@@ -218,6 +225,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             monitor_owner_id=monitor_owner_id,
         )
 
+    @workspace_consumer
     async def run_resumed_pr_monitor(self: Any, workspace_id: str, handoff: Any) -> bool:
         """Run the long-lived PR monitor loop after a successful restart handoff."""
         return await _monitor_handoff.run_resumed_pr_monitor(

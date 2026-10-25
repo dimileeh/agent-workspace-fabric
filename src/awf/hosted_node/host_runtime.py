@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -111,15 +111,27 @@ class HostRuntime:
         )
 
     async def _observe(
-        self, identity: Identity, *, require_database_quiescent: bool = True
+        self,
+        identity: Identity,
+        *,
+        require_database_quiescent: bool = True,
+        allow_busy: bool = False,
     ) -> LinuxSnapshot | None:
         if identity != self.identity:
             return None
         async with self._observation_lock:
-            before = await self.host_io(self.linux.sample)
+            sample = (
+                (lambda: self.linux.sample(require_quiescent=False))
+                if allow_busy
+                else self.linux.sample
+            )
+            before = await self.host_io(sample)
             if self.baseline is not None and not self.same_host(self.baseline, before):
                 return None
-            if not await self.docker.quiescent(identity.owner):
+            docker_idle = await self.docker.quiescent(identity.owner)
+            if not docker_idle and (
+                not allow_busy or not await self.docker.healthy(identity.owner)
+            ):
                 return None
             async with self.factory.begin() as session:
                 assert self.config.host and self.config.lifecycle
@@ -131,18 +143,31 @@ class HostRuntime:
                     or (require_database_quiescent and not await database_quiescent(session))
                 ):
                     return None
-            after = await self.host_io(self.linux.sample)
-            if before != after:
+            after = await self.host_io(sample)
+            if before != after and not (allow_busy and self.same_host(before, after)):
                 return None
             self.baseline = after
-            return after
+            return replace(
+                after,
+                execution_quiescent=(
+                    before.execution_quiescent and after.execution_quiescent and docker_idle
+                ),
+            )
 
     async def observe(self, identity: Identity) -> HostObservation | None:
         try:
             async with asyncio.timeout(4):
-                if await self._observe(identity) is not None:
+                sample = await self._observe(
+                    identity,
+                    allow_busy=self.config.runtime_enabled,
+                    require_database_quiescent=not self.config.runtime_enabled,
+                )
+                if sample is not None:
                     return HostObservation(
-                        identity, datetime.now(UTC) + timedelta(seconds=30), True, True
+                        identity,
+                        datetime.now(UTC) + timedelta(seconds=30),
+                        sample.execution_quiescent,
+                        True,
                     )
         except Exception as exc:
             _log_denial("observe", exc)

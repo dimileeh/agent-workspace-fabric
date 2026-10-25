@@ -91,11 +91,21 @@ class ProtectedResolver:
     async def _resolve(
         self, profile: WorkspaceProfile, workspace_id: str
     ) -> LocalSecretLeaseResolution:
+        return await self.resolve_current(self._receiver, self.bindings, profile, workspace_id)
+
+    @staticmethod
+    async def resolve_current(
+        receiver: Receiver,
+        bindings: Mapping[str, Binding],
+        profile: WorkspaceProfile,
+        workspace_id: str,
+    ) -> LocalSecretLeaseResolution:
+        """Same protected resolution for an in-process, identity-bound consumer."""
         mounts = []
         selected = []
         seen = set()
         for declaration in profile.secrets:
-            binding = self.bindings.get(declaration.name)
+            binding = bindings.get(declaration.name)
             if (
                 binding is None
                 or binding.workspace_id != workspace_id
@@ -108,27 +118,27 @@ class ProtectedResolver:
             ):
                 raise MaterialDeniedError("PROTECTED_DECLARATION_MISMATCH")
             seen.add(declaration.target)
-            status = await self._receiver.status(binding)
+            status = await receiver.status(binding)
             if status.status != "current" or status.receipt_id is None:
                 raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
-            async with self._receiver.factory() as session:
-                prep = await self._receiver.preparation(session, binding)
+            async with receiver.factory() as session:
+                prep = await receiver.preparation(session, binding)
                 assert prep is not None
                 directory = prep.id
             mounts.append(
                 AuthMount(
-                    source=str(self._receiver.store.path(directory, status.receipt_id)),
+                    source=str(receiver.store.path(directory, status.receipt_id)),
                     target=binding.target,
                     mode="ro",
                 )
             )
             selected.append((binding, status.receipt_id))
         # Even a profile without declarations cannot bypass owner liveness.
-        await self._receiver.identity_status()
+        await receiver.identity_status()
         # Owner liveness alone does not detect grant revocation or refresh
         # while mounts were being assembled (including failed file cleanup).
         for binding, receipt_id in selected:
-            status = await self._receiver.status(binding)
+            status = await receiver.status(binding)
             if status.status != "current" or status.receipt_id != receipt_id:
                 raise MaterialDeniedError("PROTECTED_MATERIAL_UNAVAILABLE", 503)
         return LocalSecretLeaseResolution(
