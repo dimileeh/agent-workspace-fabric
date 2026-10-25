@@ -3,6 +3,7 @@
 import hashlib
 import os
 import stat
+from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,41 @@ class RuntimeViews:
         ):
             raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
 
+    def _view_files(self, directory: int, targets: Collection[str]) -> list[str]:
+        names = os.listdir(directory)  # noqa: PTH208 - verified directory fd
+        pending = {name + ".pending" for name in targets}
+        for name in names:
+            if name not in targets and name not in pending:
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if name in targets:
+                self._verify(info, directory=False)
+            elif not (
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.geteuid()
+                and info.st_nlink == 1
+                and 0 <= info.st_size <= 65536
+                and (stat.S_IMODE(info.st_mode), info.st_gid)
+                in {(0o400, os.getegid()), (0o400, self.gid), (0o440, self.gid)}
+            ):
+                raise MaterialDeniedError("INVALID_RUNTIME_VIEW")
+        return names
+
+    def _view_directory(self, directory: int) -> None:
+        info = os.fstat(directory)
+        # mkdir/chown can precede a crash. Only an empty, owner-private view
+        # can be an unfinished setup; no material was written before chmod.
+        if (
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and info.st_gid in {os.getegid(), self.gid}
+            and stat.S_IMODE(info.st_mode) == 0o700
+            and not os.listdir(directory)  # noqa: PTH208 - verified directory fd
+        ):
+            os.fchown(directory, -1, self.gid)
+            os.fchmod(directory, 0o710)
+        self._verify(os.fstat(directory), directory=True)
+
     def _publication(self, parent: int, token: str | None = None) -> str | None:
         flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         flags |= os.O_RDONLY if token is None else os.O_RDWR | os.O_CREAT
@@ -102,13 +138,12 @@ class RuntimeViews:
                 if new:
                     os.fchown(directory, -1, self.gid)
                     os.fchmod(directory, 0o710)
-                self._verify(os.fstat(directory), directory=True)
-                for name in os.listdir(directory):  # noqa: PTH208 - verified directory fd
+                self._view_directory(directory)
+                # The root flock proves any prior writer is gone. Validate all
+                # entries before removing only its bounded private remnants.
+                for name in self._view_files(directory, files):
                     if name not in files:
-                        raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
-                    self._verify(
-                        os.stat(name, dir_fd=directory, follow_symlinks=False), directory=False
-                    )
+                        os.unlink(name, dir_fd=directory)
                 try:
                     # The private token and file replacements share the root lock.
                     # Identical refreshed bytes still constitute a new publication.
@@ -146,14 +181,8 @@ class RuntimeViews:
     def _remove_view(self, parent: int) -> None:
         directory = os.open("view", _DIRECTORY, dir_fd=parent)
         try:
-            self._verify(os.fstat(directory), directory=True)
-            names = os.listdir(directory)  # noqa: PTH208 - verified directory fd
-            if not set(names) <= _FILES:
-                raise MaterialDeniedError("INVALID_RUNTIME_VIEW_TARGET")
-            for name in names:
-                self._verify(
-                    os.stat(name, dir_fd=directory, follow_symlinks=False), directory=False
-                )
+            self._view_directory(directory)
+            names = self._view_files(directory, _FILES)
             for name in names:
                 os.unlink(name, dir_fd=directory)
         finally:

@@ -12,17 +12,24 @@ from pathlib import Path
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
     ActivityProbe,
     AsyncStreamingCommandRunner,
     CommandResult,
     StreamCallback,
+    mark_masked_command_reason_code,
 )
 from awf.common.compose_exec import DEFAULT_AGENT_WORKDIR
+from awf.common.logging import get_logger
 from awf.common.redaction import redact_exact_secret_bytes, redact_secrets
 from awf.hosted_node.identity import MaterialDeniedError, WorkspaceScopeDeniedError
 from awf.hosted_node.runtime_authority import WorkspaceAuthority
 from awf.hosted_node.runtime_filesystem import share_checkout
 from awf.service.logs import _stream_redaction_flushable_length
+
+_log = get_logger(__name__)
+_TIMEOUT_REASONS = (COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON)
 
 
 async def _no_stop(_workspace_id: str) -> None:
@@ -375,6 +382,8 @@ class HostedCommandRunner:
     ) -> CommandResult:
         args, scoped, secrets = await self._prepare(args, env)
         stdout, stderr = _Output(on_stdout, secrets), _Output(on_stderr, secrets)
+        failed = False
+        reason_code: str | None = None
         try:
             result = await self.delegate.run_streaming(
                 args,
@@ -387,7 +396,33 @@ class HostedCommandRunner:
                 idle_timeout_seconds=idle_timeout_seconds,
                 activity_probe=activity_probe,
             )
+            if result.reason_code in _TIMEOUT_REASONS:
+                reason_code = result.reason_code
+        except BaseException as error:
+            failed = True
+            masked = getattr(error, "command_reason_code", None)
+            if isinstance(masked, str) and masked in _TIMEOUT_REASONS:
+                reason_code = masked
+            raise
         finally:
-            await stdout.flush()
-            await stderr.flush()
+            # Final log delivery is secondary to a command exception or an
+            # already classified timeout. New cancellation still propagates.
+            flush_error: Exception | None = None
+            for output in (stdout, stderr):
+                try:
+                    await output.flush()
+                except asyncio.CancelledError as error:
+                    if reason_code is not None:
+                        mark_masked_command_reason_code(error, reason_code)
+                    raise
+                except Exception as error:  # noqa: BLE001 - preserve primary outcome below.
+                    if not failed and reason_code is None and flush_error is None:
+                        flush_error = error
+                    _log.warning(
+                        "hosted.command_output_flush_failed",
+                        exc_type=type(error).__name__,
+                        reason_code=reason_code,
+                    )
+            if flush_error is not None:
+                raise flush_error
         return self._result(result, secrets)

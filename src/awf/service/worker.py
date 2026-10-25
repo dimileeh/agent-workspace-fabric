@@ -29,9 +29,11 @@ from awf.common.logging import get_logger
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.common.workspace_scope import WorkspaceScope
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.state_machine import WorkspaceStateMachine
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import TaskKind
+from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
 from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -61,6 +63,12 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings, hosted_delegation_config_from_service_settings
+from awf.service.failure_causality import (
+    build_preserved_failure_payload,
+    load_failure_causality_snapshot,
+    primary_failure_reason_code,
+    restore_primary_failure_row_fields,
+)
 from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
@@ -888,6 +896,16 @@ def build_worker_runtime(
                 workspace = await session.get(Workspace, workspace_id)
                 if workspace is None or workspace.node_id != node_id:
                     return
+                fence_fields = (
+                    "node_id",
+                    "status",
+                    "version",
+                    "task_policy",
+                    "execution_claimed_by",
+                    "execution_claim_epoch",
+                    "monitor_claimed_by",
+                )
+                fence = tuple(getattr(workspace, field) for field in fence_fields)
             result = await compose.teardown_project(
                 project_name=f"awf_{workspace_id}",
                 compose_file=work_dir / "compose" / workspace_id / "compose.yml",
@@ -898,6 +916,54 @@ def build_worker_runtime(
                 from awf.hosted_node.identity import MaterialDeniedError
 
                 raise MaterialDeniedError("HOSTED_RUNTIME_STOP_FAILED", 503)
+
+            await hosted.authority.receiver.identity_status()
+            async with session_factory.begin() as session:
+                repo = WorkspaceRepository(session)
+                current = await repo.get_for_update(workspace_id)
+                if (
+                    current is None
+                    or tuple(getattr(current, field) for field in fence_fields) != fence
+                ):
+                    return
+                status = WorkspaceStatus(current.status)
+                if WorkspaceStateMachine.is_callback_terminal(status):
+                    return
+                # No external I/O under the row lock. Preserve existing primary
+                # evidence and use the ordinary transition to update attempts,
+                # events, reservations and merge-candidate lifecycle together.
+                causality = await load_failure_causality_snapshot(session, current)
+                primary = causality.primary_failure if causality is not None else None
+                reason = "HOSTED_RUNTIME_STOPPED"
+                message = "Hosted execution was stopped by its consumer authority boundary."
+                secondary = {"reason_code": reason, "message": message}
+                await repo.transition(
+                    current,
+                    to=WorkspaceStatus.failed,
+                    reason_code=primary_failure_reason_code(primary, fallback=reason),
+                    payload=(
+                        build_preserved_failure_payload(
+                            primary,
+                            secondary_failure=secondary,
+                            previous_secondary_failures=causality.secondary_failures
+                            if causality is not None
+                            else (),
+                        )
+                        if primary is not None
+                        else secondary
+                    ),
+                )
+                current.execution_claimed_by = None
+                current.execution_claim_expires_at = None
+                current.execution_claim_epoch += 1
+                current.monitor_claimed_by = None
+                current.monitor_claim_expires_at = None
+                if primary is None:
+                    current.failure_reason = FailureReason.infrastructure_failure.value
+                    current.failure_message = message
+                else:
+                    restore_primary_failure_row_fields(current, primary)
+                await repo.clear_workspace_attention(workspace_id)
 
         hosted.stop_workspace = stop_workspace
     return WorkerRuntime(engine=engine, worker=worker, runtime_driver=runtime_driver)
