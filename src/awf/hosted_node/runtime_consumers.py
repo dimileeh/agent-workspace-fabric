@@ -125,20 +125,51 @@ class WorkspaceConsumers:
             raise
         finally:
             finished.set()
-            with suppress(asyncio.CancelledError):
-                await watcher
             self.workspace_id.reset(token)
-            try:
-                await self.authority.workspace(workspace_id)
-            except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-                if failure is None or isinstance(failure, MaterialDeniedError):
-                    failure = error
+            late_cancellation: asyncio.CancelledError | None = None
+
+            async def finish() -> None:
+                nonlocal failure
+                with suppress(asyncio.CancelledError):
+                    await watcher
+                try:
+                    await self.authority.workspace(workspace_id)
+                except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
+                    if failure is None or isinstance(failure, MaterialDeniedError):
+                        failure = error
+
+            async def join(cleanup: asyncio.Task[None]) -> None:
+                nonlocal cancelled, caller_cancelled, late_cancellation
+                while True:
+                    try:
+                        await asyncio.shield(cleanup)
+                        return
+                    except asyncio.CancelledError as error:
+                        if not cancelled:
+                            cancelled = True
+                            caller_cancelled = failure is None
+                            late_cancellation = error
+                        if cleanup.done():
+                            cleanup.result()
+                            return
+
+            # Join the existing checks/teardown across repeated cancellation.
+            # Decide cleanup in the caller: cancellation can arrive after the
+            # check task finishes but before this caller wakes up.
+            await join(asyncio.create_task(finish(), name=f"hosted-finalize-{workspace_id}"))
             if failure is not None or cancelled:
-                await self._stop(workspace_id, authority_lost=failure is not None)
+                await join(
+                    asyncio.create_task(
+                        self._stop(workspace_id, authority_lost=failure is not None),
+                        name=f"hosted-retract-{workspace_id}",
+                    )
+                )
             if failure is not None and not caller_cancelled:
                 if isinstance(failure, MaterialDeniedError):
                     raise WorkspaceScopeDeniedError(failure.reason, failure.status) from failure
                 raise failure
+            if late_cancellation is not None:
+                raise late_cancellation
 
     async def _stop(self, workspace_id: str, *, authority_lost: bool = True) -> None:
         token = self.workspace_id.set(None)

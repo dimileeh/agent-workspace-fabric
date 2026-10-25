@@ -896,6 +896,11 @@ def build_worker_runtime(
                 workspace = await session.get(Workspace, workspace_id)
                 if workspace is None or workspace.node_id != node_id:
                     return
+                if not authority_lost:
+                    # Native invocation cleanup already stopped this caller's
+                    # commands. The ordinary worker owns warm-stack recovery;
+                    # tearing it down here breaks an in-place paused resume.
+                    return
                 fence_fields = (
                     "node_id",
                     "status",
@@ -928,10 +933,6 @@ def build_worker_runtime(
                     return
                 status = WorkspaceStatus(current.status)
                 if WorkspaceStateMachine.is_callback_terminal(status):
-                    return
-                if not authority_lost:
-                    # A still-authorized cooperative shutdown keeps the normal
-                    # execution/monitor recovery state and claim-release path.
                     return
                 # No external I/O under the row lock. Preserve existing primary
                 # evidence and use the ordinary transition to update attempts,

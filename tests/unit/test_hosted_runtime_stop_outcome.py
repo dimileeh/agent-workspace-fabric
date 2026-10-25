@@ -189,7 +189,7 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                     await deny_agent(runtime, payload, failure, monkeypatch)
                 await built.worker.wait_for_execution_tasks()
             assert cancelled.is_set() and not view.exists()
-            if phase != "resumed_monitor":
+            if phase != "resumed_monitor" and failure != "authorized_cancel":
                 assert any("down" in args for args in docker_calls)
             release.set()
             if failure == "authorized_cancel":
@@ -292,10 +292,7 @@ async def test_confirmed_stop_transitions_only_nonterminal_owned_rows(
     "change",
     ["node", "claim", "epoch", "monitor", "binding", "version", "status", "boot", "missing"],
 )
-@pytest.mark.parametrize("authority_lost", [True, False])
-async def test_stop_does_not_transition_a_successor_after_teardown(
-    authority, stop_worker, change, authority_lost
-):
+async def test_stop_does_not_transition_a_successor_after_teardown(authority, stop_worker, change):
     runtime, payload, factory = authority
     await retained(runtime, payload, factory, "ws_cloud_stable", status="running")
     scope, teardown = stop_worker
@@ -334,9 +331,9 @@ async def test_stop_does_not_transition_a_successor_after_teardown(
     try:
         if change == "boot":
             with pytest.raises(MaterialDeniedError):
-                await scope.stop_workspace("ws_cloud_stable", authority_lost=authority_lost)
+                await scope.stop_workspace("ws_cloud_stable")
         else:
-            await scope.stop_workspace("ws_cloud_stable", authority_lost=authority_lost)
+            await scope.stop_workspace("ws_cloud_stable")
         async with factory() as session:
             row = await session.get(Workspace, "ws_cloud_stable")
             if change == "missing":
@@ -382,16 +379,25 @@ async def test_stop_preserves_existing_primary_timeout_causality(authority, stop
         assert events[-1].payload["secondary_failure"]["reason_code"] == "HOSTED_RUNTIME_STOPPED"
 
 
-@pytest.mark.parametrize("authority_lost", [True, False])
-async def test_failed_teardown_never_claims_a_durable_stopped_outcome(
-    authority, stop_worker, authority_lost
-):
+async def test_failed_teardown_never_claims_a_durable_stopped_outcome(authority, stop_worker):
     runtime, payload, factory = authority
     await retained(runtime, payload, factory, "ws_cloud_stable", status="running")
     scope, teardown = stop_worker
     teardown.return_value = ComposeTeardownResult(status="failed", reason_code="synthetic")
     with pytest.raises(MaterialDeniedError, match="HOSTED_RUNTIME_STOP_FAILED"):
-        await scope.stop_workspace("ws_cloud_stable", authority_lost=authority_lost)
+        await scope.stop_workspace("ws_cloud_stable")
     async with factory() as session:
         row = await session.get(Workspace, "ws_cloud_stable")
         assert row.status == "running" and row.failure_reason is None
+
+
+@pytest.mark.parametrize("status", ["running", "blocked", "recovering", "pushing", "monitoring_pr"])
+async def test_authorized_shutdown_leaves_stack_to_ordinary_worker(authority, stop_worker, status):
+    runtime, payload, factory = authority
+    await retained(runtime, payload, factory, "ws_cloud_stable", status=status)
+    scope, teardown = stop_worker
+    await scope.stop_workspace("ws_cloud_stable", authority_lost=False)
+    teardown.assert_not_awaited()
+    async with factory() as session:
+        row = await session.get(Workspace, "ws_cloud_stable")
+        assert row.status == status and row.failure_reason is None
