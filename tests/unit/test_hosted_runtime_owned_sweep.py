@@ -19,7 +19,12 @@ from awf.hosted_node.schemas import Binding
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from tests.unit.test_hosted_runtime_authority import authority as authority
-from tests.unit.test_hosted_runtime_review_create import create_client as create_client
+from tests.unit.test_hosted_runtime_review_create import (
+    create_application as create_application,
+)
+from tests.unit.test_hosted_runtime_review_create import (
+    create_client as create_client,
+)
 from tests.unit.test_hosted_runtime_review_retained import retained
 
 
