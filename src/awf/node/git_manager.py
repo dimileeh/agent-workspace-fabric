@@ -1219,7 +1219,16 @@ class GitManager:
     ) -> GitResult:
         _log.debug("git.exec", operation=operation, args=args)
         if self._command_environment is not None:
-            env = await self._command_environment()
+            scoped = dict(await self._command_environment())
+            if env is not None:
+                # Keep scoped credentials; only the trusted helper's fixed
+                # hardening values may override the execution environment.
+                scoped.update(
+                    (key, value)
+                    for key, value in git_env_for_trusted_base_materialization({}).items()
+                    if env.get(key) == value
+                )
+            env = scoped
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,

@@ -362,3 +362,26 @@ class RuntimeViews:
                 return
             self._remove_view(parent, preserve_directory=True)
             self._owners.pop(workspace_id, None)
+
+    def retire_empty(self, workspace_id: str, *, current: Identity) -> bool:
+        """Reclaim a receipt-bound retired boot, never a warm/current publication."""
+        if self.identity.owner != current.owner or self.identity.boot_epoch >= current.boot_epoch:
+            return False
+        key = self._key(workspace_id)
+        with (
+            suppress(FileNotFoundError),
+            self.store._directory(key, _SLOT, remove_empty=True) as parent,
+        ):
+            # A token, material, or unknown entry is not proof of retirement.
+            if set(os.listdir(parent)) != {"view"}:  # noqa: PTH208 - locked directory fd
+                return False
+            directory = os.open("view", _DIRECTORY, dir_fd=parent)
+            try:
+                self._view_directory(directory)
+                if os.listdir(directory):  # noqa: PTH208 - verified directory fd
+                    return False
+            finally:
+                os.close(directory)
+            os.rmdir("view", dir_fd=parent)  # noqa: PTH106 - verified directory fd
+            return True
+        return False

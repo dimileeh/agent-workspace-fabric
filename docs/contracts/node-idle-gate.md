@@ -96,8 +96,9 @@ lifespan uses `start_hosted` to install `HostRuntime`'s `observe_host`,
 provisioning and evidence boundaries. Without `host`, the callbacks still
 default to no evidence; there is no automatic activation. A separate worker
 process still requires trusted boot identity and a bound factory through its
-own composition. Hosted worker execution remains closed. No automatic I3
-credential integration or Google verifier is provided here.
+own composition. Hosted worker execution requires the separate `runtime_enabled`
+opt-in and its admission checks; evidence callbacks do not activate it. No
+automatic Google verifier is provided here.
 
 ## HTTP Contract
 
@@ -117,11 +118,15 @@ The existing authenticated `/v1/hosted-node/identity` is the discovery route.
 Every success returns `identity`, `state`, `admission_closed`, `runtime_ready`,
 `node_ready`, `quiescent`, `database_quiescent`, `idle_since`, `drain_generation`,
 and `expires_at`. States are `recovering`, `ready`, `draining`, `drained`.
-`runtime_ready` is **always false** in this slice. `node_ready` reports verified
-node health with the internal DB gate open; it does not authorize dispatch.
-The existing protected runtime mutations still return
-`HOSTED_RUNTIME_INTEGRATION_REQUIRED`; material identity acknowledgement still
-reports `activation: closed`.
+GET `/readiness` reports `runtime_ready: true` only when `observe_runtime`
+returns `True` and `node_ready` is true. `node_ready` reports verified node
+health with the internal DB gate open; it alone does not authorize dispatch.
+`BootEvidence.runtime_ready` remains false: boot evidence is not runtime admission.
+Controller workspace creation requires `runtime_enabled`, current identity and
+successful runtime admission. Without that opt-in it returns
+`HOSTED_RUNTIME_INTEGRATION_REQUIRED`; other unsupported runtime mutations remain
+denied, while the existing authenticated operator stop/cancel/destroy controls
+remain available. Material identity acknowledgement still reports `activation: closed`.
 
 `generation` is a positive signed-64-bit integer, monotonic within the exact
 boot identity. Repeating the same recovery key/receipt or drain is safe after

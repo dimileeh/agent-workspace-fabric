@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
 from sqlalchemy import or_, select
 
 from awf.control.state_machine import WorkspaceStateMachine
@@ -37,6 +38,13 @@ AGENT_TARGETS = {
 _HISTORICAL_STATUSES = tuple(
     status.value for status in WorkspaceStatus if WorkspaceStateMachine.is_callback_terminal(status)
 )
+
+
+def _stored_association(value: object) -> HostedWorkspace:
+    try:
+        return HostedWorkspace.model_validate(value)
+    except ValidationError:
+        raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403) from None
 
 
 @dataclass(frozen=True)
@@ -88,11 +96,11 @@ class WorkspaceAuthority:
     async def association(self, workspace_id: str) -> tuple[HostedWorkspace, str]:
         async with self.receiver.factory() as session:
             row = await session.get(Workspace, workspace_id)
-            if row is None or POLICY_KEY not in (row.task_policy or {}):
+            if row is None or (row.task_policy or {}).get(POLICY_KEY) is None:
                 raise MaterialDeniedError("HOSTED_WORKSPACE_REQUIRED", 403)
             if row.status == "destroyed" or row.filesystem_reclaimed_at is not None:
                 raise MaterialDeniedError("HOSTED_WORKSPACE_INACTIVE", 403)
-            association = HostedWorkspace.model_validate(row.task_policy[POLICY_KEY])
+            association = _stored_association(row.task_policy[POLICY_KEY])
             agent = row.agent
         if association.workspace_id != workspace_id:
             raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
@@ -169,7 +177,10 @@ class WorkspaceAuthority:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
                 return
-            association = HostedWorkspace.model_validate((row.task_policy or {}).get(POLICY_KEY))
+            stored = (row.task_policy or {}).get(POLICY_KEY)
+            if stored is None:
+                return
+            association = _stored_association(stored)
         previous = association.credentials.agent.identity
         if (
             association.workspace_id == workspace_id

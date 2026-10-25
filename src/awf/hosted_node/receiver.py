@@ -74,8 +74,24 @@ class Receiver:
                     for row, grant in rows
                     if row.binding["identity"]["boot_epoch"] < identity.boot_epoch
                 ]
+                retired_views = {
+                    (
+                        Identity.model_validate(row.binding["identity"]),
+                        row.binding["workspace_id"],
+                    )
+                    for row, _ in rows
+                    if row.binding["identity"]["boot_epoch"] < identity.boot_epoch
+                }
             for directory, slot in slots:
                 await asyncio.to_thread(store.remove, directory, slot)
+            # Receipts retain every published boot binding, including intermediate
+            # boots no longer named by the workspace's create-time association.
+            for previous, workspace_id in retired_views:
+                if not workspace_id.startswith("ws_"):
+                    # Generic material receipts also admit non-runtime IDs.
+                    continue
+                views = RuntimeViews(store, identity=previous)
+                await asyncio.to_thread(views.retire_empty, workspace_id, current=identity)
         except BaseException:
             store.close()
             raise
