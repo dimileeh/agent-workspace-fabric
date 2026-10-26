@@ -26,7 +26,7 @@ from tests.unit.test_hosted_runtime_authority import authority as authority
 
 
 @pytest.fixture
-async def create_client(authority, monkeypatch):
+async def create_application(authority, monkeypatch):
     from awf.service import provider_readiness
 
     monkeypatch.setattr(
@@ -48,6 +48,12 @@ async def create_client(authority, monkeypatch):
         **runtime.receiver.identity.headers(),
         "Authorization": "Bearer synthetic-controller",
     }
+    return app, headers
+
+
+@pytest.fixture
+async def create_client(create_application):
+    app, headers = create_application
     async with AsyncClient(
         transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
     ) as client:
@@ -216,9 +222,8 @@ async def test_failed_initial_create_does_not_publish_readable_material(
     if failure == "disk":
         assert response.status_code == expected_status, response.text
     else:
-        # Request-scoped dependency teardown may follow response delivery.
-        # Prove the injected commit failure and durable rollback, not acceptance.
         assert commit_failed
+        assert response.status_code == 500, response.text
     async with factory() as session:
         for model in (Workspace, Task, TaskAttempt, ResourceReservation, QueueDecision):
             assert await session.scalar(select(func.count()).select_from(model)) == 0

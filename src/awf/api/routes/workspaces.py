@@ -384,6 +384,9 @@ async def create_workspace(
         await session.rollback()
         return _workspace_conflict_error_response(exc)
 
+    # Request-scoped dependency cleanup can run after the response is sent.
+    # Commit before acknowledging or caching acceptance of this new workspace.
+    await session.commit()
     if idempotency_key is not None:
         replay_key_cache.remember(
             payload,
