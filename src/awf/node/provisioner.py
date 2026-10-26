@@ -341,6 +341,7 @@ class Provisioner(
         # Set only once checkout profile resolve succeeds; stays None when
         # ProfileResolutionError fires during resolve itself.
         resolved_profile_for_failure: dict[str, Any] | None = None
+        pin: str | None = None
         try:
             if self._before_provision is not None:
                 await self._before_provision()
@@ -1043,6 +1044,12 @@ class Provisioner(
                 return
 
             hosted_pr_adoption = pr_adoption_is_hosted(persisted.task_policy)
+            if pin is not None:
+                cleared = _provisioner_helpers._task_policy_without_inherited_first_launch(
+                    persisted.task_policy
+                )
+                if cleared is not None:
+                    persisted.task_policy = cleared
             persisted.node_id = self._config.node_id
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit

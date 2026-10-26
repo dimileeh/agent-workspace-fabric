@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,7 @@ from awf.common.audit import redact_audit_value
 from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
 from awf.common.task_tag import branch_with_task_tag
 from awf.common.workspace_policy import (
+    EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY,
     expected_base_sha_from_task_policy,
     release_sync_source_branch,
 )
@@ -171,6 +173,24 @@ def _expected_base_sha_for_initial_checkout(ws: Workspace) -> str | None:
     if _provision_checkout_base_branch(ws) != ws.branch_base:
         return None
     return expected_base_sha_from_task_policy(ws.task_policy)
+
+
+def _task_policy_without_inherited_first_launch(
+    task_policy: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Drop first-launch evidence copied onto a fresh named-branch checkout.
+
+    The evidence was recorded for a previous worktree. Setup on this checkout
+    can still move HEAD, so the launch guard must verify the pin again. The
+    immutable ``expected_base_sha`` pin is left in place. Returns None when
+    the policy has no inherited evidence. Recovery of an existing checkout
+    does not call this.
+    """
+    if EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY not in task_policy:
+        return None
+    updated = dict(task_policy)
+    del updated[EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY]
+    return updated
 
 
 def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:

@@ -599,7 +599,9 @@ async def _settle_expected_base_sha_before_first_launch(
 
     Runs only for a fresh checkout of the named base branch, and only before
     the first planning or coding ``adapter.run``. Evidence written here lets
-    later implementation, monitor, and retry commits move HEAD.
+    later commits on this same checkout move HEAD. A fresh retry worktree
+    drops inherited evidence while it is provisioned, so setup on that
+    checkout is checked again. Recovery of an existing checkout keeps it.
     """
     from sqlalchemy.orm.attributes import flag_modified
 
