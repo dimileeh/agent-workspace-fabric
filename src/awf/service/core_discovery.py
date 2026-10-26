@@ -13,6 +13,8 @@ from awf import __version__
 from awf.profiles.capabilities import ProfileCapabilities
 from awf.runtime.driver import WORKSPACE_EXECUTION_V1
 
+WORKSPACE_CREATE_EXPECTED_BASE_SHA_V1 = "workspace.create.expected_base_sha.v1"
+
 PACKAGE_NAME = "agent-workspace-fabric"
 UNKNOWN_GIT_COMMIT = "unknown"
 CORE_DISCOVERY_STATE_ATTR = "core_discovery_payload"
@@ -73,7 +75,10 @@ class CoreDiscoveryPayload:
     package_name: str = PACKAGE_NAME
     package_version: str = __version__
     git_commit: str = UNKNOWN_GIT_COMMIT
-    capabilities: tuple[str, ...] = (WORKSPACE_EXECUTION_V1,)
+    capabilities: tuple[str, ...] = (
+        WORKSPACE_EXECUTION_V1,
+        WORKSPACE_CREATE_EXPECTED_BASE_SHA_V1,
+    )
     profile_capability_schema: ProfileCapabilitySchema = field(
         default_factory=profile_capability_schema
     )

@@ -344,11 +344,13 @@ class Provisioner(
         try:
             if self._before_provision is not None:
                 await self._before_provision()
+            pin = _provisioner_helpers._expected_base_sha_for_initial_checkout(ws)
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
                 repo_url=ws.repo_url,
                 base_branch=checkout_base,
                 new_branch=branch_name,
+                **({} if pin is None else {"expected_base_sha": pin}),
             )
             if not await self._recheck_status(
                 workspace_id,

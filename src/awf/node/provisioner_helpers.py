@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.common.audit import redact_audit_value
 from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
 from awf.common.task_tag import branch_with_task_tag
-from awf.common.workspace_policy import release_sync_source_branch
+from awf.common.workspace_policy import (
+    expected_base_sha_from_task_policy,
+    release_sync_source_branch,
+)
 from awf.db.enums import EgressDecision
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository
@@ -156,6 +159,18 @@ def _provision_checkout_base_branch(ws: Workspace) -> str:
         )
         or ws.branch_base
     )
+
+
+def _expected_base_sha_for_initial_checkout(ws: Workspace) -> str | None:
+    """Return the create pin only for a fresh checkout of the named base branch.
+
+    Adopted, preserved-PR, and release-sync checkouts start somewhere else and
+    must not be reset to the original SHA. A missing or invalid snapshot key
+    is unpinned.
+    """
+    if _provision_checkout_base_branch(ws) != ws.branch_base:
+        return None
+    return expected_base_sha_from_task_policy(ws.task_policy)
 
 
 def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:

@@ -14,12 +14,32 @@ DEFAULT_RELEASE_SYNC_SOURCE_BRANCH = "development"
 PR_ADOPTION_EXECUTION_MODE_LOCAL = "local"
 PR_ADOPTION_EXECUTION_MODE_HOSTED = "hosted"
 CURSOR_AUTO_MODE_POLICY_KEY = "cursor_auto_mode"
+EXPECTED_BASE_SHA_POLICY_KEY = "expected_base_sha"
+EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY = "expected_base_sha_first_launch"
 
 _CURSOR_AUTO_MODE_WIRE_VALUES: Mapping[CursorAutoMode, str] = {
     CursorAutoMode.cost: "cost",
     CursorAutoMode.balance: "balanced",
     CursorAutoMode.intelligence: "intelligence",
 }
+
+
+def expected_base_sha_from_task_policy(task_policy: object) -> str | None:
+    """Return a stored full commit pin, or None when the create was unpinned.
+
+    Missing keys, nulls, and non-SHA values are the same unpinned state. A
+    stored mixed-case SHA is normalized to lowercase.
+    """
+
+    if not isinstance(task_policy, Mapping):
+        return None
+    raw = task_policy.get(EXPECTED_BASE_SHA_POLICY_KEY)
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip().lower()
+    if len(cleaned) != 40 or any(char not in "0123456789abcdef" for char in cleaned):
+        return None
+    return cleaned
 
 
 def cursor_auto_mode_from_task_policy(task_policy: object) -> CursorAutoMode | None:

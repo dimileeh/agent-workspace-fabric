@@ -988,9 +988,15 @@ def _workspace_create_request_hash(
     api_version: str,
 ) -> str:
     """Deterministic SHA-256 hash of the serialized create request for idempotency comparison."""
+    dumped = payload.model_dump(mode="json", by_alias=True)
+    repo = dumped.get("repo")
+    # A None default must not change the digest of pre-field unpinned creates.
+    # Only this key is removed; other nulls stay in the hash.
+    if isinstance(repo, dict) and repo.get("expected_base_sha") is None:
+        repo.pop("expected_base_sha", None)
     normalized = {
         "api_version": api_version,
-        "payload": payload.model_dump(mode="json", by_alias=True),
+        "payload": dumped,
     }
     serialized = json.dumps(
         normalized,

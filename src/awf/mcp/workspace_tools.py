@@ -214,6 +214,15 @@ def register_workspace_tools(
                 "feature_branch_pr."
             ),
         ),
+        expected_base_sha: str | None = Field(
+            default=None,
+            max_length=40,
+            description=(
+                "Optional full 40-character hexadecimal commit. When set, "
+                "base_branch must resolve to this commit at the initial checkout. "
+                "Omit it to check out the current branch tip."
+            ),
+        ),
         task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
         task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
         task_kind: str = Field(
@@ -419,12 +428,15 @@ def register_workspace_tools(
             )
 
         try:
+            repo_payload: dict[str, object] = {
+                "url": repo_url,
+                "base_branch": effective_base_branch,
+                "source_branch": source_branch,
+            }
+            if expected_base_sha is not None:
+                repo_payload["expected_base_sha"] = expected_base_sha
             req = WorkspaceCreateRequest(
-                repo={
-                    "url": repo_url,
-                    "base_branch": effective_base_branch,
-                    "source_branch": source_branch,
-                },
+                repo=repo_payload,
                 task={
                     k: v
                     for k, v in {

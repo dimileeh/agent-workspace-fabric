@@ -37,6 +37,7 @@ from awf.node import git_manager_detached as _git_manager_detached
 from awf.node import git_manager_linked as _git_manager_linked
 from awf.node import git_manager_mirror as _git_manager_mirror
 from awf.node import git_manager_ownership as _git_manager_ownership
+from awf.node.git_manager_expected_base import locked_worktree_start_point
 from awf.node.git_manager_head_object import verify_head_object_exists as verify_head_object_exists
 
 _log = get_logger(__name__)
@@ -720,7 +721,13 @@ class GitManager:
             return mirror_path
 
     async def add_worktree(
-        self, *, workspace_id: str, repo_url: str, base_branch: str, new_branch: str
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+        new_branch: str,
+        expected_base_sha: str | None = None,
     ) -> WorktreeLayout:
         """Create a fresh worktree for ``workspace_id`` at a new branch off ``base_branch``.
 
@@ -729,6 +736,9 @@ class GitManager:
 
         Raises ``GitOperationError`` with a specific reason code if:
         - the base branch doesn't exist (``GIT_BASE_BRANCH_MISSING``)
+        - ``expected_base_sha`` is set and the named remote branch does not
+          resolve to that one full commit (``GIT_EXPECTED_BASE_SHA_MISMATCH``
+          or ``GIT_EXPECTED_BASE_SHA_AMBIGUOUS``)
         - the worktree path already exists (``GIT_WORKTREE_ALREADY_EXISTS``)
 
         The mirror lock is held around ``rev-parse`` + ``worktree add`` because
@@ -763,39 +773,14 @@ class GitManager:
 
         lock = self._lock_for_mirror(mirror_path)
         async with lock:
-            try:
-                if fetch_refspec is not None:
-                    await self._run(
-                        [
-                            "git",
-                            "--git-dir",
-                            str(mirror_path),
-                            "fetch",
-                            "origin",
-                            fetch_refspec,
-                        ],
-                        operation="mirror.fetch_checkout_ref",
-                    )
-                await self._run(
-                    [
-                        "git",
-                        "--git-dir",
-                        str(mirror_path),
-                        "rev-parse",
-                        "--verify",
-                        tracking_ref,
-                    ],
-                    operation="mirror.rev-parse",
-                )
-            except GitOperationError as exc:
-                raise GitOperationError(
-                    operation="worktree.add",
-                    returncode=exc.returncode,
-                    stdout=exc.stdout,
-                    stderr=exc.stderr,
-                    reason_code="GIT_BASE_BRANCH_MISSING",
-                ) from exc
-
+            start_point = await locked_worktree_start_point(
+                self._run,
+                mirror_path=mirror_path,
+                base_branch=base_branch,
+                tracking_ref=tracking_ref,
+                fetch_refspec=fetch_refspec,
+                expected_base_sha=expected_base_sha,
+            )
             await self._run(
                 [
                     "git",
@@ -806,7 +791,7 @@ class GitManager:
                     "-b",
                     new_branch,
                     str(worktree_path),
-                    tracking_ref,
+                    start_point,
                 ],
                 operation="worktree.add",
             )

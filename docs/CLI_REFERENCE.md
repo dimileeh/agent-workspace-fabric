@@ -167,6 +167,11 @@ uv run --python 3.12 --extra dev awf workspace create \
 *Note: `--effort` is optional. When omitted, AWF resolves the provider-specific
 default from the workspace profile or adapter defaults.*
 
+`--expected-base-sha` is optional. Omit it to check out the current tip of
+`--base`. Set it to a full 40-character hexadecimal commit when that branch
+must resolve to the commit at the initial checkout. It is not the mutable
+workspace base commit and does not move later commits.
+
 For eligible Cursor Teams/Enterprise accounts, select an explicit Cursor Auto
 routing profile with `--agent cursor --cursor-auto-mode
 cost|balance|intelligence`. This option cannot be combined with `--effort` or a

@@ -53,6 +53,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.time_utils import _monotonic
 from awf.control.executor.types import (
+    _ExpectedBaseShaLaunchSettled,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
@@ -588,6 +589,80 @@ async def _record_and_sync_hosted_phase(
     )
 
 
+async def _settle_expected_base_sha_before_first_launch(
+    self: Any,
+    *,
+    workspace: Workspace,
+    worktree_path: Path,
+) -> _ExpectedBaseShaLaunchSettled | None:
+    """Refuse the first paid launch when HEAD is not the create-time pin.
+
+    Runs only for a fresh checkout of the named base branch, and only before
+    the first planning or coding ``adapter.run``. Evidence written here lets
+    later implementation, monitor, and retry commits move HEAD.
+    """
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from awf.common.workspace_policy import EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY
+    from awf.db.enums import FailureReason, WorkspaceStatus
+    from awf.node.provisioner_helpers import _expected_base_sha_for_initial_checkout
+
+    pin = _expected_base_sha_for_initial_checkout(workspace)
+    if pin is None:
+        return None
+    policy = getattr(workspace, "task_policy", None)
+    assert isinstance(policy, Mapping)
+    if EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY in policy:
+        return None
+    if not await self._recheck_status(
+        workspace.id,
+        expected=WorkspaceStatus.running,
+        action="expected_base_sha_first_launch",
+    ):
+        return _ExpectedBaseShaLaunchSettled()
+    rev = await self._runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "rev-parse",
+            "HEAD",
+        ]
+    )
+    head = rev.stdout.strip().lower() if rev.ok else ""
+    if not rev.ok or re.fullmatch(r"[0-9a-f]{40}", head) is None or head != pin:
+        await self._mark_failed(
+            workspace_id=workspace.id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.policy_failure,
+            message=(
+                "Checkout HEAD does not match expected_base_sha before the first agent launch."
+            ),
+            reason_code="EXPECTED_BASE_SHA_CHECKOUT_MOVED",
+            details={"expected_base_sha": pin, "head": head},
+        )
+        return _ExpectedBaseShaLaunchSettled()
+    evidence = {"sha": pin, "status": "verified"}
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        current = await repo.get(workspace.id)
+        if current is None:  # pragma: no cover - destroyed mid-flight
+            return _ExpectedBaseShaLaunchSettled()
+        stored = dict(current.task_policy or {})
+        stored[EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY] = evidence
+        current.task_policy = stored
+        flag_modified(current, "task_policy")
+        await repo.add_event(
+            current,
+            event_type="workspace.expected_base_sha_first_launch_verified",
+            payload=evidence,
+        )
+        await session.commit()
+    workspace.task_policy = {**dict(policy), EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY: evidence}
+    return None
+
+
 async def _run_agent_task_with_optional_planning(
     self: Any,
     *,
@@ -602,13 +677,20 @@ async def _run_agent_task_with_optional_planning(
     command_evidence: list[str] | None = None,
     accept_existing_plan: bool = False,
     planning_retry_scope_baseline: dict[str, object] | None = None,
-) -> str | _PlanningRunFailure | _PlanningValidationHandoff | None:
+) -> str | _PlanningRunFailure | _PlanningValidationHandoff | _ExpectedBaseShaLaunchSettled | None:
     planning = profile.planning
     coordination_warnings = coordination_warnings_from_task_policy(
         getattr(workspace, "task_policy", None)
     )
     workspace_runtime_context = render_workspace_runtime_context(profile)
     if not planning.required:
+        settled = await _settle_expected_base_sha_before_first_launch(
+            self,
+            workspace=workspace,
+            worktree_path=worktree_path,
+        )
+        if settled is not None:
+            return settled
         await self._update_subphase(workspace.id, "agent")
         result = await adapter.run(
             compose_project=compose_project,
@@ -710,6 +792,13 @@ async def _run_agent_task_with_optional_planning(
             if isinstance(preserved_head_sha, str) and preserved_head_sha:
                 baseline_sha = preserved_head_sha
     if not skip_planning_for_existing_plan:
+        settled = await _settle_expected_base_sha_before_first_launch(
+            self,
+            workspace=workspace,
+            worktree_path=worktree_path,
+        )
+        if settled is not None:
+            return settled
         await self._update_subphase(workspace.id, "planning")
         plan_result = await adapter.run(
             compose_project=compose_project,

@@ -307,6 +307,7 @@ class TestWorkspaceCreate:
         assert body["task"]["kind"] == "sync_release_pr"
         assert body["repo"]["base_branch"] == "main"
         assert "source_branch" not in body["repo"]
+        assert "expected_base_sha" not in body["repo"]
 
     @pytest.mark.unit
     def test_sync_release_pr_respects_explicit_base(self) -> None:
@@ -334,6 +335,35 @@ class TestWorkspaceCreate:
         assert result.exit_code == 0
         body = mock.call_args.kwargs["json"]
         assert body["repo"]["base_branch"] == "release"
+
+    @pytest.mark.unit
+    def test_expected_base_sha_is_sent_only_when_set(self) -> None:
+        """The optional pin is part of the create body only when the flag is present."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_pin"})
+        sha = "a" * 40
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Pinned base",
+                    "--prompt",
+                    "Check out the inspected commit.",
+                    "--base",
+                    "development",
+                    "--expected-base-sha",
+                    sha,
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["repo"]["base_branch"] == "development"
+        assert body["repo"]["expected_base_sha"] == sha
 
     @pytest.mark.unit
     def test_monitor_policy_flags_are_sent(self) -> None:

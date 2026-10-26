@@ -46,6 +46,15 @@ class _PlanningRunFailure:
 
 
 @dataclass(frozen=True)
+class _ExpectedBaseShaLaunchSettled:
+    """The first-launch pin check already stopped this run.
+
+    A mismatch has been marked failed, or a recheck found the workspace is no
+    longer running. Callers must not mark it failed again and must not launch.
+    """
+
+
+@dataclass(frozen=True)
 class _PlanningValidationHandoff:
     report: PlanConformanceReport
     plan_path: Path
