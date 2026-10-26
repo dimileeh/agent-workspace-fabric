@@ -793,14 +793,14 @@ async def _run_agent_task_with_optional_planning(
             preserved_head_sha = planning_retry_scope_baseline.get("head_sha")
             if isinstance(preserved_head_sha, str) and preserved_head_sha:
                 baseline_sha = preserved_head_sha
+    settled = await _settle_expected_base_sha_before_first_launch(
+        self,
+        workspace=workspace,
+        worktree_path=worktree_path,
+    )
+    if settled is not None:
+        return settled
     if not skip_planning_for_existing_plan:
-        settled = await _settle_expected_base_sha_before_first_launch(
-            self,
-            workspace=workspace,
-            worktree_path=worktree_path,
-        )
-        if settled is not None:
-            return settled
         await self._update_subphase(workspace.id, "planning")
         plan_result = await adapter.run(
             compose_project=compose_project,

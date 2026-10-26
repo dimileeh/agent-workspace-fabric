@@ -30,6 +30,7 @@ from awf.control.executor.state_ops import (
     _record_stale_action_skip,
     _update_subphase,
 )
+from awf.control.executor.types import _ExpectedBaseShaLaunchSettled
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -231,6 +232,34 @@ def _reset_commands(runner: _RecordingRunner) -> list[list[str]]:
     return [call for call in runner.calls if "reset" in call or "checkout" in call]
 
 
+def _seed_existing_plan(worktree: Path, workspace_id: str) -> None:
+    plan = worktree / "docs" / "awf-plans" / f"{workspace_id}.md"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("# existing plan\n")
+
+
+async def _reuse_existing_plan(
+    executor: _Executor,
+    *,
+    workspace: Any,
+    adapter: _Adapter,
+    worktree: Path,
+    profile: WorkspaceProfile,
+) -> Any:
+    return await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=workspace,
+        profile=profile,
+        compose_project="awf_pin",
+        compose_file=worktree / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        command_evidence=[],
+        accept_existing_plan=True,
+        planning_retry_scope_baseline={"post_planning_dirty_paths": set()},
+    )
+
+
 @pytest.mark.unit
 async def test_matching_head_runs_planning_then_coding_after_evidence(
     factory: async_sessionmaker[AsyncSession],
@@ -430,3 +459,88 @@ async def test_preserved_pr_with_a_pin_is_not_reset(
             event.event_type != "workspace.expected_base_sha_first_launch_verified"
             for event in row.events
         )
+
+
+@pytest.mark.unit
+async def test_reused_plan_with_moved_head_invokes_no_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "ws_pin_reuse_moved"
+    first, second = _init_worktree(worktree)
+    _seed_existing_plan(worktree, worktree.name)
+    runner = _RecordingRunner()
+    executor = _Executor(factory=factory, runner=runner, worktrees_root=root)
+    workspace = await _workspace(
+        factory,
+        worktree=worktree,
+        pin=first,
+        policy={"expected_base_sha": first},
+        status=WorkspaceStatus.running,
+    )
+    adapter = _Adapter(
+        worktree=worktree,
+        workspace_id=workspace.id,
+        factory=factory,
+        require_evidence=False,
+    )
+    result = await _reuse_existing_plan(
+        executor,
+        workspace=workspace,
+        adapter=adapter,
+        worktree=worktree,
+        profile=_profile(planning=True),
+    )
+    assert isinstance(result, _ExpectedBaseShaLaunchSettled)
+    assert adapter.calls == []
+    assert _git(["rev-parse", "HEAD"], worktree) == second
+    assert _reset_commands(runner) == []
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace.id)
+        assert row is not None
+        assert row.status == WorkspaceStatus.failed.value
+        assert row.subphase is None
+        assert any(event.reason_code == _PIN_MOVED for event in row.events)
+
+
+@pytest.mark.unit
+async def test_reused_plan_with_matching_head_records_evidence_before_coding(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "ws_pin_reuse_match"
+    first, _second = _init_worktree(worktree)
+    _git(["reset", "--hard", first], worktree)
+    _seed_existing_plan(worktree, worktree.name)
+    runner = _RecordingRunner()
+    executor = _Executor(factory=factory, runner=runner, worktrees_root=root)
+    workspace = await _workspace(
+        factory,
+        worktree=worktree,
+        pin=first,
+        policy={"expected_base_sha": first},
+        status=WorkspaceStatus.running,
+    )
+    adapter = _Adapter(
+        worktree=worktree,
+        workspace_id=workspace.id,
+        factory=factory,
+        require_evidence=True,
+    )
+    result = await _reuse_existing_plan(
+        executor,
+        workspace=workspace,
+        adapter=adapter,
+        worktree=worktree,
+        profile=_profile(planning=True),
+    )
+    assert result is None
+    assert adapter.calls
+    assert not adapter.calls[0].startswith("## Planning phase")
+    assert "Implement the saved plan" in adapter.calls[0]
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace.id)
+        assert row is not None
+        assert row.subphase != "planning"
