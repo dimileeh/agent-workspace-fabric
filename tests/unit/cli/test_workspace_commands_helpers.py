@@ -211,6 +211,70 @@ def test_workspace_create_builds_minimal_development_payload(
 
 
 @pytest.mark.unit
+def test_workspace_create_direct_call_preserves_explicit_expected_base_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct helper call must send an explicit pin and ignore Typer's default object."""
+    captured: dict[str, object] = {}
+    pin = "ab" * 20
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    workspace_commands.workspace_create(
+        repo_url="git@example.com:repo/app.git",
+        task_title="title",
+        task_prompt="prompt",
+        task_tag=None,
+        branch_base="development",
+        task_kind=TaskKind.feature_branch_pr.value,
+        source_branch=None,
+        expected_base_sha=pin,
+        agent="codex",
+        model=None,
+        effort=None,
+        task_class=None,
+        priority=None,
+        human_boost=None,
+        out_of_scope_changes_json=None,
+        provider_recovery_json=None,
+        owned_paths=None,
+        external_id=None,
+        cpu=None,
+        memory=None,
+        steady_state_cpu_cores=None,
+        steady_state_memory_gb=None,
+        peak_cpu_cores=None,
+        peak_memory_gb=None,
+        disk_mb=None,
+        profile_ref="auto",
+        test_commands=[],
+        requires_database=False,
+        auto_merge=None,
+        initial_review_grace_period_seconds=None,
+        provider_readiness_override=False,
+        provider_readiness_override_reason=None,
+        companion_json=None,
+        companion_env_from=None,
+        companion_env_exclude=None,
+        idempotency_key=None,
+        api_token=None,
+        base_url=None,
+        fmt=OutputFormat.json,
+    )
+
+    body = captured["json"]
+    assert isinstance(body, dict)
+    assert body["repo"]["expected_base_sha"] == pin
+    assert body["repo"]["base_branch"] == "development"
+
+
+@pytest.mark.unit
 def test_workspace_create_captures_explicit_ollama_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

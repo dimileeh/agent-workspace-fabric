@@ -215,6 +215,7 @@ def workspace_create(
     repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
     if source_branch is not None:
         repo_body["source_branch"] = source_branch
+    expected_base_sha = _option_default(expected_base_sha)
     if expected_base_sha is not None:
         repo_body["expected_base_sha"] = expected_base_sha
     body: dict[str, Any] = {
