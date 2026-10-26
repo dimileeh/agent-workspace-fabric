@@ -33,8 +33,10 @@ from awf.common.logging import get_logger
 from awf.common.workspace_policy import (
     CURSOR_AUTO_MODE_POLICY_KEY,
     DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,
+    EXPECTED_BASE_SHA_POLICY_KEY,
     canonical_agent_model_for_cursor_auto,
     cursor_auto_mode_from_task_policy,
+    expected_base_sha_from_task_policy,
 )
 from awf.db.enums import AgentRuntime, TaskKind
 from awf.db.models import (
@@ -379,6 +381,7 @@ def workspace_create_payload_matches(
         association_matches((existing.task_policy or {}).get(POLICY_KEY), payload.hosted)
         and existing.repo_url == payload.repo.url
         and existing.branch_base == payload.repo.base_branch
+        and _expected_base_sha_matches(existing, payload)
         and existing.task_tag == payload.task.task_tag
         and existing.task_title == payload.task.title
         and existing.task_prompt == payload.task.prompt
@@ -417,6 +420,14 @@ def workspace_create_payload_matches(
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_resource_reservation_matches(existing, payload, settings=settings)
         and _task_provider_readiness_override_matches(existing, payload)
+    )
+
+
+def _expected_base_sha_matches(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:
+    """Compare the immutable create pin. A missing snapshot key matches an omitted pin."""
+    return (
+        expected_base_sha_from_task_policy(_stored_task_policy(existing))
+        == payload.repo.expected_base_sha
     )
 
 
@@ -1406,6 +1417,8 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
     # stable snapshot. Always write the key (even for None) to keep the snapshot
     # stable across replays.
     policy[AUTO_MERGE_INTENT_POLICY_KEY] = payload.task.auto_merge
+    if payload.repo.expected_base_sha is not None:
+        policy[EXPECTED_BASE_SHA_POLICY_KEY] = payload.repo.expected_base_sha
     if payload.task.kind == TaskKind.sync_release_pr.value:
         policy[RELEASE_SYNC_POLICY_KEY] = {
             "source_branch": payload.repo.source_branch or DEFAULT_RELEASE_SYNC_SOURCE_BRANCH,

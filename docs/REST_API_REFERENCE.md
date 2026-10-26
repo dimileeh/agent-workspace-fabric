@@ -67,7 +67,10 @@ Response shape:
   "package_name": "agent-workspace-fabric",
   "package_version": "0.1.0",
   "git_commit": "unknown",
-  "capabilities": ["workspace.execution.v1"]
+  "capabilities": [
+    "workspace.execution.v1",
+    "workspace.create.expected_base_sha.v1"
+  ]
 }
 ```
 
@@ -164,6 +167,13 @@ curl -X POST http://localhost:8000/v1/workspaces \
 ```
 
 Returns `202 Accepted` with workspace ID, status URL, and events URL.
+
+`repo.expected_base_sha` is optional. Omit it, or send null, to check out the
+current tip of `base_branch`. When set to a full 40-character hexadecimal
+commit, that named branch must resolve to the commit at the initial checkout.
+It is stored on the create policy snapshot, not on `Workspace.base_commit`, and
+it does not move later commits back to that SHA. Discovery advertises
+`workspace.create.expected_base_sha.v1` only when this Core implements the pin.
 
 The task object accepts policy metadata:
 
