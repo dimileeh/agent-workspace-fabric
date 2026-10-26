@@ -6,6 +6,7 @@ from awf.control.executor import git_methods as _git_methods
 from awf.control.executor import monitor_handoff as _monitor_handoff
 from awf.control.executor import monitor_handoff_setup as _monitor_handoff_setup
 from awf.control.executor import monitor_handoff_sync as _monitor_handoff_sync
+from awf.control.executor import monitor_resume_restart_flow as _monitor_resume_restart_flow
 from awf.control.executor import ollama_model as _ollama_model
 from awf.control.executor import planning_conformance as _planning_conformance
 from awf.control.executor import planning_ops as _planning_ops
@@ -70,6 +71,9 @@ class ExecutorDelegatesMixin:
     _complete_release_pr_sync_no_op = _monitor_handoff_sync._complete_release_pr_sync_no_op
     _handoff_sync_feature_pr_monitor = _monitor_handoff_sync._handoff_sync_feature_pr_monitor
     _record_monitor_runtime_restart_failed = _monitor_handoff._record_monitor_runtime_restart_failed
+    _restart_compose_runtime_for_monitor_resume = (
+        _monitor_resume_restart_flow._restart_compose_runtime_for_monitor_resume
+    )
 
     _prepare_conformance_salvage_for_execution = (
         _planning_conformance._prepare_conformance_salvage_for_execution

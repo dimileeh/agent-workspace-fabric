@@ -41,7 +41,14 @@ from tests.integration.runtime._pr_monitor_runner_fixtures import (
 from tests.integration.runtime.test_pr_monitor_runner_parts._helpers import (
     _queue_post_action_recheck,
 )
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
+
 
 pytest_plugins = ["tests.integration.runtime._pr_monitor_runner_fixtures"]
 
@@ -1188,8 +1195,7 @@ class TestResolveStaleGuard:
         adapter.queue(stdout="AWF-VERDICT: DEFER: follow-up nit")
         cmd.queue_result(
             returncode=0, stdout="https://github.com/o/r/issues/77\n"
-        )  # gh issue create
-        cmd.queue_result(returncode=0)  # gh pr comment
+        )  # gh issue create (no top-level capture comment since #1018)
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle: body CHANGED
         _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0, stderr="")  # git push

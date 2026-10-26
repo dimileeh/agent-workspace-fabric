@@ -103,6 +103,25 @@ def test_spec_generation_succeeds(openapi_spec: dict) -> None:
     )
 
 
+@pytest.mark.parametrize("status", ["401", "403", "404", "409", "413", "422", "503"])
+def test_hosted_routes_document_sanitized_error_schema(openapi_spec: dict, status: str) -> None:
+    operations = [
+        operation
+        for path, methods in openapi_spec["paths"].items()
+        if path.startswith("/v1/hosted-node/")
+        for method, operation in methods.items()
+        if method in {"get", "post"}
+    ]
+    assert len(operations) >= 5
+    for operation in operations:
+        response = operation["responses"][status]
+        schema = response["content"]["application/json"]["schema"]
+        assert schema == {"$ref": "#/components/schemas/HostedErrorResponse"}
+    model = openapi_spec["components"]["schemas"]["HostedErrorResponse"]
+    assert model["required"] == ["error_code"]
+    assert set(model["properties"]) == {"error_code"}
+
+
 @pytest.mark.unit
 def test_spec_is_valid_openapi_3x(openapi_spec: dict) -> None:
     from openapi_spec_validator import validate

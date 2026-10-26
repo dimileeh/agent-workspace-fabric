@@ -24,7 +24,7 @@ import os
 import re
 import shutil
 import weakref
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -500,6 +500,8 @@ class GitManager:
         env: Mapping[str, str] | None = None,
         worktree_owner_uid: int | None = None,
         worktree_owner_gid: int | None = None,
+        command_environment: Callable[[], Awaitable[Mapping[str, str]]] | None = None,
+        prepare_shared_checkout: Callable[[Path, Path], Awaitable[None]] | None = None,
     ) -> None:
         self._work_dir = work_dir
         self._mirrors_dir = work_dir / "mirrors"
@@ -508,6 +510,8 @@ class GitManager:
         self._task_env: ContextVar[dict[str, str]] = ContextVar(f"git_manager_task_env_{id(self)}")
         self._worktree_owner_uid = worktree_owner_uid
         self._worktree_owner_gid = worktree_owner_gid
+        self._command_environment = command_environment
+        self._prepare_shared_checkout = prepare_shared_checkout
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
@@ -1214,6 +1218,10 @@ class GitManager:
         env: Mapping[str, str] | None = None,
     ) -> GitResult:
         _log.debug("git.exec", operation=operation, args=args)
+        if self._command_environment is not None:
+            env = _git_manager_ownership.git_env_with_trusted_base_overrides(
+                await self._command_environment(), env
+            )
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -1253,6 +1261,9 @@ class GitManager:
         worktree_path: Path,
     ) -> None:
         """Make a root-created linked worktree usable by the agent-runtime user."""
+        if self._prepare_shared_checkout is not None:
+            await self._prepare_shared_checkout(layout_mirror, worktree_path)
+            return
         if self._worktree_owner_uid is None or self._worktree_owner_gid is None:
             return
         if os.geteuid() != 0:

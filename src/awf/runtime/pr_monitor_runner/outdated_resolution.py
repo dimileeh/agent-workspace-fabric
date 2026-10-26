@@ -13,7 +13,9 @@ everything?" signal.
 
 This focused step closes that gap forge-neutrally. The forge clients surface the
 addressed-but-outdated threads in ``PRStatus.outdated_unresolved_inline_threads``;
-here we resolve only the ones the monitor already recorded with a fix verdict.
+here we resolve only the ones the monitor already recorded with a fix verdict,
+and every resolve follows AWF's in-thread disposition reply (#1018) — a thread
+whose reply cannot be posted is parked ``needs_human`` instead.
 Uncaptured ``defer`` / ``needs_human`` / ``agent_failed`` threads stay open;
 a ``defer`` whose durable capture marker is present is resolvable here so
 already-outdated-at-batch-entry threads (R5 single resolution owner) are not
@@ -31,9 +33,13 @@ from typing import Any
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
-from awf.runtime.feedback_policy import preferred_duplicate_review_thread
+from awf.runtime.feedback_policy import (
+    preferred_duplicate_review_thread,
+    review_thread_body_hash,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import (
+    _disposition_unverified_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
 )
@@ -61,12 +67,24 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_transient_github_client_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    ThreadDisposition,
+    copy_item_disposition,
+    read_item_disposition,
+    record_item_disposition,
+)
+from awf.runtime.pr_monitor_runner.thread_disposition_reply import (
+    record_resolve_landed,
+    reply_before_resolve,
+)
 
 # Closed verdicts whose now-OUTDATED threads this hygiene step may always
 # resolve. ``defer`` is intentionally excluded from the set: capture is verified
 # separately via ``_outdated_thread_is_resolvable`` (marker present for the
 # current conversation hash). Uncaptured outdated defer stays open.
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
+# A branch-evidence match is durable only when git names the full commit (#1018).
+_FULL_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 def _outdated_thread_is_resolvable(state: MonitorState, thread: ReviewThread) -> bool:
@@ -74,7 +92,7 @@ def _outdated_thread_is_resolvable(state: MonitorState, thread: ReviewThread) ->
 
     Closed verdicts (``fix_committed`` / ``false_positive``) resolve unconditionally.
     ``defer`` resolves only when durable capture completed for the *current*
-    body hash (explanatory comment + tracking issue). That closes the R5 gap:
+    body hash (tracking issue filed). That closes the R5 gap:
     already-outdated-at-batch-entry threads are not resolved in-cycle, so this
     path must own captured-defer resolution or the merge gate wedges on
     NotifyHuman forever.
@@ -312,7 +330,10 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     protection loop on NotifyHuman (PRRT_kwDOSJAM6s6dfPZ2).
 
     Threads carrying a live operator ruling are excluded too — see
-    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a).
+    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a) — and so
+    are threads the disposition gate flagged (#1018): the operator's reopen
+    cleared such a thread's verdict so it is re-triaged, not rebuilt from the
+    branch evidence it already carried.
     """
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     unseeded = [
@@ -324,6 +345,7 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         # re-triage through ``AddressComments``, not a verdict reconstructed from
         # the evidence the operator just ruled on (PRRT_kwDOSJAM6s6fwt3a).
         and not _thread_has_live_operator_decision(state, thread)
+        and _disposition_unverified_key(thread.thread_id) not in state.threads_addressed_ids
         # #548: never seed ``fix_committed`` from branch evidence onto a thread
         # that already holds a blocking sibling comment verdict (``needs_human`` /
         # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
@@ -336,7 +358,7 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         return
     worktree_path = self._worktrees_root / workspace_id
 
-    async def _matching_fix_commit_time(thread: ReviewThread) -> tuple[bool, datetime | None]:
+    async def _matching_fix_commit(thread: ReviewThread) -> tuple[str | None, datetime | None]:
         # ``-E --all-match`` requires BOTH ``--grep`` patterns present in one commit
         # message: the literal ``fix: address`` prefix AND an alternation over the
         # thread's full identifier set (``thread_id`` plus any review-comment
@@ -361,9 +383,11 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         # rewritten committer date is newer than the follow-up, so a ``%cI`` ordering
         # would seed ``fix_committed`` over the untriaged reply; the author date stays
         # anchored to the original fix time and keeps the post-fix guard correct.
-        # Returns ``(matched, commit_time)``: an empty / failed read means no durable
-        # evidence (no seed); a non-empty read is a match whose time may still be
-        # ``None`` if git emitted something unparseable.
+        # ``%H`` precedes the time so the seeded thread's disposition reply can cite
+        # the matched commit (#1018). Returns ``(sha, commit_time)``: an empty /
+        # failed read, or one whose first token is not a full commit sha, means no
+        # durable evidence (no seed); a match's time may still be ``None`` if git
+        # emitted something unparseable.
         id_alternation = (
             "("
             + "|".join(_grep_id_pattern(i) for i in sorted(_thread_identifier_set(thread)))
@@ -375,7 +399,7 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
                 "log",
                 "-n",
                 "1",
-                "--format=%aI",
+                "--format=%H %aI",
                 "-E",
                 "--all-match",
                 "--grep",
@@ -385,17 +409,17 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
                 "HEAD",
             )
         )
-        raw = result.stdout.strip()
-        if not (result.ok and raw):
-            return False, None
-        return True, _parse_commit_iso(raw)
+        sha, _, iso = result.stdout.strip().partition(" ")
+        if not (result.ok and _FULL_COMMIT_SHA.fullmatch(sha)):
+            return None, None
+        return sha, _parse_commit_iso(iso)
 
     # The per-thread evidence greps are independent, read-only ``git log`` reads,
     # so run them concurrently (one re-adoption can carry several unseeded outdated
     # threads) and apply verdicts afterwards in deterministic thread order.
-    evidence = await asyncio.gather(*(_matching_fix_commit_time(thread) for thread in unseeded))
-    for thread, (matched, commit_time) in zip(unseeded, evidence, strict=True):
-        if not matched:
+    evidence = await asyncio.gather(*(_matching_fix_commit(thread) for thread in unseeded))
+    for thread, (matched_sha, commit_time) in zip(unseeded, evidence, strict=True):
+        if matched_sha is None:
             continue
         latest_comment_at = _latest_reviewer_comment_at(thread)
         if (
@@ -413,6 +437,21 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
             state.mark_addressed(thread.thread_id, "needs_human")
             continue
         _mark_review_thread_addressed(state, thread, "fix_committed")
+        # #1018: this monitor never produced a verdict for the thread, so its
+        # disposition reply cites the branch commit the evidence matched. The
+        # conversation hash lets a re-triage after a failed resolve tell newer
+        # reviewer feedback from the one this reply answers (PRRT_kwDOSJAM6s6vRfXm).
+        record_item_disposition(
+            state,
+            ThreadDisposition(
+                item_id=thread.thread_id,
+                disposition_class="fixed_branch_evidence",
+                verdict="fix_committed",
+                commits=(matched_sha,),
+                source="branch_evidence",
+                thread_body_hash=review_thread_body_hash(thread),
+            ),
+        )
 
 
 def _reconcile_comment_keyed_outdated_verdicts(
@@ -475,7 +514,9 @@ def _reconcile_comment_keyed_outdated_verdicts(
     before hygiene's active-wins skip suppresses AddressComments without ever
     resolving the forge thread. Active-path ownership handles those IDs. Threads
     carrying a live operator ruling are skipped as well — see
-    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a).
+    ``_thread_has_live_operator_decision`` (#939 / PRRT_kwDOSJAM6s6fwt3a) — and so
+    are threads the disposition gate flagged, whose reopen asks for a re-triage
+    (#1018).
     """
     active_thread_ids = {t.thread_id for t in status.unresolved_inline_threads}
     for thread in status.outdated_unresolved_inline_threads:
@@ -489,6 +530,10 @@ def _reconcile_comment_keyed_outdated_verdicts(
         # would resolve the thread — or re-park it — without the agent ever reading
         # the directive (PRRT_kwDOSJAM6s6fwt3a).
         if _thread_has_live_operator_decision(state, thread):
+            continue
+        # #1018: the operator's reopen cleared a flagged thread's verdict so that it
+        # is re-triaged, not rebuilt from its comments' earlier verdicts.
+        if _disposition_unverified_key(thread.thread_id) in state.threads_addressed_ids:
             continue
         # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
         # ``fix_committed`` and a reply ``needs_human``. Promoting the resolvable
@@ -566,6 +611,9 @@ def _reconcile_comment_keyed_outdated_verdicts(
             _mark_review_thread_addressed(
                 state, thread, state.threads_addressed_ids[resolvable_comment_ids[0]]
             )
+            # #1018: the promoted verdict's reason / commit goes with it, so the
+            # thread's disposition reply can be posted before it is resolved.
+            copy_item_disposition(state, from_id=resolvable_comment_ids[0], thread=thread)
 
 
 async def _resolve_addressed_outdated_threads(
@@ -613,7 +661,6 @@ async def _resolve_addressed_outdated_threads(
     clears a stale requeue (and addressed state) before continuing so AddressComments
     owns the retry rather than NotifyHuman-looping (PRRT_kwDOSJAM6s6dffOX).
     """
-    del repo  # repo is recovered from the neutral thread_id by the forge client
     # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
     # the (continuous-monitor) in-memory case resolves without a git call and the
     # branch-evidence seed below naturally skips the now-seeded threads.
@@ -684,6 +731,35 @@ async def _resolve_addressed_outdated_threads(
         # changed body). Prefer the coalesced representation — not every ghost.
         if _review_thread_needs_attention(state, preferred):
             continue
+        previous = read_item_disposition(state, tid)
+        disposition = await reply_before_resolve(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            thread_id=tid,
+            state=state,
+            action="resolve_outdated_thread",
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            thread=preferred,
+            monitor_log=monitor_log,
+            repo=repo,
+            # Under the merge lock its post-reply re-read fails fast too
+            # (PRRT_kwDOSJAM6s6vbU2K).
+            retry=wait_on_transient,
+        )
+        if disposition is None:
+            # Parked, requeued, or its feedback moved on before the reply (#1018).
+            # Persist now (any reply id too) for the same reason as the permanent-
+            # fault downgrade below: a transient ``_execute`` fault skips
+            # ``_persist_state``.
+            await self._persist_state(workspace_id, state)
+            continue
+        if previous is None or previous.reply_comment_id != disposition.reply_comment_id:
+            # A NEW reply was posted: persist its id so a later transient resolve
+            # retry (or a transient ``_execute`` fault) never double-posts. Safe for
+            # the reason the permanent-fault arm below gives.
+            await self._persist_state(workspace_id, state)
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)
         except ForgeClientError as exc:
@@ -736,6 +812,7 @@ async def _resolve_addressed_outdated_threads(
                         "resolved_thread_count": 0,
                         "requeued_thread_count": 1,
                         "error_message": str(exc),
+                        "dispositions": [disposition.as_payload()],
                     },
                 )
                 # Flag the thread requeued so ``decide`` (which runs THIS iteration,
@@ -803,9 +880,14 @@ async def _resolve_addressed_outdated_threads(
                     "resolved_thread_count": 0,
                     "needs_human_thread_count": 1,
                     "error_message": str(exc),
+                    "dispositions": [disposition.as_payload()],
                 },
             )
             continue
+        # #1018: a reopen of this thread now retires its reply, never reuses it.
+        await record_resolve_landed(
+            self, workspace_id=workspace_id, state=state, disposition=disposition
+        )
         # Resolve landed — clear any transient requeue flag from a prior poll so
         # ``decide`` no longer holds this thread at ``NotifyHuman``.
         state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(tid), None)
@@ -830,6 +912,7 @@ async def _resolve_addressed_outdated_threads(
             evidence={
                 "thread_ids": [tid],
                 "resolved_thread_count": 1,
+                "dispositions": [disposition.as_payload()],
             },
         )
         resolved_ids.add(tid)

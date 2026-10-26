@@ -43,7 +43,9 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
+from tests.unit.runtime._thread_disposition_fixtures import seed_resolvable_disposition
 from tests.unit.runtime.test_pr_monitor_outdated_resolution_parts._helpers import (
+    _EVIDENCE_SHA,
     _call_resolve,
     _grep_argv,
     _outdated_thread,
@@ -132,7 +134,7 @@ async def test_comment_path_outdated_thread_resolved_via_branch_evidence(
     )
     # The branch head carries ``fix: address review comment issue:4688598838 — …``;
     # ``%aI`` emits its author time (09:00, AFTER the 08:00 finding) => fix_committed.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     await _call_resolve(
         runner,
@@ -183,6 +185,7 @@ async def test_comment_keyed_in_memory_verdict_resolves_outdated_thread(
     # The fix-cycle COMMENT path recorded the verdict under the comment databaseId,
     # NOT the thread node id — the exact #540 shape the thread-keyed lookup missed.
     state.mark_addressed("4688598838", "fix_committed")
+    seed_resolvable_disposition(state, "4688598838", "fix_committed")
 
     await _call_resolve(
         runner,
@@ -315,6 +318,7 @@ async def test_mixed_verdict_outdated_thread_stays_open(
     state = MonitorState()
     thread = _outdated_thread_with_two_comments("PRRT_mixed", comment_ids=("1000", "9000"))
     state.mark_addressed("1000", "fix_committed")
+    seed_resolvable_disposition(state, "1000", "fix_committed")
     state.mark_addressed("9000", "needs_human")
 
     status = _status_with_outdated(thread)
@@ -361,11 +365,12 @@ async def test_mixed_verdict_outdated_thread_not_seeded_from_branch_evidence(
     state = MonitorState()
     thread = _outdated_thread_with_two_comments("PRRT_mixed_seed", comment_ids=("1000", "9000"))
     state.mark_addressed("1000", "fix_committed")
+    seed_resolvable_disposition(state, "1000", "fix_committed")
     state.mark_addressed("9000", "needs_human")
     # A matching fix commit IS on HEAD — but the blocking sibling must keep the seed
     # from ever consulting it. If the guard regressed, this queued result would be
     # popped by the grep and the thread seeded + resolved.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     await _call_resolve(
         runner,
@@ -419,6 +424,7 @@ async def test_comment_keyed_post_fix_reply_blocks_resolve(
     # Only the original comment was addressed via the COMMENT path; the later reply
     # carries no verdict and was never re-triaged.
     state.mark_addressed("4688598838", "fix_committed")
+    seed_resolvable_disposition(state, "4688598838", "fix_committed")
 
     status = _status_with_outdated(thread)
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
@@ -462,6 +468,7 @@ async def test_comment_keyed_pre_fix_reply_still_resolves(
         reply_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
     )
     state.mark_addressed("4688598838", "fix_committed")
+    seed_resolvable_disposition(state, "4688598838", "fix_committed")
 
     await _call_resolve(
         runner,
@@ -510,7 +517,9 @@ async def test_comment_keyed_later_handled_sibling_still_resolves(
         second_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
     )
     state.mark_addressed("a", "fix_committed")
+    seed_resolvable_disposition(state, "a", "fix_committed")
     state.mark_addressed("b", "fix_committed")
+    seed_resolvable_disposition(state, "b", "fix_committed")
 
     await _call_resolve(
         runner,
@@ -580,7 +589,9 @@ async def test_comment_keyed_untriaged_reply_after_handled_sibling_blocks(
         ),
     )
     state.mark_addressed("a", "fix_committed")
+    seed_resolvable_disposition(state, "a", "fix_committed")
     state.mark_addressed("b", "fix_committed")
+    seed_resolvable_disposition(state, "b", "fix_committed")
 
     status = _status_with_outdated(thread)
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
@@ -627,6 +638,7 @@ async def test_comment_keyed_edited_addressed_comment_blocks_resolve(
         edited_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
     )
     state.mark_addressed("4688598838", "fix_committed")
+    seed_resolvable_disposition(state, "4688598838", "fix_committed")
 
     status = _status_with_outdated(thread)
     await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
@@ -691,7 +703,7 @@ async def test_dual_feed_id_not_seeded_from_branch_evidence(
         outdated_unresolved_inline_threads=(outdated,),
     )
     # Matching fix commit on HEAD — must NOT be consulted for dual-feed IDs.
-    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+    cmd.queue_result(returncode=0, stdout=f"{_EVIDENCE_SHA} 2026-06-10T09:00:00+00:00\n")
 
     await _call_resolve(
         runner,
@@ -743,6 +755,7 @@ async def test_dual_feed_id_not_reconciled_from_comment_keyed_verdict(
         comments=outdated.comments,
     )
     state.mark_addressed("4688598838", "fix_committed")
+    seed_resolvable_disposition(state, "4688598838", "fix_committed")
     status = PRStatus(
         number=42,
         head_sha="abc1234567890def",
@@ -797,6 +810,7 @@ async def test_live_operator_decision_thread_is_not_reconciled_from_comment_verd
     thread = _outdated_thread_with_distinct_comment(tid, comment_id="4688598838")
     state = MonitorState()
     state.mark_addressed("4688598838", "fix_committed")
+    seed_resolvable_disposition(state, "4688598838", "fix_committed")
     state.mark_addressed(_operator_decision_key(tid), "fix the guard at the reviewer's line")
 
     status = _status_with_outdated(thread)

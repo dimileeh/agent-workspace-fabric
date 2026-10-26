@@ -34,7 +34,13 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_manual_ready_handoff,
     _non_check_reviewer_settle_decision,
     _non_check_reviewer_settle_wait_operation_context,
+    _notification_key,
     _notify_human_reason,
+)
+from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.thread_disposition import REVIEW_THREAD_AUDIT_UNAVAILABLE
+from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
+    review_thread_disposition_gate,
 )
 
 
@@ -213,6 +219,42 @@ async def handle_notify_human_action(
                 )
                 return False
 
+    disposition_count_rows: tuple[tuple[str, int], ...] | None = None
+    if manual_ready_handoff and action.message is None:
+        # #1018: never certify READY_TO_MERGE over a thread AWF resolved silently.
+        gate = await review_thread_disposition_gate(
+            self,
+            workspace_id=workspace_id,
+            repo=repo,
+            pr_number=pr_number,
+            status=status,
+            state=state,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+        )
+        if gate.retry:
+            if gate.feedback_changed:
+                await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
+        if gate.audit_unavailable and _ready_cert_posted_at_head(state, status.head_sha):
+            # The cert at this head was earned on a complete audit; an outage on a
+            # later poll only logs and waits, never contradicts it publicly.
+            _log.warning(
+                "monitor.review_thread_audit_unavailable_after_ready_cert",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                head_sha=status.head_sha[:10],
+                reason_code=REVIEW_THREAD_AUDIT_UNAVAILABLE,
+            )
+            await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
+        if gate.blocker is not None:
+            action = NotifyHuman(message=gate.blocker)
+            manual_ready_handoff = False
+        else:
+            disposition_count_rows = gate.count_rows
+
     # ``NotifyHuman.message`` is optional and ``_notify_human_reason`` returns
     # ``None`` for a clean manual-ready handoff (green PR, ``auto_merge`` off),
     # so fall back to a sensible default. A ``None`` reason would otherwise be
@@ -261,6 +303,7 @@ async def handle_notify_human_action(
             status=status,
             state=state,
             blocker_reason=action.message,
+            disposition_count_rows=disposition_count_rows,
             # No boundary re-read armed here: ``status`` is THIS cycle's poll
             # snapshot that ``decide()`` just returned ``NotifyHuman`` on, with no
             # long action in between — unlike the workflow-scope and merge-rejection
@@ -331,3 +374,12 @@ async def handle_notify_human_action(
         },
     )
     return False
+
+
+def _ready_cert_posted_at_head(state: MonitorState, head_sha: str) -> bool:
+    """Whether a READY_TO_MERGE cert was already posted for ``head_sha``."""
+    cert_key = _notification_key(head_sha=head_sha, blocker_reason=None)
+    return any(
+        value == "notified" and (key == cert_key or key.startswith(f"{cert_key}:"))
+        for key, value in state.threads_addressed_ids.items()
+    )

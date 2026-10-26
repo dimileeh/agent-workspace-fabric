@@ -422,6 +422,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "preflight",
                 "resources",
                 "companions",
+                "hosted",
             }
         ),
         mcp_request_fields=frozenset(

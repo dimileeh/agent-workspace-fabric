@@ -8,7 +8,6 @@ import subprocess
 from collections.abc import Callable, Mapping
 from typing import Literal, Protocol
 
-from awf.common.config import Settings
 from awf.service.resource_capacity import LocalCapacityLimits
 
 _DETECT_TIMEOUT_SECONDS = 5.0
@@ -22,6 +21,11 @@ class CompletedProcessLike(Protocol):
     stderr: str
 
 
+class DockerCapacitySettings(Protocol):
+    @property
+    def docker_host(self) -> str: ...
+
+
 SubprocessRun = Callable[
     [
         list[str],
@@ -31,8 +35,9 @@ SubprocessRun = Callable[
 
 
 def detect_local_capacity(
-    settings: Settings,
+    settings: DockerCapacitySettings,
     *,
+    environment: Mapping[str, str] | None = None,
     run_subprocess: Callable[
         ...,
         CompletedProcessLike,
@@ -42,7 +47,10 @@ def detect_local_capacity(
     """Detect capacity exposed by the Docker daemon used for workspaces."""
 
     run = run_subprocess or _run_subprocess
-    env = {**os.environ, "DOCKER_HOST": settings.docker_host}
+    env = {
+        **(os.environ if environment is None else environment),
+        "DOCKER_HOST": settings.docker_host,
+    }
     try:
         result = run(
             ["docker", "info", "--format", "{{json .}}"],

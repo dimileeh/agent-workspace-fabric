@@ -41,7 +41,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -49,6 +49,12 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     pr_payload,
     seed_monitoring_workspace,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 class _BitbucketResolveThreadClient(DefaultMergeMethodGitHubClient):

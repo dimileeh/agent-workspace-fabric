@@ -28,6 +28,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.runtime.logs import LogStore
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -37,6 +38,12 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
     thread_node,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
 
 
 @pytest.fixture
@@ -401,7 +408,10 @@ class TestMonitorActionLogging:
         assert resolution_events[0].payload["action"] == "resolve_thread"
         assert resolution_events[0].payload["outcome"] == "succeeded"
         assert resolution_events[0].payload["operation_id"] == comment_operation.id
-        assert resolution_events[0].payload["evidence"] == {
+        evidence = dict(resolution_events[0].payload["evidence"])
+        # #1018: the resolve audit carries the reply-before-resolve disposition.
+        assert evidence.pop("dispositions")[0]["class"] == "fixed"
+        assert evidence == {
             "thread_ids": ["T_recov"],
             "resolved_thread_count": 1,
             "log_stream_refs": {"monitor": "monitor.log"},

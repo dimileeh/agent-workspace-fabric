@@ -51,6 +51,7 @@ from typing import Protocol, cast, runtime_checkable
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge_lifecycle import PullRequestLifecycle, PullRequestSnapshot
+from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.enums import ForgeKind
 from awf.runtime.pr_monitor import CheckFailureLogResult, CheckTiming, PRStatus
@@ -162,6 +163,30 @@ class ForgeClient(Protocol):
 
     async def resolve_thread(self, *, thread_id: str) -> None:
         """Resolve a review thread by node ID."""
+        ...
+
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        """Post ``body`` as a reply inside review thread ``thread_id``; return its id.
+
+        The PR monitor posts its disposition reply here before every resolve
+        (#1018). Callers own the body; the forge adds no mention syntax.
+        """
+        ...
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
+        """Audit every review thread, or one repository/PR-bound ``thread_id``.
+
+        Exhaustive (fails closed on a truncated page) so the READY_TO_MERGE gate
+        can verify each AWF resolution carries its disposition marker (#1018).
+        A selected thread still includes all its comments; a supported reader
+        must fail closed if the node is absent or belongs to another repository/PR.
+        The final gate omits ``thread_id`` to enumerate all threads, resolved included.
+        ``supported=False`` means the forge cannot attribute resolutions yet.
+        ``retry=False`` (the in-lock re-audit) surfaces a single failure promptly
+        instead of retrying under the merge lock, as for ``fetch_pr_status``.
+        """
         ...
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:

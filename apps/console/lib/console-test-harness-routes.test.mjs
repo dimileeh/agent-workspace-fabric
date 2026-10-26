@@ -10,6 +10,7 @@ import {
   DEFAULT_PAGE_EXTENSIONS,
   HARNESS_PAGE_EXTENSION,
   isConsoleTestHarnessRouteBuildEnabled,
+  resolveConsoleDevIndicators,
   resolveConsolePageExtensions,
 } from "../console-test-harness-routes.ts";
 
@@ -47,4 +48,25 @@ test("harness flag alone without NODE_ENV still enables the test-only extension"
   const env = { AWF_CONSOLE_TEST_HARNESS: "1" };
   assert.equal(isConsoleTestHarnessRouteBuildEnabled(env), true);
   assert.ok(resolveConsolePageExtensions(env).includes(HARNESS_PAGE_EXTENSION));
+});
+
+test("harness dev servers hide the Next.js dev indicator", () => {
+  // The indicator fetches its own font and re-renders on client URL changes,
+  // which lands inside the browser smoke pane timing windows.
+  for (const env of [
+    { AWF_CONSOLE_TEST_HARNESS: "1", NODE_ENV: "development" },
+    { AWF_CONSOLE_TEST_HARNESS: "1" },
+  ]) {
+    assert.equal(resolveConsoleDevIndicators(env), false);
+  }
+});
+
+test("developer and production servers keep the default Next.js dev indicator", () => {
+  for (const env of [
+    {},
+    { AWF_CONSOLE_TEST_HARNESS: "0", NODE_ENV: "development" },
+    { AWF_CONSOLE_TEST_HARNESS: "1", NODE_ENV: "production" },
+  ]) {
+    assert.equal(resolveConsoleDevIndicators(env), undefined);
+  }
 });

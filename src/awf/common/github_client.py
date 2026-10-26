@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
+from awf.common import github_client_threads as _review_threads
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.forge_errors import ForgeClientError
@@ -861,6 +862,11 @@ class GitHubClient:
             variables={"threadId": thread_id},
             retry_policy=RetryPolicy.NEVER,
         )
+
+    # In-thread reply + exhaustive resolution audit (#1018) live in
+    # ``github_client_threads`` so this module stays under the line cap.
+    reply_to_thread = _review_threads.reply_to_thread
+    fetch_review_thread_audit = _review_threads.fetch_review_thread_audit
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment (not a reply to a thread)."""

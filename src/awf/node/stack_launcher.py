@@ -122,6 +122,11 @@ class ComposeStackLauncher:
         auth_mount_resolver: WorkspaceAuthMountResolver | None = None,
         secret_lease_resolver: WorkspaceSecretLeaseResolver | None = None,
         companion_image_builder: CompanionImageBuilder | None = None,
+        protected_profile_mounts: Callable[
+            [WorkspaceProfile, str], Awaitable[LocalSecretLeaseResolution]
+        ]
+        | None = None,
+        resource_limits: Callable[[str], Awaitable[tuple[float, float]]] | None = None,
     ) -> None:
         """Wire stack launch dependencies and optional credential resolvers."""
         self._compose = compose
@@ -129,6 +134,8 @@ class ComposeStackLauncher:
         self._auth_mount_resolver = auth_mount_resolver
         self._secret_lease_resolver = secret_lease_resolver
         self._companion_image_builder = companion_image_builder
+        self._protected_profile_mounts = protected_profile_mounts
+        self._resource_limits = resource_limits
 
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
         """Render and start the profile stack, including companions and secret metadata."""
@@ -226,6 +233,11 @@ class ComposeStackLauncher:
         """Build the rendered stack spec shared by launch and render-only paths."""
         layout = request.layout
         profile = request.profile
+        reservation_limits = (
+            await self._resource_limits(request.workspace_id)
+            if self._resource_limits is not None
+            else None
+        )
         egress_plan = local_egress_plan(profile.security.egress)
         # Linked git worktrees store writable refs/objects in the common mirror.
         # Agents need that metadata writable when they make local commits.
@@ -236,7 +248,12 @@ class ComposeStackLauncher:
         )
         auth_mounts = [mirror_mount]
         secret_lease_resolution: LocalSecretLeaseResolution | None = None
-        if use_hosted_secret_placeholders:
+        if self._protected_profile_mounts is not None:
+            secret_lease_resolution = await self._protected_profile_mounts(
+                profile, request.workspace_id
+            )
+            auth_mounts.extend(secret_lease_resolution.mounts)
+        elif use_hosted_secret_placeholders:
             secret_lease_resolution = _hosted_secret_lease_placeholder_resolution(profile)
             if secret_lease_resolution is not None:
                 auth_mounts.extend(secret_lease_resolution.mounts)
@@ -323,7 +340,10 @@ class ComposeStackLauncher:
                 agent_environment,
                 secret_lease_resolution.environment,
             )
-        agent_environment = agent_environment_with_host_auth(agent_environment)
+        agent_environment = agent_environment_with_host_auth(
+            agent_environment,
+            host_env={} if self._protected_profile_mounts is not None else None,
+        )
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
                 auth_mounts,
@@ -344,6 +364,7 @@ class ComposeStackLauncher:
             network_internal=egress_plan.network_internal,
             host_gateway_enabled=egress_plan.host_gateway_enabled,
             compose_up_timeout_seconds=compose_up_timeout_seconds,
+            reservation_limits=reservation_limits,
         )
         return spec, secret_lease_resolution, companion_secret_metadata
 

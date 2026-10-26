@@ -393,9 +393,11 @@ async def callee_definition_item_fix_evidence(
     reachable from module scope. Attempt 0 stays strict, so a no-op or misplaced
     FIXED still earns its correction round; a commit with no callee relationship
     keeps escalating to ``needs_human`` with the commit preserved (#928); and
-    the unmappable-anchor sentinel stays fail-closed. Cross-file linking is
-    name-based (no import or type resolution), so this widens the *radius* of the
-    existing "an unrelated edit could satisfy the gate" risk, not its kind.
+    the unmappable-anchor sentinel stays fail-closed. Python callees are linked
+    through the call site's own imports; a JS/TS call site never accepts
+    cross-file evidence (issue #1047); only other languages stay name-based,
+    where this widens the *radius* of the existing "an unrelated edit could
+    satisfy the gate" risk, not its kind.
 
     ``item_line`` is required: with no anchored line (or the ``item_line <= 0``
     unmappable-anchor sentinel) there is no call site to resolve, so the check

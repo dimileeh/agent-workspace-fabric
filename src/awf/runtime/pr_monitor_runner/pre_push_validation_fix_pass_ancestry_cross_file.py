@@ -60,6 +60,7 @@ _MAX_CALLEE_EVIDENCE_CANDIDATE_PATHS = 25
 # the first-party line guardrail; every moved name is rebound here, so imports
 # and test references keep resolving through this module.
 _PYTHON_CALL_SITE_SUFFIXES = _imports._PYTHON_CALL_SITE_SUFFIXES
+_JS_TS_CALL_SITE_SUFFIXES = _imports._JS_TS_CALL_SITE_SUFFIXES
 _ABSOLUTE_FROM_IMPORT_RE = _imports._ABSOLUTE_FROM_IMPORT_RE
 _RELATIVE_FROM_IMPORT_RE = _imports._RELATIVE_FROM_IMPORT_RE
 _PLAIN_IMPORT_RE = _imports._PLAIN_IMPORT_RE
@@ -779,9 +780,12 @@ async def _commit_range_changes_callee_definition(
     (PRRT_kwDOSJAM6s6q-6LK); the chain's remaining segments extend that root's
     module path, so a sibling module under it is not evidence either, and a
     chain this reader cannot resolve to one module fails closed
-    (PRRT_kwDOSJAM6s6q_M0j). A callee whose
+    (PRRT_kwDOSJAM6s6q_M0j). A Python callee whose
     binding is unreadable keeps the name-only rule, which is the #1019 shape the
-    gate exists for; a receiver imported by name resolves to that name's own
+    gate exists for, and so does a call site in a language with no binding
+    reader. A JS/TS call site never accepts here: without an ES-module parser
+    its callee cannot be tied to one file, and the name-only rule let an edit to
+    an unrelated same-named export pass (issue #1047). A receiver imported by name resolves to that name's own
     module or to the importing module's file, not to any sibling under its
     package (PRRT_kwDOSJAM6s6q8MW9). The receiver's binding *kind* is kept too:
     a receiver a plain ``import`` proves to be a module reaches only
@@ -824,6 +828,8 @@ async def _commit_range_changes_callee_definition(
 
     normalized_item = _normalize_evidence_item_path(item_path)
     if not normalized_item or item_line < 1:
+        return False
+    if f".{normalized_item.rsplit('.', 1)[-1].lower()}" in _JS_TS_CALL_SITE_SUFFIXES:
         return False
     item_text = await _path_text_at_ref(
         self, worktree_path=worktree_path, ref=left, path=normalized_item

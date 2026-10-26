@@ -37,6 +37,7 @@ from awf.node.auth_mounts import (
     teardown_workspace_auth_overlay,
 )
 from awf.node.compose_manager import ComposeManager
+from awf.runtime.inspection import command_environment
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_PROCESSED_KEY_PREFIX,
     OPERATOR_HINT_STATE_KEY,
@@ -986,10 +987,14 @@ def _completed_workspace_compose_teardown(
         return None
     fallback_compose_project = compose_project
 
-    manager = ComposeManager(
-        work_dir=self._work_dir,
-        template_path=_completed_workspace_teardown_template_sentinel(self._work_dir),
-    )
+    environment = command_environment()
+    template = _completed_workspace_teardown_template_sentinel(self._work_dir)
+    if environment is None:
+        manager = ComposeManager(work_dir=self._work_dir, template_path=template)
+    else:
+        manager = ComposeManager(
+            work_dir=self._work_dir, template_path=template, command_environment=environment
+        )
 
     async def _teardown(candidate: WorkspaceGCCandidate) -> WorkspaceGCComposeTeardownResult:
         result = await manager.teardown_project(

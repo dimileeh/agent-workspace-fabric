@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -24,6 +25,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
 )
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -83,6 +85,8 @@ class _MergeMethodClient:
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
         self.resolved_threads: list[str] = []
+        self._audit_client = DefaultMergeMethodGitHubClient(FakeCommandRunner())
+        self.thread_replies = self._audit_client.thread_replies
         self.fetch_pr_status_calls = 0
         self.expected_repo = _TEST_REPO
         self.expected_pr_number = _TEST_PR_NUMBER
@@ -117,8 +121,12 @@ class _MergeMethodClient:
             result = self.status_results.pop(0)
             if isinstance(result, GitHubClientError | BitbucketClientError):
                 raise result
-            return result
-        return self.recheck_status if self.recheck_status is not None else _mergeable_status()
+        else:
+            result = self.recheck_status if self.recheck_status is not None else _mergeable_status()
+        self._audit_client.remember_review_threads(
+            result.unresolved_inline_threads + result.outdated_unresolved_inline_threads
+        )
+        return result
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return configured repository merge methods or raise the configured error."""
@@ -172,6 +180,20 @@ class _MergeMethodClient:
         if self.resolve_error is not None:
             raise self.resolve_error
 
+    async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
+        """Record the disposition reply posted before an outdated-hygiene resolve."""
+        return await self._audit_client.reply_to_thread(thread_id=thread_id, body=body)
+
+    async def fetch_review_thread_audit(
+        self, *, repo: RepoRef, pr_number: int, retry: bool = True, thread_id: str | None = None
+    ) -> ReviewThreadAudit:
+        """Audit the observed threads and replies used by merge-hygiene tests."""
+        assert repo == self.expected_repo
+        assert pr_number == self.expected_pr_number
+        return await self._audit_client.fetch_review_thread_audit(
+            repo=repo, pr_number=pr_number, retry=retry, thread_id=thread_id
+        )
+
 
 async def _execute_merge(
     *,
@@ -180,6 +202,7 @@ async def _execute_merge(
     gh: _MergeMethodClient,
     base_branch: str = _TEST_DEFAULT_BASE_BRANCH,
     delete_source_branch_on_merge: bool = True,
+    state: MonitorState | None = None,
 ) -> tuple[bool | None, MonitorState, RecordedSleep, str]:
     """Seed a monitored workspace and execute one merge action."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -198,7 +221,7 @@ async def _execute_merge(
         gh=gh,
         delete_source_branch_on_merge=delete_source_branch_on_merge,
     )
-    state = MonitorState()
+    state = state if state is not None else MonitorState()
 
     terminal = await runner._execute(
         action=Merge(),

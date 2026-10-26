@@ -42,6 +42,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
+from awf.hosted_node import lifecycle_models as lifecycle_models  # noqa: F401
+from awf.hosted_node import models as hosted_models  # noqa: F401
 
 ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON = "ADVISORY_PLAN_ARTIFACT_OVERLAP"
 _ADVISORY_STALE_REASON_CODES = frozenset({ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON})
@@ -350,6 +352,7 @@ class Workspace(Base):
     indefinitely defer cleanup of persistently-failing workspaces."""
 
     # Timestamps
+    filesystem_reclaimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

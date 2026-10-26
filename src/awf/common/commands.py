@@ -134,6 +134,7 @@ class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
         activity_probe: ActivityProbe | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult: ...
 
 
@@ -216,6 +217,7 @@ class AsyncioSubprocessRunner:
         wall_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
         activity_probe: ActivityProbe | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         _validate_timeout("wall_timeout_seconds", wall_timeout_seconds)
         _validate_timeout("idle_timeout_seconds", idle_timeout_seconds)
@@ -225,6 +227,7 @@ class AsyncioSubprocessRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=None if env is None else dict(env),
         )
         assert proc.stdout is not None
         assert proc.stderr is not None

@@ -46,13 +46,21 @@ from awf.runtime.pr_monitor_runner.fix_cycle_resolution_invariant import (
     stranded_resolvable_thread_ids,
 )
 from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient, supply_fixed_item_commit
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
     seed_monitoring_workspace,
 )
+from tests.unit.runtime._thread_disposition_fixtures import seed_resolvable_disposition
+
+
+@pytest.fixture(autouse=True)
+def _fixed_item_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No git worktree here records a FIXED item's commit for its reply (#1018)."""
+    supply_fixed_item_commit(monkeypatch)
+
 
 _THREAD_ID = "PRRT_stranded"
 _PRIOR_THREAD_ID = "PRRT_stranded_by_earlier_cycle"
@@ -474,6 +482,8 @@ async def test_thread_stranded_by_an_earlier_cycle_is_swept_when_another_comment
     prior = _thread(thread_id=_PRIOR_THREAD_ID, body="earlier cycle feedback")
     state = MonitorState()
     state.threads_addressed_ids.update(_state_map("fix_committed", prior))
+    # #1018: the earlier cycle recorded the disposition its reply will cite.
+    seed_resolvable_disposition(state, _PRIOR_THREAD_ID, "fix_committed")
 
     gh, state = await _run_cycle(
         factory,
@@ -485,6 +495,7 @@ async def test_thread_stranded_by_an_earlier_cycle_is_swept_when_another_comment
 
     assert gh.resolved == [_THREAD_ID, _PRIOR_THREAD_ID]
     assert state.threads_addressed_ids[_PRIOR_THREAD_ID] == "fix_committed"
+    assert [thread_id for thread_id, _ in gh.thread_replies] == [_THREAD_ID, _PRIOR_THREAD_ID]
 
 
 @pytest.mark.unit
@@ -550,6 +561,8 @@ async def test_swept_defer_with_capture_marker_is_resolved(
     state.threads_addressed_ids[
         _deferred_issue_filed_marker(prior.thread_id, review_thread_body_hash(prior))
     ] = "dimileeh/aira-web#7"
+    # #1018: the captured defer's reply needs the agent's reason and the issue link.
+    seed_resolvable_disposition(state, _PRIOR_THREAD_ID, "defer")
 
     gh, state = await _run_cycle(
         factory,

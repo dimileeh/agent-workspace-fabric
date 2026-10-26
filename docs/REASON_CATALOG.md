@@ -102,6 +102,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#artifact_oversized](#artifact_oversized)
 
+### AUTHORITY_UNAVAILABLE
+**Problem:** A protected hosted-node operation returned HTTP 503 because authority or material availability could not be verified. Acceptance is unknown, never evidence of nonacceptance.
+**Likely Cause:** The receiver is unavailable, or a database, filesystem or timeout failure prevented a reliable authority check or material operation.
+**Operator Fix:** Restore the protected service's database and private material storage availability, then query material status with the original exact binding. Do not assume a failed response means an install was rejected or issue a replacement grant on that basis.
+**Related Command:** `POST /v1/hosted-node/materials/status` with the controller bearer and expected identity headers.
+**Docs Link:** [Protected node identity and material receiver](contracts/hosted-node-material.md)
+
 ### AWF_SETUP_PLACEHOLDER
 **Problem:** `awf setup` is registered but the first-run setup implementation is not active yet.
 **Likely Cause:** This build contains the stable command surface before the setup checks are implemented.
@@ -283,6 +290,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the named commits in the workspace worktree, then either keep them (push or let AWF resume) or drop them manually, and remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#comment_repair_unpublished_provenance_missing](#comment_repair_unpublished_provenance_missing)
+
+### COMPANION_SPECS_UNRESOLVED
+**Problem:** A PR monitor resume could not resolve the workspace's companion service specs, so it refused to restart the runtime.
+**Likely Cause:** The stored companion policy could not be parsed. Only the specs say which companions carry env secrets that the restart must recreate, so restarting without them could leave a rotated or revoked secret in a running companion.
+**Operator Fix:** Read the executor.resume_companion_spec_resolution_failed log for the parse error and fix the companion entries in the workspace task_policy. AWF retries the resume and parks the workspace in blocked after repeated failures; run guide on the blocked workspace once the policy is fixed.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#companion_specs_unresolved](#companion_specs_unresolved)
 
 ### COMPLETED_PR_NOT_MERGED
 **Problem:** A completed workspace has a PR, but the PR has not been merged.
@@ -648,6 +662,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_recovery_superseded](#monitor_recovery_superseded)
 
+### MONITOR_RESUME_DEPENDENCY_PREREQUISITE_FAILED
+**Problem:** A PR monitor resume had to recreate a dependency service, but a service it depends on had failed, so the restart failed before recreating it.
+**Likely Cause:** A forced recreate runs with --no-deps, which skips the depends_on condition, and the later up --no-recreate never recreates a running dependent. Recreating it against a prerequisite that exited non-zero or never started would leave its one-time initialization failed.
+**Operator Fix:** Check the logs of the prerequisite named in the error (for example a database that exited right after it was recreated) and fix its configuration. AWF retries the resume and parks the workspace in blocked after repeated failures; the dependent is still recreated on the next resume.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_resume_dependency_prerequisite_failed](#monitor_resume_dependency_prerequisite_failed)
+
+### MONITOR_RESUME_DEPENDENCY_WAIT_TIMEOUT
+**Problem:** A PR monitor resume waited for a running dependency service to become healthy and the stack's startup budget ran out.
+**Likely Cause:** Monitor resume never restarts a dependency that is still starting or unhealthy; it waits for it instead. The dependency stayed unsettled for longer than docker.startup_timeout_seconds (or a companion's larger compose_up_timeout_seconds).
+**Operator Fix:** Check the named dependency's logs (for example Postgres crash recovery after an unclean stop). If its recovery legitimately takes longer, raise docker.startup_timeout_seconds in the workspace profile. AWF retries the resume and parks the workspace in blocked after repeated failures.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_resume_dependency_wait_timeout](#monitor_resume_dependency_wait_timeout)
+
+### MONITOR_RUNTIME_RESTART_EXHAUSTED
+**Problem:** AWF could not bring the workspace runtime back after several consecutive PR monitor resumes, so it stopped retrying and parked the workspace in blocked with its PR, worktree and stack preserved.
+**Likely Cause:** Every monitor resume (restart recovery, remonitor or guide) restarts the agent container and brings dependencies up. That restart failed on several resumes in a row, and retrying it forever would hide the problem.
+**Operator Fix:** Read the last compose error and the failure count in the workspace.monitor_runtime_restart_exhausted event or workspace logs, and fix the stack (for example a dependency that cannot finish its recovery, a missing companion secret or a full disk). Then run guide on the blocked workspace to resume monitoring; the resume gets a fresh set of attempts.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_runtime_restart_exhausted](#monitor_runtime_restart_exhausted)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.
@@ -851,6 +886,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#release_sync_forge_not_supported](#release_sync_forge_not_supported)
 
+### REVIEW_THREAD_AUDIT_UNAVAILABLE
+**Problem:** AWF could not enumerate the PR's review threads to verify thread dispositions.
+**Likely Cause:** Before READY_TO_MERGE (release) or merge (feature), AWF re-reads every review thread with exhaustive pagination. A permanent forge fault, an exhausted transient retry budget, a truncated page, or a missing viewer login fails closed instead of certifying from a partial list.
+**Operator Fix:** Check forge connectivity and the token's permissions in the monitor log. AWF re-runs the audit on the next poll; no READY_TO_MERGE or merge happens meanwhile.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_audit_unavailable](#review_thread_audit_unavailable)
+
+### REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE
+**Problem:** AWF's first disposition audit on this workspace found review threads resolved by its identity without an AWF disposition reply and recorded them as a legacy baseline.
+**Likely Cause:** Those threads were resolved before AWF replied in every thread before resolving it (the #1018 rollout). Only the workspace's first audit records a baseline; any later unmarked resolution blocks as REVIEW_THREAD_DISPOSITION_UNVERIFIED.
+**Operator Fix:** No action is required to merge: baseline threads do not block and the READY_TO_MERGE certificate counts them separately. Inspect the thread ids in the audit event if any of them should be reopened.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_legacy_baseline](#review_thread_disposition_legacy_baseline)
+
+### REVIEW_THREAD_DISPOSITION_UNVERIFIED
+**Problem:** AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's identity carry no AWF disposition reply.
+**Likely Cause:** A thread resolved by AWF's own forge identity has no in-thread `AWF:thread-disposition` marker — it was resolved silently (for example before AWF replied before every resolve, or by hand under the same account). Threads resolved by other logins do not block.
+**Operator Fix:** Inspect the listed threads and reopen each one. AWF then re-triages it through the normal fix cycle and posts a fresh disposition in the thread before resolving it. Do not resolve it again by hand under AWF's account.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_unverified](#review_thread_disposition_unverified)
+
+### RUNTIME_SETUP_REPLAY_FAILED
+**Problem:** AWF recreated the workspace agent runtime and could not re-run the profile's setup phase, so it stopped the workspace instead of validating without its tools.
+**Likely Cause:** A monitor resume (restart recovery, remonitor or guide) or an agent-service recovery created a new agent container. Setup state inside the old container, such as tools installed under /tmp, was gone, and replaying the profile's setup and pre_agent phases failed.
+**Operator Fix:** Read the failing setup command and its output in the block or failure details or workspace logs, and fix the profile setup or the dependency it needs. A PR-monitor workspace is parked in blocked with its work preserved: run guide to resume monitoring, which replays setup. A pre-PR workspace failed: retry it.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#runtime_setup_replay_failed](#runtime_setup_replay_failed)
+
 ### SERVICE_STATUS_COLLECTION_FAILED
 **Problem:** AWF service status checks could not be collected.
 **Likely Cause:** Service discovery or database connection failed.
@@ -948,6 +1011,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the listed workspaces before running cleanup or recovery.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#stranded_workspaces_present](#stranded_workspaces_present)
+
+### THREAD_DISPOSITION_EVIDENCE_MISSING
+**Problem:** AWF did not resolve a review thread because its FIXED disposition had no fix commit (or its DEFER had no tracking issue) to cite.
+**Likely Cause:** AWF replies in the thread with its disposition before every resolve. The fix commit for this item was not recorded (for example a verdict carried over from before the reply-before-resolve change), so there was nothing durable to cite.
+**Operator Fix:** Guide the workspace naming the thread id so the agent re-triages it; do not resolve the thread by hand. The pushed commits are kept.
+**Related Command:** `awf workspace guide <workspace_id> --directive '<thread id>: ...'`
+**Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_evidence_missing](#thread_disposition_evidence_missing)
+
+### THREAD_DISPOSITION_REASON_MISSING
+**Problem:** AWF did not resolve a review thread because its FALSE POSITIVE or DEFER disposition had no reason to post.
+**Likely Cause:** AWF publishes the agent's stated reason in the thread before resolving it. The verdict carried no reason (for example one recorded before the reason was captured), so the thread was parked instead of being closed silently.
+**Operator Fix:** Guide the workspace naming the thread id so the agent re-triages it with a one-line reason; do not resolve the thread by hand.
+**Related Command:** `awf workspace guide <workspace_id> --directive '<thread id>: ...'`
+**Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_reason_missing](#thread_disposition_reason_missing)
+
+### THREAD_DISPOSITION_REPLY_FAILED
+**Problem:** AWF could not post the disposition reply in a review thread, so it left the thread open and parked it.
+**Likely Cause:** The forge rejected the in-thread reply (permissions, a locked conversation, or an outage). A thread is never resolved without its reply, and the reply is not retried blindly because it could be posted twice.
+**Operator Fix:** Check forge token scopes and connectivity in the monitor log, then guide the workspace naming the thread id. The pushed commits are kept.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_reply_failed](#thread_disposition_reply_failed)
+
+### THREAD_DISPOSITION_UNREAD_FEEDBACK
+**Problem:** AWF did not resolve a review thread because a comment by its own forge identity, without an AWF disposition marker, preceded its disposition reply.
+**Likely Cause:** AWF's identity can be the operator's own account. The monitor never reads that identity's comments as feedback, so the triage behind the reply did not see the comment; resolving would have closed it unread. The reply was retired.
+**Operator Fix:** Read that comment in the thread, then guide the workspace naming the thread id with what it asks; do not resolve the thread by hand. The pushed commits are kept.
+**Related Command:** `awf workspace guide <workspace_id> --directive '<thread id>: ...'`
+**Docs Link:** [docs/REASON_CATALOG.md#thread_disposition_unread_feedback](#thread_disposition_unread_feedback)
 
 ### UNSUPPORTED_AGENT_RUNTIME
 **Problem:** The requested agent runtime is not supported by AWF.

@@ -1287,7 +1287,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # reaching this gate carries a recorded verdict.
     #
     # Inline threads: block on ``defer`` or ``needs_human``. A successfully
-    # captured follow-up ``defer`` (explanatory comment + filed tracking issue)
+    # captured follow-up ``defer`` (filed tracking issue + disposition reply)
     # is RESOLVED on GitHub by the runner and leaves this snapshot entirely; a
     # ``defer`` still visible here means capture did not complete, and a failed
     # capture is downgraded to ``needs_human`` — either way, block instead of

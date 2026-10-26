@@ -500,22 +500,12 @@ def test_the_shared_root_may_be_empty_or_the_whole_call_site_package() -> None:
     )
 
 
-@pytest.mark.unit
-async def test_non_python_call_sites_keep_the_name_only_rule() -> None:
-    """The binding reader only understands Python imports; JS/TS is unchanged."""
-    caller_path = "src/pkg_a/services/pools.ts"
-    callee_path = "src/pkg_b/metrics.ts"
-    caller = (
-        "import { helper } from './other';\n"
-        "\n"
-        "export function refresh(value) {\n"
-        "  return helper(value);\n"
-        "}\n"
-    )
-    probe = _Probe(
+def _js_ts_probe(caller_path: str, callee_path: str, caller: str) -> _Probe:
+    """A JS/TS call site plus an edit inside a same-named ``record`` elsewhere."""
+    return _Probe(
         texts={
             (_LEFT, caller_path): caller,
-            (_LEFT, callee_path): "const helper = (value) => {\n  return value;\n};\n",
+            (_LEFT, callee_path): "export function record(value) {\n  return value;\n}\n",
         },
         changed_paths=(callee_path,),
         diffs={
@@ -524,7 +514,79 @@ async def test_non_python_call_sites_keep_the_name_only_rule() -> None:
                 f"+++ b/{callee_path}\n"
                 "@@ -2 +2 @@\n"
                 "-  return value;\n"
-                "+  return value.depth;\n"
+                "+  return value + 1;\n"
+            )
+        },
+    )
+
+
+def _js_ts_caller(import_line: str, call: str) -> str:
+    """A call site whose anchored line 4 makes ``call``."""
+    return f"{import_line}\n\nexport function ingest(value) {{\n  return {call};\n}}\n"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("import_line", "call"),
+    [
+        ("import { record } from './telemetry';", "record(value)"),
+        ("import * as tel from './telemetry';", "tel.record(value)"),
+    ],
+)
+async def test_js_ts_issue_1047_reproductions_are_rejected(import_line: str, call: str) -> None:
+    """The #1047 named and namespace imports never accept by name (issue #1047).
+
+    The call binds to ``./telemetry``; an edit to an unrelated same-named
+    ``record`` in ``src/lib/unrelated/audit.ts`` used to satisfy the name-only
+    rule. JS/TS call sites now fail closed on cross-file evidence instead.
+    """
+    probe = _js_ts_probe(
+        "src/app/ingest.ts", "src/lib/unrelated/audit.ts", _js_ts_caller(import_line, call)
+    )
+
+    assert not await _probe(probe, item_path="src/app/ingest.ts", item_line=4)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("suffix", [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".CTS"])
+async def test_js_ts_call_sites_never_accept_cross_file_evidence(suffix: str) -> None:
+    """A JS/TS call site fails closed even when the imported module was edited.
+
+    Without a real ES-module parser the gate cannot tie a JS/TS callee to one
+    file, so it never accepts on cross-file evidence; the item keeps its
+    reason-coded ``AGENT_FIXED_WITHOUT_EVIDENCE`` outcome and parks as
+    ``needs_human`` (issue #1047). The reviewed file is not even read.
+    """
+    caller_path = f"src/app/ingest{suffix}"
+    probe = _js_ts_probe(
+        caller_path,
+        f"src/app/telemetry{suffix}",
+        _js_ts_caller("import { record } from './telemetry';", "record(value)"),
+    )
+
+    assert not await _probe(probe, item_path=caller_path, item_line=4)
+    assert probe.shows == []
+
+
+@pytest.mark.unit
+async def test_call_sites_without_a_binding_reader_keep_the_name_only_rule() -> None:
+    """A language that is neither Python nor JS/TS is unchanged (issue #1047).
+
+    The JS/TS fail-closed rule does not narrow other languages: a Ruby call
+    site still links a same-named definition in another changed file by name.
+    """
+    caller_path = "src/pkg_a/services/pools.rb"
+    callee_path = "src/pkg_b/metrics.rb"
+    caller = "require_relative 'other'\n\ndef refresh(value)\n  helper(value)\nend\n"
+    probe = _Probe(
+        texts={
+            (_LEFT, caller_path): caller,
+            (_LEFT, callee_path): "def helper(value)\n  value\nend\n",
+        },
+        changed_paths=(callee_path,),
+        diffs={
+            callee_path: (
+                f"--- a/{callee_path}\n+++ b/{callee_path}\n@@ -2 +2 @@\n-  value\n+  value + 1\n"
             )
         },
     )

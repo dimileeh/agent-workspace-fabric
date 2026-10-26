@@ -24,6 +24,7 @@ from awf.common.attention_events import (
     ATTENTION_REQUIRED_EVENT_TYPE,
     blocked_attention_payload,
 )
+from awf.control.executor.constants import MONITOR_RESUME_PARK_BLOCK_REASON_CODES
 from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.admission import (
     _acquire_requested_admission_locks,
@@ -1170,7 +1171,11 @@ async def _monitor_recovery_terminal_finalize_status(
                 return OperationStatus.succeeded, None, None
             if after_successful_handoff and ws.status == WorkspaceStatus.failed.value:
                 return OperationStatus.succeeded, None, None
-            if ws.status == WorkspaceStatus.failed.value:
+            # Resume parks (setup replay, restart exhaustion) keep their failure, not a cancel.
+            if ws.status == WorkspaceStatus.failed.value or (
+                ws.status == WorkspaceStatus.blocked.value
+                and ws.block_reason_code in MONITOR_RESUME_PARK_BLOCK_REASON_CODES
+            ):
                 error_code, error_message = await _monitor_recovery_handoff_failure_error(
                     self,
                     workspace_id,

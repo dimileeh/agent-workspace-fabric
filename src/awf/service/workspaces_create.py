@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import text
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +49,9 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
+from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.runtime_authority import SESSION_KEY, WorkspaceAuthority
+from awf.hosted_node.runtime_schemas import POLICY_KEY, association_matches
 from awf.profiles.models import WorkspaceProfile, normalize_inline_profile_snapshot
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.service.config import resolve_service_settings
@@ -132,6 +136,17 @@ async def create_workspace_row(
             _assert_supported_agent_runtime(fallback.agent)
 
     resolved_settings = settings or get_settings()
+    hosted_authority = session.info.get(SESSION_KEY)
+    if isinstance(hosted_authority, WorkspaceAuthority):
+        provider_environ = (await hosted_authority.admit(payload)).environment
+        resolved_settings = resolved_settings.model_copy(
+            update={
+                "host_home": str(hosted_authority.receiver.config.material_root / "no-host-auth"),
+                "github_token": None,
+            }
+        )
+    elif payload.hosted is not None or resolved_settings.hosted_node is not None:
+        raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
     repo = WorkspaceRepository(session)
     base_task_policy = workspace_create_task_policy_snapshot(payload)
     if requested_profile is PROFILE_NOT_PROVIDED or resolved_profile is PROFILE_NOT_PROVIDED:
@@ -164,12 +179,16 @@ async def create_workspace_row(
     )
     preflight: dict[str, Any] | None = None
     if not defer_cursor_router_preflight:
-        preflight_environ = overlay_profile_provider_credentials(
-            overlay_profile_ollama_base_url(
-                provider_environ if provider_environ is not None else os.environ,
+        preflight_environ = (
+            dict(provider_environ or {})
+            if payload.hosted
+            else overlay_profile_provider_credentials(
+                overlay_profile_ollama_base_url(
+                    provider_environ if provider_environ is not None else os.environ,
+                    resolved_profile,
+                ),
                 resolved_profile,
-            ),
-            resolved_profile,
+            )
         )
         preflight = await _selected_provider_preflight_for_task_async(
             resolved_settings,
@@ -182,7 +201,21 @@ async def create_workspace_row(
             http_get=http_get,
         )
         _raise_if_provider_preflight_blocks(preflight)
-    workspace_id = repositories.new_workspace_id()
+    workspace_id = (
+        payload.hosted.workspace_id if payload.hosted else repositories.new_workspace_id()
+    )
+    if payload.hosted:
+        # Different request keys still address one actual workspace. Use the
+        # separate two-key advisory namespace, held through the caller's commit.
+        await session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtext('awf:hosted-workspace'), hashtext(:workspace_id))"
+            ),
+            {"workspace_id": workspace_id},
+        )
+        if await session.get(Workspace, workspace_id) is not None:
+            raise MaterialDeniedError("HOSTED_WORKSPACE_ID_CONFLICT", 409)
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
@@ -343,7 +376,8 @@ def workspace_create_payload_matches(
     if stored_task_kind is None:
         stored_task_kind = "feature_branch_pr"
     return (
-        existing.repo_url == payload.repo.url
+        association_matches((existing.task_policy or {}).get(POLICY_KEY), payload.hosted)
+        and existing.repo_url == payload.repo.url
         and existing.branch_base == payload.repo.base_branch
         and existing.task_tag == payload.task.task_tag
         and existing.task_title == payload.task.title
@@ -1358,6 +1392,8 @@ def workspace_create_task_policy_snapshot(payload: WorkspaceCreateRequest) -> di
     )
 
     policy: dict[str, Any] = {}
+    if payload.hosted is not None:
+        policy[POLICY_KEY] = payload.hosted.model_dump(mode="json")
     resource_request = _requested_resource_reservation_values(payload)
     # Persist empty requests so idempotent replays do not re-plan against
     # mutable default resource settings.

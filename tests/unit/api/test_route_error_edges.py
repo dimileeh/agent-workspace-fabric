@@ -80,6 +80,7 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_flat
             return None
 
     async def create_row(*_args: object, **_kwargs: object) -> object:
+        calls.append(("create", "ws_locked_flat"))
         return SimpleNamespace(
             id="ws_locked_flat",
             status="requested",
@@ -101,6 +102,10 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_flat
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
+    session = SimpleNamespace(
+        info={},
+        commit=AsyncMock(side_effect=lambda: calls.append(("commit", "ws_locked_flat"))),
+    )
     response = await workspace_routes.create_workspace(
         WorkspaceCreateRequest(
             repo_url="https://github.com/example/repo.git",
@@ -111,11 +116,17 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_flat
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key="route-flat-key",
         settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
     )
 
     assert response.workspace_id == "ws_locked_flat"
-    assert calls[:2] == [("lock", "route-flat-key"), ("get", "route-flat-key")]
+    session.commit.assert_awaited_once_with()
+    assert calls == [
+        ("lock", "route-flat-key"),
+        ("get", "route-flat-key"),
+        ("create", "ws_locked_flat"),
+        ("commit", "ws_locked_flat"),
+    ]
 
 
 @pytest.mark.unit
@@ -137,6 +148,7 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_rich
             return None
 
     async def create_row(*_args: object, **_kwargs: object) -> object:
+        calls.append(("create", "ws_locked_rich"))
         return SimpleNamespace(
             id="ws_locked_rich",
             status="requested",
@@ -158,6 +170,10 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_rich
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
+    session = SimpleNamespace(
+        info={},
+        commit=AsyncMock(side_effect=lambda: calls.append(("commit", "ws_locked_rich"))),
+    )
     response = await workspace_routes.create_workspace(
         WorkspaceCreateRequest(
             repo={"url": "https://github.com/example/repo.git", "base_branch": "main"},
@@ -166,11 +182,17 @@ async def test_workspace_create_acquires_idempotency_lock_before_lookup_for_rich
         request=SimpleNamespace(),  # type: ignore[arg-type]
         idempotency_key="route-rich-key",
         settings=Settings(_env_file=None),
-        session=object(),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
     )
 
     assert response.workspace_id == "ws_locked_rich"
-    assert calls[:2] == [("lock", "route-rich-key"), ("get", "route-rich-key")]
+    session.commit.assert_awaited_once_with()
+    assert calls == [
+        ("lock", "route-rich-key"),
+        ("get", "route-rich-key"),
+        ("create", "ws_locked_rich"),
+        ("commit", "ws_locked_rich"),
+    ]
 
 
 @pytest.mark.unit
@@ -299,7 +321,7 @@ async def test_workspace_v2_create_reports_task_external_id_conflict(
         AsyncMock(return_value=_admission_ok_disk_check()),
     )
 
-    session = SimpleNamespace(rollback=AsyncMock())
+    session = SimpleNamespace(info={}, rollback=AsyncMock())
 
     response = await workspace_routes.create_workspace(
         payload,

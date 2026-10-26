@@ -33,6 +33,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
+from tests.unit.runtime._thread_disposition_fixtures import seed_resolvable_disposition
 
 
 @pytest.fixture
@@ -135,6 +136,8 @@ async def test_pre_merge_recheck_resolves_late_outdated_addressed_thread(
     )
     state = MonitorState()
     _mark_review_thread_addressed(state, late_addressed, "fix_committed")
+    # #1018: the FIXED disposition its reply cites before the pre-merge resolve.
+    seed_resolvable_disposition(state, late_addressed.thread_id, "fix_committed")
     recheck = replace(
         _mergeable_status(),
         outdated_unresolved_inline_threads=(late_addressed,),
@@ -209,6 +212,8 @@ async def test_pre_merge_outdated_resolve_transient_backs_off_outside_lock(
     )
     state = MonitorState()
     _mark_review_thread_addressed(state, late_addressed, "fix_committed")
+    # #1018: the FIXED disposition its reply cites before the pre-merge resolve.
+    seed_resolvable_disposition(state, late_addressed.thread_id, "fix_committed")
     recheck = replace(
         _mergeable_status(),
         outdated_unresolved_inline_threads=(late_addressed,),

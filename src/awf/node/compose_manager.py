@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
@@ -48,6 +49,8 @@ COMPOSE_CAPTURE_TIMEOUT_SECONDS = 360.0
 COMPOSE_CAPTURE_TIMEOUT_BUFFER_SECONDS = 60.0
 COMPANION_BUILD_CAPTURE_TIMEOUT_SECONDS = 1800.0
 _DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
+HEALTHCHECK_INTERVAL_SECONDS = 5
+"""Rendered dependency healthcheck ``interval``; retries scale the budget by it."""
 
 # Labels stamped on pre-built companion images so image GC can scope its prune
 # to AWF-managed companion builds without touching unrelated images.
@@ -200,6 +203,7 @@ class WorkspaceComposeSpec:
     postgres_password: str | None = None  # None → generate one
     cpu_limit: str | None = None
     memory_limit: str | None = None
+    reservation_limits: tuple[float, float] | None = None
     auth_mounts: tuple[AuthMount, ...] = ()
     git_name: str | None = None
     git_email: str | None = None
@@ -243,6 +247,16 @@ def _is_transient_compose_dispatch_failure(stderr: str) -> bool:
     return any(marker in stderr for marker in _COMPOSE_DISPATCH_RETRY_MARKERS)
 
 
+def healthcheck_retries_for_budget(budget_seconds: int) -> int:
+    """Return the dependency healthcheck retries that span ``budget_seconds``.
+
+    The stack's startup budget (``docker.startup_timeout_seconds`` or a larger
+    companion ``compose_up_timeout_seconds``) also bounds how long Docker probes a
+    dependency before marking it ``unhealthy``. The default 300 s keeps 60 retries.
+    """
+    return max(1, math.ceil(budget_seconds / HEALTHCHECK_INTERVAL_SECONDS))
+
+
 def compose_up_capture_timeout_seconds(compose_up_timeout_seconds: int, *, wait: bool) -> float:
     """Return AWF's outer timeout for ``docker compose up``.
 
@@ -260,9 +274,18 @@ def compose_up_capture_timeout_seconds(compose_up_timeout_seconds: int, *, wait:
 class ComposeManager:
     """Renders, launches, and tears down per-workspace compose stacks."""
 
-    def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        work_dir: Path,
+        template_path: Path,
+        command_environment: Callable[[], Awaitable[Mapping[str, str]]] | None = None,
+        cgroup_parent: str | None = None,
+    ) -> None:
         """Prepare the compose project directory and Jinja template loader."""
         self._projects_dir = work_dir / "compose"
+        self._command_environment = command_environment
+        self._cgroup_parent = cgroup_parent
         template_dir = template_path.parent
         self._env = Environment(
             loader=FileSystemLoader(str(template_dir)),
@@ -322,6 +345,22 @@ class ComposeManager:
             for c in spec.companions
         ]
         services.extend(companions)
+        service_resources = None
+        if spec.reservation_limits is not None:
+            import math
+
+            cpu, memory = spec.reservation_limits
+            if not all(math.isfinite(value) and value > 0 for value in (cpu, memory)):
+                raise ValueError("INVALID_WORKSPACE_RESERVATION")
+            count = len(services) + 1
+            cpu_nanos = math.floor(cpu * 1_000_000_000 / count)
+            memory_bytes = math.floor(memory * 1024**3 / count)
+            if cpu_nanos <= 0 or memory_bytes <= 0:
+                raise ValueError("INVALID_WORKSPACE_RESERVATION")
+            service_resources = resources = {
+                "cpu_limit": format(cpu_nanos / 1_000_000_000, ".9f").rstrip("0").rstrip("."),
+                "memory_limit": str(memory_bytes),
+            }
         named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
 
         # Agent waits for profile services that expose healthchecks. Services
@@ -337,6 +376,7 @@ class ComposeManager:
 
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
+            cgroup_parent=self._cgroup_parent,
             worktree_host_path=str(spec.worktree_host_path),
             agent_runtime_image=spec.agent_runtime_image,
             postgres_image=spec.postgres_image,
@@ -344,6 +384,7 @@ class ComposeManager:
             postgres_password=password,
             postgres_db=spec.postgres_db,
             resources=resources,
+            service_resources=service_resources,
             auth_mounts=[
                 {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
             ],
@@ -355,6 +396,7 @@ class ComposeManager:
             agent_depends_on=agent_depends_on,
             network_internal=spec.network_internal,
             host_gateway_enabled=spec.host_gateway_enabled,
+            healthcheck_retries=healthcheck_retries_for_budget(spec.compose_up_timeout_seconds),
         )
         compose_file.write_text(rendered, encoding="utf-8")
 
@@ -396,6 +438,8 @@ class ComposeManager:
         compose_up_timeout_seconds: int = 300,
         force_recreate: bool = False,
         services: tuple[str, ...] = (),
+        no_recreate: bool = False,
+        no_deps: bool = False,
     ) -> None:
         """Start an already-rendered compose project without re-rendering.
 
@@ -403,10 +447,20 @@ class ComposeManager:
         compose project and compose.yml path that were active before the
         service restart. Re-rendering from a profile at resume time risks
         drifting from the stack the monitor originally owned.
+
+        ``no_recreate`` starts exited or absent containers but never recreates an
+        existing one, so a dependency in its own crash recovery keeps running.
+        ``no_deps`` limits the call to the listed ``services``.
         """
+        if force_recreate and no_recreate:
+            raise ValueError("force_recreate and no_recreate are mutually exclusive")
         args = ["up", "-d", "--remove-orphans"]
         if force_recreate:
             args.append("--force-recreate")
+        if no_recreate:
+            args.append("--no-recreate")
+        if no_deps:
+            args.append("--no-deps")
         if wait:
             args.extend(["--wait", "--wait-timeout", str(compose_up_timeout_seconds)])
         args.extend(services)
@@ -417,6 +471,8 @@ class ComposeManager:
             compose_file=str(compose_file),
             wait=wait,
             force_recreate=force_recreate,
+            no_recreate=no_recreate,
+            no_deps=no_deps,
             services=services,
         )
         await self._compose(
@@ -874,7 +930,11 @@ class ComposeManager:
             *args,
         ]
         env = {
-            **os.environ,
+            **(
+                await self._command_environment()
+                if self._command_environment is not None
+                else os.environ
+            ),
             "COMPOSE_PROJECT_NAME": project_name,
             "COMPOSE_FILE": str(compose_file),
         }
@@ -991,11 +1051,15 @@ class ComposeManager:
         # diagnostics capture folds stderr into stdout to avoid empty logs on
         # exactly the failing-companion case we care about.
         stderr_target = asyncio.subprocess.STDOUT if combine_stderr else asyncio.subprocess.PIPE
+        environment: dict[str, Any] = (
+            {"env": dict(await self._command_environment())} if self._command_environment else {}
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr_target,
+                **environment,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),

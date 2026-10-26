@@ -35,8 +35,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.monitor_state_keys import _COMMENT_REPAIR_ITEM_PROVENANCE_STATE_KEY
 from awf.runtime.pr_monitor import MonitorState
@@ -264,6 +266,51 @@ async def _persist_item_commit_provenance_durably(
             ],
         )
         await session.commit()
+
+
+async def recorded_item_commit(
+    runner: Any,
+    *,
+    workspace_id: str,
+    item_id: str,
+    operation_id: str,
+) -> ItemCommitProvenance | None:
+    """The latest durable item-commit record for ``item_id`` in ``operation_id``.
+
+    Each accepted item commit appends an ``ITEM_COMMIT_RECORDED_EVENT`` next to
+    the in-state chain. The event outlives what the chain does not keep — a fold
+    past ``_MAX_CHAIN_RECORDS``, a restart onto a new chain — so a FIXED reply can
+    still cite the commit this cycle recorded for the item (#1018). Scoped to one
+    operation: another cycle's commit is not this item's evidence. Best-effort:
+    a DB fault reads as "no record", and the caller fails closed.
+    """
+    try:
+        async with runner._deps.session_factory() as session:
+            rows = await session.execute(
+                select(WorkspaceEvent.payload)
+                .where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == ITEM_COMMIT_RECORDED_EVENT,
+                )
+                .order_by(WorkspaceEvent.event_order.desc())
+            )
+            payloads = list(rows.scalars())
+    except (SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "monitor.comment_repair_item_commit_lookup_failed",
+            workspace_id=workspace_id,
+            item_id=item_id,
+            error=repr(exc)[:400],
+        )
+        return None
+    for payload in payloads:
+        record = _record_from_mapping(payload)
+        if record is not None and (record.item_id, record.operation_id) == (
+            item_id,
+            operation_id,
+        ):
+            return record
+    return None
 
 
 async def _clear_item_commit_provenance_chain_durably(

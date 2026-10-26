@@ -13,7 +13,10 @@ from typing import Any
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
-from awf.runtime.feedback_policy import review_thread_body_hashes
+from awf.runtime.feedback_policy import (
+    recorded_review_thread_body_matches,
+    review_thread_body_hashes,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.pr_monitor import (
     MonitorState,
@@ -31,6 +34,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.thread_disposition import (
+    attach_issue_url,
+    read_item_disposition,
+)
 
 
 def _requeue_workflow_scope_publish_dependent_items(
@@ -80,10 +87,35 @@ def _deferred_issue_already_filed(state: MonitorState, thread: ReviewThread) -> 
     resume does not file a duplicate — PRRT_kwDOSJAM6s6dfH8h /
     PRRT_kwDOSJAM6s6dfSq-.
     """
-    return any(
-        state.threads_addressed_ids.get(_deferred_issue_filed_marker(thread.thread_id, body_hash))
-        for body_hash in review_thread_body_hashes(thread)
-    )
+    return _deferred_issue_url(state, thread) is not None
+
+
+def _deferred_issue_url(state: MonitorState, thread: ReviewThread) -> str | None:
+    """The tracking-issue URL filed for this conversation (any hash era), if any."""
+    for body_hash in review_thread_body_hashes(thread):
+        issue_url = state.threads_addressed_ids.get(
+            _deferred_issue_filed_marker(thread.thread_id, body_hash)
+        )
+        if issue_url:
+            return issue_url
+    return None
+
+
+def _recorded_deferred_issue_url(state: MonitorState, thread: ReviewThread) -> str | None:
+    """The tracking issue the thread's saved DEFER disposition cites, if still current.
+
+    The disposition reply is saved durably with its issue link, so a reloaded
+    row that lost the filed-issue marker still proves the issue exists — but
+    only for the conversation that disposition was bound to (#1018).
+    """
+    disposition = read_item_disposition(state, thread.thread_id)
+    if (
+        disposition is None
+        or disposition.disposition_class != "deferred"
+        or not recorded_review_thread_body_matches(disposition.thread_body_hash, thread)
+    ):
+        return None
+    return disposition.issue_url
 
 
 def _deferred_thread_conversation(thread: ReviewThread) -> str:
@@ -125,11 +157,15 @@ async def _capture_deferred_review_thread(
 ) -> bool | None:
     """Durably capture a follow-up ``defer`` before its thread is resolved (#305).
 
-    Posts an explanatory PR comment and files a tracking issue. Idempotent per
+    Files a tracking issue and records its URL on the thread's disposition; the
+    in-thread disposition reply (agent reason + issue link) is posted right
+    before the resolve, and a failed reply keeps the thread open (#1018). Idempotent per
     thread *and body*: a marker records that the issue was already filed so a
     later same-body resolve-retry (which clears the verdict and re-addresses the
     thread) does not file a duplicate, while new reviewer replies (a changed
-    body) are captured into a fresh issue. Returns ``True`` when the deferred
+    body) are captured into a fresh issue. A reloaded row that lost the marker
+    still carries the saved DEFER disposition bound to the same conversation, so
+    its issue is recovered from there before filing. Returns ``True`` when the deferred
     work is durably captured (caller may resolve the thread); ``False`` on a
     *permanent* capture failure (caller downgrades to ``needs_human`` so the
     merge stays blocked and the operator is notified); or ``None`` on a
@@ -138,7 +174,14 @@ async def _capture_deferred_review_thread(
     permanently downgrading a valid defer.
     """
     marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
-    if _deferred_issue_already_filed(state, thread):
+    filed_issue_url = _deferred_issue_url(state, thread) or _recorded_deferred_issue_url(
+        state, thread
+    )
+    if filed_issue_url is not None:
+        # Re-anchor the marker: an issue recovered from the saved disposition
+        # stays durable with the thread's next save, never filed twice.
+        state.mark_addressed(marker, filed_issue_url)
+        attach_issue_url(state, thread.thread_id, filed_issue_url)
         return True
     location = thread.path or "the PR diff"
     thread_ref = thread.url or f"PR #{pr_number}"
@@ -240,31 +283,13 @@ async def _capture_deferred_review_thread(
         context="capture_deferred_thread",
     )
     # Filing the tracking issue is the durable capture. Record it immediately so
-    # a later retry (e.g. after a failed push) never files a duplicate, even if
-    # the explanatory comment below fails. The comment is best-effort courtesy.
+    # a later retry (e.g. after a failed push) never files a duplicate. The
+    # explanation used to be a best-effort top-level PR comment whose failure was
+    # swallowed before the thread was resolved anyway (#1018). It is now the
+    # in-thread disposition reply posted right before the resolve — reason plus
+    # this issue link — and a failed reply parks the thread instead.
     state.mark_addressed(marker, issue_url)
-    try:
-        await self._deps.gh.post_comment(
-            repo=repo,
-            pr_number=pr_number,
-            body=(
-                f"AWF deferred the review thread on `{location}` and filed "
-                f"{issue_url} to track the follow-up. Resolving this thread; the "
-                "deferred work lives in that issue."
-            ),
-        )
-    except ForgeClientError as exc:
-        # The tracking issue is already filed and recorded; this explanatory
-        # comment is best-effort courtesy, so a failure on either forge is
-        # swallowed. Catching the shared base keeps a Bitbucket fault from escaping
-        # and terminating the monitor after the durable capture is already done.
-        # ``redacted_detail()`` normalizes the human detail across forges.
-        _log.warning(
-            "monitor.deferred_capture_comment_failed",
-            thread_id=thread.thread_id,
-            issue_url=issue_url,
-            stderr=_redact_and_truncate_forge_error(exc.redacted_detail()),
-        )
+    attach_issue_url(state, thread.thread_id, issue_url)
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,
         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
