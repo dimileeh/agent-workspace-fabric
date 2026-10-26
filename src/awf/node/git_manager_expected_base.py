@@ -93,18 +93,34 @@ async def verified_expected_base_oid(
 ) -> str:
     """Resolve only the named remote-tracking commit and require the pin.
 
-    The rev-parse uses a fully qualified ``refs/remotes/origin/...^{commit}``
-    so a tag or another namespace with the same short name cannot win.
+    The exact ``refs/remotes/origin/...`` ref must exist before commit peeling.
+    Revision syntax such as ``branch~1`` is not that ref and fails closed as a
+    missing branch. The rev-parse then uses ``^{commit}`` so a tag or another
+    namespace with the same short name cannot win.
     """
     from awf.node.git_manager import GitOperationError
 
     tracking_ref, _fetch_refspec = _git_manager_mirror._checkout_tracking_ref(base_branch)
     if tracking_ref.startswith("refs/"):
-        qualified = f"{tracking_ref}^{{commit}}"
+        ref = tracking_ref
     else:
-        qualified = f"refs/remotes/origin/{tracking_ref.removeprefix('origin/')}^{{commit}}"
+        ref = f"refs/remotes/origin/{tracking_ref.removeprefix('origin/')}"
+    qualified = f"{ref}^{{commit}}"
     expected = expected_base_sha.strip().lower()
     try:
+        await run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror_path),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "--",
+                ref,
+            ],
+            operation="mirror.expected_base_ref",
+        )
         result = await run(
             [
                 "git",

@@ -140,6 +140,38 @@ async def test_moved_branch_and_wrong_sha_fail_before_worktree_add(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("base_branch", "workspace_id", "pin_parent"),
+    [
+        ("development~1", "ws_rev_tilde", True),
+        ("development^{commit}", "ws_rev_peel", False),
+    ],
+)
+async def test_revision_expression_does_not_pin_an_ancestor(
+    tmp_path: Path,
+    split_origin: tuple[Path, str, str],
+    base_branch: str,
+    workspace_id: str,
+    pin_parent: bool,
+) -> None:
+    """Revision syntax must not satisfy the pin when it names an ancestor or the tip."""
+    origin, main_sha, development_sha = split_origin
+    pinned = main_sha if pin_parent else development_sha
+    work = tmp_path / "awf-work"
+    manager = GitManager(work)
+    with pytest.raises(GitOperationError) as missing:
+        await manager.add_worktree(
+            workspace_id=workspace_id,
+            repo_url=str(origin),
+            base_branch=base_branch,
+            new_branch=f"awf/{workspace_id}",
+            expected_base_sha=pinned,
+        )
+    assert missing.value.reason_code == "GIT_BASE_BRANCH_MISSING"
+    assert not (work / "worktrees" / workspace_id).exists()
+
+
+@pytest.mark.unit
 async def test_missing_branch_keeps_existing_reason_and_skips_worktree(
     tmp_path: Path,
     split_origin: tuple[Path, str, str],
@@ -234,7 +266,10 @@ async def test_pull_head_pin_resolves_only_the_qualified_remote_commit(tmp_path:
         expected_base_sha=sha.upper(),
     )
     assert resolved == sha
-    assert seen[0][-1] == "refs/remotes/origin/pull/12/head^{commit}"
+    assert seen[0][-1] == "refs/remotes/origin/pull/12/head"
+    assert "show-ref" in seen[0]
+    assert "--verify" in seen[0]
+    assert seen[1][-1] == "refs/remotes/origin/pull/12/head^{commit}"
 
 
 @pytest.mark.unit
