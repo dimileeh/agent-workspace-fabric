@@ -168,11 +168,16 @@ def _expected_base_sha_for_initial_checkout(ws: Workspace) -> str | None:
 
     Adopted, preserved-PR, and release-sync checkouts start somewhere else and
     must not be reset to the original SHA. A missing or invalid snapshot key
-    is unpinned.
+    is unpinned and returns before checkout metadata is resolved, so callers
+    that never stored a pin do not need task-kind fields. A real pin still
+    refuses any checkout that is not the named base branch.
     """
+    pin = expected_base_sha_from_task_policy(getattr(ws, "task_policy", None))
+    if pin is None:
+        return None
     if _provision_checkout_base_branch(ws) != ws.branch_base:
         return None
-    return expected_base_sha_from_task_policy(ws.task_policy)
+    return pin
 
 
 def _task_policy_without_inherited_first_launch(

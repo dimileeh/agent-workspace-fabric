@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.provisioner_helpers import _expected_base_sha_for_initial_checkout
 from tests.postgres import postgres_test_engine
 
 _SHA = "a" * 40
@@ -262,3 +264,55 @@ async def test_fresh_retry_checkout_drops_inherited_launch_evidence(
         assert "expected_base_sha" not in git.calls[0]
     else:
         assert git.calls[0]["expected_base_sha"] == _SHA
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "workspace",
+    [
+        SimpleNamespace(
+            id="ws_coord_plan",
+            task_prompt="do overlapping work",
+            task_policy={"coordination": {"warnings": []}},
+            task_tag=None,
+        ),
+        SimpleNamespace(id="ws_plan_missing", task_prompt="do it", task_tag=None),
+        SimpleNamespace(task_policy={"expected_base_sha": "not-a-sha"}),
+    ],
+)
+def test_unpinned_checkout_returns_before_task_kind_metadata(workspace: SimpleNamespace) -> None:
+    """Missing or invalid pins must not resolve checkout metadata."""
+    assert _expected_base_sha_for_initial_checkout(workspace) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_fresh_named_branch_checkout_still_returns_the_pin() -> None:
+    """A real pin on the named base branch is still the checkout SHA."""
+    pin = "a" * 40
+    workspace = SimpleNamespace(
+        task_kind="feature_branch_pr",
+        task_policy={"expected_base_sha": pin.upper()},
+        branch_base="development",
+        pr_url=None,
+        pr_number=None,
+        remote_push_branch=None,
+        repo_url="https://github.com/example/app.git",
+        resolved_profile=None,
+    )
+    assert _expected_base_sha_for_initial_checkout(workspace) == pin  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_pinned_preserved_feature_pr_is_not_reset_to_the_create_sha() -> None:
+    """A pin does not move a preserved PR checkout back to the original base."""
+    workspace = SimpleNamespace(
+        task_kind="feature_branch_pr",
+        task_policy={"expected_base_sha": "b" * 40},
+        branch_base="development",
+        pr_url="https://github.com/example/app/pull/12",
+        pr_number=12,
+        remote_push_branch="feature/old",
+        repo_url="https://github.com/example/app.git",
+        resolved_profile={"forge": "github"},
+    )
+    assert _expected_base_sha_for_initial_checkout(workspace) is None  # type: ignore[arg-type]
