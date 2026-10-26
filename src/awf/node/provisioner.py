@@ -16,14 +16,14 @@ re-raised so the caller can log/alert.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import REDACTION_MARKER, redact_audit_value
+from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
     auto_merge_intent_from_policy,
@@ -114,6 +114,10 @@ _sync_feature_pr_adoption = _provisioner_helpers._sync_feature_pr_adoption
 _sync_feature_pr_head_ref = _provisioner_helpers._sync_feature_pr_head_ref
 _sync_feature_pr_pr_number = _provisioner_helpers._sync_feature_pr_pr_number
 _sync_feature_pr_pull_head_ref = _provisioner_helpers._sync_feature_pr_pull_head_ref
+_resolved_profile_snapshot_for_failure = _provisioner_helpers._resolved_profile_snapshot_for_failure
+_resolved_profile_requires_credential_rehydration = (
+    _provisioner_helpers._resolved_profile_requires_credential_rehydration
+)
 
 ProvisionerConfig = _provisioner_config.ProvisionerConfig
 ServiceStartupDiagnosticsCapturer = _provisioner_config.ServiceStartupDiagnosticsCapturer
@@ -123,29 +127,6 @@ _EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
 
 _UNSUPPORTED_AGENT_RUNTIME_REASON_CODE: Final = "UNSUPPORTED_AGENT_RUNTIME"
 """Reason code logged when workspace specifies an unknown or retired agent runtime (e.g. gemini)."""
-
-
-def _resolved_profile_snapshot_for_failure(
-    resolved_profile_dict: dict[str, Any] | None,
-    profile: WorkspaceProfile,
-) -> dict[str, Any]:
-    """Return a secret-safe profile JSON snapshot for pre-launch failures."""
-
-    if resolved_profile_dict is not None:
-        return cast(dict[str, Any], redact_audit_value(resolved_profile_dict))
-    return cast(dict[str, Any], redact_audit_value(profile.model_dump(mode="json", by_alias=True)))
-
-
-def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
-    """Return whether a persisted redacted profile must be resolved again for retry."""
-
-    if isinstance(value, Mapping):
-        return any(
-            _resolved_profile_requires_credential_rehydration(item) for item in value.values()
-        )
-    if isinstance(value, list):
-        return any(_resolved_profile_requires_credential_rehydration(item) for item in value)
-    return value == REDACTION_MARKER
 
 
 _log = get_logger(__name__)

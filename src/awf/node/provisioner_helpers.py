@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.common.audit import redact_audit_value
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
 from awf.common.task_tag import branch_with_task_tag
 from awf.common.workspace_policy import (
@@ -578,6 +578,29 @@ async def record_stale_action_skip(
             "actual_status": ws.status,
         },
     )
+
+
+def _resolved_profile_snapshot_for_failure(
+    resolved_profile_dict: dict[str, Any] | None,
+    profile: WorkspaceProfile,
+) -> dict[str, Any]:
+    """Return a secret-safe profile JSON snapshot for pre-launch failures."""
+
+    if resolved_profile_dict is not None:
+        return cast(dict[str, Any], redact_audit_value(resolved_profile_dict))
+    return cast(dict[str, Any], redact_audit_value(profile.model_dump(mode="json", by_alias=True)))
+
+
+def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
+    """Return whether a persisted redacted profile must be resolved again for retry."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _resolved_profile_requires_credential_rehydration(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_resolved_profile_requires_credential_rehydration(item) for item in value)
+    return value == REDACTION_MARKER
 
 
 def check_unsupported_agent_runtime(agent_name: str) -> str | None:
