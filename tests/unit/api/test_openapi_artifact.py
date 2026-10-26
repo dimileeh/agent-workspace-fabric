@@ -173,6 +173,7 @@ def test_workspace_create_schema_components_use_canonical_v1_names(openapi_spec:
     assert schemas["WorkspaceCreateRequest"]["properties"]["repo"]["$ref"] == (
         "#/components/schemas/WorkspaceRepo"
     )
+    assert "expected_base_sha" in schemas["WorkspaceRepo"]["properties"]
     assert schemas["WorkspaceCreateRequest"]["properties"]["task"]["$ref"] == (
         "#/components/schemas/WorkspaceTask"
     )

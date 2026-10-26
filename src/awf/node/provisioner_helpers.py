@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.common.audit import redact_audit_value
+from awf.common.audit import REDACTION_MARKER, redact_audit_value
 from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
 from awf.common.task_tag import branch_with_task_tag
-from awf.common.workspace_policy import release_sync_source_branch
+from awf.common.workspace_policy import (
+    EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY,
+    expected_base_sha_from_task_policy,
+    release_sync_source_branch,
+)
 from awf.db.enums import EgressDecision
 from awf.db.models import Workspace
 from awf.db.repositories import ResourceReservationRepository
@@ -156,6 +161,41 @@ def _provision_checkout_base_branch(ws: Workspace) -> str:
         )
         or ws.branch_base
     )
+
+
+def _expected_base_sha_for_initial_checkout(ws: Workspace) -> str | None:
+    """Return the create pin only for a fresh checkout of the named base branch.
+
+    Adopted, preserved-PR, and release-sync checkouts start somewhere else and
+    must not be reset to the original SHA. A missing or invalid snapshot key
+    is unpinned and returns before checkout metadata is resolved, so callers
+    that never stored a pin do not need task-kind fields. A real pin still
+    refuses any checkout that is not the named base branch.
+    """
+    pin = expected_base_sha_from_task_policy(getattr(ws, "task_policy", None))
+    if pin is None:
+        return None
+    if _provision_checkout_base_branch(ws) != ws.branch_base:
+        return None
+    return pin
+
+
+def _task_policy_without_inherited_first_launch(
+    task_policy: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Drop first-launch evidence copied onto a fresh named-branch checkout.
+
+    The evidence was recorded for a previous worktree. Setup on this checkout
+    can still move HEAD, so the launch guard must verify the pin again. The
+    immutable ``expected_base_sha`` pin is left in place. Returns None when
+    the policy has no inherited evidence. Recovery of an existing checkout
+    does not call this.
+    """
+    if EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY not in task_policy:
+        return None
+    updated = dict(task_policy)
+    del updated[EXPECTED_BASE_SHA_FIRST_LAUNCH_POLICY_KEY]
+    return updated
 
 
 def _provision_base_commit(ws: Workspace, *, checked_out_head: str) -> str:
@@ -538,6 +578,29 @@ async def record_stale_action_skip(
             "actual_status": ws.status,
         },
     )
+
+
+def _resolved_profile_snapshot_for_failure(
+    resolved_profile_dict: dict[str, Any] | None,
+    profile: WorkspaceProfile,
+) -> dict[str, Any]:
+    """Return a secret-safe profile JSON snapshot for pre-launch failures."""
+
+    if resolved_profile_dict is not None:
+        return cast(dict[str, Any], redact_audit_value(resolved_profile_dict))
+    return cast(dict[str, Any], redact_audit_value(profile.model_dump(mode="json", by_alias=True)))
+
+
+def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
+    """Return whether a persisted redacted profile must be resolved again for retry."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _resolved_profile_requires_credential_rehydration(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_resolved_profile_requires_credential_rehydration(item) for item in value)
+    return value == REDACTION_MARKER
 
 
 def check_unsupported_agent_runtime(agent_name: str) -> str | None:

@@ -13,7 +13,11 @@ from typing import Any
 
 from awf.common.logging import get_logger
 from awf.control.executor.helpers import _failure_salvage_payload
-from awf.control.executor.types import _PlanningRunFailure, _PlanningValidationHandoff
+from awf.control.executor.types import (
+    _ExpectedBaseShaLaunchSettled,
+    _PlanningRunFailure,
+    _PlanningValidationHandoff,
+)
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION, render_workspace_path
 from awf.service.artifacts import deposit_workspace_planning_artifacts
@@ -148,6 +152,8 @@ async def handle_agent_planning_result(
             handoff=planning_failure,
         )
         return planning_failure, False
+    if isinstance(planning_failure, _ExpectedBaseShaLaunchSettled):
+        return None, True
     if planning_failure is not None:
         failure_message = (
             planning_failure if isinstance(planning_failure, str) else planning_failure.message

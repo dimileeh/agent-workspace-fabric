@@ -7,6 +7,7 @@ REST + MCP stay in lockstep. Keep them narrow: business objects live in
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -127,6 +128,29 @@ class WorkspaceRepo(BaseModel):
     source_branch: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
     """Optional source branch for ``sync_release_pr`` (defaults to ``development``).
     The release PR is opened ``source_branch`` → ``base_branch``."""
+    expected_base_sha: Annotated[
+        str | None,
+        Field(
+            default=None,
+            max_length=40,
+            description=(
+                "Optional full 40-character hexadecimal commit. When set, "
+                "base_branch must resolve to this commit at the initial checkout. "
+                "Omit it to check out the current branch tip. This is not "
+                "Workspace.base_commit and does not move later commits."
+            ),
+        ),
+    ] = None
+
+    @field_validator("expected_base_sha")
+    @classmethod
+    def _validate_expected_base_sha(cls, value: str | None) -> str | None:
+        """Accept one full commit object name and store it lowercase."""
+        if value is None:
+            return None
+        if re.fullmatch(r"[0-9a-fA-F]{40}", value) is None:
+            raise ValueError("expected_base_sha must be a full 40-character hexadecimal commit SHA")
+        return value.lower()
 
 
 class WorkspaceProviderFallbackTarget(BaseModel):

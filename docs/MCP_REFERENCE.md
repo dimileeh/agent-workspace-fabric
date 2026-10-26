@@ -103,6 +103,11 @@ builds Claude/Codex plans from the same client descriptors as `awf setup
 --client` and returns command/args/config-path instructions without reading
 the referenced env file.
 
+`expected_base_sha` is optional. Omit it to check out the current tip of
+`base_branch`. Set it to a full 40-character hexadecimal commit when that named
+branch must resolve to the commit at the initial checkout. It is not
+`base_commit` and does not move later commits.
+
 Example `awf_create_workspace` arguments:
 
 ```json

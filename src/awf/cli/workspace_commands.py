@@ -105,6 +105,11 @@ def workspace_create(
         "--source-branch",
         help="Source branch for sync_release_pr release PRs (default development).",
     ),
+    expected_base_sha: str | None = typer.Option(
+        None,
+        "--expected-base-sha",
+        help="Full 40-hex commit the base branch must match at initial checkout.",
+    ),
     agent: str = typer.Option("codex", "--agent"),
     model: str | None = typer.Option(None, "--model"),
     effort: str | None = typer.Option(
@@ -210,6 +215,9 @@ def workspace_create(
     repo_body: dict[str, Any] = {"url": repo_url, "base_branch": branch_base}
     if source_branch is not None:
         repo_body["source_branch"] = source_branch
+    expected_base_sha = _option_default(expected_base_sha)
+    if expected_base_sha is not None:
+        repo_body["expected_base_sha"] = expected_base_sha
     body: dict[str, Any] = {
         "repo": repo_body,
         "task": {

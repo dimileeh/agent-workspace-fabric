@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from awf import __version__
 from awf.api.app import create_app
 from awf.common.config import get_settings
+from awf.runtime.driver import WORKSPACE_EXECUTION_V1, RuntimeDriverConfig
 from awf.service import core_discovery as core_discovery_service
 
 DISCOVERY_PATH = "/.well-known/awf-core.json"
@@ -42,7 +43,10 @@ async def test_core_discovery_is_public_with_token_configured(
     assert payload["package_name"] == "agent-workspace-fabric"
     assert payload["package_version"] == __version__
     assert payload["git_commit"] == "abc1234"
-    assert payload["capabilities"] == ["workspace.execution.v1"]
+    assert payload["capabilities"] == [
+        "workspace.execution.v1",
+        "workspace.create.expected_base_sha.v1",
+    ]
     assert token not in response.text
 
 
@@ -148,7 +152,11 @@ def test_core_discovery_payload_from_state_uses_default_when_cache_missing() -> 
     payload = core_discovery_service.core_discovery_payload_from_state(SimpleNamespace())
 
     assert payload.git_commit == "unknown"
-    assert payload.capabilities == ("workspace.execution.v1",)
+    assert payload.capabilities == (
+        "workspace.execution.v1",
+        "workspace.create.expected_base_sha.v1",
+    )
+    assert RuntimeDriverConfig().capabilities == (WORKSPACE_EXECUTION_V1,)
     assert payload.profile_capability_schema == core_discovery_service.profile_capability_schema()
     assert payload.to_response().profile_capability_schema == payload.profile_capability_schema
 

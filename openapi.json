@@ -13009,6 +13009,19 @@
             "title": "Base Branch",
             "type": "string"
           },
+          "expected_base_sha": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional full 40-character hexadecimal commit. When set, base_branch must resolve to this commit at the initial checkout. Omit it to check out the current branch tip. This is not Workspace.base_commit and does not move later commits.",
+            "title": "Expected Base Sha"
+          },
           "source_branch": {
             "anyOf": [
               {
