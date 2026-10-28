@@ -166,10 +166,10 @@ def _dead_awf_locked_checkout(admin_dir: Path, worktrees_root: Path) -> Path | N
     try:
         lock_reason = (admin_dir / "locked").read_text(encoding="utf-8")
         raw_gitdir = (admin_dir / "gitdir").read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         # Unlocked entries are plain prune's job. A missing back-reference cannot
-        # prove the checkout lies in the managed root, and unreadable metadata
-        # must stay on the fail-closed path.
+        # prove the checkout lies in the managed root, and unreadable or
+        # non-UTF-8 metadata (never AWF-written) must stay on the fail-closed path.
         return None
     if not lock_reason.startswith(AWF_WORKTREE_LOCK_REASON_PREFIX) or not raw_gitdir:
         return None

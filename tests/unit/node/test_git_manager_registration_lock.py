@@ -601,3 +601,32 @@ class TestReapGuards:
             )
             == ()
         )
+
+    @pytest.mark.unit
+    async def test_non_utf8_registration_metadata_is_skipped_not_raised(
+        self, tmp_path: Path
+    ) -> None:
+        worktrees_root = tmp_path / "worktrees"
+        worktrees_root.mkdir()
+        reason = registration.awf_worktree_lock_reason("ws")
+        operator = _synthetic_admin(
+            tmp_path,
+            "ws_operator",
+            gitdir=str(worktrees_root / "ws_operator" / ".git"),
+            locked=None,
+        )
+        (operator / "locked").write_bytes(b"held by \xff operator")
+        bad_gitdir = _synthetic_admin(tmp_path, "ws_bad_gitdir", gitdir="", locked=reason)
+        (bad_gitdir / "gitdir").write_bytes(b"/worktrees/\xfe/.git")
+        dead = _synthetic_admin(
+            tmp_path, "ws_dead", gitdir=str(worktrees_root / "ws_dead" / ".git"), locked=reason
+        )
+
+        reaped = await registration.unlock_dead_managed_registrations(
+            mirror_path=tmp_path / "mirrors" / "repo.git", worktrees_root=worktrees_root
+        )
+
+        assert reaped == ("ws_dead",)
+        assert not (dead / "locked").exists()
+        assert (operator / "locked").read_bytes() == b"held by \xff operator"
+        assert (bad_gitdir / "locked").is_file()
