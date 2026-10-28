@@ -140,7 +140,16 @@ async def create_workspace_row(
     resolved_settings = settings or get_settings()
     hosted_authority = session.info.get(SESSION_KEY)
     if isinstance(hosted_authority, WorkspaceAuthority):
-        provider_environ = (await hosted_authority.admit(payload)).environment
+        material = await hosted_authority.admit(payload)
+        # Admission runs Docker before a workspace consumer scope exists. Keep
+        # its configured transport without inheriting host auth or contexts.
+        provider_environ = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": str(hosted_authority.receiver.config.material_root / "no-host-auth"),
+            "LANG": "C.UTF-8",
+            "DOCKER_HOST": resolved_settings.docker_host,
+            **material.environment,
+        }
         resolved_settings = resolved_settings.model_copy(
             update={
                 "host_home": str(hosted_authority.receiver.config.material_root / "no-host-auth"),
