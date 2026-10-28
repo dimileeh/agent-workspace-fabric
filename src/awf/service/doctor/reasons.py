@@ -20,6 +20,9 @@ from awf.service.doctor.reasons_monitor_runtime_restart import (
     get_monitor_runtime_restart_reasons,
 )
 from awf.service.doctor.reasons_runtime_setup_replay import get_runtime_setup_replay_reasons
+from awf.service.doctor.reasons_worktree_registration import (
+    get_worktree_registration_reasons,
+)
 
 
 @dataclass(frozen=True)
@@ -1007,89 +1010,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace remonitor <workspace_id>",
         "docs/REASON_CATALOG.md#git_base_fetch_transient_retry_exhausted",
     ),
-    "GIT_WORKTREE_REGISTRATION_LOCK_FAILED": _ReasonText(
-        (
-            "AWF could not lock a worktree registration on the shared git mirror; "
-            "the workspace continues with an unlocked registration."
-        ),
-        (
-            "Inspect the worker log for the git stderr and fix ownership or "
-            "permissions of `<mirror>/worktrees/<id>`. AWF retries the lock the "
-            "next time it reuses the checkout. Until then, avoid running "
-            "`git worktree prune` against that mirror."
-        ),
-        (
-            "The mirror's worktree admin dir is unwritable or its metadata is "
-            "damaged, so `git worktree lock` failed. An unlocked registration can "
-            "be pruned by a container that cannot see the checkout."
-        ),
-        "awf service logs --service worker",
-        "docs/REASON_CATALOG.md#git_worktree_registration_lock_failed",
-    ),
-    "GIT_WORKTREE_REGISTRATION_REAPED": _ReasonText(
-        (
-            "AWF unlocked a registration whose managed checkout was gone so "
-            "`git worktree prune` could remove it."
-        ),
-        (
-            "No action required. This records normal cleanup of an AWF-locked "
-            "registration whose worktree directory no longer has a `.git`."
-        ),
-        (
-            "A managed checkout under the AWF worktrees root was deleted or "
-            "half-removed while its AWF-locked registration stayed on the mirror."
-        ),
-        "awf service logs --service worker",
-        "docs/REASON_CATALOG.md#git_worktree_registration_reaped",
-    ),
-    "GIT_WORKTREE_REGISTRATION_REAP_FAILED": _ReasonText(
-        (
-            "AWF could not unlock a dead AWF-locked registration, so "
-            "`git worktree prune` kept it on the mirror."
-        ),
-        (
-            "Check ownership and permissions of `<mirror>/worktrees/<id>/locked`, "
-            "then rerun `awf service gc` so the in-container worker retries the "
-            "cleanup. Do not delete mirror metadata from the host shell."
-        ),
-        (
-            "The `locked` file of a registration whose checkout is gone could not "
-            "be removed, usually because of a permission or filesystem error."
-        ),
-        "awf service gc",
-        "docs/REASON_CATALOG.md#git_worktree_registration_reap_failed",
-    ),
-    "MIRROR_WORKTREE_REGISTRATION_DEAD": _ReasonText(
-        "Hooks-path repair skipped a mirror worktree registration that git cannot open.",
-        (
-            "No action is needed for healthy workspaces on the mirror. To clear the "
-            "stale entry, run `awf service gc`; if it persists, inspect "
-            "`<mirror>/worktrees/<id>` and destroy the owning workspace through AWF."
-        ),
-        (
-            "The registration's admin dir lost `HEAD` or `commondir`, or holds "
-            "metadata git rejects, typically after an interrupted worktree removal. "
-            "Git cannot open it, so it cannot carry a poisoned hooks path."
-        ),
-        "awf service gc",
-        "docs/REASON_CATALOG.md#mirror_worktree_registration_dead",
-    ),
-    "MIRROR_WORKTREE_REGISTRATION_VANISHED": _ReasonText(
-        (
-            "Hooks-path repair skipped a mirror worktree registration whose checkout "
-            "or admin dir disappeared during the repair."
-        ),
-        (
-            "No action required. Another workspace removed or recreated its "
-            "worktree concurrently; run `awf service gc` if stale entries remain."
-        ),
-        (
-            "The checkout, its `.git`, or the mirror admin dir was removed between "
-            "registration enumeration and the hooks-path probe."
-        ),
-        "awf service gc",
-        "docs/REASON_CATALOG.md#mirror_worktree_registration_vanished",
-    ),
     "HOSTED_REMOTE_HEAD_MISSING": _ReasonText(
         "Hosted PR monitor repair completed without reporting the terminal head commit.",
         (
@@ -1532,6 +1452,7 @@ _REASON_TEXT.update(get_salvage_and_monitor_reasons(_ReasonText))
 _REASON_TEXT.update(get_claude_overlay_reasons(_ReasonText))
 _REASON_TEXT.update(get_runtime_setup_replay_reasons(_ReasonText))
 _REASON_TEXT.update(get_monitor_runtime_restart_reasons(_ReasonText))
+_REASON_TEXT.update(get_worktree_registration_reasons(_ReasonText))
 
 
 def _reason_text(
