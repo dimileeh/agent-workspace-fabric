@@ -219,6 +219,28 @@ async def unlock_dead_managed_registrations(
     return tuple(reaped)
 
 
+def locked_registration_without_backref_is_dead(linked_git_dir: Path) -> bool:
+    """Return whether a locked registration missing ``gitdir`` is also unopenable.
+
+    Git never prunes a locked registration, so a half-removed one that lost its
+    ``gitdir`` back-reference would stay stale across prune and fail repair for
+    the whole mirror. When ``HEAD`` or ``commondir`` is gone too, git cannot
+    open it, so it cannot carry hooks-path poisoning and is skipped (not
+    unlocked). Unreadable metadata (a non-``ENOENT`` ``OSError``) stays
+    fail-closed.
+    """
+    if not (linked_git_dir / "locked").exists():
+        return False
+    try:
+        for name in ("HEAD", "commondir"):
+            (linked_git_dir / name).read_bytes()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def classify_linked_probe_failure(
     exc: GitOperationError, *, linked_git_dir: Path, worktree_path: Path
 ) -> LinkedProbeFailure | None:
@@ -257,7 +279,11 @@ def classify_linked_probe_failure(
 
 
 def log_skipped_linked_registration(
-    outcome: LinkedProbeFailure, *, mirror_path: Path, linked_git_dir: Path, worktree_path: Path
+    outcome: LinkedProbeFailure,
+    *,
+    mirror_path: Path,
+    linked_git_dir: Path,
+    worktree_path: Path | None,
 ) -> None:
     """Record a dead or vanished registration skipped by hooks-path repair."""
     _log.warning(
@@ -265,7 +291,7 @@ def log_skipped_linked_registration(
         reason_code=DEAD_REASON_CODE if outcome == "dead" else VANISHED_REASON_CODE,
         mirror_path=str(mirror_path),
         registration=linked_git_dir.name,
-        worktree_path=str(worktree_path),
+        worktree_path=None if worktree_path is None else str(worktree_path),
     )
 
 

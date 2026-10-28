@@ -142,6 +142,29 @@ class TestDeadRegistrationDoesNotFailMirror:
         assert (_admin(healthy) / "locked").is_file()
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("missing", ["HEAD", "commondir"])
+    async def test_locked_registration_without_backref_or_admin_file_is_skipped(
+        self, missing: str, manager: GitManager, origin_repo: Path
+    ) -> None:
+        dead = await _add(manager, origin_repo, "ws_0_dead")
+        healthy = await _add(manager, origin_repo, "ws_1_healthy")
+        _poison_worktree_config(healthy)
+        # Half-removed, but still locked: git prune never reaps it.
+        (_admin(dead) / "gitdir").unlink()
+        (_admin(dead) / missing).unlink()
+
+        with capture_logs() as logs:
+            repaired = await git_module.repair_mirror_hooks_path(healthy.mirror_path)
+
+        assert repaired is True
+        assert _hooks_path("-C", str(healthy.worktree_path), "config", "--worktree").returncode
+        assert _reason_codes(logs, "mirror.hooks_path.dead_worktree_registration_skipped") == [
+            "MIRROR_WORKTREE_REGISTRATION_DEAD"
+        ]
+        assert (_admin(dead) / "locked").is_file()
+        assert (_admin(healthy) / "locked").is_file()
+
+    @pytest.mark.unit
     async def test_registration_vanishing_during_probe_is_reaped_and_retried(
         self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -269,6 +292,43 @@ class TestPoisoningStaysFailClosed:
 
         assert raised.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
         assert raised.value.returncode == 128
+
+    @pytest.mark.unit
+    async def test_locked_registration_without_backref_but_openable_still_fails_closed(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        live = await _add(manager, origin_repo, "ws_0_live")
+        # ``HEAD`` and ``commondir`` intact: git can still open it, so it may
+        # carry poisoning and must not be skipped.
+        (_admin(live) / "gitdir").unlink()
+
+        with pytest.raises(GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(live.mirror_path)
+
+        assert raised.value.operation == "mirror.worktree_metadata_stale"
+        assert (_admin(live) / "locked").is_file()
+
+    @pytest.mark.unit
+    async def test_locked_registration_without_backref_and_unreadable_head_fails_closed(
+        self, manager: GitManager, origin_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dead = await _add(manager, origin_repo, "ws_0_dead")
+        (_admin(dead) / "gitdir").unlink()
+        (_admin(dead) / "commondir").unlink()
+        head = _admin(dead) / "HEAD"
+        real_read_bytes = Path.read_bytes
+
+        def _denied(path: Path) -> bytes:
+            if path == head:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _denied)
+
+        with pytest.raises(GitOperationError) as raised:
+            await git_module.repair_mirror_hooks_path(dead.mirror_path)
+
+        assert raised.value.operation == "mirror.worktree_metadata_stale"
 
 
 def _probe_error(

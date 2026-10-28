@@ -1328,6 +1328,18 @@ async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]
         except GitOperationError as exc:
             if not _is_stale_linked_worktree_metadata_error(exc):
                 raise
+            if _git_manager_registration.locked_registration_without_backref_is_dead(
+                linked_worktree_dir
+            ):
+                # Prune skips locked entries; skip this dead one instead of
+                # leaving it stale (which would fail the whole mirror).
+                _git_manager_registration.log_skipped_linked_registration(
+                    "dead",
+                    mirror_path=mirror_path,
+                    linked_git_dir=linked_worktree_dir,
+                    worktree_path=None,
+                )
+                continue
             stale_worktree_metadata = True
             continue
         if not worktree_path.exists():
