@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from awf.common.commands import _terminate_process
 from awf.common.logging import get_logger
 from awf.node.git_manager_linked import _path_within_root
 from awf.node.git_manager_ownership import git_env_without_object_lookup_overrides
@@ -84,7 +85,16 @@ async def _run_mirror_worktree(mirror_path: Path, *args: str, operation: str) ->
         stderr=asyncio.subprocess.PIPE,
         env=git_env_without_object_lookup_overrides(),
     )
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    wait_task = asyncio.create_task(proc.wait())
+    try:
+        stdout_bytes, stderr_bytes = await proc.communicate()
+    except asyncio.CancelledError:
+        # Same as ``GitManager._run``: reap git before the caller releases the
+        # mirror lock, or it can keep changing registrations under another holder.
+        await _terminate_process(proc, wait_task)
+        raise
+    finally:
+        wait_task.cancel()
     assert proc.returncode is not None
     if proc.returncode != 0:
         raise GitOperationError(

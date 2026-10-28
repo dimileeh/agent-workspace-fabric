@@ -9,7 +9,11 @@ worktrees root.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -254,6 +258,43 @@ class TestLockOnReuse:
 
         assert locked is True
         assert not [entry for entry in logs if entry["event"].startswith("worktree.registration")]
+
+    @pytest.mark.unit
+    async def test_cancelled_lock_terminates_git_before_releasing_mirror_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirrors" / "repo.git"
+        mirror.mkdir(parents=True)
+        pid_file = tmp_path / "git.pid"
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text(f'#!/bin/sh\necho $$ > "{pid_file}"\nexec sleep 30\n', encoding="utf-8")
+        fake_git.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+        task = asyncio.create_task(
+            registration.lock_reused_registration(
+                mirror_path=mirror, worktree_path=tmp_path / "worktrees" / "wt", workspace_id="ws"
+            )
+        )
+        for _ in range(500):
+            if pid_file.is_file() and pid_file.read_text(encoding="utf-8").strip():
+                break
+            await asyncio.sleep(0.01)
+        pid = int(pid_file.read_text(encoding="utf-8"))
+
+        try:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+            assert not GitManager._lock_for_mirror(mirror).locked()  # noqa: SLF001
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 class TestRemoveLockedRegistrations:
