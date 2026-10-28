@@ -282,3 +282,27 @@ def test_monitor_runtime_restart_reasons_have_doctor_guidance(
         assert term in reason.action
     assert reason.related_command == "awf workspace logs <workspace_id>"
     assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "code",
+    [
+        "GIT_WORKTREE_REGISTRATION_LOCK_FAILED",
+        "GIT_WORKTREE_REGISTRATION_REAPED",
+        "GIT_WORKTREE_REGISTRATION_REAP_FAILED",
+        "MIRROR_WORKTREE_REGISTRATION_DEAD",
+        "MIRROR_WORKTREE_REGISTRATION_VANISHED",
+    ],
+)
+def test_worktree_registration_reasons_are_cataloged(code: str) -> None:
+    """Verify the locked-registration reason codes (#1133) map to operator guidance."""
+    reason = _REASON_TEXT[code]
+
+    assert reason.message
+    assert reason.likely_cause
+    assert reason.action
+    assert reason.related_command
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+    catalog = (Path(__file__).parents[3] / "docs" / "REASON_CATALOG.md").read_text()
+    assert f"### {code}" in catalog

@@ -671,6 +671,24 @@ for the full per-pillar analysis (Docker socket, SSH/auth mounts, bind-mounted
 state, linked worktree metadata, Linux/macOS behavior, cleanup permissions,
 migration path) and the locked test contract.
 
+Every agent container mounts the whole bare mirror read-write at its host path,
+but only its own checkout. Inside a container every other registration's
+`<mirror>/worktrees/<id>/gitdir` points at a path that does not exist, so one
+`git worktree prune` there would unregister every workspace on the mirror. AWF
+therefore registers each linked worktree it creates locked
+(`git worktree add --lock --reason "awf-managed worktree for workspace <id>; remove via AWF"`),
+including the short-lived `__trusted_base_profile` snapshots. When it reuses a
+checkout (`ensure_worktree`, local PR-monitor resume) it locks an unlocked
+registration, so workspaces created earlier are covered after a restart; a lock
+that cannot be added is logged as `GIT_WORKTREE_REGISTRATION_LOCK_FAILED` and
+does not fail the resume. AWF removes worktrees with
+`git worktree remove --force --force`. Because prune skips locked entries, AWF's
+own reaping first unlocks, under the mirror lock, only AWF-locked registrations
+of direct children of the managed worktrees root whose `.git` is gone
+(`GIT_WORKTREE_REGISTRATION_REAPED`), and nothing when that root is not visible;
+`git worktree prune` then removes them. Cancel and stop keep the checkout and
+its lock.
+
 Because the API and worker use the host Docker daemon, AWF state must live at a
 host-visible path that is mounted at the same absolute path inside the
 containers. The local stack defaults this to `${HOME}/.awf/service`, overridable
@@ -1135,6 +1153,17 @@ first-run setup, the replay repairs a poisoned mirror `core.hooksPath` before
 and after the phases, and recovers a missing `HEAD` after an exec cleanup
 failure; on a PR-monitor workspace that recovery rebuilds on the PR's pushed
 head, not on `base_commit`.
+
+The mirror hooks-path repair probes every linked registration on the mirror. A
+registration git refuses to open although its checkout and admin directory still
+exist, because `HEAD` or `commondir` is missing or reads fine but is corrupt
+(`MIRROR_WORKTREE_REGISTRATION_DEAD`), or one that vanishes between enumeration
+and probe (`MIRROR_WORKTREE_REGISTRATION_VANISHED`, then reaped and re-checked),
+is logged and skipped instead of failing every workspace on the mirror: git
+cannot open it, so it cannot carry `core.hooksPath` poisoning, and that
+workspace still fails on its own. A disallowed `core.hooksPath` in a
+readable mirror `config` or `config.worktree` that repair cannot remove, and
+unreadable registration metadata, still fail closed.
 
 A failed replay is not retried in place and carries `RUNTIME_SETUP_REPLAY_FAILED`
 with the failing command, its redacted output tail and, for an ownership-repair,

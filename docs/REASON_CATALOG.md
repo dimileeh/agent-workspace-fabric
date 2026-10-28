@@ -459,6 +459,27 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#git_fetch_base_failed](#git_fetch_base_failed)
 
+### GIT_WORKTREE_REGISTRATION_LOCK_FAILED
+**Problem:** AWF could not lock a worktree registration on the shared git mirror; the workspace continues with an unlocked registration.
+**Likely Cause:** The mirror's worktree admin dir is unwritable or its metadata is damaged, so `git worktree lock` failed. An unlocked registration can be pruned by a container that cannot see the checkout.
+**Operator Fix:** Inspect the worker log for the git stderr and fix ownership or permissions of `<mirror>/worktrees/<id>`. AWF retries the lock the next time it reuses the checkout. Until then, avoid running `git worktree prune` against that mirror.
+**Related Command:** `awf service logs --service worker`
+**Docs Link:** [docs/REASON_CATALOG.md#git_worktree_registration_lock_failed](#git_worktree_registration_lock_failed)
+
+### GIT_WORKTREE_REGISTRATION_REAPED
+**Problem:** AWF unlocked a registration whose managed checkout was gone so `git worktree prune` could remove it.
+**Likely Cause:** A managed checkout under the AWF worktrees root was deleted or half-removed while its AWF-locked registration stayed on the mirror.
+**Operator Fix:** No action required. This records normal cleanup of an AWF-locked registration whose worktree directory no longer has a `.git`.
+**Related Command:** `awf service logs --service worker`
+**Docs Link:** [docs/REASON_CATALOG.md#git_worktree_registration_reaped](#git_worktree_registration_reaped)
+
+### GIT_WORKTREE_REGISTRATION_REAP_FAILED
+**Problem:** AWF could not unlock a dead AWF-locked registration, so `git worktree prune` kept it on the mirror.
+**Likely Cause:** The `locked` file of a registration whose checkout is gone could not be removed, usually because of a permission or filesystem error.
+**Operator Fix:** Check ownership and permissions of `<mirror>/worktrees/<id>/locked`, then rerun `awf service gc` so the in-container worker retries the cleanup. Do not delete mirror metadata from the host shell.
+**Related Command:** `awf service gc`
+**Docs Link:** [docs/REASON_CATALOG.md#git_worktree_registration_reap_failed](#git_worktree_registration_reap_failed)
+
 ### GROK_AUTH_MISSING
 **Problem:** No Grok Build auth signal was visible.
 **Likely Cause:** Missing xAI API credentials for the official Grok Build CLI.
@@ -626,6 +647,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the repository and base-branch merge policy, enable a compatible merge method, or update the branch ruleset before remonitoring the workspace.
 **Related Command:** `awf workspace remonitor <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#merge_method_mismatch](#merge_method_mismatch)
+
+### MIRROR_WORKTREE_REGISTRATION_DEAD
+**Problem:** Hooks-path repair skipped a mirror worktree registration that git cannot open.
+**Likely Cause:** The registration's admin dir lost `HEAD` or `commondir`, or holds metadata git rejects, typically after an interrupted worktree removal. Git cannot open it, so it cannot carry a poisoned hooks path.
+**Operator Fix:** No action is needed for healthy workspaces on the mirror. To clear the stale entry, run `awf service gc`; if it persists, inspect `<mirror>/worktrees/<id>` and destroy the owning workspace through AWF.
+**Related Command:** `awf service gc`
+**Docs Link:** [docs/REASON_CATALOG.md#mirror_worktree_registration_dead](#mirror_worktree_registration_dead)
+
+### MIRROR_WORKTREE_REGISTRATION_VANISHED
+**Problem:** Hooks-path repair skipped a mirror worktree registration whose checkout or admin dir disappeared during the repair.
+**Likely Cause:** The checkout, its `.git`, or the mirror admin dir was removed between registration enumeration and the hooks-path probe.
+**Operator Fix:** No action required. Another workspace removed or recreated its worktree concurrently; run `awf service gc` if stale entries remain.
+**Related Command:** `awf service gc`
+**Docs Link:** [docs/REASON_CATALOG.md#mirror_worktree_registration_vanished](#mirror_worktree_registration_vanished)
 
 ### MONITOR_ACTION_MOOT_PR_TERMINAL
 **Problem:** The PR merged or closed while the monitor action was still running.
