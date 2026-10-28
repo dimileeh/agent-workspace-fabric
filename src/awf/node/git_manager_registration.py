@@ -269,7 +269,14 @@ def classify_linked_probe_failure(
     if exc.operation not in _LINKED_PROBE_OPERATIONS or exc.returncode != 128:
         return None
     stderr = exc.stderr.lower()
-    if "not a git repository" not in stderr and "cannot change to" not in stderr:
+    if not any(
+        message in stderr
+        for message in (
+            "not a git repository",
+            "cannot change to",
+            "gitfile does not point to a valid repository:",
+        )
+    ):
         return None
     try:
         for path in (worktree_path, worktree_path / ".git", linked_git_dir):

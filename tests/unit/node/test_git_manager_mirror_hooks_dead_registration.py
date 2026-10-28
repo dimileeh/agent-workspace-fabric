@@ -101,7 +101,13 @@ class TestDeadRegistrationDoesNotFailMirror:
             ["git", "-C", str(dead.worktree_path), "status"], capture_output=True, text=True
         )
         assert status.returncode == 128
-        assert "not a git repository" in status.stderr
+        assert any(
+            message in status.stderr
+            for message in (
+                "not a git repository",
+                "gitfile does not point to a valid repository",
+            )
+        )
         assert (_admin(healthy) / "locked").is_file()
 
     @pytest.mark.unit
@@ -361,6 +367,56 @@ class TestClassifyLinkedProbeFailure:
         return registration.classify_linked_probe_failure(
             exc, linked_git_dir=admin, worktree_path=checkout
         )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "missing_head",
+            "missing_commondir",
+            "readable",
+            "vanished",
+            "unreadable",
+            "repair",
+            "wrong_status",
+            "other_error",
+        ],
+    )
+    def test_gitfile_diagnostic_preserves_metadata_checks(
+        self,
+        case: str,
+        registered: tuple[Path, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        admin, checkout = registered
+        if case.startswith("missing_"):
+            (admin / ("HEAD" if case == "missing_head" else "commondir")).unlink()
+        if case == "vanished":
+            (checkout / ".git").unlink()
+        if case == "unreadable":
+            read_bytes = Path.read_bytes
+
+            def denied(path: Path) -> bytes:
+                if path == admin / "HEAD":
+                    raise PermissionError(13, "Permission denied", str(path))
+                return read_bytes(path)
+
+            monkeypatch.setattr(Path, "read_bytes", denied)
+        exc = _probe_error(
+            stderr=(
+                "fatal: gitfile does not point to a valid repository: x"
+                if case != "other_error"
+                else "fatal: unable to read gitfile: x"
+            ),
+            operation="worktree.hooks_path_repair" if case == "repair" else "",
+            returncode=1 if case == "wrong_status" else 128,
+        )
+        expected = (
+            "vanished"
+            if case == "vanished"
+            else ("dead" if case in {"missing_head", "missing_commondir", "readable"} else None)
+        )
+        assert self._classify(exc, registered) == expected
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
