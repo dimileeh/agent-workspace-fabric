@@ -47,6 +47,7 @@ from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
     _run_hosted_monitor_handoff_profile_setup,
 )
+from awf.control.executor.monitor_resume_registration import lock_resumed_worktree_registration
 from awf.control.executor.monitor_resume_restart_escalation import (
     pace_monitor_resume_restart,
 )
@@ -373,6 +374,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 monitor_owner_id=monitor_owner_id,
             ):
                 return None
+            await lock_resumed_worktree_registration(
+                self, workspace_id=workspace_id, repo_url=ws.repo_url
+            )
             identity_before = await _runtime_setup_replay.capture_agent_container_identity(
                 compose_project
             )

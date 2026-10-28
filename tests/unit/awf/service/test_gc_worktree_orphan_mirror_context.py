@@ -546,4 +546,4 @@ async def test_remove_orphan_worktree_reaps_legacy_path_safe_directory_names(
         }
     ]
     # The real (unmocked) GitManager ran the removal against the exact directory.
-    assert ["worktree", "remove", "--force", str(worktree_path)] == calls[0][-4:]
+    assert ["worktree", "remove", "--force", "--force", str(worktree_path)] == calls[0][-5:]
