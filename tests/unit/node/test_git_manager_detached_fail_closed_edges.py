@@ -327,3 +327,37 @@ async def test_verify_failure_rmtrees_when_worktree_remove_fails(
     assert raised.value.reason_code == "GIT_TRUSTED_BASE_PROFILE_MISMATCH"
     assert "forced verify failure" in raised.value.stderr
     assert not worktree_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_removes_the_locked_registration(
+    git_manager: GitManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verify-failure cleanup overrides the AWF lock and leaves no registration (#1133)."""
+    repo, base_sha, _ = _build_stale_head_safe_base_origin(tmp_path / "git")
+    snap_id = "ws_snap_locked__trusted_base_profile"
+    worktree_path = git_manager._worktree_path_for(snap_id)
+    admin_dir = git_manager._mirror_path(str(repo)) / "worktrees" / snap_id
+
+    async def _boom_verify(*_args: Any, **_kwargs: Any) -> None:
+        assert (admin_dir / "locked").is_file()
+        raise GitOperationError(
+            operation="mirror.verify_trusted_base_profile",
+            returncode=1,
+            stdout="",
+            stderr="forced verify failure",
+            reason_code="GIT_TRUSTED_BASE_PROFILE_MISMATCH",
+        )
+
+    monkeypatch.setattr(
+        detached_mod,
+        "_verify_and_materialize_trusted_profile_markers",
+        _boom_verify,
+    )
+
+    with pytest.raises(GitOperationError):
+        await git_manager.add_detached_worktree_at_commit(
+            workspace_id=snap_id, repo_url=str(repo), commit_sha=base_sha
+        )
+    assert not worktree_path.exists()
+    assert not admin_dir.exists()

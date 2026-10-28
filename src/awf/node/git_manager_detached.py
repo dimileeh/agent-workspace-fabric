@@ -14,6 +14,7 @@ from awf.node.git_manager_ownership import (
     TRUSTED_BASE_GIT_CONFIG_ARGS,
     git_env_for_trusted_base_materialization,
 )
+from awf.node.git_manager_registration import worktree_add_lock_args
 
 if TYPE_CHECKING:
     from awf.node.git_manager import GitManager, WorktreeLayout
@@ -180,6 +181,7 @@ async def add_detached_worktree_at_commit(
                 "add",
                 "--detach",
                 "--no-checkout",
+                *worktree_add_lock_args(workspace_id),
                 str(worktree_path),
                 cleaned_sha,
             ),
@@ -202,13 +204,15 @@ async def add_detached_worktree_at_commit(
                 env=trusted_env,
             )
         except BaseException:
-            # Leave no half-trusted snapshot path behind on verify failure.
+            # Leave no half-trusted snapshot path behind on verify failure. Two
+            # ``--force`` flags because the registration was added locked.
             with contextlib.suppress(GitOperationError):
                 await manager._run(
                     _trusted_git_args(
                         mirror_path,
                         "worktree",
                         "remove",
+                        "--force",
                         "--force",
                         str(worktree_path),
                     ),

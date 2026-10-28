@@ -37,6 +37,7 @@ from awf.node import git_manager_detached as _git_manager_detached
 from awf.node import git_manager_linked as _git_manager_linked
 from awf.node import git_manager_mirror as _git_manager_mirror
 from awf.node import git_manager_ownership as _git_manager_ownership
+from awf.node import git_manager_registration as _git_manager_registration
 from awf.node.git_manager_expected_base import locked_worktree_start_point
 from awf.node.git_manager_head_object import verify_head_object_exists as verify_head_object_exists
 
@@ -788,6 +789,7 @@ class GitManager:
                     str(mirror_path),
                     "worktree",
                     "add",
+                    *_git_manager_registration.worktree_add_lock_args(workspace_id),
                     "-b",
                     new_branch,
                     str(worktree_path),
@@ -836,6 +838,9 @@ class GitManager:
             expected_mirror=expected_mirror,
             expected_branch=new_branch,
         ):
+            await _git_manager_registration.lock_reused_registration(
+                mirror_path=expected_mirror, worktree_path=worktree_path, workspace_id=workspace_id
+            )
             return WorktreeLayout(
                 mirror_path=expected_mirror,
                 worktree_path=worktree_path,
@@ -850,6 +855,11 @@ class GitManager:
                 expected_mirror=expected_mirror,
                 expected_branch=new_branch,
             ):
+                await _git_manager_registration.lock_reused_registration(
+                    mirror_path=expected_mirror,
+                    worktree_path=worktree_path,
+                    workspace_id=workspace_id,
+                )
                 return WorktreeLayout(
                     mirror_path=expected_mirror,
                     worktree_path=worktree_path,
@@ -992,91 +1002,12 @@ class GitManager:
         worktree_path = Path(resolved_worktree_path)
 
         async def _remove_under_mirror_lock() -> None:
-            lock = self._lock_for_mirror(mirror_path)
-            async with lock:
-                if worktree_path.exists():
-                    # A standalone repository (``.git`` as a directory) is not proven
-                    # AWF-linked leftover metadata. Fail closed rather than
-                    # ``rmtree`` — reclaiming would erase unrelated commits or
-                    # uncommitted work (AGENTS.md destructive-git rule; GC likewise
-                    # skips these paths as ``WORKTREE_NOT_GIT_MANAGED``).
-                    git_marker = worktree_path / ".git"
-                    if git_marker.is_dir():
-                        raise GitOperationError(
-                            operation="worktree.remove",
-                            returncode=1,
-                            stdout="",
-                            stderr=(
-                                f"refusing to remove standalone repository at "
-                                f"{worktree_path}: .git is a directory (not a "
-                                "linked-worktree gitfile); quarantine or remove it "
-                                "manually before reclaiming the path"
-                            ),
-                            reason_code="GIT_WORKTREE_STANDALONE_REPO",
-                        )
-                    # ``--force`` because a failed task may leave dirty state.
-                    try:
-                        await self._run(
-                            [
-                                "git",
-                                "--git-dir",
-                                str(mirror_path),
-                                "worktree",
-                                "remove",
-                                "--force",
-                                str(worktree_path),
-                            ],
-                            operation="worktree.remove",
-                        )
-                    except GitOperationError as exc:
-                        # Idempotent removal: a directory left behind with stale git
-                        # metadata makes ``git worktree remove`` fail with
-                        # ``fatal: '<path>' is not a working tree``. If the worktree
-                        # ``.git`` file was already removed but mirror metadata still
-                        # points to it, Git instead reports that validation failed
-                        # because ``<path>/.git`` does not exist. If the gitfile is
-                        # present but linked admin metadata is corrupt (e.g. missing
-                        # HEAD), Git reports ``.git`` is not a .git file with
-                        # error code 7. Do not treat other codes (e.g. 3 for an
-                        # unreadable gitfile) as reclaimable — that would erase a
-                        # live checkout. Standalone ``.git`` dirs are refused
-                        # above. Re-raise any genuine removal error.
-                        stderr = exc.stderr.lower()
-                        corrupt_or_missing_git_file = (
-                            "validation failed, cannot remove working tree" in stderr
-                            and ".git" in stderr
-                            and (
-                                "does not exist" in stderr
-                                or ("is not a .git file" in stderr and "error code 7" in stderr)
-                            )
-                        )
-                        if (
-                            "is not a working tree" not in stderr
-                            and not corrupt_or_missing_git_file
-                        ):
-                            raise
-                        # ``git worktree remove`` never ran, so the physical
-                        # directory and its contents are still on disk; ``worktree
-                        # prune`` below only clears metadata for *missing* dirs and
-                        # would leave the disk space behind. Reclaim it ourselves so
-                        # GC actually frees the space it reports as reclaimed. We must
-                        # NOT swallow genuine deletion failures (e.g. permission
-                        # errors): if rmtree fails the directory is still on disk, and
-                        # callers like ``WorkspaceCleanupService.cleanup_workspace``
-                        # rely on a raised error to record the step as partial/failed
-                        # instead of falsely reporting removal success.
-                        await asyncio.to_thread(self._reclaim_stale_worktree, worktree_path)
-                        _log.info(
-                            "worktree.remove.already_gone",
-                            workspace_id=workspace_id,
-                            worktree_path=str(worktree_path),
-                        )
-
-                if mirror_path.exists():
-                    await self._run(
-                        ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
-                        operation="worktree.prune",
-                    )
+            await _git_manager_registration.remove_worktree_under_mirror_lock(
+                self,
+                workspace_id=workspace_id,
+                mirror_path=mirror_path,
+                worktree_path=worktree_path,
+            )
 
         if writer_lock_held:
             await _remove_under_mirror_lock()
@@ -1409,41 +1340,57 @@ async def _repair_mirror_hooks_path_once(mirror_path: Path) -> tuple[bool, bool]
         ):
             stale_worktree_metadata = True
             continue
-        repaired = (
-            await _repair_hooks_path_config(
-                git_args=(
-                    *git_safe_directory_config_args(worktree_path),
-                    "-C",
-                    str(worktree_path),
-                ),
-                config_scope_args=("--local",),
-                config_path=mirror_path / "config",
-                operation_prefix="linked_worktree",
+        try:
+            repaired = (
+                await _repair_hooks_path_config(
+                    git_args=(
+                        *git_safe_directory_config_args(worktree_path),
+                        "-C",
+                        str(worktree_path),
+                    ),
+                    config_scope_args=("--local",),
+                    config_path=mirror_path / "config",
+                    operation_prefix="linked_worktree",
+                )
+                or repaired
             )
-            or repaired
-        )
-        config_path = linked_worktree_dir / "config.worktree"
-        if not config_path.exists():
-            continue
-        if worktree_config_enabled is None:
-            worktree_config_enabled = await _worktree_config_extension_enabled(
-                mirror_path / "config"
+            config_path = linked_worktree_dir / "config.worktree"
+            if not config_path.exists():
+                continue
+            if worktree_config_enabled is None:
+                worktree_config_enabled = await _worktree_config_extension_enabled(
+                    mirror_path / "config"
+                )
+            if not worktree_config_enabled:
+                continue
+            repaired = (
+                await _repair_hooks_path_config(
+                    git_args=(
+                        *git_safe_directory_config_args(worktree_path),
+                        "-C",
+                        str(worktree_path),
+                    ),
+                    config_scope_args=("--worktree",),
+                    config_path=config_path,
+                    operation_prefix="worktree",
+                )
+                or repaired
             )
-        if not worktree_config_enabled:
-            continue
-        repaired = (
-            await _repair_hooks_path_config(
-                git_args=(
-                    *git_safe_directory_config_args(worktree_path),
-                    "-C",
-                    str(worktree_path),
-                ),
-                config_scope_args=("--worktree",),
-                config_path=config_path,
-                operation_prefix="worktree",
+        except GitOperationError as exc:
+            # Dead or vanished metadata cannot carry hooks-path poisoning; skip
+            # it (vanished → prune + retry) instead of failing the whole mirror.
+            outcome = _git_manager_registration.classify_linked_probe_failure(
+                exc, linked_git_dir=linked_worktree_dir, worktree_path=worktree_path
             )
-            or repaired
-        )
+            if outcome is None:
+                raise
+            _git_manager_registration.log_skipped_linked_registration(
+                outcome,
+                mirror_path=mirror_path,
+                linked_git_dir=linked_worktree_dir,
+                worktree_path=worktree_path,
+            )
+            stale_worktree_metadata = stale_worktree_metadata or outcome == "vanished"
     return repaired, stale_worktree_metadata
 
 
@@ -1459,6 +1406,11 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         if not stale_worktree_metadata:
             return repaired
 
+        # Locked AWF registrations survive prune; unlock the really-dead ones.
+        await _git_manager_registration.unlock_dead_managed_registrations(
+            mirror_path=mirror_path,
+            worktrees_root=_git_manager_registration.managed_worktrees_root_for_mirror(mirror_path),
+        )
         await _run_git_worktree_prune(mirror_path)
         retry_repaired, retry_stale_worktree_metadata = await _repair_mirror_hooks_path_once(
             mirror_path
