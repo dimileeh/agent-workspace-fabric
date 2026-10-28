@@ -226,10 +226,13 @@ def classify_linked_probe_failure(
 
     - ``"vanished"``: the checkout, its ``.git`` or the admin dir disappeared
       between enumeration and probe.
-    - ``"dead"``: the admin dir lacks ``HEAD`` or ``commondir``, so git cannot
-      open the registration at all and it cannot carry hooks-path poisoning.
-    - ``None``: anything else, including unreadable metadata. The caller
-      re-raises and fails closed.
+    - ``"dead"``: the admin dir lacks ``HEAD`` or ``commondir``, or both read
+      fine but git still rejects them (for example an empty or garbage ``HEAD``,
+      or a ``commondir`` pointing elsewhere). Git cannot open the registration,
+      so it cannot carry hooks-path poisoning.
+    - ``None``: any other operation, return code or stderr, and unreadable
+      metadata (a non-``ENOENT`` ``OSError`` such as ``PermissionError``). The
+      caller re-raises and fails closed.
     """
     if exc.operation not in _LINKED_PROBE_OPERATIONS or exc.returncode != 128:
         return None
@@ -250,7 +253,7 @@ def classify_linked_probe_failure(
         return "dead"
     except OSError:
         return None
-    return None
+    return "dead"
 
 
 def log_skipped_linked_registration(

@@ -1155,12 +1155,13 @@ failure; on a PR-monitor workspace that recovery rebuilds on the PR's pushed
 head, not on `base_commit`.
 
 The mirror hooks-path repair probes every linked registration on the mirror. A
-registration git refuses to open because its admin directory lacks `HEAD` or
-`commondir` (`MIRROR_WORKTREE_REGISTRATION_DEAD`), or one that vanishes between
-enumeration and probe (`MIRROR_WORKTREE_REGISTRATION_VANISHED`, then reaped and
-re-checked), is logged and skipped instead of failing every workspace on the
-mirror: git cannot open it, so it cannot carry `core.hooksPath` poisoning, and
-that workspace still fails on its own. A disallowed `core.hooksPath` in a
+registration git refuses to open although its checkout and admin directory still
+exist, because `HEAD` or `commondir` is missing or reads fine but is corrupt
+(`MIRROR_WORKTREE_REGISTRATION_DEAD`), or one that vanishes between enumeration
+and probe (`MIRROR_WORKTREE_REGISTRATION_VANISHED`, then reaped and re-checked),
+is logged and skipped instead of failing every workspace on the mirror: git
+cannot open it, so it cannot carry `core.hooksPath` poisoning, and that
+workspace still fails on its own. A disallowed `core.hooksPath` in a
 readable mirror `config` or `config.worktree` that repair cannot remove, and
 unreadable registration metadata, still fail closed.
 

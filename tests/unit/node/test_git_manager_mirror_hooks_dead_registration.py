@@ -105,6 +105,25 @@ class TestDeadRegistrationDoesNotFailMirror:
         assert (_admin(healthy) / "locked").is_file()
 
     @pytest.mark.unit
+    async def test_garbage_head_registration_is_skipped_and_healthy_one_still_repaired(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        healthy = await _add(manager, origin_repo, "ws_0_healthy")
+        corrupt = await _add(manager, origin_repo, "ws_1_corrupt")
+        _poison_worktree_config(healthy)
+        (_admin(corrupt) / "HEAD").write_text("garbage\n", encoding="utf-8")
+
+        with capture_logs() as logs:
+            repaired = await git_module.repair_mirror_hooks_path(healthy.mirror_path)
+
+        assert repaired is True
+        assert _hooks_path("-C", str(healthy.worktree_path), "config", "--worktree").returncode
+        assert _reason_codes(logs, "mirror.hooks_path.dead_worktree_registration_skipped") == [
+            "MIRROR_WORKTREE_REGISTRATION_DEAD"
+        ]
+        assert _admin(corrupt).is_dir()
+
+    @pytest.mark.unit
     async def test_locked_registration_with_gone_checkout_is_reaped(
         self, manager: GitManager, origin_repo: Path
     ) -> None:
@@ -300,9 +319,22 @@ class TestClassifyLinkedProbeFailure:
         assert self._classify(exc, registered) is None
 
     @pytest.mark.unit
-    def test_corrupt_but_readable_registration_fails_closed(
-        self, registered: tuple[Path, Path]
+    def test_corrupt_but_readable_registration_is_dead(self, registered: tuple[Path, Path]) -> None:
+        assert self._classify(_probe_error(), registered) == "dead"
+
+    @pytest.mark.unit
+    def test_unreadable_head_fails_closed(
+        self, registered: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        head = registered[0] / "HEAD"
+        real_read_bytes = Path.read_bytes
+
+        def _denied(path: Path) -> bytes:
+            if path == head:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _denied)
         assert self._classify(_probe_error(), registered) is None
 
     @pytest.mark.unit
