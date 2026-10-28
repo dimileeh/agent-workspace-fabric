@@ -14,7 +14,10 @@ from awf.node.git_manager_ownership import (
     TRUSTED_BASE_GIT_CONFIG_ARGS,
     git_env_for_trusted_base_materialization,
 )
-from awf.node.git_manager_registration import worktree_add_lock_args
+from awf.node.git_manager_registration import (
+    unlock_dead_managed_registrations,
+    worktree_add_lock_args,
+)
 
 if TYPE_CHECKING:
     from awf.node.git_manager import GitManager, WorktreeLayout
@@ -206,6 +209,7 @@ async def add_detached_worktree_at_commit(
         except BaseException:
             # Leave no half-trusted snapshot path behind on verify failure. Two
             # ``--force`` flags because the registration was added locked.
+            removed = False
             with contextlib.suppress(GitOperationError):
                 await manager._run(
                     _trusted_git_args(
@@ -219,10 +223,23 @@ async def add_detached_worktree_at_commit(
                     operation="worktree.remove_trusted_base_verify_failed",
                     env=trusted_env,
                 )
+                removed = True
             if worktree_path.exists():
                 # Best-effort under the mirror lock: avoid stranding a dir that
                 # would trip GIT_WORKTREE_ALREADY_EXISTS on retry.
                 shutil.rmtree(worktree_path, ignore_errors=True)
+            if not removed:
+                # The registration is still locked and prune skips locked
+                # entries; unlock it now its checkout is gone so retry can add.
+                await unlock_dead_managed_registrations(
+                    mirror_path=mirror_path, worktrees_root=manager._worktrees_dir
+                )
+                with contextlib.suppress(GitOperationError):
+                    await manager._run(
+                        _trusted_git_args(mirror_path, "worktree", "prune"),
+                        operation="worktree.prune_trusted_base_verify_failed",
+                        env=trusted_env,
+                    )
             raise
 
     # Ephemeral profile snapshot — no agent runtime will write here.
