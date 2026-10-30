@@ -75,6 +75,7 @@ from awf.control.validation_fix_cycle import (
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
+from awf.runtime.planning import PLAN_CONFORMANCE_NEEDS_HUMAN
 from awf.runtime.validation import (
     ValidationCoverageResult,
     profile_phase_command_plan,
@@ -812,6 +813,15 @@ async def run_validation_and_fix_cycle(
                             successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                         )
                 if isinstance(conformance_failure, _PlanningNeedsHuman):
+                    await self._finish_pending_validate_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        validation_run_id=validation_run_id,
+                        requested_tier=validation_tier,
+                        reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+                        coverage=validation_coverage,
+                        error_message="Plan conformance requires an operator decision.",
+                    )
                     await _planning_artifacts.pause_for_conformance_decision(
                         self,
                         workspace_id=workspace_id,

@@ -9,6 +9,7 @@ after the validating→pushing CAS commits the validated change to push.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +30,9 @@ from awf.control.executor.state_ops import (
     RESUME_SETUP_FAILED_REASON_CODE,
     RESUME_SETUP_FAILURE_BLOCK_TYPE,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
@@ -784,11 +785,13 @@ _PENDING_CONFORMANCE_HANDOFF = {
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("operation_status", [OperationStatus.pending, OperationStatus.running])
 async def test_post_validation_decision_pauses_before_push(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    operation_status: OperationStatus,
 ) -> None:
     from awf.control.executor.types import _PlanningNeedsHuman
     from awf.runtime.planning import parse_conformance_report
@@ -798,11 +801,37 @@ async def test_post_validation_decision_pauses_before_push(
         factory,
         block_planning_conformance_handoff=_PENDING_CONFORMANCE_HANDOFF,
     )
+    async with factory() as session:
+        operation = await OperationRepository(session).create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            status=operation_status,
+            payload={"reason": "manual_validate", "requested_tier": 2},
+        )
+        operation_id = operation.id
+        await session.commit()
     _queue_blocked_resume_to_push(fake, ws_id=ws_id, conformance_handoff=True)
+
+    coverage = ValidationCoverageResult(
+        provider="python",
+        percent=100.0,
+        minimum_percent=99.0,
+        enforce=True,
+        status="passed",
+        reason_code="COVERAGE_OK",
+    )
+    run_profile_phases = executor._validation.run_profile_phases
+
+    async def with_coverage(**kwargs: Any) -> ValidationResult:
+        return replace(await run_profile_phases(**kwargs), coverage=coverage)
+
+    monkeypatch.setattr(executor._validation, "run_profile_phases", with_coverage)
+    validation_run_ids: list[str] = []
 
     async def needs_decision(
         *, handoff: Any, validation_run_id: str, **_kwargs: Any
     ) -> _PlanningNeedsHuman:
+        validation_run_ids.append(validation_run_id)
         return _PlanningNeedsHuman(
             report=parse_conformance_report(decision_payload()),
             plan_path=handoff.plan_path,
@@ -820,6 +849,20 @@ async def test_post_validation_decision_pauses_before_push(
         assert ws.block_reason_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
         assert ws.block_resume_phase == "post_validation_conformance"
         assert ws.pending_operator_hint is None
+        operation = await OperationRepository(session).get(operation_id)
+        assert operation is not None
+        assert operation.status == OperationStatus.failed.value
+        assert operation.finished_at is not None
+        assert operation.error_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        assert operation.error_message == "Plan conformance requires an operator decision."
+        assert operation.result is not None
+        assert operation.result["reason_code"] == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        assert operation.result["requested_tier"] == 2
+        assert [operation.result["validation_run_id"]] == validation_run_ids
+        assert operation.result["coverage"] == coverage.as_metadata()
+        validation_run = await ValidationRunRepository(session).get(validation_run_ids[0])
+        assert validation_run is not None
+        assert validation_run.status == "succeeded"
     assert not any("push" in call.args or "gh" in call.args for call in fake.calls)
 
 
