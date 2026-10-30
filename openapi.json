@@ -786,6 +786,26 @@
         "title": "CheckResult",
         "type": "object"
       },
+      "CheckpointRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_id": {
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "request_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "request_sha256"
+        ],
+        "title": "CheckpointRequest",
+        "type": "object"
+      },
       "CleanupReadinessResponse": {
         "properties": {
           "action": {
@@ -3358,6 +3378,32 @@
           "generation"
         ],
         "title": "Maintenance",
+        "type": "object"
+      },
+      "MaintenanceBegin": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "title": "MaintenanceBegin",
         "type": "object"
       },
       "MaterialStatus": {
@@ -15926,7 +15972,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Maintenance"
+                "$ref": "#/components/schemas/MaintenanceBegin"
               }
             }
           },

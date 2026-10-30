@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, Integer, String
+from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,3 +36,12 @@ class NodeLifecycleRow(Base):
         BigInteger, nullable=False, default=0, server_default="0"
     )
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checkpoint_marker: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
+    restore_quarantine: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
+    restore_reconciliation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("hosted_restore_reconciliations.id"), nullable=True
+    )

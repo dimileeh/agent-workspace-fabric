@@ -27,6 +27,7 @@ from awf.db.enums import (
 )
 from awf.db.models import ServiceGCRequest
 from awf.db.repositories.base import resolve_session_dialect_name
+from awf.db.repositories.workspace_recovery import restore_row_allows_work
 
 
 class ServiceGCRequestRepository:
@@ -101,6 +102,7 @@ class ServiceGCRequestRepository:
         stmt = (
             select(ServiceGCRequest)
             .where(ServiceGCRequest.status == SERVICE_GC_REQUEST_STATUS_PENDING)
+            .where(restore_row_allows_work("service_gc_requests", ServiceGCRequest.id))
             .where(
                 or_(
                     ServiceGCRequest.deadline_at.is_(None),
@@ -168,6 +170,7 @@ class ServiceGCRequestRepository:
                 )
             )
             .where(ServiceGCRequest.deadline_at.is_not(None))
+            .where(restore_row_allows_work("service_gc_requests", ServiceGCRequest.id))
             .where(ServiceGCRequest.deadline_at < now)
             .where(
                 or_(

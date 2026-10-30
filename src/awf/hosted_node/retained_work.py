@@ -654,7 +654,7 @@ async def reconcile(
             }
         )
         policy = {
-            **workspace.task_policy,
+            **(workspace.task_policy or {}),
             RECOVERY_POLICY_KEY: {
                 **value.model_dump(),
                 "identity": gate.identity,
@@ -667,6 +667,10 @@ async def reconcile(
                 "execution_claim_epoch": workspace.execution_claim_epoch + 1,
             },
         }
+        if gate.restore_quarantine is not None:
+            policy[RECOVERY_POLICY_KEY]["restore_id"] = gate.restore_quarantine["binding"][
+                "restore_id"
+            ]
         if fresh is not None:
             policy["hosted_node"] = fresh.model_dump(mode="json")
         policies.append((workspace.id, policy))

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator
 
+from awf.hosted_node.checkpoint_schemas import CheckpointRequest
 from awf.hosted_node.schemas import Generation, Identity, Opaque, StrictModel
 
 
@@ -28,6 +29,10 @@ class Maintenance(StrictModel):
     """Monotonic hold token, independent of idle-drain generations."""
 
     generation: Generation
+
+
+class MaintenanceBegin(Maintenance):
+    checkpoint: CheckpointRequest | None = None
 
 
 class BootChallenge(StrictModel):

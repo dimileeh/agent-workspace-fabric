@@ -6,7 +6,7 @@ import binascii
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -17,6 +17,11 @@ from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import MaterialDeniedError, boot, check
 from awf.hosted_node.material_store import MaterialStore
 from awf.hosted_node.models import Grant, Owner, PreparationRow, Receipt
+from awf.hosted_node.restore_reconciliation_schemas import (
+    RestoreMaterialPermit,
+    VerifyRestoreMaterial,
+)
+from awf.hosted_node.restore_schemas import RestoreBootEvidence
 from awf.hosted_node.runtime_views import RuntimeViews
 from awf.hosted_node.schemas import (
     Binding,
@@ -55,6 +60,9 @@ class Receiver:
         self.closed = False
         self.views = RuntimeViews(store, identity=identity)
         self._close_task: asyncio.Task[None] | None = None
+        from awf.hosted_node.restore_materials import deny_material
+
+        self.verify_restore_material: VerifyRestoreMaterial = deny_material
         from awf.hosted_node.lifecycle import NodeLifecycle
 
         self.lifecycle = NodeLifecycle(factory, identity) if config.lifecycle else None
@@ -150,11 +158,15 @@ class Receiver:
 
     @classmethod
     async def start(
-        cls, config: HostedSettings, factory: async_sessionmaker[AsyncSession]
+        cls,
+        config: HostedSettings,
+        factory: async_sessionmaker[AsyncSession],
+        *,
+        restore: RestoreBootEvidence | None = None,
     ) -> "Receiver":
         store = MaterialStore(config.material_root)
         try:
-            identity = await boot(config, factory)
+            identity = await boot(config, factory, restore=restore)
             async with factory() as session:
                 rows = (
                     await session.execute(
@@ -207,15 +219,31 @@ class Receiver:
                 **self.identity.model_dump(), acknowledged=row.acknowledgement is not None
             )
 
+    async def allow_materials(
+        self,
+        session: AsyncSession,
+        value: Preparation | Binding | None = None,
+        permit: RestoreMaterialPermit | None = None,
+        operation: Literal["prepare", "install"] | None = None,
+    ) -> None:
+        from awf.hosted_node.restore_materials import allow
+
+        if self.config.lifecycle is not None:
+            await allow(self, session, value, permit, operation)
+
     @staticmethod
     def future(expiry: datetime) -> None:
         if not datetime.now(UTC) < expiry <= datetime.now(UTC) + timedelta(hours=1):
             raise MaterialDeniedError("INVALID_EXPIRY", 422)
 
     async def prepare(self, value: Preparation) -> None:
+        from awf.hosted_node.restore_materials import authorize
+
         self.future(value.expires_at)
+        permit = await authorize(self, value, "prepare")
         async with self.factory.begin() as session:
             await self.authority(session, lock=True)
+            await self.allow_materials(session, value, permit, "prepare")
             row = await self.preparation(session, value, required=False)
             binding = {**value.model_dump(mode="json"), "identity": self.identity.model_dump()}
             if row:
@@ -262,6 +290,7 @@ class Receiver:
         self, session: AsyncSession, value: PreparationRenewal, metadata: dict[str, Any]
     ) -> tuple[PreparationRow, Grant, Binding, Receipt | None]:
         await self.authority(session, lock=True)
+        await self.allow_materials(session, value.current)
         recorded = await session.scalar(
             select(Receipt).where(
                 Receipt.owner == self.identity.owner,
@@ -429,6 +458,8 @@ class Receiver:
             raise MaterialDeniedError("IDENTITY_MISMATCH", 403)
 
     async def install(self, value: Install, *, refresh: bool = False) -> MaterialStatus:
+        from awf.hosted_node.restore_materials import authorize
+
         self.expected(value)
         try:
             material = base64.b64decode(value.material, validate=True)
@@ -437,10 +468,13 @@ class Receiver:
         if not 1 <= len(material) <= 65536:
             raise MaterialDeniedError("INVALID_MATERIAL", 422)
         operation = "refresh" if refresh else "install"
+        permit_operation: Literal["install"] | None = None if refresh else "install"
+        permit = await authorize(self, value, permit_operation)
         predecessor = value.predecessor if isinstance(value, Refresh) else None
         replay = False
         async with self.factory.begin() as session:
             await self.authority(session, lock=True)
+            await self.allow_materials(session, value, permit, permit_operation)
             prep = await self.preparation(session, value)
             assert prep is not None
             old = await self.receipt(session, value)
@@ -520,8 +554,10 @@ class Receiver:
             )
         finalized = False
         try:
+            permit = await authorize(self, value, permit_operation)
             async with self.factory.begin() as session:
                 await self.authority(session, lock=True)
+                await self.allow_materials(session, value, permit, permit_operation)
                 grant = await self.grant(session, prep, value)
                 row = await session.get(Receipt, slot)
                 assert grant is not None and row is not None

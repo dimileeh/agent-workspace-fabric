@@ -75,7 +75,11 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("IDENTITY_ACKNOWLEDGEMENT_REQUIRED", 403)
         async with self.receiver.factory.begin() as session:
             row = await locked(session, self.receiver.identity)
-            if row.phase != "ready" or row.recovery_key is None:
+            if (
+                row.phase != "ready"
+                or row.recovery_key is None
+                or row.restore_quarantine is not None
+            ):
                 raise MaterialDeniedError("NODE_ADMISSION_CLOSED", 409)
 
     async def admit(self, payload: "WorkspaceCreateRequest") -> AuthorizedMaterials:
