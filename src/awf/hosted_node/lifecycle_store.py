@@ -43,8 +43,11 @@ async def reset_boot(
     row.disk_ref, row.database_ref = config.lifecycle.disk_ref, config.lifecycle.database_ref
     row.phase = "recovering"
     row.recovery_key = row.receipt_ref = None
+    row.recovery_acceptance = None
     row.drain_generation = row.idle_since = None
     row.aborted_through = 0
+    # Maintenance and its release tombstone survive boot/replacement. Only the
+    # new current identity may explicitly release the exact outstanding token.
 
 
 async def locked(session: AsyncSession, identity: Identity) -> NodeLifecycleRow:

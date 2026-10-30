@@ -48,6 +48,7 @@ from awf.db.repositories.base import (
     _operation_result_with_log_stream_refs,
     resolve_session_dialect_name,
 )
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 
 
 class CallbackIdempotencyConflictError(ValueError):
@@ -360,6 +361,15 @@ class CallbackDeliveryRepository:
             select(CallbackDelivery)
             .where(
                 CallbackDelivery.status == CallbackDeliveryStatus.pending.value,
+                or_(
+                    CallbackDelivery.workspace_id.is_(None),
+                    select(Workspace.id)
+                    .where(
+                        Workspace.id == CallbackDelivery.workspace_id,
+                        recovery_allows_work(),
+                    )
+                    .exists(),
+                ),
                 or_(
                     CallbackDelivery.next_attempt_at.is_(None),
                     CallbackDelivery.next_attempt_at <= due_at,

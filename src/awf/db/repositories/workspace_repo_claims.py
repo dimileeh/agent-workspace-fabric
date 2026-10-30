@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 
 
 async def claim_monitoring_pr(
@@ -31,6 +32,7 @@ async def claim_monitoring_pr(
         "updated_at": Workspace.updated_at,
     }
     claim_conditions: list[Any] = [
+        recovery_allows_work(),
         Workspace.id == workspace_id,
         Workspace.status == WorkspaceStatus.monitoring_pr.value,
         or_(
@@ -134,6 +136,7 @@ async def claim_worker_restart_recovery_execution(
     result = await session.execute(
         update(Workspace)
         .where(
+            recovery_allows_work(),
             Workspace.id == workspace_id,
             Workspace.status.in_(_WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES),
             active_worker_restart_recovery,

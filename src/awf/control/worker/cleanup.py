@@ -71,6 +71,7 @@ from awf.db.repositories.base import (
     has_terminal_runtime_released_event,
     terminal_runtime_effectively_released_expr,
 )
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
     run_db_operation_with_retry,
@@ -196,7 +197,7 @@ async def _load_terminal_runtime_candidate(
             Workspace.task_policy,
             Workspace.node_id,
         )
-        .where(Workspace.id == workspace_id)
+        .where(Workspace.id == workspace_id, recovery_allows_work())
         .limit(1)
     )
 
@@ -803,7 +804,7 @@ async def _list_terminal_released_pending_planning_scope_auto_retry_candidates(
         )
         .where(latest_planning_event.c.retry_after == _TERMINAL_RUNTIME_RELEASE_RETRY_AFTER)
         .where(~newer_planning_event_exists)
-        .where(Workspace.status.in_(terminal_status_values))
+        .where(Workspace.status.in_(terminal_status_values), recovery_allows_work())
         .where(
             or_(
                 effective_node == worker_node_id,
@@ -876,7 +877,7 @@ async def _list_terminal_runtime_candidates(
             Workspace.compose_file_path,
             Workspace.task_policy,
         )
-        .where(Workspace.status.in_(terminal_status_values))
+        .where(Workspace.status.in_(terminal_status_values), recovery_allows_work())
         # Include every terminal row on this node — even those where both
         # ``compose_project_name`` and ``compose_file_path`` are NULL.
         # The cleaner derives ``awf_<workspace_id>`` and falls back to

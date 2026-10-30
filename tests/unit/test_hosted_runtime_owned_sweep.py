@@ -242,19 +242,39 @@ async def test_listed_row_is_rechecked_for_owner_and_binding_before_reconciliati
         scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
 
 
-async def test_new_boot_sweeps_prelaunch_view_without_compose(authority, tmp_path):
+@pytest.mark.parametrize("phase", ["requested", "failed"])
+async def test_new_boot_sweeps_prelaunch_view_without_compose(authority, tmp_path, phase):
     runtime, value, factory = authority
-    path = await retained(runtime, value, factory, "ws_cloud_stable", status="failed")
+    path = await retained(runtime, value, factory, "ws_cloud_stable", status=phase)
     async with factory.begin() as session:
         row = await session.get(Workspace, "ws_cloud_stable")
         row.compose_project_name = row.compose_file_path = None
+        expected = {
+            "status": row.status,
+            "version": row.version,
+            "task_policy": deepcopy(row.task_policy),
+            "execution_claim_epoch": row.execution_claim_epoch,
+            "failure_reason": row.failure_reason,
+            "failure_message": row.failure_message,
+        }
     successor = await Receiver.start(runtime.receiver.config, factory)
     try:
-        scope = WorkspaceConsumers(WorkspaceAuthority(successor), tmp_path)
+        successor_authority = WorkspaceAuthority(successor)
+        scope = WorkspaceConsumers(successor_authority, tmp_path)
         scope.stop_workspace = AsyncMock()
         assert not await scope.admission_check()
         assert not path.exists()
-        scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+        # Closed-boot cleanup retracts credentials without terminalizing retained work.
+        scope.stop_workspace.assert_not_awaited()
+        with pytest.raises(MaterialDeniedError, match="IDENTITY_ACKNOWLEDGEMENT_REQUIRED"):
+            await successor_authority.workspace("ws_cloud_stable")
+        assert await successor_authority.publication("ws_cloud_stable") is None
+        async with factory() as session:
+            row = await session.get(Workspace, "ws_cloud_stable")
+            assert row is not None
+            assert {field: getattr(row, field) for field in expected} == expected
+            assert row.compose_project_name is None and row.compose_file_path is None
+            assert row.filesystem_reclaimed_at is None
     finally:
         await successor.close()
 

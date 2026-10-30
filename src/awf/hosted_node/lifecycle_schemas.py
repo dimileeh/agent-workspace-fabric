@@ -2,10 +2,10 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from awf.hosted_node.schemas import Generation, Identity, Opaque, StrictModel
 
@@ -21,6 +21,12 @@ class RecoveryAcknowledgement(StrictModel):
 
 
 class Drain(StrictModel):
+    generation: Generation
+
+
+class Maintenance(StrictModel):
+    """Monotonic hold token, independent of idle-drain generations."""
+
     generation: Generation
 
 
@@ -56,6 +62,17 @@ class HostBootObservation:
     expires_at: datetime
 
 
+class RecoveryAcceptance(RecoveryAcknowledgement):
+    """Immutable committed reconciliation snapshot for this exact boot."""
+
+    previous_identity: Identity | None
+    disk_ref: Opaque
+    database_ref: Opaque
+    queued_workspaces: Annotated[int, Field(strict=True, ge=0, le=9223372036854775807)]
+    monitor_workspaces: Annotated[int, Field(strict=True, ge=0, le=9223372036854775807)]
+    attention_workspaces: Annotated[int, Field(strict=True, ge=0, le=9223372036854775807)]
+
+
 class LifecycleStatus(StrictModel):
     identity: Identity
     state: Literal["recovering", "ready", "draining", "drained"]
@@ -66,6 +83,9 @@ class LifecycleStatus(StrictModel):
     database_quiescent: bool
     idle_since: datetime | None
     drain_generation: int | None
+    maintenance_generation: int | None = None
+    maintenance_released_through: int = 0
+    recovery_acceptance: RecoveryAcceptance | None = None
     expires_at: datetime | None
 
 

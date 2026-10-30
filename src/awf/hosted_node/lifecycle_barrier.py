@@ -55,11 +55,26 @@ def bind_factory(factory: async_sessionmaker[AsyncSession], identity: Identity) 
 
 
 def install_barrier(connection: Connection) -> None:
+    replace_barrier(connection)
+    for table in GUARDED_TABLES:
+        connection.execute(
+            text(f"""
+            CREATE TRIGGER awf_node_admission BEFORE INSERT OR UPDATE OR DELETE ON {table}
+            FOR EACH ROW EXECUTE FUNCTION awf_node_admission_guard()
+        """)
+        )
+
+
+def replace_barrier(connection: Connection) -> None:
+    # The historical idle-gate migration imports this installer before the
+    # additive columns exist. JSON row access also keeps its downgrade usable.
     connection.execute(
         text("""
         CREATE OR REPLACE FUNCTION awf_node_admission_guard() RETURNS trigger
         LANGUAGE plpgsql AS $$
         DECLARE gate hosted_node_lifecycle%ROWTYPE;
+                before_row jsonb;
+                after_row jsonb;
         BEGIN
             SELECT * INTO gate FROM hosted_node_lifecycle WHERE singleton = 1 FOR UPDATE;
             IF FOUND THEN
@@ -70,6 +85,24 @@ def install_barrier(connection: Connection) -> None:
                 IF gate.phase <> 'ready' THEN
                     RAISE EXCEPTION 'NODE_ADMISSION_CLOSED' USING ERRCODE = '55000';
                 END IF;
+                before_row := CASE WHEN TG_OP = 'INSERT' THEN '{}'::jsonb ELSE to_jsonb(OLD) END;
+                after_row := CASE WHEN TG_OP = 'DELETE' THEN '{}'::jsonb ELSE to_jsonb(NEW) END;
+                IF (TG_TABLE_NAME = 'workspaces'
+                    AND before_row #>> '{task_policy,hosted_recovery,disposition}' = 'attention')
+                   OR (TG_TABLE_NAME NOT IN ('workspaces', 'workspace_events') AND EXISTS (
+                       SELECT 1 FROM workspaces w
+                       WHERE w.task_policy::jsonb #>> '{hosted_recovery,disposition}' = 'attention'
+                         AND (w.id IN (before_row->>'workspace_id', after_row->>'workspace_id')
+                           OR (TG_TABLE_NAME = 'tasks' AND EXISTS (
+                               SELECT 1 FROM task_attempts a WHERE a.workspace_id = w.id
+                                 AND a.task_id IN (before_row->>'id', after_row->>'id'))))
+                   )) THEN
+                    RAISE EXCEPTION 'RECOVERY_ATTENTION_REQUIRED' USING ERRCODE = '55000';
+                END IF;
+                IF TG_TABLE_NAME = 'workspaces' AND TG_OP = 'INSERT'
+                   AND to_jsonb(gate)->>'maintenance_generation' IS NOT NULL THEN
+                    RAISE EXCEPTION 'NODE_MAINTENANCE_HELD' USING ERRCODE = '55000';
+                END IF;
                 UPDATE hosted_node_lifecycle SET idle_since = NULL WHERE singleton = 1;
             ELSIF NULLIF(current_setting('awf.node_identity', true), '') IS NOT NULL THEN
                 RAISE EXCEPTION 'NODE_GATE_MISSING' USING ERRCODE = '55000';
@@ -79,13 +112,6 @@ def install_barrier(connection: Connection) -> None:
         END $$
     """)
     )
-    for table in GUARDED_TABLES:
-        connection.execute(
-            text(f"""
-            CREATE TRIGGER awf_node_admission BEFORE INSERT OR UPDATE OR DELETE ON {table}
-            FOR EACH ROW EXECUTE FUNCTION awf_node_admission_guard()
-        """)
-        )
 
 
 async def verify_barrier(session: AsyncSession) -> None:

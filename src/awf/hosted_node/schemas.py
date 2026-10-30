@@ -1,6 +1,7 @@
 """Bounded public metadata; material is excluded from representations and persistence."""
 
 from datetime import datetime
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
@@ -53,6 +54,7 @@ class Preparation(StrictModel):
 
     @field_validator("target")
     @classmethod
+    @lru_cache(maxsize=256)
     def safe_target(cls, value: str) -> str:
         path = PurePosixPath(value)
         if (
