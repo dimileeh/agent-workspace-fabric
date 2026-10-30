@@ -98,6 +98,8 @@ Implemented now:
 - Codex, Claude Code, Cursor, Antigravity, OpenCode, and Grok adapters.
 - Central default model/effort map for agent adapters.
 - AWF-owned Plan -> Execute -> Compare lifecycle policy.
+- [Plan-conformance decision pauses](docs/CONCEPTS.md#workspace-profiles) with
+  console evidence and same-workspace resume through `workspace guide --directive`.
 - Generic phase-based validation.
 - Git worktree provisioning.
 - PR creation.
