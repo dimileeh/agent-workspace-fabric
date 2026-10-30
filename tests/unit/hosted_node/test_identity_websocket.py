@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from awf.hosted_node.receiver import Receiver
 
@@ -83,9 +84,20 @@ async def test_existing_websocket_with_valid_identity(hosted):
             "Authorization": "Bearer operator-test-only",
         },
     )
-    assert (await asyncio.wait_for(outgoing.get(), 2))["type"] == "websocket.accept"
-    # The real endpoint subsequently closes for the deliberately absent workspace.
+    # This endpoint is finite for an absent workspace. Join it before inspecting
+    # frames so an independent queue deadline cannot abandon the ASGI task.
     await asyncio.wait_for(task, 3)
+    assert outgoing.get_nowait()["type"] == "websocket.accept"
+    error = outgoing.get_nowait()
+    assert error["type"] == "websocket.send"
+    assert json.loads(error["text"]) == {
+        "type": "error",
+        "error_code": "NOT_FOUND",
+        "message": "workspace not found",
+    }
+    closed = outgoing.get_nowait()
+    assert closed["type"] == "websocket.close" and closed["code"] == 1008
+    assert outgoing.empty()
 
 
 async def test_disabled_receiver_websocket_uses_close_frame(client):
