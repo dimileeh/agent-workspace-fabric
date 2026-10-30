@@ -23,6 +23,7 @@ acknowledgement, and anything else takes the bounded fallback reopen.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 from collections.abc import Iterator
@@ -35,9 +36,17 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedThreadComment
 from awf.common.github_client import RepoRef
+from awf.node.git_manager import git_env_without_object_lookup_overrides
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.comment_verdict_residue import (
+    _residue_fingerprint_nested_scan_budget,
+)
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint import (
+    _hash_ignored_residue_identity,
+    _ignored_paths_from_status_stdout,
+)
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint_git_config import (
     _gitfile_target_path_without_follow,
     _open_snapshotted_git_dir_for_restore,
@@ -82,6 +91,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
+from awf.runtime.validation_worktree import is_under_agent_runtime_root
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _AUDIT_ACTION = "review_thread_disposition_ack_check"
@@ -270,8 +280,11 @@ async def _judge(
 
 async def _worktree_fingerprint(
     self: Any, worktree: Path, pin: tuple[Path, Path] | None = None
-) -> tuple[str, str, str, str] | None:
-    """HEAD, ``git status --porcelain -z``, git dirs and HEAD's ref; ``None`` if a probe failed."""
+) -> tuple[str, str, str, str, str] | None:
+    """HEAD, ``git status --porcelain -z``, git dirs, HEAD's ref and ignored content.
+
+    ``None`` if a probe failed.
+    """
     outputs: list[str] = []
     for args in (
         ("rev-parse", "HEAD"),
@@ -283,6 +296,9 @@ async def _worktree_fingerprint(
         # The branch HEAD is attached to (``HEAD`` when detached): a checkout of
         # another branch at the same commit reads as a change.
         ("rev-parse", "--symbolic-full-name", "HEAD"),
+        # Ignored paths, which the status above omits: an overwritten ``.env``
+        # would otherwise leave the fingerprint unchanged.
+        ("status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching"),
     ):
         try:
             result = await _run_git(self, worktree, pin, *args)
@@ -291,14 +307,36 @@ async def _worktree_fingerprint(
         if result.returncode != 0:
             return None
         outputs.append(result.stdout)
-    return outputs[0], outputs[1], outputs[2], outputs[3]
+    ignored = await _ignored_content_identity(worktree, outputs[4])
+    if ignored is None:
+        return None
+    return outputs[0], outputs[1], outputs[2], outputs[3], ignored
+
+
+async def _ignored_content_identity(worktree: Path, status: str) -> str | None:
+    """Content identity of the ignored paths in ``status``; ``None`` if unreadable."""
+    paths = sorted(
+        path
+        for path in _ignored_paths_from_status_stdout(status, is_z=True)
+        if not is_under_agent_runtime_root(path)
+    )
+    try:
+        with _residue_fingerprint_nested_scan_budget():
+            return await asyncio.to_thread(
+                _hash_ignored_residue_identity,
+                worktree_path=worktree,
+                ignored_paths=paths,
+                git_env=git_env_without_object_lookup_overrides(),
+            )
+    except OSError:
+        return None
 
 
 async def _restore_worktree(
     self: Any,
     workspace_id: str,
     worktree: Path,
-    before: tuple[str, str, str, str],
+    before: tuple[str, str, str, str, str],
     linkage: tuple[str | None, tuple[int, str] | None],
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
@@ -316,6 +354,7 @@ async def _restore_worktree(
     holding the same branch and tree would read as clean and steer the fallback's
     repair there. HEAD is re-attached to its pre-run ref
     before the resets, which would otherwise move a branch the agent checked out.
+    An ignored file the agent changed cannot be restored: the check fails closed.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:

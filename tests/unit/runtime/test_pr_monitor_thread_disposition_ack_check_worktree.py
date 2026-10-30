@@ -22,6 +22,7 @@ import structlog
 from awf.adapters.base import AgentRunError
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner import thread_disposition_ack_check as ack_check
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import ACKNOWLEDGES, UNJUDGED
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import _judge
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
@@ -137,6 +138,48 @@ async def test_the_rollback_keeps_an_ignored_file_the_agent_force_added(tmp_path
     assert (worktree / ".env").read_text() == "TOKEN=keep\n"
     assert not (worktree / "staged.txt").exists()
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
+async def test_an_answer_from_a_run_that_edited_an_ignored_file_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    # Porcelain status without ``--ignored`` stays clean after an ignored file is
+    # overwritten: its content is part of the fingerprint, and the rollback
+    # cannot restore it, so the check fails closed and logs it.
+    worktree = _worktree(tmp_path)
+    (worktree / ".gitignore").write_text(".env\n")
+    _git(worktree, "add", ".gitignore")
+    _git(worktree, "commit", "-qm", "ignore .env")
+    (worktree / ".env").write_text("TOKEN=keep\n")
+
+    def agent() -> Any:
+        (worktree / ".env").write_text("TOKEN=agent\n")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_changed")
+
+    [log] = [r for r in captured if r["event"] == _RESTORE_FAILED]
+    assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
+
+
+async def test_unreadable_ignored_content_is_never_handed_to_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _worktree(tmp_path)
+    calls: list[str] = []
+
+    def unreadable(**kwargs: Any) -> str:
+        raise PermissionError("denied")
+
+    def agent() -> Any:
+        calls.append("run")
+        return SimpleNamespace(stdout=_ACK)
+
+    monkeypatch.setattr(ack_check, "_hash_ignored_residue_identity", unreadable)
+
+    assert await _check(_runner(worktree.parent, agent)) == (UNJUDGED, "worktree_probe_failed")
+    assert calls == []
 
 
 @pytest.mark.parametrize("detached", [False, True], ids=["on-branch", "detached"])
