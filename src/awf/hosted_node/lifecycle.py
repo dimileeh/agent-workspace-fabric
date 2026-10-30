@@ -110,7 +110,14 @@ class NodeLifecycle:
     ) -> LifecycleStatus:
         valid = host is not None and host.identity == self.identity and fresh(host.expires_at)
         healthy = bool(valid and host and host.retained_state_verified)
-        idle = bool(healthy and host and host.quiescent and db_idle and row.recovery_key)
+        idle = bool(
+            healthy
+            and host
+            and host.quiescent
+            and db_idle
+            and row.recovery_key
+            and row.restore_quarantine is None
+        )
         row.idle_since = (row.idle_since or datetime.now(UTC)) if idle else None
         return LifecycleStatus(
             identity=self.identity,
@@ -321,6 +328,8 @@ class NodeLifecycle:
                 raise MaterialDeniedError("DRAIN_GENERATION_STALE")
             if row.recovery_key is None:
                 raise MaterialDeniedError("RECOVERY_REQUIRED")
+            if row.restore_quarantine is not None:
+                raise MaterialDeniedError("RESTORE_QUARANTINED")
             idle = await database_quiescent(session)
             if not idle:
                 return self.status(row, False, None)
