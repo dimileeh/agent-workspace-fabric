@@ -25,14 +25,12 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import (
-    ValidationCommandResult,
-    ValidationResult,
     ValidationRunner,
 )
 from tests.postgres import postgres_test_engine
@@ -58,41 +56,6 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 @pytest.fixture
 def fake() -> FakeCommandRunner:
     return FakeCommandRunner()
-
-
-class _PreflightFailingValidation:
-    """Validation runner whose profile tool preflight fails."""
-
-    def __init__(self, tmp_path: Path) -> None:
-        self._tmp_path = tmp_path
-        self.preflight_calls = 0
-
-    async def run_profile_phases(self, **_kwargs: Any) -> ValidationResult:
-        return ValidationResult()
-
-    async def run_profile_coverage(self, **_kwargs: Any) -> None:
-        return None
-
-    async def run_profile_tool_preflight(self, **_kwargs: Any) -> ValidationResult:
-        self.preflight_calls += 1
-        stdout_path = self._tmp_path / "preflight.stdout"
-        stderr_path = self._tmp_path / "preflight.stderr"
-        stdout_path.write_text("missing tool", encoding="utf-8")
-        stderr_path.write_text("tool not found", encoding="utf-8")
-        return ValidationResult(
-            commands=[
-                ValidationCommandResult(
-                    command="which pytest",
-                    returncode=1,
-                    duration_seconds=0.1,
-                    stdout_path=stdout_path,
-                    stderr_path=stderr_path,
-                    phase="profile_preflight",
-                    reason_code="PROFILE_TOOL_MISSING",
-                    policy_failed=True,
-                )
-            ]
-        )
 
 
 def _make_executor_with_monitor(
@@ -157,6 +120,13 @@ async def test_recovery_skip_push_status_race_returns_without_transition(
         return await real_recheck(workspace_id, expected=expected, action=action)
 
     monkeypatch.setattr(executor, "_recheck_status", _recheck)
+
+    async def retired_preflight(**_kwargs: Any) -> None:
+        raise AssertionError("recovery must not invoke the retired static uv gate")
+
+    monkeypatch.setattr(
+        executor._validation, "run_profile_tool_preflight", retired_preflight, raising=False
+    )
 
     _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
@@ -285,55 +255,6 @@ async def test_recovery_skip_push_status_race_before_monitor_run_returns(
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
-
-
-@pytest.mark.unit
-async def test_recovery_profile_preflight_failure_finishes_operation_and_marks_failed(
-    fake: FakeCommandRunner,
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A profile preflight failure under recovery finishes the operation and fails.
-
-    Drives the recovery branch of the profile-tool-preflight guard: the failing
-    preflight must finish the active recovery operation with a dedicated reason
-    code AND mark the workspace failed before any monitor handoff.
-    """
-    validation = _PreflightFailingValidation(tmp_path)
-
-    def _monitor_factory(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("monitor must not build when profile preflight fails")
-
-    executor = _make_executor(
-        fake=fake,
-        factory=factory,
-        tmp_path=tmp_path,
-        pr_monitor_factory=_monitor_factory,
-        validation=validation,
-    )
-    ws_id = await _seed_ready_workspace_with_recovery(
-        factory, pr_url="https://github.com/x/y/pull/1"
-    )
-
-    await executor.execute(ws_id)
-
-    assert validation.preflight_calls == 1
-    # No adapter / push happened — the preflight gate fired first.
-    assert _all_adapter_args(fake) == []
-    assert _all_push_and_pr_create_calls(fake) == []
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(ws_id)
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert "preflight" in (ws.failure_message or "").lower()
-        operations = await OperationRepository(s).list_all(workspace_id=ws_id)
-        validate_ops = [op for op in operations if op.type == OperationType.validate.value]
-        assert validate_ops
-        assert all(op.status == OperationStatus.failed.value for op in validate_ops)
-        assert any(
-            (op.result or {}).get("reason_code") == "MONITOR_RECOVERY_PROFILE_PREFLIGHT_FAILED"
-            for op in validate_ops
-        )
 
 
 @pytest.mark.unit

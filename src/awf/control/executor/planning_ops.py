@@ -54,6 +54,7 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.time_utils import _monotonic
 from awf.control.executor.types import (
     _ExpectedBaseShaLaunchSettled,
+    _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
@@ -71,6 +72,7 @@ from awf.runtime.planning import (
     ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceReport,
+    PlanConformanceStatus,
     agent_artifact_path,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
@@ -679,7 +681,14 @@ async def _run_agent_task_with_optional_planning(
     command_evidence: list[str] | None = None,
     accept_existing_plan: bool = False,
     planning_retry_scope_baseline: dict[str, object] | None = None,
-) -> str | _PlanningRunFailure | _PlanningValidationHandoff | _ExpectedBaseShaLaunchSettled | None:
+) -> (
+    str
+    | _PlanningRunFailure
+    | _PlanningValidationHandoff
+    | _PlanningNeedsHuman
+    | _ExpectedBaseShaLaunchSettled
+    | None
+):
     planning = profile.planning
     coordination_warnings = coordination_warnings_from_task_policy(
         getattr(workspace, "task_policy", None)
@@ -1105,6 +1114,27 @@ async def _run_agent_task_with_optional_planning(
         # slow-but-satisfied iteration is not misread as over_duration,
         # and so a run that wrote a satisfied report before idling /
         # timing out is not misread as no_output.
+        # A stale disk report of ANY status must not hide a current decision.
+        # Preserve existing success/iteration handling when neither channel
+        # requests a decision; current-call structured stdout is already supported.
+        if not fresh_report_written:
+            current_report = parse_conformance_report(stdout)
+            if current_report.status == PlanConformanceStatus.needs_human or (
+                report is not None and report.status == PlanConformanceStatus.needs_human
+            ):
+                report = current_report
+                last_report = report
+        if (
+            compare_error is None
+            and report is not None
+            and report.status == PlanConformanceStatus.needs_human
+        ):
+            return _PlanningNeedsHuman(
+                report=report,
+                plan_path=plan_path,
+                report_path=report_path,
+                phase="conformance",
+            )
         if report is not None and report.satisfied:
             _log.info(
                 "executor.planning_conformance_satisfied",

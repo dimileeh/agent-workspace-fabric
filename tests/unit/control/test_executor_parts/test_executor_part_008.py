@@ -9,6 +9,7 @@ after the validating→pushing CAS commits the validated change to push.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +30,9 @@ from awf.control.executor.state_ops import (
     RESUME_SETUP_FAILED_REASON_CODE,
     RESUME_SETUP_FAILURE_BLOCK_TYPE,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
@@ -661,12 +662,14 @@ async def test_hosted_blocked_directive_resume_uses_hosted_env_probe(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("decision_pending", [False, True])
 async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    decision_pending: bool,
 ) -> None:
     """A setup failure on a blocked-resume re-pauses into ``blocked``, not ``failed`` (#743).
 
@@ -676,6 +679,12 @@ async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
     ws_id = await _seed_resumable_blocked_workspace(
         factory, grant_path=None, directive="revert the protected change"
     )
+    if decision_pending:
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.block_type = "plan_conformance_decision"
+            await session.commit()
     # Unhealthy env → setup runs; then setup fails (e.g. uv venv --python 3.14).
     monkeypatch.setattr(
         executor._validation,
@@ -717,10 +726,48 @@ async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
         # Re-blocked (operator-recoverable), NOT terminally failed.
         assert ws.status == WorkspaceStatus.blocked.value
         assert ws.block_reason_code == RESUME_SETUP_FAILED_REASON_CODE
-        assert ws.block_type == RESUME_SETUP_FAILURE_BLOCK_TYPE
+        expected_type = (
+            "plan_conformance_decision" if decision_pending else RESUME_SETUP_FAILURE_BLOCK_TYPE
+        )
+        assert ws.block_type == expected_type
     # No agent fix-pass ran (setup died before the agent).
     agent_calls = [call for call in fake.calls if call.input_bytes is not None]
     assert agent_calls == []
+
+    if decision_pending:
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.pending_operator_hint is None
+            assert ws.block_planning_conformance_handoff is None
+            # Simulate a stale worker resuming from a legacy grant without a
+            # fresh directive after setup failed before the decision agent ran.
+            s.add(
+                OperatorGrantAuditRecord(
+                    id=f"grant_{ws_id}",
+                    workspace_id=ws_id,
+                    operator="op@example.com",
+                    reason="approved protected change",
+                    normalized_path="pyproject.toml",
+                    block_epoch=ws.block_epoch,
+                )
+            )
+            ws.status = WorkspaceStatus.running.value
+            await s.commit()
+
+        calls_before_resume = list(fake.calls)
+        await executor.resume_blocked_execution(ws_id)
+
+        # Reject before setup, validation, agent execution, or push can run.
+        assert fake.calls == calls_before_resume
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_type == "plan_conformance_decision"
+            assert ws.block_reason_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+            assert ws.block_epoch == 3
+        assert (await _active_grant(factory, ws_id)).consumed_at is None
 
 
 _PENDING_CONFORMANCE_HANDOFF = {
@@ -735,6 +782,113 @@ _PENDING_CONFORMANCE_HANDOFF = {
         "reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION",
     },
 }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation_status", [OperationStatus.pending, OperationStatus.running])
+async def test_post_validation_decision_pauses_before_push(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    operation_status: OperationStatus,
+) -> None:
+    from awf.control.executor import planning_artifacts
+    from awf.control.executor.types import _PlanningNeedsHuman
+    from awf.runtime.planning import parse_conformance_report
+    from tests.unit.runtime.test_conformance_decision import decision_payload
+
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        block_planning_conformance_handoff=_PENDING_CONFORMANCE_HANDOFF,
+    )
+    async with factory() as session:
+        operation = await OperationRepository(session).create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            status=operation_status,
+            payload={"reason": "manual_validate", "requested_tier": 2},
+        )
+        operation_id = operation.id
+        await session.commit()
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id, conformance_handoff=True)
+
+    coverage = ValidationCoverageResult(
+        provider="python",
+        percent=100.0,
+        minimum_percent=99.0,
+        enforce=True,
+        status="passed",
+        reason_code="COVERAGE_OK",
+    )
+    run_profile_phases = executor._validation.run_profile_phases
+
+    async def with_coverage(**kwargs: Any) -> ValidationResult:
+        return replace(await run_profile_phases(**kwargs), coverage=coverage)
+
+    monkeypatch.setattr(executor._validation, "run_profile_phases", with_coverage)
+    validation_run_ids: list[str] = []
+
+    async def needs_decision(
+        *, handoff: Any, validation_run_id: str, **_kwargs: Any
+    ) -> _PlanningNeedsHuman:
+        validation_run_ids.append(validation_run_id)
+        return _PlanningNeedsHuman(
+            report=parse_conformance_report(decision_payload()),
+            plan_path=handoff.plan_path,
+            report_path=handoff.report_path,
+            phase="post_validation_conformance",
+            validation_run_id=validation_run_id,
+        )
+
+    monkeypatch.setattr(executor, "_run_post_validation_conformance_check", needs_decision)
+    pause_for_decision = planning_artifacts.pause_for_conformance_decision
+
+    async def pause_after_operation_finished(*args: Any, **kwargs: Any) -> None:
+        # Publishing the pause permits a concurrent resume; the old request must
+        # already be terminal so it cannot be reused for that validation.
+        async with factory() as session:
+            operations = OperationRepository(session)
+            operation = await operations.get(operation_id)
+            assert operation is not None
+            assert operation.status == OperationStatus.failed.value
+            assert operation.finished_at is not None
+            assert (
+                await operations.find_active_matching_payload(
+                    workspace_id=ws_id,
+                    operation_type=OperationType.validate,
+                    payload_identity={"reason": "manual_validate", "requested_tier": 2},
+                )
+                is None
+            )
+        await pause_for_decision(*args, **kwargs)
+
+    monkeypatch.setattr(
+        planning_artifacts, "pause_for_conformance_decision", pause_after_operation_finished
+    )
+    await executor.resume_blocked_execution(ws_id)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        assert ws.block_reason_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        assert ws.block_resume_phase == "post_validation_conformance"
+        assert ws.pending_operator_hint is None
+        operation = await OperationRepository(session).get(operation_id)
+        assert operation is not None
+        assert operation.status == OperationStatus.failed.value
+        assert operation.finished_at is not None
+        assert operation.error_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        assert operation.error_message == "Plan conformance requires an operator decision."
+        assert operation.result is not None
+        assert operation.result["reason_code"] == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        assert operation.result["requested_tier"] == 2
+        assert [operation.result["validation_run_id"]] == validation_run_ids
+        assert operation.result["coverage"] == coverage.as_metadata()
+        validation_run = await ValidationRunRepository(session).get(validation_run_ids[0])
+        assert validation_run is not None
+        assert validation_run.status == "succeeded"
+    assert not any("push" in call.args or "gh" in call.args for call in fake.calls)
 
 
 @pytest.mark.unit

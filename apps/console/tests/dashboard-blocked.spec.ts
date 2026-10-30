@@ -68,6 +68,89 @@ test("inspector shows the protected violation and both guide resolution commands
   );
 });
 
+for (const hasReport of [true, false]) {
+  test(`conformance decision requires an answer and exposes report availability (${hasReport})`, async ({ page }) => {
+    await page.route("**/api/awf/workspaces/ws_blocked1", async (route) => {
+      const workspace = blockedWorkspace();
+      await fulfillJson(route, {
+        ...workspace,
+        block_state: {
+          ...workspace.block_state,
+          block_type: "plan_conformance_decision",
+          block_reason_code: "PLAN_CONFORMANCE_NEEDS_HUMAN",
+          violations: [],
+        },
+      });
+    });
+    let releaseList = () => {};
+    const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+    await page.route("**/api/awf/workspaces/ws_blocked1/artifacts*", async (route) => {
+      await listGate;
+      await fulfillJson(route, listEnvelope(hasReport ? [{ relative_path: "conformance.json" }] : []));
+    });
+    await page.route("**/api/awf/workspaces/ws_blocked1/artifacts/download*", async (route) => {
+      await fulfillJson(route, {
+        status: "needs_human", summary: "Dependency update needs approval.",
+        decision_request: "Approve updating the pinned dependency?",
+      });
+    });
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await openInspector(page, "ws_blocked1");
+    const block = page.getByTestId("blocked-violation-block");
+    await expect(block).toContainText("An operator decision is required");
+    await expect(block).toContainText("awf workspace guide ws_blocked1 --directive '<your decision>'");
+    await expect(block).not.toContainText("Approve & keep");
+    await expect(block).not.toContainText("Revert");
+    await expect(block).not.toContainText("--grant");
+    const artifacts = block.getByTestId("task-artifacts");
+    try {
+      await expect(artifacts).toContainText("Loading artifacts");
+      await expect(artifacts).not.toContainText("Conformance report unavailable");
+      await expect(artifacts.getByRole("button", { name: "Validation", exact: true })).toHaveCount(0);
+    } finally {
+      releaseList();
+    }
+    await expect(artifacts).not.toContainText("Loading artifacts");
+    if (hasReport) {
+      await expect(artifacts).not.toContainText("Conformance report unavailable");
+      await artifacts.getByRole("button", { name: "Validation", exact: true }).click();
+      await expect(artifacts).toContainText("Approve updating the pinned dependency?");
+    } else {
+      await expect(artifacts).toContainText("Conformance report unavailable");
+      await expect(artifacts).toContainText("workspace timeline");
+    }
+  });
+}
+
+test("conformance decision shows unavailable guidance after the artifact list fails", async ({ page }) => {
+  await page.route("**/api/awf/workspaces/ws_blocked1", async (route) => {
+    const workspace = blockedWorkspace();
+    await fulfillJson(route, {
+      ...workspace,
+      block_state: {
+        ...workspace.block_state,
+        block_type: "plan_conformance_decision",
+        block_reason_code: "PLAN_CONFORMANCE_NEEDS_HUMAN",
+        violations: [],
+      },
+    });
+  });
+  await page.route("**/api/awf/workspaces/ws_blocked1/artifacts*", async (route) => {
+    await fulfillJson(route, { detail: { message: "Unable to load artifacts." } }, 500);
+  });
+  await page.goto("/");
+  await waitForConsoleReady(page);
+  await openInspector(page, "ws_blocked1");
+
+  const artifacts = page.getByTestId("blocked-violation-block").getByTestId("task-artifacts");
+  await expect(artifacts).toContainText("Unable to load artifacts.");
+  await expect(artifacts).toContainText("Conformance report unavailable");
+  await expect(artifacts).toContainText("workspace timeline");
+  await expect(artifacts).not.toContainText("Loading artifacts");
+  await expect(artifacts.getByRole("button", { name: "Validation", exact: true })).toHaveCount(0);
+});
+
 function kpiCard(page: Page, label: string) {
   return page
     .getByText(label, { exact: true })

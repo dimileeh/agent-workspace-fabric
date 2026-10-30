@@ -16,6 +16,7 @@ from awf.db.repositories import (
     MergeCandidateRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkspaceRepository,
 )
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload, utcnow
 from awf.service.controls import (
@@ -70,6 +71,64 @@ async def _grants(session: AsyncSession, workspace_id: str) -> list[OperatorGran
         )
     )
     return list(rows.scalars().all())
+
+
+@pytest.mark.unit
+async def test_decision_guide_directive_is_idempotent(session: AsyncSession) -> None:
+    workspace = await _blocked_workspace(session, violations=[])
+    workspace.block_type = "plan_conformance_decision"
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+    arguments = {
+        "directive": "Approve the dependency update.",
+        "reason": "Operator decision",
+        "idempotency_key": "decision-answer",
+        "expected_version": workspace.version,
+    }
+    response = await service.guide_workspace(workspace.id, **arguments)
+    replay = await service.guide_workspace(workspace.id, **arguments)
+    assert replay.operation_id == response.operation_id
+    assert workspace.pending_operator_hint["directive"] == arguments["directive"]
+    assert await _grants(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_conformance_decision_rejects_grant_only_guide(session: AsyncSession) -> None:
+    workspace = await _blocked_workspace(session, violations=[])
+    workspace.block_type = "plan_conformance_decision"
+    service, _, _ = _service(session)
+    with pytest.raises(WorkspaceGuideEmptyDirectiveError):
+        await service.guide_workspace(
+            workspace.id,
+            directive="",
+            reason="approved",
+            grants=["pyproject.toml"],
+            approve_policy_downgrade=True,
+        )
+    assert await _grants(session, workspace.id) == []
+    assert workspace.pending_operator_hint is None
+
+
+@pytest.mark.unit
+async def test_conformance_decision_selector_requires_directive_even_with_grant(
+    session: AsyncSession,
+) -> None:
+    workspace = await _blocked_workspace(session, violations=[])
+    service, _, _ = _service(session)
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+    )
+    # A legacy/corrupt grant must not make this distinct block type eligible.
+    workspace.block_type = "plan_conformance_decision"
+    await session.flush()
+    repo = WorkspaceRepository(session)
+    assert workspace.id not in await repo.list_resumable_blocked_ids(limit=10)
+    await service.guide_workspace(workspace.id, directive="Retain the pinned dependency.")
+    assert workspace.id in await repo.list_resumable_blocked_ids(limit=10)
 
 
 @pytest.mark.unit

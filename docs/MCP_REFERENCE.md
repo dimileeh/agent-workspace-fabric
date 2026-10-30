@@ -51,7 +51,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces. See
 | `awf_stop_workspace` | Operator control: stop a workspace stack. |
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
 | `awf_remonitor_workspace` | Operator control: request PR monitor recovery. |
-| `awf_guide_workspace` | Operator control: inject a directive into a live monitoring workspace (closes the NotifyHuman loop). |
+| `awf_guide_workspace` | Operator control: guide a live monitor or supply a decision to a blocked workspace. |
 | `awf_request_workspace_validation` | Operator control: request workspace re-validation. |
 | `awf_refresh_workspace` | Operator control: refresh workspace state after upstream changes. |
 | `awf_rebase_workspace` | Operator control: rebase workspace work onto the current base. |
@@ -82,6 +82,12 @@ clients that omitted this argument or sent `null` must pass a stable non-empty
 key for each operator action. This mirrors the REST `Idempotency-Key`
 requirement for the same control routes; `expected_version` remains optional and
 maps to `If-Match`.
+
+For a conformance decision pause (`block_type=plan_conformance_decision`), call
+`awf_guide_workspace` with a nonblank `directive` answering the report's question,
+even when no PR exists. A file grant alone cannot resume this pause; validation
+and merge gates still apply. See
+[Workspace Profiles](CONCEPTS.md#workspace-profiles) for the conformance contract.
 
 **MCP log and operation response migration note:** `awf_read_workspace_log`
 now returns `WorkspaceLogReadResponse` with `stream_id`, `offset`,

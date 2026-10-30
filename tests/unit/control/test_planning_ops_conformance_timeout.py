@@ -75,6 +75,158 @@ class _CaptureWorktreeAdapter:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "stale_status,current_stdout",
+    [
+        (None, True),
+        ("needs_human", False),
+        ("needs_human", True),
+        ("needs_iteration", True),
+        ("satisfied", True),
+    ],
+)
+@pytest.mark.parametrize("failed_call", [False, True])
+async def test_initial_conformance_decision_requires_current_report(
+    tmp_path: Path,
+    stale_status: str | None,
+    current_stdout: bool,
+    failed_call: bool,
+) -> None:
+    from tests.unit.runtime.test_conformance_decision import decision_payload
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    if stale_status is not None:
+        (worktree / "ws_decision.json").write_text(decision_payload(status=stale_status, gaps=[]))
+    runner = FakeCommandRunner()
+    for output in (
+        "",
+        "sha1\n",
+        "?? ws_decision.md\n",
+        "",
+        "sha1\n",
+        "?? ws_decision.md\n",
+        "?? ws_decision.md\n",
+        "sha2\n",
+    ):
+        runner.queue_result(returncode=0, stdout=output)
+    executor = _executor_with_runner(runner, tmp_path)
+
+    class Adapter:
+        calls = 0
+
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            self.calls += 1
+            if self.calls == 3 and failed_call:
+                raise AgentRunError(
+                    agent=AgentRuntime.codex,
+                    result=CommandResult(
+                        returncode=124, stdout=decision_payload(), stderr="timeout"
+                    ),
+                    reason_code="AGENT_IDLE_TIMEOUT",
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=decision_payload() if self.calls == 3 and current_stdout else "",
+            )
+
+    adapter = Adapter()
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "decision",
+            "planning": {
+                "required": True,
+                "max_iterations": 0,
+                "plan_path": "{workspace_id}.md",
+                "conformance_report_path": "{workspace_id}.json",
+            },
+        }
+    )
+    result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
+        adapter=adapter,
+        workspace=SimpleNamespace(id="ws_decision", task_prompt="task", task_tag=None),
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+    assert type(result).__name__ == (
+        "_PlanningRunFailure" if not current_stdout or failed_call else "_PlanningNeedsHuman"
+    )
+    assert adapter.calls == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "file_status,stdout_status",
+    [("satisfied", "needs_human"), ("needs_human", "satisfied")],
+)
+async def test_initial_conformance_fresh_file_takes_precedence_over_stdout(
+    tmp_path: Path, file_status: str, stdout_status: str
+) -> None:
+    from awf.control.executor.types import _PlanningNeedsHuman
+    from tests.unit.runtime.test_conformance_decision import decision_payload
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    runner = FakeCommandRunner()
+    for output in (
+        "",
+        "sha1\n",
+        "?? ws_decision.md\n",
+        "",
+        "sha1\n",
+        "?? ws_decision.md\n",
+        "?? ws_decision.md\n?? ws_decision.json\n",
+        "sha2\n",
+    ):
+        runner.queue_result(returncode=0, stdout=output)
+    executor = _executor_with_runner(runner, tmp_path)
+
+    class Adapter:
+        calls = 0
+
+        async def run(self, **kwargs: object) -> SimpleNamespace:
+            self.calls += 1
+            stdout = ""
+            if self.calls == 3:
+                (worktree / "ws_decision.json").write_text(
+                    decision_payload(status=file_status, summary="Fresh file report", gaps=[])
+                )
+                stdout = decision_payload(status=stdout_status, summary="Stdout report", gaps=[])
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    adapter = Adapter()
+    result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
+        adapter=adapter,
+        workspace=SimpleNamespace(id="ws_decision", task_prompt="task", task_tag=None),
+        profile=WorkspaceProfile.model_validate(
+            {
+                "name": "decision",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 0,
+                    "plan_path": "{workspace_id}.md",
+                    "conformance_report_path": "{workspace_id}.json",
+                },
+            }
+        ),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+    )
+    if file_status == "satisfied":
+        assert result is None
+    else:
+        assert isinstance(result, _PlanningNeedsHuman)
+        assert result.report.summary == "Fresh file report"
+    assert adapter.calls == 3
+
+
+@pytest.mark.unit
 async def test_planning_conformance_timeout_falls_back_to_stdout_report(
     tmp_path: Path,
 ) -> None:

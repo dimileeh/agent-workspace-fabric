@@ -277,7 +277,9 @@ async def test_authorized_paused_resume_retains_warm_stack(
         try:
             tasks = list(built.worker._execution_tasks.values())
             assert tasks
-            await asyncio.wait([waiter, *tasks], timeout=15, return_when=asyncio.FIRST_COMPLETED)
+            # This is a lifecycle checkpoint, not a throughput assertion. The
+            # shared Postgres-test watchdog bounds slow or stuck workers.
+            await asyncio.wait([waiter, *tasks], return_when=asyncio.FIRST_COMPLETED)
         finally:
             waiter.cancel()
             await asyncio.gather(waiter, return_exceptions=True)
