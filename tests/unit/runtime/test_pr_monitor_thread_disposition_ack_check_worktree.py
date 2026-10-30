@@ -144,20 +144,95 @@ async def test_the_rollback_keeps_an_ignored_file_the_agent_force_added(tmp_path
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
-async def test_an_answer_from_a_run_that_edited_an_ignored_file_is_not_trusted(
-    tmp_path: Path,
+def _overwrite(path: Path, outside: Path) -> None:
+    path.write_text("TOKEN=agent\n")
+
+
+def _delete(path: Path, outside: Path) -> None:
+    path.unlink()
+
+
+def _symlink_outside(path: Path, outside: Path) -> None:
+    path.unlink()
+    path.symlink_to(outside)
+
+
+@pytest.mark.parametrize("change", [_overwrite, _delete, _symlink_outside])
+async def test_an_ignored_file_the_agent_changed_is_restored_and_its_answer_not_trusted(
+    tmp_path: Path, change: Callable[[Path, Path], None]
 ) -> None:
     # Porcelain status without ``--ignored`` stays clean after an ignored file is
-    # overwritten: its content is part of the fingerprint, and the rollback
-    # cannot restore it, so the check fails closed and logs it.
+    # changed: its content is part of the fingerprint, and the rollback writes
+    # back its pre-run copy, never through a symlink the agent left there.
     worktree = _worktree(tmp_path)
-    (worktree / ".gitignore").write_text(".env\n")
+    (worktree / ".gitignore").write_text(".env\nsub/.env\nkeep.log\n")
     _git(worktree, "add", ".gitignore")
     _git(worktree, "commit", "-qm", "ignore .env")
     (worktree / ".env").write_text("TOKEN=keep\n")
+    (worktree / ".env").chmod(0o600)
+    (worktree / "sub").mkdir()
+    (worktree / "sub" / ".env").write_text("NESTED=keep\n")
+    (worktree / "keep.log").write_text("untouched\n")
+    untouched_inode = (worktree / "keep.log").stat().st_ino
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n")
 
     def agent() -> Any:
-        (worktree / ".env").write_text("TOKEN=agent\n")
+        change(worktree / ".env", outside)
+        change(worktree / "sub" / ".env", outside)
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_changed")
+
+    assert not (worktree / ".env").is_symlink()
+    assert (worktree / ".env").read_text() == "TOKEN=keep\n"
+    assert (worktree / ".env").stat().st_mode & 0o777 == 0o600
+    assert (worktree / "sub" / ".env").read_text() == "NESTED=keep\n"
+    assert (worktree / "keep.log").stat().st_ino == untouched_inode
+    assert outside.read_text() == "outside\n"
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
+def _edit_under_ignored_directory(worktree: Path) -> None:
+    (worktree / "cache" / "data.txt").write_text("agent\n")
+
+
+def _replace_ignored_file_with_directory(worktree: Path) -> None:
+    (worktree / ".env").unlink()
+    (worktree / ".env").mkdir()
+    (worktree / ".env" / "x").write_text("agent\n")
+
+
+@pytest.mark.parametrize(
+    ("change", "uncopyable"),
+    [
+        # Ignored directories are never copied before the run.
+        pytest.param(_edit_under_ignored_directory, False, id="ignored-directory"),
+        # A file past the read budgets is not copied either.
+        pytest.param(_overwrite, True, id="uncopyable-file"),
+        # The pre-run copy cannot replace a directory the agent left in its place.
+        pytest.param(_replace_ignored_file_with_directory, False, id="replaced-by-directory"),
+    ],
+)
+async def test_an_ignored_change_that_cannot_be_undone_fails_the_check_closed_and_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: Callable[..., None], uncopyable: bool
+) -> None:
+    worktree = _worktree(tmp_path)
+    (worktree / ".gitignore").write_text(".env\ncache/\n")
+    _git(worktree, "add", ".gitignore")
+    _git(worktree, "commit", "-qm", "ignore .env and cache")
+    (worktree / ".env").write_text("TOKEN=keep\n")
+    (worktree / "cache").mkdir()
+    (worktree / "cache" / "data.txt").write_text("keep\n")
+    if uncopyable:
+        monkeypatch.setattr(ack_check, "_read_opened_regular_file_snapshot", lambda _fh: None)
+
+    def agent() -> Any:
+        if change is _overwrite:
+            change(worktree / ".env", tmp_path)
+        else:
+            change(worktree)
         return SimpleNamespace(stdout=_ACK)
 
     with structlog.testing.capture_logs() as captured:
@@ -165,6 +240,39 @@ async def test_an_answer_from_a_run_that_edited_an_ignored_file_is_not_trusted(
 
     [log] = [r for r in captured if r["event"] == _RESTORE_FAILED]
     assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
+    assert not list(worktree.glob(".*.tmp"))
+
+
+class _IgnoredSnapshotUnprobedRunner(FakeCommandRunner):
+    # The fingerprint's ignored-path status runs first; the snapshot's is the second.
+    def __init__(self, *, raises: bool) -> None:
+        super().__init__()
+        self.raises = raises
+        self.ignored_probes = 0
+
+    async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+        if "--ignored=matching" in args:
+            self.ignored_probes += 1
+            if self.ignored_probes == 2 and self.raises:
+                raise OSError("git is missing")
+            if self.ignored_probes == 2:
+                return CommandResult(returncode=128, stdout="", stderr="bad index")
+        return await super().run(args, **kwargs)
+
+
+@pytest.mark.parametrize("raises", [True, False], ids=["raises", "fails"])
+async def test_an_ignored_file_snapshot_that_cannot_be_probed_is_never_handed_to_the_agent(
+    tmp_path: Path, raises: bool
+) -> None:
+    cmd = _IgnoredSnapshotUnprobedRunner(raises=raises)
+    calls: list[str] = []
+
+    def agent() -> Any:
+        calls.append("run")
+        return SimpleNamespace(stdout=_ACK)
+
+    assert await _check(_runner(tmp_path, agent, cmd)) == (UNJUDGED, "worktree_probe_failed")
+    assert calls == []
 
 
 async def test_unreadable_ignored_content_is_never_handed_to_the_agent(
