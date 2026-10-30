@@ -852,8 +852,10 @@ class WorkspaceRepository:
     ) -> Workspace | None:
         """Atomically transition a row only if it is still in ``from_status``."""
         from awf.control.state_machine import WorkspaceStateMachine
+        from awf.db.repositories.workspace_recovery import recovery_allows_work
 
         WorkspaceStateMachine.assert_transition(from_status, to)
+        extra_conditions = (*extra_conditions, recovery_allows_work())
 
         now = datetime.now(UTC)
         if self._dialect_name != "postgresql":

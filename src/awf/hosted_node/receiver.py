@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import MaterialDeniedError, boot, check
@@ -57,6 +58,95 @@ class Receiver:
         from awf.hosted_node.lifecycle import NodeLifecycle
 
         self.lifecycle = NodeLifecycle(factory, identity) if config.lifecycle else None
+        if self.lifecycle is not None:
+            self.lifecycle.verify_bindings = self.verify_recovery_bindings
+
+    async def verify_recovery_bindings(self, bindings: list[Binding]) -> bool:
+        slots = await self._recovery_material_slots(bindings)
+        if slots is None:
+            return False
+        # Batch only recovery preflight. The caller retains its five-second bound;
+        # ordinary material status/expiry cleanup is unchanged.
+        for offset in range(0, len(slots), 8):
+            async with asyncio.TaskGroup() as group:
+                checks = [
+                    group.create_task(asyncio.to_thread(self.store.exists, directory, slot))
+                    for directory, slot in slots[offset : offset + 8]
+                ]
+            if not all(check.result() for check in checks):
+                return False
+        # A revoke, expiry or superseding fence during file I/O must dominate.
+        # Final acceptance separately rechecks the complete retained-row snapshot.
+        return await self._recovery_material_slots(bindings) == slots
+
+    async def _recovery_material_slots(
+        self, bindings: list[Binding]
+    ) -> list[tuple[str, str]] | None:
+        from awf.hosted_node.retained_work import MAX_RETAINED_WORKSPACES
+
+        expected = {binding.idempotency_key: binding for binding in bindings}
+        if len(expected) != len(bindings) or len(bindings) > 2 * MAX_RETAINED_WORKSPACES:
+            return None
+        for binding in bindings:
+            self.expected(binding)
+        other = aliased(Grant)
+        async with self.factory.begin() as session:
+            await self.authority(session, lock=True)
+            rows = (
+                await session.execute(
+                    select(
+                        PreparationRow,
+                        Grant,
+                        Receipt,
+                        select(func.max(other.fence))
+                        .where(other.preparation == Grant.preparation)
+                        .correlate(Grant)
+                        .scalar_subquery(),
+                        select(func.max(other.authorization_generation))
+                        .where(other.preparation == Grant.preparation)
+                        .correlate(Grant)
+                        .scalar_subquery(),
+                    )
+                    .join(Grant, Grant.preparation == PreparationRow.id)
+                    .join(Receipt, Receipt.grant == Grant.id)
+                    .where(
+                        PreparationRow.owner == self.identity.owner,
+                        Receipt.owner == self.identity.owner,
+                        Receipt.idempotency_key.in_(expected),
+                    )
+                    .order_by(Receipt.id)
+                    .limit(len(bindings) + 1)
+                )
+            ).all()
+            if len(rows) != len(bindings):
+                return None
+            slots = []
+            for prep, grant, receipt, fence, generation in rows:
+                binding = expected[receipt.idempotency_key]
+                if (
+                    receipt.binding != self.binding(binding)
+                    or receipt.state != "installed"
+                    or grant.revoked
+                    or grant.pending is not None
+                    or grant.current != receipt.id
+                    or grant.grant_id != binding.grant_id
+                    or grant.revision != binding.revision
+                    or grant.fence != binding.fence
+                    or grant.authorization_generation != binding.authorization_generation
+                    or fence != binding.fence
+                    or generation != binding.authorization_generation
+                    or binding.expires_at <= datetime.now(UTC)
+                    or prep.namespace != binding.namespace
+                    or prep.workspace_id != binding.workspace_id
+                    or prep.preparation_id != binding.preparation_id
+                    or prep.binding["identity"] != self.identity.model_dump()
+                    or prep.binding["purpose"] != binding.purpose
+                    or prep.binding["target"] != binding.target
+                    or binding.expires_at > datetime.fromisoformat(prep.binding["expires_at"])
+                ):
+                    return None
+                slots.append((prep.id, receipt.id))
+            return slots
 
     @classmethod
     async def start(

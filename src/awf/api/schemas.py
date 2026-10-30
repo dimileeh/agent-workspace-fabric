@@ -960,10 +960,8 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     )
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
     block_state: WorkspaceBlockStateResponse | None = None
-    # Awaiting-human attention flag, surfaced only while ``status == monitoring_pr``.
-    # ``attention_required`` is derived from the persisted ``awaiting_human_since``
-    # column; a PR-monitor ``NotifyHuman`` escalation (HUMAN_WAIT) sets it without
-    # changing status (the monitor keeps polling and auto-recovers).
+    # Human waits surface while monitoring_pr. Hosted recovery attention also
+    # surfaces without changing the retained status or inventing a wait timestamp.
     attention_required: bool = False
     awaiting_human_since: datetime | None = None
     awaiting_human_reason: str | None = None
@@ -1201,9 +1199,8 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     # "Blocked for N" without falling back to the lossy last-event/``updated_at``
     # heuristic. ``None`` when the workspace is not blocked.
     blocked_at: datetime | None = None
-    # Awaiting-human attention flag, surfaced only while ``status == monitoring_pr``
-    # (mirrors the ``blocked_at`` status gate). ``attention_required`` lets list
-    # cards show an attention marker without inferring it from the PR comment.
+    # Human waits and durable hosted recovery attention use the same public flag;
+    # retained recovery preserves status and any existing live human episode.
     attention_required: bool = False
     awaiting_human_since: datetime | None = None
     awaiting_human_reason: str | None = None

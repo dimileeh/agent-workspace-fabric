@@ -86,6 +86,7 @@ from awf.db.models import (
     WorkspaceEvent,
 )
 from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 from awf.db.resilience import (
     DB_CONNECTION_CLOSED_REASON,
     run_db_operation_with_retry,
@@ -235,7 +236,7 @@ async def _list_stale_active_execution_candidates(
             Workspace.pr_url,
             Workspace.task_policy,
         )
-        .where(Workspace.status.in_(active_status_values))
+        .where(Workspace.status.in_(active_status_values), recovery_allows_work())
         .where(
             or_(
                 Workspace.node_id == worker_node_id,

@@ -158,11 +158,13 @@ async def test_new_boot_reconciliation_removes_only_recorded_previous_boot_view(
         current = WorkspaceAuthority(successor)
         scope = WorkspaceConsumers(current, tmp_path)
         scope.stop_workspace = AsyncMock()
-        # Boot acceptance stays closed, but stale material/retained execution
-        # must still be reconciled by the actual new owner's ordinary poll.
+        # Before physical acceptance only readable-view cleanup is permitted;
+        # ordinary stop callbacks may mutate/terminalize retained evidence.
         assert not await scope.admission_check()
-        scope.stop_workspace.assert_awaited_once_with("ws_cloud_stable")
+        scope.stop_workspace.assert_not_awaited()
         assert not old_path.exists()
+        async with factory() as session:
+            assert (await session.get(Workspace, "ws_cloud_stable")).status == "blocked"
     finally:
         await successor.close()
 
