@@ -4,7 +4,8 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, text, tuple_
+from sqlalchemy import String, and_, any_, cast, func, or_, select, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -235,7 +236,10 @@ async def apply_decisions(
             }
         )
     inserts, edits = [], []
-    resumed = [(row.family, row.row_id) for row in proof.rows if row.disposition == "resume"]
+    resumed: dict[str, set[str]] = defaultdict(set)
+    for selected_row in proof.rows:
+        if selected_row.disposition == "resume":
+            resumed[selected_row.family].add(selected_row.row_id)
     inherited = (
         list(
             await session.scalars(
@@ -244,7 +248,15 @@ async def apply_decisions(
                     RestoreRowHold.owner == proof.identity.owner,
                     RestoreRowHold.restore_id != proof.binding.restore_id,
                     RestoreRowHold.state == "held",
-                    tuple_(RestoreRowHold.family, RestoreRowHold.row_id).in_(resumed),
+                    or_(
+                        *(
+                            and_(
+                                RestoreRowHold.family == family,
+                                RestoreRowHold.row_id == any_(cast(sorted(ids), ARRAY(String(64)))),
+                            )
+                            for family, ids in sorted(resumed.items())
+                        )
+                    ),
                 )
                 .order_by(RestoreRowHold.restore_id, RestoreRowHold.family, RestoreRowHold.row_id)
                 .limit(MAX_RESTORE_ROWS + 1)
