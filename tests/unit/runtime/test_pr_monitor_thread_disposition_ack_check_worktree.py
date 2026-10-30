@@ -139,6 +139,37 @@ async def test_the_rollback_keeps_an_ignored_file_the_agent_force_added(tmp_path
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
+@pytest.mark.parametrize("detached", [False, True], ids=["on-branch", "detached"])
+async def test_the_rollback_reattaches_head_and_keeps_a_branch_the_agent_switched_to(
+    tmp_path: Path, detached: bool
+) -> None:
+    # Resetting HEAD would move whatever branch the agent left it on, and the
+    # resolved SHA alone would then match: the original attachment is restored first.
+    worktree = _worktree(tmp_path)
+    _git(worktree, "checkout", "-qb", "other")
+    (worktree / "other.py").write_text("o = 1\n")
+    _git(worktree, "add", "other.py")
+    _git(worktree, "commit", "-qm", "other branch")
+    other_tip = _git(worktree, "rev-parse", "other")
+    _git(worktree, "checkout", "-q", "-")
+    if detached:
+        _git(worktree, "checkout", "-q", "--detach")
+    attachment = _git(worktree, "rev-parse", "--symbolic-full-name", "HEAD")
+    before = _snapshot(worktree)
+
+    def agent() -> Any:
+        _git(worktree, "checkout", "-q", "other")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_changed")
+
+    assert _git(worktree, "rev-parse", "other") == other_tip
+    assert _git(worktree, "rev-parse", "--symbolic-full-name", "HEAD") == attachment
+    assert _snapshot(worktree) == before
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
 def _agent_error() -> Any:
     raise AgentRunError(agent="claude_code", result=CommandResult(1, "", "x"))
 

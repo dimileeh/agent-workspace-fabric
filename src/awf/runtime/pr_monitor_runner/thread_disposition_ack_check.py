@@ -267,7 +267,7 @@ async def _roll_back_run(
     self: Any,
     workspace_id: str,
     worktree: Path,
-    before: tuple[str, str, str],
+    before: tuple[str, str, str, str],
     gitfile: str | None,
     state: MonitorState,
     saved_push: tuple[str | None, bool],
@@ -309,8 +309,8 @@ async def _roll_back_run(
 
 async def _worktree_fingerprint(
     self: Any, worktree: Path, pin: tuple[Path, Path] | None = None
-) -> tuple[str, str, str] | None:
-    """HEAD, ``git status --porcelain -z`` and git dirs; ``None`` if a probe failed."""
+) -> tuple[str, str, str, str] | None:
+    """HEAD, ``git status --porcelain -z``, git dirs and HEAD's ref; ``None`` if a probe failed."""
     outputs: list[str] = []
     for args in (
         ("rev-parse", "HEAD"),
@@ -319,6 +319,9 @@ async def _worktree_fingerprint(
         # A retargeted gitfile or ``commondir`` reads as a change, and the rollback
         # pins these pre-run directories.
         ("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"),
+        # The branch HEAD is attached to (``HEAD`` when detached): a checkout of
+        # another branch at the same commit reads as a change.
+        ("rev-parse", "--symbolic-full-name", "HEAD"),
     ):
         try:
             result = await _run_git(self, worktree, pin, *args)
@@ -327,14 +330,14 @@ async def _worktree_fingerprint(
         if result.returncode != 0:
             return None
         outputs.append(result.stdout)
-    return outputs[0], outputs[1], outputs[2]
+    return outputs[0], outputs[1], outputs[2], outputs[3]
 
 
 async def _restore_worktree(
     self: Any,
     workspace_id: str,
     worktree: Path,
-    before: tuple[str, str, str],
+    before: tuple[str, str, str, str],
     gitfile: str | None,
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
@@ -346,7 +349,8 @@ async def _restore_worktree(
     The rollback runs through the pre-run git dirs, never the live ``.git``: the
     agent may have retargeted it at another repository. A gitfile the agent
     deleted or broke is first rewritten from its pre-run text: the pin admits
-    the linked mirror only through it.
+    the linked mirror only through it. HEAD is re-attached to its pre-run ref
+    before the resets, which would otherwise move a branch the agent checked out.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
@@ -354,9 +358,16 @@ async def _restore_worktree(
     if after is None and gitfile is not None:
         _restore_worktree_git_linkage(worktree, gitfile)
     head = before[0].strip()
+    ref = before[3].strip()
+    attach = (
+        ("update-ref", "--no-deref", "HEAD", head)
+        if ref == "HEAD"
+        else ("symbolic-ref", "HEAD", ref)
+    )
     with _pinned_git_dirs(worktree, before[2]) as pin:
         restored = (
             pin is not None
+            and await _git_ok(self, worktree, pin, *attach)
             and await _git_ok(self, worktree, pin, "reset", "-q", "--mixed", head)
             and await _git_ok(self, worktree, pin, "reset", "--hard", head)
         )
