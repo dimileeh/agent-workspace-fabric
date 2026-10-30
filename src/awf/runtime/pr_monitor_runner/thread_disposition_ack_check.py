@@ -88,6 +88,8 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
@@ -269,7 +271,11 @@ async def _judge(
             except _AGENT_INFRASTRUCTURE_ERRORS as exc:
                 await _restore_worktree(self, workspace_id, worktree, before, linkage)
                 return UNJUDGED, f"agent_failed:{type(exc).__name__}"
-            except asyncio.CancelledError:
+            except (
+                asyncio.CancelledError,
+                _MonitorAgentServiceRecoveryFailedError,
+                _MonitorAgentServiceRecoverySupersededError,
+            ):
                 # ``UNJUDGED`` is already saved, so a restart takes the fallback, whose
                 # repair would refuse the agent's edits: roll back under the lock first.
                 await _restore_worktree(self, workspace_id, worktree, before, linkage)
