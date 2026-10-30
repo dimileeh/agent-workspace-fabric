@@ -188,7 +188,8 @@ def _disposition_ack_pending_key(thread_id: str) -> str:
     """Build state key asking the next poll to judge a thread's bot replies (#1138).
 
     The disposition gate sets it; the runner step that runs the agent outside the
-    merge lock clears it. It is per-workspace bookkeeping and never crosses re-adoption.
+    merge lock clears it. The value is the decimal count of failed re-reads of the
+    thread so far. It is per-workspace bookkeeping and never crosses re-adoption.
     """
     return f"__awf_disposition_ack_pending__:{thread_id}"
 

@@ -944,8 +944,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED
 **Problem:** AWF could not judge a review bot's reply after its disposition, so it re-triages the thread instead.
-**Likely Cause:** The agent run failed, its answer had no single valid AWF-DISPOSITION-ACK line, it changed the worktree during a judgment-only run, or the thread could not be re-read. A failed judgment is recorded and never retried.
-**Operator Fix:** No action is required: the thread takes the automatic reopen and a fresh disposition. If the monitor log shows a forge re-read fault, AWF retries the check on the next poll; check the token and the forge status if it persists.
+**Likely Cause:** The agent run failed, its answer had no single valid AWF-DISPOSITION-ACK line, it changed the worktree during a judgment-only run, or the thread could not be re-read on three polls. A failed check is recorded and never retried; a provider outage goes to provider recovery instead and is not a failed check.
+**Operator Fix:** No action is required: the thread takes the automatic reopen and a fresh disposition. If the monitor log shows forge re-read faults, check the token and the forge status; AWF retries the re-read on the next two polls first.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_ack_check_failed](#review_thread_disposition_ack_check_failed)
 

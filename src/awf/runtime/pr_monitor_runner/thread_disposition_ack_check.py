@@ -7,7 +7,12 @@ thread it re-reads that one thread, and for each of the bot's comments with no
 judgment yet it runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``,
 ``NEW_POINT``, or ``UNJUDGED`` when the agent failed, answered unusably or
 changed the worktree) is persisted at once, so a restart cannot re-run it, and
-gets one reason-coded log line and one audit event without any comment body.
+gets one reason-coded log line and one audit event without any comment body. A
+check is recorded ``UNJUDGED`` before the agent starts, so even a crash mid-run
+cannot repeat it; only a provider failure, which goes to the monitor's provider
+recovery like every other agent run, leaves it pending for a later poll. A
+thread whose re-read keeps failing gives up after
+:data:`~.thread_disposition_ack.MAX_ACK_REFETCH_FAILURES` polls.
 AWF posts no reply and reopens nothing here: the gate's next audit certifies an
 acknowledgement, and anything else takes the bounded fallback reopen.
 """
@@ -18,11 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from awf.adapters.base import AgentRunError
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedThreadComment
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.monitor_state_keys import _disposition_ack_pending_key
+from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
@@ -35,10 +41,12 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ACKNOWLEDGES,
+    MAX_ACK_REFETCH_FAILURES,
     NEW_POINT,
     UNJUDGED,
     AckJudgment,
     ack_check_prompt,
+    ack_refetch_failures,
     acknowledgement_view,
     comment_identity,
     parse_ack_answer,
@@ -49,11 +57,28 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryAuthError,
     ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 
 _AUDIT_ACTION = "review_thread_disposition_ack_check"
 _LOG_SOURCE = "disposition_ack"
 _PROBE_TIMEOUT_SECONDS = 60.0
+# Provider recovery owns these: not a judgment of the reply, so nothing is recorded.
+_PROVIDER_RECOVERY_ERRORS = (
+    ProviderRecoveryRetryError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryAuthError,
+)
+# The agent run failed for an infrastructure reason: a failed check (``UNJUDGED``).
+_AGENT_INFRASTRUCTURE_ERRORS = (
+    ComposeExecCleanupError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    TimeoutError,
+)
 _OUTCOMES: dict[str, tuple[str, str]] = {
     ACKNOWLEDGES: ("acknowledged", REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED),
     NEW_POINT: ("new_point", REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT),
@@ -83,17 +108,35 @@ async def judge_pending_disposition_acks(
                 repo=repo, pr_number=pr_number, thread_id=thread_id
             )
         except ForgeClientError as exc:
-            # Not a judgment: the check stays pending for the next poll.
+            # Not a judgment: the check stays pending for the next poll, up to the
+            # cap; the gate then records it failed and the fallback re-triages.
+            failures = ack_refetch_failures(state, thread_id) + 1
+            state.mark_addressed(_disposition_ack_pending_key(thread_id), str(failures))
             _log.warning(
                 "monitor.review_thread_disposition_ack_refetch_failed",
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 thread_id=thread_id,
+                refetch_failures=failures,
                 reason_code=REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
                 forge_reason_code=exc.reason_code,
                 detail=_redact_and_truncate_forge_error(str(exc)),
             )
-            return
+            if failures >= MAX_ACK_REFETCH_FAILURES:
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                    action=_AUDIT_ACTION,
+                    outcome=_OUTCOMES[UNJUDGED][0],
+                    reason_code=REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
+                    pr_number=pr_number,
+                    status=None,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                    evidence={"thread_id": thread_id, "detail": "refetch_failed"},
+                )
+            continue
         viewer = (audit.viewer_login or "").strip().casefold()
         thread = next((t for t in audit.threads if t.thread_id == thread_id), None)
         view = acknowledgement_view(thread, viewer=viewer) if thread and viewer else None
@@ -101,18 +144,27 @@ async def judge_pending_disposition_acks(
             for comment in thread.trailing_comments:
                 if read_ack_judgment(state, thread_id, comment) is not None:
                     continue
-                judgment, detail = await _judge(
-                    self,
-                    workspace_id=workspace_id,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    state=state,
-                    prompt=ack_check_prompt(
-                        thread.opener.body if thread.opener else "",
-                        view.viewer_comment_bodies[-1],
-                        comment.body,
-                    ),
-                )
+                # Recorded failed before the agent starts: at most one check, crash or not.
+                record_ack_judgment(state, thread_id, comment, UNJUDGED)
+                await self._persist_state(workspace_id, state)
+                try:
+                    judgment, detail = await _judge(
+                        self,
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        state=state,
+                        prompt=ack_check_prompt(
+                            thread.opener.body if thread.opener else "",
+                            view.viewer_comment_bodies[-1],
+                            comment.body,
+                        ),
+                    )
+                except _PROVIDER_RECOVERY_ERRORS:
+                    ack_key = _disposition_ack_key(thread_id, comment_identity(comment))
+                    state.threads_addressed_ids.pop(ack_key, None)
+                    await self._persist_state(workspace_id, state)
+                    raise
                 record_ack_judgment(state, thread_id, comment, judgment)
                 # Saved before any further forge call or audit write: at most one check.
                 await self._persist_state(workspace_id, state)
@@ -158,13 +210,11 @@ async def _judge(
             state=state,
         )
     except AgentRunError as exc:
+        # Provider recovery first, as for every monitor agent run: it raises a
+        # ProviderRecovery* error for a 429 / quota / auth failure.
+        await self._handle_provider_agent_run_error(workspace_id, exc)
         return UNJUDGED, f"agent_failed:{exc.reason_code}"
-    except (
-        ProviderRecoveryRetryError,
-        ProviderRecoveryFallbackError,
-        ProviderRecoveryAuthError,
-        TimeoutError,
-    ) as exc:
+    except _AGENT_INFRASTRUCTURE_ERRORS as exc:
         return UNJUDGED, f"agent_failed:{type(exc).__name__}"
     if await _worktree_fingerprint(self, worktree) != before:
         # A judgment-only run must not touch the branch; its answer is not trusted.

@@ -89,7 +89,7 @@ async def test_bot_ack_waits_for_one_check_then_certifies_without_reopen_or_repl
     assert terminal is False
     assert gh.unresolved == [] and gh.comments == [] and gh.thread_replies == []
     assert runner._deps.sleep.calls == [60]
-    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "pending"
+    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "0"
     disposition = read_item_disposition(state, _SILENT)
     assert disposition is not None and disposition.reply_comment_id == "reply-1"  # not retired
     assert runner._deps.adapter.calls == []  # the gate never calls the agent
@@ -221,7 +221,7 @@ async def test_edited_ack_comment_is_a_new_identity_and_is_checked_again(
 
     assert result.retry is True and result.feedback_changed is True
     assert result.blocker is None and result.count_rows is None
-    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "pending"
+    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "0"
     assert _disposition_ack_key(_SILENT, comment_identity(edited)) not in (
         state.threads_addressed_ids
     )
@@ -275,7 +275,7 @@ async def test_a_pending_ack_check_does_not_hold_back_another_threads_reopen(
     await _execute(runner, workspace_id, NotifyHuman(), state)
 
     assert gh.unresolved == [_FRESH]
-    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "pending"
+    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "0"
 
 
 def test_comment_identity_changes_with_id_author_or_body() -> None:

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.forge_thread_audit import ReviewThreadAudit
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.models import WorkspaceEvent
@@ -46,6 +47,14 @@ from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
 )
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import (
     judge_pending_disposition_acks,
+)
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
 )
 from awf.service.pr_monitor_adoption_seed import seedable_monitor_state
 from tests.postgres import postgres_test_engine
@@ -277,7 +286,7 @@ async def test_the_judgment_survives_a_restart_and_is_never_asked_again(
     # the reloaded step asks nothing (an empty adapter queue fails on any call)
     # and the gate certifies.
     reloaded = await _persisted(factory, workspace_id)
-    reloaded.mark_addressed(_disposition_ack_pending_key(_SILENT), "pending")
+    reloaded.mark_addressed(_disposition_ack_pending_key(_SILENT), "0")
     await _judge(runner, workspace_id, reloaded)
     certified = await _gate(runner, workspace_id, reloaded)
 
@@ -328,13 +337,14 @@ async def test_a_re_read_fault_keeps_the_check_pending_for_the_next_poll(
         await _judge(runner, workspace_id, state)
 
     assert runner._deps.adapter.calls == []
-    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "pending"
+    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "1"
     assert _ack_key() not in state.threads_addressed_ids
     [log] = [
         r for r in captured if r["event"] == "monitor.review_thread_disposition_ack_refetch_failed"
     ]
     assert log["reason_code"] == _CHECK_FAILED
     assert log["forge_reason_code"] == "GITHUB_API_ERROR"
+    assert log["refetch_failures"] == 1
 
 
 async def test_the_in_lock_audit_never_calls_the_agent(
@@ -374,7 +384,7 @@ async def test_the_in_lock_audit_never_calls_the_agent(
     assert gh.merge_calls == [] and gh.unresolved_threads == []
     assert gh.status_refreshes_at_audit == [0, 1]
     assert lock.sleeps_under_lock == [False]
-    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "pending"
+    assert state.threads_addressed_ids[_disposition_ack_pending_key(_SILENT)] == "0"
 
 
 @pytest.mark.parametrize("head_continuity", [True, False])
@@ -411,3 +421,141 @@ async def test_the_successor_certifies_a_crossed_acknowledgement_without_asking_
     assert certified.count_rows is not None
     assert dict(certified.count_rows)["false positive"] == 1
     assert runner._deps.adapter.calls == [] and gh.refetches == [None]
+
+
+@pytest.mark.parametrize("provider_action", ["retry", "fallback", "auth_failed"])
+async def test_a_provider_failure_goes_to_provider_recovery_and_judges_nothing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_action: str,
+) -> None:
+    # A 429, quota or auth failure is the provider's, not the reply's: it takes
+    # the monitor's provider recovery, and the check stays pending for later.
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path)
+    failure = CommandResult(returncode=1, stdout="", stderr="429")
+    runner._deps.adapter.queue(exc=AgentRunError(agent="claude_code", result=failure))
+    recorded: list[str] = []
+
+    async def provider(workspace_id: str, exc: AgentRunError) -> str:
+        recorded.append(exc.reason_code)
+        return provider_action
+
+    monkeypatch.setattr(runner, "_record_provider_agent_run_error", provider)
+
+    with pytest.raises(
+        (ProviderRecoveryRetryError, ProviderRecoveryFallbackError, ProviderRecoveryAuthError)
+    ):
+        await _judge(runner, workspace_id, state)
+
+    assert recorded == ["AGENT_CLI_FAILED"]
+    assert _ack_key() not in state.threads_addressed_ids
+    assert _ack_key() not in (await _persisted(factory, workspace_id)).threads_addressed_ids
+    assert _disposition_ack_pending_key(_SILENT) in state.threads_addressed_ids
+    assert await _ack_events(factory, workspace_id) == []
+    assert gh.unresolved == []
+
+
+async def test_a_provider_cooldown_judges_nothing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, _, workspace_id, runner = await _flagged(factory, tmp_path)
+
+    async def suppressed(**kwargs: Any) -> Any:
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", suppressed)
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await _judge(runner, workspace_id, state)
+
+    assert _ack_key() not in (await _persisted(factory, workspace_id)).threads_addressed_ids
+    assert _disposition_ack_pending_key(_SILENT) in state.threads_addressed_ids
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            ComposeExecCleanupError(
+                invocation_id="i-1", source="agent", label="claude", message="still running"
+            ),
+            id="compose-cleanup",
+        ),
+        pytest.param(_MonitorHeadObjectMissingError("HEAD_OBJECT_MISSING"), id="head-object"),
+        pytest.param(_MonitorMirrorHooksPathRepairFailedError(), id="mirror-hooks"),
+        pytest.param(_MonitorAgentRuntimeOwnershipRepairFailedError("chown"), id="ownership"),
+        pytest.param(TimeoutError(), id="timeout"),
+    ],
+)
+async def test_an_agent_infrastructure_failure_is_a_failed_check(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path)
+
+    async def failing(**kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", failing)
+
+    await _judge(runner, workspace_id, state)
+
+    persisted = await _persisted(factory, workspace_id)
+    assert persisted.threads_addressed_ids[_ack_key()] == UNJUDGED
+    [event] = await _ack_events(factory, workspace_id)
+    assert event["outcome"] == "check_failed"
+    assert event["evidence"]["detail"] == f"agent_failed:{type(error).__name__}"
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    assert gh.unresolved == [_SILENT]
+
+
+async def test_a_crash_during_the_check_never_runs_it_twice(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The check is recorded as failed before the agent starts, so an unforeseen
+    # crash mid-run cannot make a resumed monitor run it again.
+    state, _, workspace_id, runner = await _flagged(factory, tmp_path)
+    runs: list[str] = []
+
+    async def crashing(**kwargs: Any) -> Any:
+        runs.append(kwargs["prompt"])
+        raise RuntimeError("worker lost")
+
+    monkeypatch.setattr(runner, "_run_monitor_agent_with_service_recovery", crashing)
+    with pytest.raises(RuntimeError):
+        await _judge(runner, workspace_id, state)
+
+    resumed = await _persisted(factory, workspace_id)
+    assert resumed.threads_addressed_ids[_ack_key()] == UNJUDGED
+    resumed.mark_addressed(_disposition_ack_pending_key(_SILENT), "0")
+    await _judge(runner, workspace_id, resumed)
+    assert len(runs) == 1
+
+
+async def test_repeated_re_read_faults_end_in_a_failed_check_and_the_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    state, gh, workspace_id, runner = await _flagged(factory, tmp_path)
+    gh.refetch_error = GitHubClientError(
+        operation="fetch_review_thread_audit", returncode=1, stderr="Review thread not found"
+    )
+
+    for _ in range(3):  # each poll: the step's re-read fails, then the gate re-audits
+        await _judge(runner, workspace_id, state)
+        await _gate(runner, workspace_id, state)
+
+    [event] = await _ack_events(factory, workspace_id)
+    assert (event["outcome"], event["reason_code"]) == ("check_failed", _CHECK_FAILED)
+    assert event["evidence"] == {"thread_id": _SILENT, "detail": "refetch_failed"}
+    assert state.threads_addressed_ids[_ack_key()] == UNJUDGED
+    await _execute(runner, workspace_id, NotifyHuman(), state)
+    assert gh.unresolved == [_SILENT]
+    assert runner._deps.adapter.calls == []

@@ -489,7 +489,7 @@ def test_ack_judgments_cross_regardless_of_head_and_the_pending_flag_never_does(
         f"{_ACK}PRRT_test_e:{identity.upper()}": "ACKNOWLEDGES",
         f"{_ACK}__evil__:{identity}": "ACKNOWLEDGES",
         f"{_ACK}PRRT_test_f": "ACKNOWLEDGES",
-        f"{_ACK_PENDING}PRRT_test_a": "pending",
+        f"{_ACK_PENDING}PRRT_test_a": "0",
     }
 
     seeded = seedable_monitor_state({**valid, **malformed}, head_continuity=head_continuity)

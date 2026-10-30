@@ -18,6 +18,8 @@ once per identity, across re-adoption too:
 * any comment not judged yet: the gate reads the thread without them too, so its
   binding is not retired meanwhile, but certifies nothing and re-polls; the
   runner step (:mod:`~.thread_disposition_ack_check`) judges it outside the merge lock.
+  After :data:`MAX_ACK_REFETCH_FAILURES` failed re-reads of the thread, its
+  unjudged comments are recorded ``UNJUDGED`` instead, so it cannot re-poll forever.
 * any comment ``NEW_POINT`` or ``UNJUDGED`` (agent failure, unparseable answer):
   the full thread is kept, which is today's path to the fallback reopen.
 
@@ -49,7 +51,8 @@ NEW_POINT: Final = "NEW_POINT"
 UNJUDGED: Final = "UNJUDGED"  # the check failed: the agent errored, or its answer was unusable
 AckJudgment = Literal["ACKNOWLEDGES", "NEW_POINT", "UNJUDGED"]
 ACK_JUDGMENTS: frozenset[str] = frozenset({ACKNOWLEDGES, NEW_POINT, UNJUDGED})
-ACK_PENDING = "pending"
+# Failed re-reads of one flagged thread before its check counts as failed.
+MAX_ACK_REFETCH_FAILURES = 3
 _ANSWER_PREFIX = "AWF-DISPOSITION-ACK:"
 _ANSWER_RE = re.compile(r"AWF-DISPOSITION-ACK: (ACKNOWLEDGES|NEW_POINT)")
 _EVIDENCE_MAX_CHARS = 4000
@@ -98,6 +101,12 @@ def read_ack_judgment(
     return cast(AckJudgment, value) if value in ACK_JUDGMENTS else UNJUDGED
 
 
+def ack_refetch_failures(state: MonitorState, thread_id: str) -> int:
+    """Failed re-reads so far of a flagged thread (the pending key's decimal value)."""
+    raw = state.threads_addressed_ids.get(_disposition_ack_pending_key(thread_id), "")
+    return int(raw) if raw.isdecimal() else 0
+
+
 def record_ack_judgment(
     state: MonitorState, thread_id: str, comment: AuditedThreadComment, judgment: AckJudgment
 ) -> None:
@@ -110,11 +119,12 @@ def acknowledgement_views(
 ) -> tuple[ReviewThreadAudit, frozenset[str]]:
     """Apply the recorded judgments to ``audit``; return it and the threads still to judge.
 
-    Sets the pending key of each thread still to judge and drops every other one,
-    so the runner step only ever judges what the gate's latest audit asked for.
+    Sets the pending key of each thread still to judge (keeping its failed re-read
+    count) and drops every other one, so the runner step only ever judges what the
+    gate's latest audit asked for.
     """
     threads: list[AuditedReviewThread] = []
-    pending: set[str] = set()
+    pending: dict[str, int] = {}
     for thread in audit.threads:
         view = acknowledgement_view(thread, viewer=viewer)
         judgments = (
@@ -126,14 +136,21 @@ def acknowledgement_views(
             threads.append(thread)  # today's semantics: the fallback re-triages it
             continue
         if None in judgments:
-            pending.add(thread.thread_id)
+            failures = ack_refetch_failures(state, thread.thread_id)
+            if failures >= MAX_ACK_REFETCH_FAILURES:
+                for comment in thread.trailing_comments:
+                    if read_ack_judgment(state, thread.thread_id, comment) is None:
+                        record_ack_judgment(state, thread.thread_id, comment, UNJUDGED)
+                threads.append(thread)  # the check failed: the fallback re-triages it
+                continue
+            pending[thread.thread_id] = failures
         threads.append(view)
     prefix = _disposition_ack_pending_key("")
     for key in [k for k in state.threads_addressed_ids if k.startswith(prefix)]:
         if key[len(prefix) :] not in pending:
             del state.threads_addressed_ids[key]
-    for thread_id in pending:
-        state.mark_addressed(_disposition_ack_pending_key(thread_id), ACK_PENDING)
+    for thread_id, failures in pending.items():
+        state.mark_addressed(_disposition_ack_pending_key(thread_id), str(failures))
     return replace(audit, threads=tuple(threads)), frozenset(pending)
 
 
