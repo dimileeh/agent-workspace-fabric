@@ -4,7 +4,7 @@ import { useEffect, useState, type MutableRefObject } from "react";
 import { parseApiResponse } from "@/components/console-dashboard-shared";
 import { workspaceTelemetryPath } from "@/lib/console-urls";
 import { parseTelemetryPresentation, isLegitimateNullOwnershipNoResource, type ParsedTelemetryPresentation, type TelemetryViewWindow } from "@/lib/console-workspace-telemetry";
-import { parseVMTelemetry, type VMTelemetry } from "@/lib/console-vm-telemetry";
+import { parseVMTelemetry, vmTelemetryResourceIdentity, type VMTelemetry } from "@/lib/console-vm-telemetry";
 
 export type TelemetryReadState = {
   data: ParsedTelemetryPresentation | VMTelemetry | null;
@@ -51,13 +51,19 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
         const raw = result.data as Record<string, unknown> | null;
         const query = new URL(url, window.location.origin).searchParams;
         if (raw?.resource_kind === "vm_node") {
-          const parsed = parseVMTelemetry(raw, { workspaceId, view, orgId: query.get("org_id"), projectId: query.get("project_id") });
-          if (!parsed) {
+          const scope = { workspaceId, view, orgId: query.get("org_id"), projectId: query.get("project_id") };
+          const nextIdentity = vmTelemetryResourceIdentity(raw, scope);
+          if (nextIdentity === null) {
             resourceIdentity = null;
-            setState({ data: null, error: "Malformed or misbound VM telemetry response", lastGoodAt: null });
+            setState({ data: null, error: "VM telemetry ownership mismatch", lastGoodAt: null });
             return;
           }
-          resourceIdentity = JSON.stringify(["vm_node", parsed.workspace, parsed.node]);
+          if (nextIdentity !== resourceIdentity) {
+            resourceIdentity = nextIdentity;
+            setState({ data: null, error: null, lastGoodAt: null });
+          }
+          const parsed = parseVMTelemetry(raw, scope);
+          if (!parsed) throw new Error("Malformed VM telemetry response");
           setState({ data: parsed, error: null, lastGoodAt: new Date().toISOString() });
           return;
         }

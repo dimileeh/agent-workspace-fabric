@@ -60,6 +60,27 @@ function node(v: unknown, org: string): v is VMNode {
     && v.org_id === org && text(v.node_id) && text(v.provider_id, 20) && /^[1-9][0-9]*$/.test(v.provider_id)
     && BigInt(v.provider_id) <= BigInt("18446744073709551615") && generation(v.recovery_generation) && generation(v.boot_generation);
 }
+function workspace(v: unknown, scope: VMReadScope): v is VMTelemetry["workspace"] {
+  return record(v) && keys(v, ["org_id", "project_id", "workspace_record_id", "owner_record_id", "authorization_generation"])
+    && [v.org_id, v.project_id, v.workspace_record_id, v.owner_record_id].every(value => text(value))
+    && generation(v.authorization_generation) && v.workspace_record_id === scope.workspaceId
+    && (scope.orgId == null || v.org_id === scope.orgId) && (scope.projectId == null || v.project_id === scope.projectId);
+}
+
+/** Binding evidence only; malformed metrics cannot refresh or replace a snapshot. */
+export function vmTelemetryResourceIdentity(payload: unknown, scope: VMReadScope): string | null {
+  if (!record(payload) || payload.resource_kind !== "vm_node" || !workspace(payload.workspace, scope)
+    || !["1h", "6h", "24h"].includes(String(payload.view)) || (scope.view !== undefined && payload.view !== scope.view)) return null;
+  const w = payload.workspace, n = payload.node;
+  let physical: (string | number)[] | null = null;
+  if (payload.node_visibility === "authorized") {
+    if (!node(n, w.org_id)) return null;
+    physical = [n.org_id, n.node_id, n.provider_id, n.recovery_generation, n.boot_generation];
+  } else if (payload.node_visibility !== "not_authorized" || n !== null) return null;
+  return JSON.stringify(["vm_node", w.org_id, w.project_id, w.workspace_record_id, w.owner_record_id,
+    w.authorization_generation, payload.node_visibility, physical]);
+}
+
 function estimate(v: unknown, end: string): v is VMEstimate {
   if (!record(v) || !keys(v, estimateKeys) || v.currency !== "USD" || !integer(v.priced_interval_seconds)
     || !integer(v.unpriced_interval_seconds) || !record(v.evidence)) return false;
@@ -110,10 +131,7 @@ export function parseVMTelemetry(payload: unknown, scope: VMReadScope): VMTeleme
     || !integer(p.stale_after_seconds) || p.stale_after_seconds < 60 || p.stale_after_seconds > 300
     || !Array.isArray(p.data_quality_notes) || p.data_quality_notes.length > 16 || !p.data_quality_notes.every(n => text(n, 64))) return null;
   const w = p.workspace;
-  if (!record(w) || !keys(w, ["org_id", "project_id", "workspace_record_id", "owner_record_id", "authorization_generation"])
-    || ![w.org_id, w.project_id, w.workspace_record_id, w.owner_record_id].every(v => text(v))
-    || !generation(w.authorization_generation) || w.workspace_record_id !== scope.workspaceId
-    || (scope.orgId != null && w.org_id !== scope.orgId) || (scope.projectId != null && w.project_id !== scope.projectId)) return null;
+  if (!workspace(w, scope)) return null;
   const org = String(w.org_id), current = p.node;
   if ((current !== null && !node(current, org)) || !["authorized", "not_authorized"].includes(String(p.node_visibility))
     || (p.node_visibility === "authorized" && current === null)) return null;
