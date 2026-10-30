@@ -7,7 +7,9 @@ thread it re-reads that one thread, and for each of the bot's comments with no
 judgment yet it runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``,
 ``NEW_POINT``, or ``UNJUDGED`` when the reply is too long to quote whole, or the
 agent failed, answered unusably or changed the worktree) is persisted at once, so a restart cannot re-run it, and
-gets one reason-coded log line and one audit event without any comment body. A
+gets one reason-coded log line and one audit event without any comment body. The
+check runs only on a worktree with no tracked changes, and anything the agent
+changed there is rolled back at once, so the fallback's repair can start. A
 check is recorded ``UNJUDGED`` before the agent starts, so even a crash mid-run
 cannot repeat it; only a provider failure, which goes to the monitor's provider
 recovery like every other agent run, leaves it pending for a later poll. A
@@ -34,6 +36,10 @@ from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EV
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.path_parsing import (
+    _porcelain_z_records,
+    _untracked_paths_from_porcelain_z,
+)
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
     REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT,
@@ -206,6 +212,9 @@ async def _judge(
     before = await _worktree_fingerprint(self, worktree)
     if before is None:
         return UNJUDGED, "worktree_probe_failed"
+    if any(status != "??" for status, _, _ in _porcelain_z_records(before[1])):
+        # The agent's edits could not be rolled back without these: do not run it.
+        return UNJUDGED, "worktree_dirty"
     try:
         result = await self._run_monitor_agent_with_service_recovery(
             workspace_id=workspace_id,
@@ -216,13 +225,15 @@ async def _judge(
             state=state,
         )
     except AgentRunError as exc:
+        await _restore_worktree(self, workspace_id, worktree, before)
         # Provider recovery first, as for every monitor agent run: it raises a
         # ProviderRecovery* error for a 429 / quota / auth failure.
         await self._handle_provider_agent_run_error(workspace_id, exc)
         return UNJUDGED, f"agent_failed:{exc.reason_code}"
     except _AGENT_INFRASTRUCTURE_ERRORS as exc:
+        await _restore_worktree(self, workspace_id, worktree, before)
         return UNJUDGED, f"agent_failed:{type(exc).__name__}"
-    if await _worktree_fingerprint(self, worktree) != before:
+    if await _restore_worktree(self, workspace_id, worktree, before):
         # A judgment-only run must not touch the branch; its answer is not trusted.
         return UNJUDGED, "worktree_changed"
     answer = parse_ack_answer(result.stdout)
@@ -232,9 +243,13 @@ async def _judge(
 
 
 async def _worktree_fingerprint(self: Any, worktree: Path) -> tuple[str, str] | None:
-    """HEAD and ``git status --porcelain`` of the worktree; ``None`` if a probe failed."""
+    """HEAD and ``git status --porcelain -z`` of the worktree; ``None`` if a probe failed."""
     outputs: list[str] = []
-    for args in (("rev-parse", "HEAD"), ("status", "--porcelain")):
+    for args in (
+        ("rev-parse", "HEAD"),
+        # Every untracked leaf, so a file added under an untracked directory shows.
+        ("status", "--porcelain", "-z", "--untracked-files=all"),
+    ):
         try:
             result = await self._deps.runner.run(
                 git_worktree_command(worktree, *args), timeout_seconds=_PROBE_TIMEOUT_SECONDS
@@ -245,6 +260,51 @@ async def _worktree_fingerprint(self: Any, worktree: Path) -> tuple[str, str] | 
             return None
         outputs.append(result.stdout)
     return outputs[0], outputs[1]
+
+
+async def _restore_worktree(
+    self: Any, workspace_id: str, worktree: Path, before: tuple[str, str]
+) -> bool:
+    """Roll back whatever the check's agent changed; return whether it changed anything.
+
+    ``before`` has no tracked changes, so resetting to its HEAD discards only the
+    agent's commits and edits; only the untracked paths the agent added are
+    removed, so pre-existing untracked files stay.
+    """
+    after = await _worktree_fingerprint(self, worktree)
+    if after == before:
+        return False
+    restored = after is not None and await _git_ok(
+        self, worktree, "reset", "--hard", before[0].strip()
+    )
+    if restored and after is not None:
+        added = sorted(
+            set(_untracked_paths_from_porcelain_z(after[1]))
+            - set(_untracked_paths_from_porcelain_z(before[1]))
+        )
+        if added:
+            restored = await _git_ok(
+                self, worktree, "--literal-pathspecs", "clean", "-ffd", "--", *added
+            )
+    if not (restored and await _worktree_fingerprint(self, worktree) == before):
+        # Fail closed: the fallback's repair then refuses the dirty worktree.
+        _log.warning(
+            "monitor.review_thread_disposition_ack_worktree_restore_failed",
+            workspace_id=workspace_id,
+            reason_code=REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
+        )
+    return True
+
+
+async def _git_ok(self: Any, worktree: Path, *args: str) -> bool:
+    """Run one git command in the worktree; whether it succeeded."""
+    try:
+        result = await self._deps.runner.run(
+            git_worktree_command(worktree, *args), timeout_seconds=_PROBE_TIMEOUT_SECONDS
+        )
+    except OSError:
+        return False
+    return bool(result.returncode == 0)
 
 
 async def _record_judgment(
