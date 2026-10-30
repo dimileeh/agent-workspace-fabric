@@ -78,7 +78,6 @@ from awf.runtime.validation_setup import (
     _setup_dependency_retry_output_prefix,
     _with_setup_dependency_network_metadata,
     profile_phase_command_plan,
-    profile_validation_tool_preflight_findings,
     validate_command_probe_targets,
 )
 from awf.runtime.validation_types import (
@@ -125,8 +124,6 @@ HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
 HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
 HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
 PYTEST_TEST_FAILURE = "PYTEST_TEST_FAILURE"
-PROFILE_PREFLIGHT_PHASE = "profile_preflight"
-PROFILE_VALIDATION_TOOL_UNAVAILABLE = "PROFILE_VALIDATION_TOOL_UNAVAILABLE"
 DATABASE_GENERATED_SETUP_FAILED = "DATABASE_GENERATED_SETUP_FAILED"
 DATABASE_GENERATED_SETUP_TIMEOUT = "DATABASE_GENERATED_SETUP_TIMEOUT"
 DATABASE_REFRESH_FAILED = "DATABASE_REFRESH_FAILED"
@@ -167,43 +164,6 @@ _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
 _SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS = 6
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET = 2
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
-_UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
-_UV_OPTION_VALUE_FLAGS = frozenset(
-    {
-        "--config-setting",
-        "--config-settings-package",
-        "--default-index",
-        "--directory",
-        "--env-file",
-        "--exclude-newer",
-        "--extra",
-        "--extra-index-url",
-        "--find-links",
-        "--from",
-        "--group",
-        "--index",
-        "--index-strategy",
-        "--keyring-provider",
-        "--link-mode",
-        "--no-binary",
-        "--no-build",
-        "--no-build-package",
-        "--no-extra",
-        "--only-binary",
-        "--only-group",
-        "--project",
-        "--python",
-        "--python-platform",
-        "--refresh-package",
-        "--resolution",
-        "--upgrade-package",
-        "--with",
-        "--with-editable",
-        "--with-requirements",
-        "-C",
-        "-p",
-    }
-)
 _PROFILE_PHASE_EXECUTION_ORDER = {
     "setup": 0,
     "pre_agent": 1,
@@ -290,65 +250,6 @@ class ValidationRunner:
             legacy_command_labels=True,
             coverage=None,
         )
-
-    async def run_profile_tool_preflight(
-        self,
-        *,
-        workspace_id: str,
-        profile: WorkspaceProfile,
-    ) -> ValidationResult:
-        """Fail fast when profile validation commands cannot keep setup tools visible."""
-        findings = profile_validation_tool_preflight_findings(profile)
-        if not findings:
-            return ValidationResult()
-
-        started = time.monotonic()
-        workspace_artifacts = self._artifacts_dir / workspace_id
-        workspace_artifacts.mkdir(parents=True, exist_ok=True)
-        label = "01_profile_preflight"
-        base_stream_id = f"validation.{label}"
-        stdout_path = workspace_artifacts / f"{label}.stdout"
-        stderr_path = workspace_artifacts / f"{label}.stderr"
-        metadata: dict[str, object] = {"findings": [finding.as_metadata() for finding in findings]}
-        stderr = json.dumps(metadata, sort_keys=True, indent=2) + "\n"
-        await asyncio.to_thread(stdout_path.write_text, "", encoding="utf-8")
-        await asyncio.to_thread(stderr_path.write_text, stderr, encoding="utf-8")
-
-        stream_ids: dict[str, str | None] = {
-            "stdout": f"{base_stream_id}.stdout",
-            "stderr": f"{base_stream_id}.stderr",
-        }
-        if self._log_store is not None:
-            sinks = await self._log_store.open_command_streams(
-                workspace_id=workspace_id,
-                base_stream_id=base_stream_id,
-                source="validation",
-                name=f"{PROFILE_PREFLIGHT_PHASE} {label}",
-            )
-            try:
-                await sinks.write_stderr(stderr)
-            finally:
-                await sinks.close()
-
-        _log.info(
-            "validation.profile_tool_preflight_failed",
-            workspace_id=workspace_id,
-            reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
-            finding_count=len(findings),
-        )
-        result = ValidationCommandResult(
-            command="profile validation tool preflight",
-            returncode=1,
-            duration_seconds=time.monotonic() - started,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            phase=PROFILE_PREFLIGHT_PHASE,
-            reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
-            stream_ids=stream_ids,
-            policy_failed=True,
-            metadata=metadata,
-        )
-        return ValidationResult(commands=[result])
 
     async def probe_runtime_toolchain_findings(
         self,

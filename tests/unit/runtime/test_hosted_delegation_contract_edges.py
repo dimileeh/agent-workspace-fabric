@@ -63,22 +63,6 @@ def _terminal_commands_from_expected(
 
 
 @pytest.mark.unit
-async def test_hosted_validation_profile_tool_preflight_noops_without_findings(
-    tmp_path: Path,
-) -> None:
-    """A hosted profile with no static tool findings returns empty validation evidence."""
-    delegate = HostedValidationDelegate(_config(), artifacts_dir=tmp_path)
-
-    result = await delegate.run_profile_tool_preflight(
-        workspace_id="ws_hosted",
-        profile=WorkspaceProfile(name="hosted-no-preflight-findings"),
-    )
-
-    assert result.all_passed
-    assert result.commands == []
-
-
-@pytest.mark.unit
 def test_hosted_validation_expected_commands_place_healthchecks_before_validate() -> None:
     """Hosted validation keeps local command ordering for alembic, DB, and healthchecks."""
     profile = WorkspaceProfile.model_validate(

@@ -339,6 +339,13 @@ monitor resumes with the directive in context, so you steer it instead of
 cancelling and re-adopting. The `--directive` value is capped at 1024
 characters.
 
+For a workspace paused with `PLAN_CONFORMANCE_NEEDS_HUMAN`, the same command
+works before a PR exists: read the conformance report in the console or workspace
+timeline, then run `awf workspace guide ws_123 --directive '<your decision>'`.
+A nonblank directive is required; a file grant alone cannot resume this pause.
+AWF resumes the same checkout without bypassing validation or merge gates. See
+[Workspace Profiles](CONCEPTS.md#workspace-profiles) for the conformance contract.
+
 Inspect workspace observability data:
 
 ```bash

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
+PLAN_CONFORMANCE_NEEDS_HUMAN = "PLAN_CONFORMANCE_NEEDS_HUMAN"
 CONFORMANCE_REQUIRES_AWF_VALIDATION = "CONFORMANCE_REQUIRES_AWF_VALIDATION"
 CONFORMANCE_CI_DELEGATED_SATISFIED = "CONFORMANCE_CI_DELEGATED_SATISFIED"
 """Satisfied-flavour reason code for a conformance outcome resolved as CI-delegated
@@ -45,6 +46,7 @@ class PlanConformanceStatus(StrEnum):
 
     satisfied = "satisfied"
     needs_iteration = "needs_iteration"
+    needs_human = "needs_human"
 
 
 class GapKind(StrEnum):
@@ -80,6 +82,7 @@ class PlanConformanceReport:
     summary: str
     gaps: tuple[ConformanceGap, ...]
     reason_code: str = PLAN_CONFORMANCE_REPORTED
+    decision_request: str | None = None
 
     def __init__(
         self,
@@ -88,11 +91,13 @@ class PlanConformanceReport:
         summary: str,
         gaps: Sequence[ConformanceGap | str] = (),
         reason_code: str = PLAN_CONFORMANCE_REPORTED,
+        decision_request: str | None = None,
     ) -> None:
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "summary", summary)
         object.__setattr__(self, "gaps", _normalize_conformance_gaps(gaps))
         object.__setattr__(self, "reason_code", reason_code)
+        object.__setattr__(self, "decision_request", decision_request)
 
     @property
     def satisfied(self) -> bool:
@@ -458,9 +463,9 @@ def build_conformance_prompt(
         f"Write a JSON object to `{report_path.as_posix()}` and also print the same JSON object "
         "as your final response. The object must have this shape:\n\n"
         "```json\n"
-        '{"status":"satisfied|needs_iteration","summary":"...",'
+        '{"status":"satisfied|needs_iteration|needs_human","summary":"...",'
         '"gaps":[{"kind":"awf_validation_evidence","detail":"..."}],'
-        '"reason_code":"optional reason code"}\n'
+        '"reason_code":"optional reason code","decision_request":null}\n'
         "```\n\n"
         "Each `gaps` item must be an object with a `kind` chosen from this list and "
         "a human-readable `detail`:\n"
@@ -468,6 +473,17 @@ def build_conformance_prompt(
         "Use `satisfied` only when the implementation fully achieves the saved plan. "
         "Use `needs_iteration` when any planned behavior, test, validation, or documented "
         "non-goal handling is missing. Keep gaps actionable and specific.\n\n"
+        "Use `needs_human` only when proceeding safely requires a specific missing "
+        "operator decision, permission, or external dependency input that this task "
+        "does not authorize you to supply. First consider in-scope alternatives. "
+        "A self-imposed design constraint, ordinary unfinished implementation, failing "
+        "tests, or missing AWF-owned validation evidence is not a human decision: "
+        "use `needs_iteration` with actionable gaps instead. Do not expand scope or "
+        "relax the original task to manufacture a blocker. For `needs_human`, supply "
+        "a nonblank `summary` explaining the blocker and a nonblank `decision_request` "
+        "asking the exact decision required (each at most 1000 characters). Use the "
+        "exact lowercase status; do not express this outcome only in prose. "
+        "AWF will pause the workspace without approving changes or bypassing gates.\n\n"
         f"Iteration: {iteration}\n\n"
         f"### Original Task\n{task_prompt}\n"
     )
@@ -531,7 +547,7 @@ def satisfied_report_for_ci_delegated_validation(
     (#743). Any non-validation gap (implementation, test, docs, …) still fails,
     so genuine plan gaps are unaffected.
     """
-    if report.satisfied:
+    if report.status != PlanConformanceStatus.needs_iteration:
         return None
     if not report.gaps:
         return None
@@ -848,6 +864,26 @@ def parse_conformance_report(text: str) -> PlanConformanceReport:
         )
 
     status = _status_from_payload(payload.get("status"))
+    if status == PlanConformanceStatus.needs_human:
+        summary_value = payload.get("summary")
+        decision_value = payload.get("decision_request")
+        if not all(
+            isinstance(value, str) and 0 < len(value.strip()) <= MAX_CONFORMANCE_TEXT_CHARS
+            for value in (summary_value, decision_value)
+        ):
+            return PlanConformanceReport(
+                status=PlanConformanceStatus.needs_iteration,
+                summary="Decision report requires bounded nonblank summary and decision_request strings.",
+                gaps=("Produce a valid plan-conformance JSON report.",),
+                reason_code="PLAN_CONFORMANCE_REPORT_INVALID",
+            )
+        return PlanConformanceReport(
+            status=status,
+            summary=str(summary_value).strip(),
+            gaps=_gaps_from_payload(payload.get("gaps")),
+            reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+            decision_request=str(decision_value).strip(),
+        )
     gaps = _gaps_from_payload(payload.get("gaps"))
     summary = str(payload.get("summary") or "").strip() or (
         "Plan satisfied." if status == PlanConformanceStatus.satisfied else "Plan gaps remain."
@@ -884,6 +920,8 @@ def changed_paths_from_porcelain(output: str) -> set[Path]:
 
 
 def _status_from_payload(value: Any) -> PlanConformanceStatus:
+    if value == "needs_human":
+        return PlanConformanceStatus.needs_human
     normalized = str(value or "").strip().lower().replace("-", "_")
     if normalized in {"satisfied", "pass", "passed", "ok", "complete", "completed"}:
         return PlanConformanceStatus.satisfied

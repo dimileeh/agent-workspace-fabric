@@ -964,7 +964,7 @@ async def test_hosted_recovery_validation_routes_through_hosted_delegate(
         ("setup", "pre_agent"),
         ("setup", "pre_agent", "post_agent", "validate"),
     ]
-    assert len(hosted_validation.preflight_calls) == 1
+    assert hosted_validation.preflight_calls == []
     setup_kwargs = hosted_validation.calls[0]["kwargs"]
     validation_kwargs = hosted_validation.calls[1]["kwargs"]
     assert setup_kwargs["pr_identity"]["pr_url"] == "https://github.com/x/y/pull/1"

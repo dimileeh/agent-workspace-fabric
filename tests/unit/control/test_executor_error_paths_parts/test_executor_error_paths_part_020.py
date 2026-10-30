@@ -27,15 +27,12 @@ from awf.control.executor.monitor_handoff import (
 )
 from awf.control.executor.monitor_handoff_setup import (
     _MonitorHandoffSetupFailureError,
-    _run_monitor_handoff_profile_preflight,
     _run_monitor_handoff_profile_setup,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
-from awf.profiles.models import ProfileCommand, WorkspaceProfile
-from awf.runtime.hosted_delegation import HostedDelegationConfig, HostedValidationDelegate
-from awf.runtime.validation import PROFILE_VALIDATION_TOOL_UNAVAILABLE, ValidationResult
+from awf.runtime.validation import ValidationResult
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_005 import (
     _make_executor,
     _seed_ready,
@@ -496,119 +493,6 @@ class TestRecordMonitorRuntimeRestartFailed:
 
 
 class TestHandoffProfilePreflightAndSetupReraise:
-    @pytest.mark.unit
-    async def test_hosted_preflight_uses_static_profile_tool_preflight(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        mark_failed_calls: list[dict[str, Any]] = []
-        delegate = HostedValidationDelegate(
-            HostedDelegationConfig(
-                base_url="https://hosted.example.test",
-                bearer_token="secret-token",
-                poll_interval_seconds=0.001,
-                operation_timeout_seconds=1.0,
-                request_timeout_seconds=1.0,
-                cancel_timeout_seconds=1.0,
-                max_output_bytes=100_000,
-            ),
-            artifacts_dir=tmp_path,
-        )
-        profile = WorkspaceProfile(
-            name="hosted-profile-preflight",
-            phases={
-                "setup": [ProfileCommand(command="uv sync --extra dev")],
-                "validate": [ProfileCommand(command="uv run ruff check src/awf")],
-            },
-        )
-
-        class _Executor:
-            async def _mark_failed(self, **kwargs: Any) -> None:
-                mark_failed_calls.append(kwargs)
-
-        result = await _run_monitor_handoff_profile_preflight(
-            _Executor(),
-            workspace_id="ws-hosted-preflight",
-            validation=delegate,
-            profile=profile,
-        )
-
-        assert result is False
-        assert len(mark_failed_calls) == 1
-        call = mark_failed_calls[0]
-        assert call["reason_code"] == PROFILE_VALIDATION_TOOL_UNAVAILABLE
-        assert call["failure_reason"] == FailureReason.profile_resolution_failure
-        assert call["message"] == "profile preflight failed: profile validation tool preflight"
-
-    @pytest.mark.unit
-    async def test_preflight_generic_exception_marks_setup_failed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # A profile-tool preflight that raises an unexpected error (not a
-        # setup-failure) is redacted and marked PR_MONITOR_SETUP_FAILED.
-        mark_failed_calls: list[dict[str, Any]] = []
-        log_events: list[str] = []
-
-        class _Logger:
-            def exception(self, event: str, **_kwargs: Any) -> None:
-                log_events.append(event)
-
-        class _Validation:
-            async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-                raise RuntimeError("preflight exploded ghp_FAKESECRET0000000")
-
-        class _Executor:
-            async def _mark_failed(self, **kwargs: Any) -> None:
-                mark_failed_calls.append(kwargs)
-
-        monkeypatch.setattr(monitor_handoff_setup_module, "_log", _Logger())
-
-        result = await _run_monitor_handoff_profile_preflight(
-            _Executor(),
-            workspace_id="ws-preflight",
-            validation=_Validation(),
-            profile=object(),
-        )
-
-        assert result is False
-        assert log_events == ["executor.monitor_handoff_profile_preflight_failed"]
-        assert len(mark_failed_calls) == 1
-        call = mark_failed_calls[0]
-        assert call["reason_code"] == PR_MONITOR_SETUP_FAILED_REASON_CODE
-        assert call["failure_reason"] == FailureReason.infrastructure_failure
-        assert call["message"].startswith("monitor handoff profile preflight failed: ")
-        assert "ghp_FAKESECRET0000000" not in call["message"]
-
-    @pytest.mark.unit
-    async def test_preflight_reraises_escaping_setup_failure(self) -> None:
-        # A setup-failure payload that escapes the preflight call already carries
-        # its own terminal transition, so the preflight wrapper re-raises it
-        # rather than re-wrapping it as a fresh infra failure or marking failed.
-        escaping = _MonitorHandoffSetupFailureError(
-            failure_reason=FailureReason.service_startup_failure,
-            message="preflight already failed the workspace",
-            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
-        )
-
-        class _Validation:
-            async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-                raise escaping
-
-        class _Executor:
-            async def _mark_failed(self, **_kwargs: Any) -> None:
-                raise AssertionError("escaping preflight failures must not be re-marked")
-
-        with pytest.raises(_MonitorHandoffSetupFailureError) as exc_info:
-            await _run_monitor_handoff_profile_preflight(
-                _Executor(),
-                workspace_id="ws-preflight-escape",
-                validation=_Validation(),
-                profile=object(),
-            )
-
-        assert exc_info.value is escaping
-
     @pytest.mark.unit
     async def test_setup_reraises_setup_failure_escaping_run_profile_phases(
         self,

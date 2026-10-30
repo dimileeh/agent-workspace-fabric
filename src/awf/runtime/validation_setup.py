@@ -54,7 +54,6 @@ from awf.runtime.validation_coverage import (
 )
 from awf.runtime.validation_types import (
     ProfileExecutionCommand,
-    ProfileValidationToolPreflightFinding,
     SetupDependencyNetworkClassification,
     ValidationCommandResult,
 )
@@ -91,7 +90,6 @@ HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
 HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
 HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
 PYTEST_TEST_FAILURE = "PYTEST_TEST_FAILURE"
-PROFILE_PREFLIGHT_PHASE = "profile_preflight"
 PROFILE_VALIDATION_TOOL_UNAVAILABLE = "PROFILE_VALIDATION_TOOL_UNAVAILABLE"
 DATABASE_GENERATED_SETUP_FAILED = "DATABASE_GENERATED_SETUP_FAILED"
 DATABASE_GENERATED_SETUP_TIMEOUT = "DATABASE_GENERATED_SETUP_TIMEOUT"
@@ -109,7 +107,6 @@ _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
 _SETUP_DEPENDENCY_NETWORK_FAILURE_BLOCK_RADIUS = 6
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_RETRY_BUDGET = 2
 _SETUP_DEPENDENCY_NETWORK_DEFAULT_BACKOFF_SECONDS = (1.0, 3.0)
-_UV_DEV_VALIDATION_TOOLS = frozenset({"mypy", "pre-commit", "pytest", "ruff"})
 _UV_OPTION_VALUE_FLAGS = frozenset(
     {
         "--config-setting",
@@ -146,6 +143,7 @@ _UV_OPTION_VALUE_FLAGS = frozenset(
         "-p",
     }
 )
+
 _PROFILE_PHASE_EXECUTION_ORDER = {
     "setup": 0,
     "pre_agent": 1,
@@ -247,107 +245,6 @@ def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecut
         ProfileExecutionCommand(phase=phase_name, command=command)
         for phase_name, command in profile.phases.commands_for((phase,))
     ]
-
-
-def profile_validation_tool_preflight_findings(
-    profile: WorkspaceProfile,
-) -> list[ProfileValidationToolPreflightFinding]:
-    """Return validation commands that may drop setup-installed dev tools.
-
-    ``uv sync --extra dev`` installs tools such as ruff/mypy/pytest into the
-    project environment. A later bare ``uv run ruff`` can re-resolve without
-    that extra and remove the tool before spawning it. Catch that profile bug
-    before the agent spends time on a task.
-    """
-    if not _setup_syncs_uv_dev_dependencies(profile):
-        return []
-    findings: list[ProfileValidationToolPreflightFinding] = []
-    for command in profile.phases.validate_commands:
-        metadata = _uv_run_metadata(command.command)
-        if metadata is None or metadata["tool"] not in _UV_DEV_VALIDATION_TOOLS:
-            continue
-        if metadata["has_dev_scope"]:
-            continue
-        tool = str(metadata["tool"])
-        findings.append(
-            ProfileValidationToolPreflightFinding(
-                command=command.command,
-                tool=tool,
-                reason_code=PROFILE_VALIDATION_TOOL_UNAVAILABLE,
-                message=(
-                    f"validation command runs dev tool '{tool}' through `uv run` "
-                    "without `--extra dev`, `--group dev`, or `--all-extras` "
-                    "after setup installed dev dependencies"
-                ),
-            )
-        )
-    return findings
-
-
-def _setup_syncs_uv_dev_dependencies(profile: WorkspaceProfile) -> bool:
-    return any(_uv_command_has_dev_scope(command.command) for command in profile.phases.setup)
-
-
-def _uv_command_has_dev_scope(command: str) -> bool:
-    tokens = _shell_tokens(command)
-    if tokens is None or len(tokens) < 2:
-        return False
-    if tokens[0:2] not in (["uv", "sync"], ["uv", "run"]):
-        return False
-    metadata = _uv_run_metadata(command) if tokens[1] == "run" else None
-    if metadata is not None:
-        return bool(metadata["has_dev_scope"])
-    return _uv_tokens_include_dev_scope(tokens[2:])
-
-
-def _uv_run_metadata(command: str) -> dict[str, object] | None:
-    tokens = _shell_tokens(command)
-    if tokens is None or len(tokens) < 3 or tokens[0:2] != ["uv", "run"]:
-        return None
-    has_dev_scope = False
-    index = 2
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--":
-            index += 1
-            break
-        if token in {"--all-extras", "--dev"}:
-            has_dev_scope = True
-            index += 1
-            continue
-        if token in {"--extra", "--group"}:
-            value = tokens[index + 1] if index + 1 < len(tokens) else ""
-            has_dev_scope = has_dev_scope or value == "dev"
-            index += 2
-            continue
-        if token.startswith("--extra=") or token.startswith("--group="):
-            has_dev_scope = has_dev_scope or token.split("=", 1)[1] == "dev"
-            index += 1
-            continue
-        if token.startswith("-"):
-            index += 2 if token in _UV_OPTION_VALUE_FLAGS else 1
-            continue
-        break
-    if index >= len(tokens):
-        return None
-    return {"tool": tokens[index], "has_dev_scope": has_dev_scope}
-
-
-def _uv_tokens_include_dev_scope(tokens: list[str]) -> bool:
-    for index, token in enumerate(tokens):
-        if token in {"--all-extras", "--dev"}:
-            return True
-        if (
-            token in {"--extra", "--group"}
-            and index + 1 < len(tokens)
-            and tokens[index + 1] == "dev"
-        ):
-            return True
-        if (token.startswith("--extra=") or token.startswith("--group=")) and token.split("=", 1)[
-            1
-        ] == "dev":
-            return True
-    return False
 
 
 _SETUP_DEPENDENCY_COMMAND_VERBS: dict[str, frozenset[str]] = {

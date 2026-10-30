@@ -70,6 +70,7 @@ async def enter_blocked_for_protected_violation_in_session(
     resume_phase: str,
     block_type: str = PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     block_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+    transition_reason_code: str = PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
     execution_owner_id: str | None = None,
     monitor_owner_id: str | None = None,
     fence_unclaimed_monitor: bool = False,
@@ -134,7 +135,7 @@ async def enter_blocked_for_protected_violation_in_session(
         workspace_id,
         from_status=from_status,
         to=WorkspaceStatus.blocked,
-        reason_code=PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
+        reason_code=transition_reason_code,
         payload=payload,
         extra_conditions=extra_conditions,
     )

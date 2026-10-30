@@ -354,6 +354,13 @@ close a `NotifyHuman` loop without cancel + re-adopt; prefer it over overloading
 `remonitor --reason`. `directive` is the instruction; `reason` is audit-only.
 Auth required. Requires `Idempotency-Key` and supports `If-Match`.
 
+The same endpoint resumes a pre-PR conformance decision pause
+(`block_type=plan_conformance_decision`). Read the conformance report or workspace
+transition event, then supply the answer in a nonblank `directive`; `reason` or
+file grants alone cannot resume this pause. The existing checkout is preserved
+and validation and merge gates still apply. See
+[Workspace Profiles](CONCEPTS.md#workspace-profiles) for the conformance contract.
+
 ```bash
 curl -X POST "http://localhost:8000/v1/workspaces/ws_123/guide" \
   -H "Authorization: Bearer $AWF_API_TOKEN" \
@@ -688,11 +695,11 @@ the external callback envelope.
 
 | Field | When present | Notes |
 |---|---|---|
-| `source` | always | `"monitoring_pr"` (HUMAN_WAIT) or `"blocked"` (protected-gate pause) |
+| `source` | always | `"monitoring_pr"` (HUMAN_WAIT) or `"blocked"` (protected-gate or conformance decision pause) |
 | `reason` | always (may be `null`) | `monitoring_pr`: escalation reason (nullable). `blocked`: explicit reason, else `block_reason_code` (may still be `null`) |
 | `pr_url` | `monitoring_pr` only, when truthy | Omitted unless the workspace row has a truthy PR URL; never emitted as `null` |
-| `block_reason_code` | always on `blocked` | Durable protected-gate reason code; key always present, value may be `null` |
-| `block_type` | always on `blocked` | e.g. `protected_quality_gate`; key always present, value may be `null` |
+| `block_reason_code` | always on `blocked` | Durable pause reason code; key always present, value may be `null` |
+| `block_type` | always on `blocked` | e.g. `protected_quality_gate` or `plan_conformance_decision`; key always present, value may be `null` |
 
 `monitoring_pr_attention_payload` always includes `reason` and `source`; `reason`
 may be `null`, and `pr_url` is omitted unless truthy.

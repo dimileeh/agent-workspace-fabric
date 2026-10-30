@@ -22,7 +22,12 @@ from awf.common.ids import new_operator_grant_id
 from awf.control.blocked_transition import is_monitor_origin_block_resume_phase
 from awf.control.quality_gates import _grant_matches
 from awf.control.state_machine import WorkspaceStateMachine
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import (
+    PLAN_CONFORMANCE_DECISION_BLOCK_TYPE,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -160,6 +165,8 @@ async def guide_workspace(
         raise WorkspaceGuideStateError(workspace)
 
     if current == WorkspaceStatus.blocked:
+        if workspace.block_type == PLAN_CONFORMANCE_DECISION_BLOCK_TYPE and not directive_text:
+            raise WorkspaceGuideEmptyDirectiveError()
         # Pre-PR operator decision: arm scoped grants and/or a directive on the
         # paused workspace so the worker resume path can pick it up. No PR exists
         # yet, so the ``pr_url`` requirement is relaxed for this branch.
