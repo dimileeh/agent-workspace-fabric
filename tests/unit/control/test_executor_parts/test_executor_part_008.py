@@ -793,6 +793,7 @@ async def test_post_validation_decision_pauses_before_push(
     monkeypatch: pytest.MonkeyPatch,
     operation_status: OperationStatus,
 ) -> None:
+    from awf.control.executor import planning_artifacts
     from awf.control.executor.types import _PlanningNeedsHuman
     from awf.runtime.planning import parse_conformance_report
     from tests.unit.runtime.test_conformance_decision import decision_payload
@@ -841,6 +842,30 @@ async def test_post_validation_decision_pauses_before_push(
         )
 
     monkeypatch.setattr(executor, "_run_post_validation_conformance_check", needs_decision)
+    pause_for_decision = planning_artifacts.pause_for_conformance_decision
+
+    async def pause_after_operation_finished(*args: Any, **kwargs: Any) -> None:
+        # Publishing the pause permits a concurrent resume; the old request must
+        # already be terminal so it cannot be reused for that validation.
+        async with factory() as session:
+            operations = OperationRepository(session)
+            operation = await operations.get(operation_id)
+            assert operation is not None
+            assert operation.status == OperationStatus.failed.value
+            assert operation.finished_at is not None
+            assert (
+                await operations.find_active_matching_payload(
+                    workspace_id=ws_id,
+                    operation_type=OperationType.validate,
+                    payload_identity={"reason": "manual_validate", "requested_tier": 2},
+                )
+                is None
+            )
+        await pause_for_decision(*args, **kwargs)
+
+    monkeypatch.setattr(
+        planning_artifacts, "pause_for_conformance_decision", pause_after_operation_finished
+    )
     await executor.resume_blocked_execution(ws_id)
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
