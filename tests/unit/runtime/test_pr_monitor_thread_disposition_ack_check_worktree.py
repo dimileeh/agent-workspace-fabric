@@ -243,6 +243,33 @@ async def test_edits_before_a_failed_run_are_rolled_back_too(
     assert _snapshot(worktree) == before
 
 
+async def test_edits_before_a_cancelled_run_are_rolled_back_before_it_propagates(
+    tmp_path: Path,
+) -> None:
+    # ``UNJUDGED`` is already saved, so after a restart the thread takes the
+    # fallback, whose repair would refuse the agent's left-over edits.
+    worktree = _worktree(tmp_path)
+    before = _snapshot(worktree)
+    started = asyncio.Event()
+    runner = _runner(tmp_path, lambda: None)
+
+    async def run_agent(**kwargs: Any) -> Any:
+        (worktree / "core.py").write_text("x = 2\n")
+        (worktree / "scratch.py").write_text("y = 1\n")
+        started.set()
+        await asyncio.Event().wait()
+
+    runner._run_monitor_agent_with_service_recovery = run_agent
+    check = asyncio.create_task(_check(runner))
+    await started.wait()
+    check.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await check
+    assert _snapshot(worktree) == before
+    assert not (worktree / "scratch.py").exists()
+
+
 async def test_an_untouched_worktree_keeps_the_answer(tmp_path: Path) -> None:
     worktree = _worktree(tmp_path)
     before = _snapshot(worktree)
