@@ -8,13 +8,13 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NoReturn
-from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import and_, column, insert, or_, select, true, update, values
+from sqlalchemy import DateTime, and_, case, cast, column, insert, or_, select, true, update, values
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, raiseload
 
+from awf.common.ids import new_event_id
 from awf.db.models import (
     CallbackDelivery,
     CallbackSubscription,
@@ -544,13 +544,24 @@ async def reconcile(
         .limit(1)
     ):
         _unresolved()
+    expiry = PreparationRow.binding["expires_at"].as_string()
+    # Only an explicitly timezone-bound expired preparation is inert. Unknown
+    # metadata stays in the bounded inventory and must validate before acceptance.
+    live = case(
+        (
+            expiry.regexp_match(r"(Z|[+-][0-9]{2}:[0-9]{2})$"),
+            cast(expiry, DateTime(timezone=True)) > datetime.now(UTC),
+        ),
+        else_=True,
+    )
     preparations = (
         await session.execute(
             select(PreparationRow.id, PreparationRow.binding)
             .where(
+                live,
                 select(Grant.id)
                 .where(Grant.preparation == PreparationRow.id, Grant.revoked.is_(False))
-                .exists()
+                .exists(),
             )
             .limit(MAX_ACTIVE_PREPARATIONS + 1)
         )
@@ -559,6 +570,10 @@ async def reconcile(
         _unresolved()
     retired = []
     for preparation_id, binding in preparations:
+        try:
+            Preparation.aware(datetime.fromisoformat(binding["expires_at"]))
+        except ValueError:
+            _unresolved()
         bound = Identity.model_validate(binding["identity"])
         if bound != identity:
             if bound.owner != identity.owner or bound.boot_epoch >= identity.boot_epoch:
@@ -622,7 +637,7 @@ async def reconcile(
         # them and accidentally flush a per-row update over the bulk statements.
         events.append(
             {
-                "id": str(uuid4()),
+                "id": new_event_id(),
                 "workspace_id": workspace.id,
                 "event_type": "workspace.recovery_accepted",
                 "old_state": workspace.status,

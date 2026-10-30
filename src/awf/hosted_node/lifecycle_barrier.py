@@ -95,8 +95,7 @@ def replace_barrier(connection: Connection) -> None:
                          AND (w.id IN (before_row->>'workspace_id', after_row->>'workspace_id')
                            OR (TG_TABLE_NAME = 'tasks' AND EXISTS (
                                SELECT 1 FROM task_attempts a WHERE a.workspace_id = w.id
-                                 AND a.task_id IN (before_row->>'id', after_row->>'id')))
-                           OR TG_TABLE_NAME = 'service_gc_requests')
+                                 AND a.task_id IN (before_row->>'id', after_row->>'id'))))
                    )) THEN
                     RAISE EXCEPTION 'RECOVERY_ATTENTION_REQUIRED' USING ERRCODE = '55000';
                 END IF;

@@ -212,7 +212,7 @@ class NodeLifecycle:
             # Do not enter draining: accepted claims, operations and credential
             # consumers must remain writable until ordinary quiescence is true.
             row.maintenance_generation = generation
-            return self.status(row, await database_quiescent(session), None)
+        return await self.readiness()
 
     async def release_maintenance(self, generation: int) -> LifecycleStatus:
         async with self.factory.begin() as session:
@@ -226,7 +226,7 @@ class NodeLifecycle:
             ):
                 raise MaterialDeniedError("MAINTENANCE_GENERATION_MISMATCH")
             # Releasing maintenance does not acknowledge recovery or abort drain.
-            return self.status(row, await database_quiescent(session), None)
+        return await self.readiness()
 
     async def drain(self, generation: int) -> LifecycleStatus:
         async with self.factory.begin() as session:
