@@ -67,7 +67,9 @@ def _runner(tmp_path: Path, agent: Callable[[], Any], runner: Any = None) -> Any
 
     return SimpleNamespace(
         _worktrees_root=tmp_path,
-        _deps=SimpleNamespace(runner=runner or AsyncioSubprocessRunner()),
+        _deps=SimpleNamespace(
+            runner=runner or AsyncioSubprocessRunner(), adapter=SimpleNamespace(is_hosted=False)
+        ),
         _run_monitor_agent_with_service_recovery=run_agent,
         _handle_provider_agent_run_error=handle_provider_error,
     )
@@ -360,3 +362,133 @@ async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_pat
     assert _git(other, "status", "--porcelain") == ""
     [log] = [r for r in captured if r["event"] == _RESTORE_FAILED]
     assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
+
+
+def _hosted(tmp_path: Path) -> tuple[Path, Path, str]:
+    # A worktree tracking a PR branch ``feature`` on a bare remote.
+    worktree = _worktree(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    _git(worktree, "push", "-q", str(remote), "HEAD:refs/heads/feature")
+    return worktree, remote, _git(worktree, "rev-parse", "HEAD").strip()
+
+
+def _publish(worktree: Path, remote: Path) -> str:
+    # What a hosted run does: publish a commit, then AWF syncs the worktree to it.
+    clone = worktree.parent / "hosted"
+    subprocess.run(["git", "clone", "-q", "-b", "feature", str(remote), str(clone)], check=True)
+    (clone / "core.py").write_text("x = 2\n")
+    _git(clone, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "hosted")
+    _git(clone, "push", "-q", "origin", "feature")
+    _git(worktree, "fetch", "-q", str(remote), "feature")
+    _git(worktree, "reset", "-q", "--hard", "FETCH_HEAD")
+    return _git(worktree, "rev-parse", "HEAD").strip()
+
+
+def _hosted_runner(tmp_path: Path, remote: Path, agent: Callable[[], Any]) -> Any:
+    runner = _runner(tmp_path, agent)
+    runner._deps.adapter.is_hosted = True
+
+    async def identity(workspace_id: str, *, state: Any = None) -> dict[str, object]:
+        return {"repo_url": str(remote), "head_ref": "feature"}
+
+    runner._hosted_pr_identity_for_workspace = identity
+    return runner
+
+
+async def _check_with(runner: Any, state: MonitorState) -> tuple[str, str]:
+    return await _judge(
+        runner,
+        workspace_id="ws",
+        compose_project="proj",
+        compose_file=Path("/tmp/compose.yml"),
+        state=state,
+        reply="Thanks, that makes sense.",
+        prompt="judge",
+    )
+
+
+def _refused() -> Any:
+    raise AgentRunError(
+        agent="codex_cloud",
+        result=CommandResult(1, "", "refused"),
+        reason_code="HOSTED_REMOTE_HEAD_DELTA_REJECTED",
+    )
+
+
+@pytest.mark.parametrize(
+    ("recorded", "finish", "detail"),
+    [
+        pytest.param(True, lambda: SimpleNamespace(stdout=_ACK), "worktree_changed", id="synced"),
+        # The delta gate refused the synced head: published, yet not in the state.
+        pytest.param(
+            False, _refused, "agent_failed:HOSTED_REMOTE_HEAD_DELTA_REJECTED", id="gate-refused"
+        ),
+    ],
+)
+async def test_a_hosted_run_that_published_a_head_is_rolled_back_on_the_pr_too(
+    tmp_path: Path, recorded: bool, finish: Callable[[], Any], detail: str
+) -> None:
+    worktree, remote, start = _hosted(tmp_path)
+    state = MonitorState(last_push_sha=start)
+
+    def agent() -> Any:
+        head = _publish(worktree, remote)
+        if recorded:
+            state.last_push_sha, state.hosted_terminal_head_advanced = head, True
+        return finish()
+
+    assert await _check_with(_hosted_runner(tmp_path, remote, agent), state) == (UNJUDGED, detail)
+
+    assert _git(remote, "rev-parse", "refs/heads/feature").strip() == start
+    assert _git(worktree, "rev-parse", "HEAD").strip() == start
+    assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (start, False)
+
+
+async def test_a_failed_hosted_rollback_keeps_the_published_head_in_the_state(
+    tmp_path: Path,
+) -> None:
+    # The lease sees the PR moved on again, so nothing is overwritten and the
+    # state still names the head the PR carries.
+    worktree, remote, start = _hosted(tmp_path)
+    state = MonitorState(last_push_sha=start)
+    published: list[str] = []
+
+    def agent() -> Any:
+        published.append(_publish(worktree, remote))
+        state.last_push_sha, state.hosted_terminal_head_advanced = published[0], True
+        later = _git(
+            remote,
+            "-c",
+            "user.email=a@b",
+            "-c",
+            "user.name=a",
+            "commit-tree",
+            f"{start}^{{tree}}",
+            "-p",
+            published[0],
+            "-m",
+            "later",
+        ).strip()
+        _git(remote, "update-ref", "refs/heads/feature", later)
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _check_with(_hosted_runner(tmp_path, remote, agent), state)
+
+    assert result == (UNJUDGED, "worktree_changed")
+    assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (published[0], True)
+    [log] = [
+        r for r in captured if r["event"] == "monitor.hosted_terminal_head_remote_rollback_failed"
+    ]
+    assert log["reason_code"] == "HOSTED_REMOTE_HEAD_ROLLBACK_FAILED"
+
+
+async def test_a_hosted_run_that_published_nothing_keeps_the_answer(tmp_path: Path) -> None:
+    worktree, remote, start = _hosted(tmp_path)
+    state = MonitorState(last_push_sha=start)
+    runner = _hosted_runner(tmp_path, remote, lambda: SimpleNamespace(stdout=_ACK))
+
+    assert await _check_with(runner, state) == (ACKNOWLEDGES, "judged")
+    assert _git(remote, "rev-parse", "refs/heads/feature").strip() == start
+    assert state.last_push_sha == start
