@@ -160,7 +160,9 @@ class HostRuntime:
                 sample = await self._observe(
                     identity,
                     allow_busy=self.config.runtime_enabled,
-                    require_database_quiescent=not self.config.runtime_enabled,
+                    # Logical retained work is not unhealthy physical storage.
+                    # Lifecycle status still derives idle/drain quiescence.
+                    require_database_quiescent=False,
                 )
                 if sample is not None:
                     return HostObservation(

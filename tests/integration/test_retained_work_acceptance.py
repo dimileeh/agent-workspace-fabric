@@ -122,14 +122,16 @@ async def retained(authority, request, tmp_path):
 
 
 @asynccontextmanager
-async def replacement(authority, tmp_path, *, maintenance_generation=7):
+async def replacement(
+    authority, tmp_path, *, maintenance_generation=7, incarnation="8063738394745155542"
+):
     old, value, factory = authority
     previous = old.receiver.identity
     await old.receiver.lifecycle.begin_maintenance(maintenance_generation)
     receiver = await Receiver.start(
         old.receiver.config.model_copy(
             update={
-                "incarnation": "8063738394745155542",
+                "incarnation": incarnation,
                 "recovery_generation": previous.recovery_generation + 1,
             }
         ),
@@ -348,6 +350,11 @@ async def seed_family(session, family, owner):
     elif family == "missing_attempt":
         await session.execute(delete(TaskAttempt))
         await session.execute(delete(Task))
+    elif family in {"execution_claim", "monitor_claim"}:
+        workspace = await session.get(Workspace, WS)
+        prefix = family.removesuffix("_claim")
+        setattr(workspace, f"{prefix}_claimed_by", "retired-worker")
+        setattr(workspace, f"{prefix}_claim_expires_at", now - timedelta(minutes=1))
     elif family == "orphan_task":
         session.add(
             Task(
@@ -1131,6 +1138,157 @@ async def test_public_attention_preserves_nonhosted_monitor_gate(client, engine,
             assert body["awaiting_human_reason"] == "Existing human episode"
         else:
             assert body["awaiting_human_since"] is None and body["awaiting_human_reason"] is None
+
+
+@pytest.mark.parametrize(
+    "retained",
+    [
+        {"kind": "terminal", "family": "execution_claim"},
+        {"kind": "terminal", "family": "monitor_claim"},
+    ],
+    indirect=True,
+)
+async def test_quiescent_boot_still_counts_parked_terminal_attention(retained):
+    client, runtime, factory, _, value, root = retained
+    first = await client.post(PREFIX + "/recovery/acknowledge", json=ACK)
+    assert first.status_code == 200, first.text
+    assert first.json()["recovery_acceptance"]["attention_workspaces"] == 1
+    assert first.json()["database_quiescent"]
+    async with factory() as session:
+        workspace = await session.get(Workspace, WS)
+        original_policy = deepcopy(workspace.task_policy)
+        original_version = workspace.version
+        assert workspace.status == "completed"
+        assert workspace.execution_claimed_by is workspace.monitor_claimed_by is None
+
+    assert (
+        await client.post(PREFIX + "/maintenance/release", json={"generation": 7})
+    ).status_code == 200
+    async with factory.begin() as session:
+        session.add_all(
+            Workspace(
+                id=f"ws_history_{index}",
+                node_id=runtime.receiver.identity.owner,
+                status="completed",
+                repo_url="https://example.test/history",
+                branch_base="main",
+                task_title="Inert history",
+                task_prompt="Synthetic",
+                agent="codex",
+            )
+            for index in range(2048)
+        )
+        await session.flush()
+        session.add_all(
+            WorkspaceEvent(
+                id=f"history-{index}",
+                workspace_id=f"ws_history_{index}",
+                event_type="workspace.completed",
+            )
+            for index in range(2048)
+        )
+        session.add_all(
+            Operation(
+                id=f"history-op-{index}",
+                workspace_id=f"ws_history_{index}",
+                type="execute",
+                status="succeeded",
+            )
+            for index in range(2048)
+        )
+    async with replacement(
+        (runtime, value, factory),
+        root,
+        maintenance_generation=8,
+        incarnation="8063738394745155543",
+    ) as third:
+        loaded = []
+
+        def record_load(_session, instance):
+            loaded.append((type(instance).__name__, getattr(instance, "id", None)))
+
+        event.listen(Session, "loaded_as_persistent", record_load)
+        try:
+            async with factory.begin() as historical_reader:
+                await historical_reader.execute(
+                    text("SELECT id FROM workspaces WHERE id LIKE 'ws_history_%' FOR UPDATE")
+                )
+                await historical_reader.execute(
+                    text("SELECT id FROM workspace_events WHERE id LIKE 'history-%' FOR UPDATE")
+                )
+                response = await asyncio.wait_for(
+                    third[0].post(PREFIX + "/recovery/acknowledge", json=ACK), timeout=5
+                )
+        finally:
+            event.remove(Session, "loaded_as_persistent", record_load)
+        assert response.status_code == 200, response.text
+        assert response.json()["database_quiescent"]
+        acceptance = response.json()["recovery_acceptance"]
+        assert acceptance["previous_identity"] == runtime.receiver.identity.model_dump()
+        assert acceptance["attention_workspaces"] == 1
+        assert acceptance["queued_workspaces"] == acceptance["monitor_workspaces"] == 0
+        assert (await third[0].get(PREFIX + "/readiness")).json()[
+            "recovery_acceptance"
+        ] == acceptance
+        assert (await third[0].post(PREFIX + "/recovery/acknowledge", json=ACK)).json()[
+            "recovery_acceptance"
+        ] == acceptance
+        assert ("Workspace", WS) in loaded
+        assert not any(
+            name in {"WorkspaceEvent", "Operation", "TaskAttempt", "Task"} for name, _ in loaded
+        )
+        assert not any(str(key).startswith("ws_history_") for _, key in loaded)
+        async with factory() as session:
+            workspace = await session.get(Workspace, WS)
+            assert (
+                workspace.task_policy == original_policy and workspace.version == original_version
+            )
+            assert workspace.status == "completed"
+            assert workspace.execution_claimed_by is workspace.monitor_claimed_by is None
+            assert (
+                len(
+                    list(
+                        await session.scalars(
+                            select(WorkspaceEvent.id).where(WorkspaceEvent.workspace_id == WS)
+                        )
+                    )
+                )
+                == 1
+            )
+        with pytest.raises(DBAPIError, match="RECOVERY_ATTENTION_REQUIRED"):
+            async with factory.begin() as session:
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == WS)
+                    .values(execution_claimed_by="new-worker")
+                )
+
+
+@pytest.mark.parametrize(
+    "retained", [{"kind": "terminal", "family": "execution_claim"}], indirect=True
+)
+async def test_quiescent_parked_attention_still_obeys_inventory_limit(retained, monkeypatch):
+    from awf.hosted_node import retained_work
+
+    client, runtime, factory, _, value, root = retained
+    first = await client.post(PREFIX + "/recovery/acknowledge", json=ACK)
+    assert first.status_code == 200, first.text
+    assert first.json()["database_quiescent"]
+    assert first.json()["recovery_acceptance"]["attention_workspaces"] == 1
+    monkeypatch.setattr(retained_work, "MAX_RETAINED_WORKSPACES", 0)
+    async with replacement(
+        (runtime, value, factory),
+        root,
+        maintenance_generation=8,
+        incarnation="8063738394745155543",
+    ) as third:
+        response = await third[0].post(PREFIX + "/recovery/acknowledge", json=ACK)
+        assert response.status_code == 409, response.text
+        assert response.json()["error_code"] == "RECOVERY_OUTCOME_UNRESOLVED"
+        state = (await third[0].get(PREFIX + "/readiness")).json()
+        assert state["state"] == "recovering" and state["database_quiescent"]
+        assert state["recovery_acceptance"] is None
+        assert state["admission_closed"] and not state["node_ready"]
 
 
 @pytest.mark.parametrize("retained", ["terminal"], indirect=True)

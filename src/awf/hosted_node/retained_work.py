@@ -11,9 +11,9 @@ from typing import NoReturn
 from uuid import uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, column, insert, or_, select, true, update, values
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import raiseload
+from sqlalchemy.orm import aliased, raiseload
 
 from awf.db.models import (
     CallbackDelivery,
@@ -69,75 +69,147 @@ def _passive_monitor_operation(operation: Operation, workspace: Workspace) -> bo
     )
 
 
-async def _fresh_association(
+async def _fresh_associations(
     session: AsyncSession,
-    old: HostedWorkspace,
+    old: dict[str, HostedWorkspace],
     identity: Identity,
-) -> HostedWorkspace:
-    selected: dict[str, Binding] = {}
-    rows = (
-        await session.execute(
-            select(PreparationRow, Grant, Receipt)
-            .join(Grant, Grant.preparation == PreparationRow.id)
-            .join(Receipt, Receipt.id == Grant.current)
+) -> dict[str, HostedWorkspace]:
+    if not old:
+        return {}
+    selected: dict[str, dict[str, Binding]] = {key: {} for key in old}
+    counts: Counter[str] = Counter()
+    superseding = aliased(Grant)
+    scopes = values(column("workspace_id", Workspace.id.type), name="material_workspaces").data(
+        [(key,) for key in old]
+    )
+    # LATERAL preserves the existing per-workspace cap without N round trips or
+    # hydrating unrelated preparations. Streaming bounds the Python working set.
+    candidates = (
+        select(PreparationRow, Grant, Receipt)
+        .join(Grant, Grant.preparation == PreparationRow.id)
+        .join(Receipt, Receipt.id == Grant.current)
+        .where(
+            PreparationRow.owner == identity.owner,
+            PreparationRow.workspace_id == scopes.c.workspace_id,
+            Grant.revoked.is_(False),
+            Grant.pending.is_(None),
+            Receipt.state == "installed",
+            ~select(superseding.id)
             .where(
-                PreparationRow.owner == identity.owner,
-                PreparationRow.workspace_id == old.workspace_id,
-                Grant.revoked.is_(False),
-                Grant.pending.is_(None),
-                Receipt.state == "installed",
+                superseding.preparation == Grant.preparation,
+                or_(
+                    superseding.fence > Grant.fence,
+                    superseding.authorization_generation > Grant.authorization_generation,
+                ),
             )
-            .limit(MAX_ACTIVE_PREPARATIONS + 1)
+            .correlate(Grant)
+            .exists(),
         )
-    ).all()
-    if len(rows) > MAX_ACTIVE_PREPARATIONS:
-        raise MaterialDeniedError("RECOVERY_BINDINGS_REQUIRED")
+        .correlate(scopes)
+        .limit(MAX_ACTIVE_PREPARATIONS + 1)
+        .lateral("material_candidates")
+    )
+    rows = await session.stream(
+        select(
+            aliased(PreparationRow, candidates),
+            aliased(Grant, candidates),
+            aliased(Receipt, candidates),
+        )
+        .select_from(scopes.join(candidates, true()))
+        .execution_options(yield_per=256)
+    )
     now = datetime.now(UTC)
-    for role in ("agent", "github"):
-        anchor = getattr(old.credentials, role)
-        matches = []
-        for preparation, grant, receipt in rows:
+    try:
+        async for preparation, grant, receipt in rows:
+            workspace_id = preparation.workspace_id
+            counts[workspace_id] += 1
+            if counts[workspace_id] > MAX_ACTIVE_PREPARATIONS:
+                raise MaterialDeniedError("RECOVERY_BINDINGS_REQUIRED")
             binding = Binding.model_validate(receipt.binding)
             prepared = preparation.binding
-            if binding.identity != identity or binding.target != anchor.target:
-                continue
-            if (
-                receipt.owner != identity.owner
-                or receipt.grant != grant.id
-                or binding.namespace != anchor.namespace
-                or binding.purpose != anchor.purpose
-                or binding.workspace_id != old.workspace_id
-                or binding.preparation_id != preparation.preparation_id
-                or binding.grant_id != grant.grant_id
-                or binding.authorization_generation != anchor.authorization_generation
-                or binding.authorization_generation != grant.authorization_generation
-                or binding.revision != grant.revision
-                or binding.fence != grant.fence
-                or binding.expires_at <= now
-                or any(
-                    prepared.get(key) != binding.model_dump(mode="json")[key]
-                    for key in (
-                        "identity",
-                        "namespace",
-                        "workspace_id",
-                        "preparation_id",
-                        "purpose",
-                        "target",
+            for role in ("agent", "github"):
+                anchor = getattr(old[workspace_id].credentials, role)
+                if binding.identity != identity or binding.target != anchor.target:
+                    continue
+                if (
+                    receipt.owner != identity.owner
+                    or receipt.grant != grant.id
+                    or binding.namespace != anchor.namespace
+                    or binding.purpose != anchor.purpose
+                    or binding.workspace_id != workspace_id
+                    or binding.preparation_id != preparation.preparation_id
+                    or binding.grant_id != grant.grant_id
+                    or binding.authorization_generation != anchor.authorization_generation
+                    or binding.authorization_generation != grant.authorization_generation
+                    or binding.revision != grant.revision
+                    or binding.fence != grant.fence
+                    or binding.expires_at <= now
+                    or any(
+                        prepared.get(key) != binding.model_dump(mode="json")[key]
+                        for key in (
+                            "identity",
+                            "namespace",
+                            "workspace_id",
+                            "preparation_id",
+                            "purpose",
+                            "target",
+                        )
                     )
-                )
-                or Preparation.model_validate(
-                    {key: prepared[key] for key in Preparation.model_fields}
-                ).expires_at
-                < binding.expires_at
-            ):
-                raise MaterialDeniedError("RECOVERY_BINDINGS_REQUIRED")
-            matches.append(binding)
-        if len(matches) != 1:
+                    or Preparation.model_validate(
+                        {key: prepared[key] for key in Preparation.model_fields}
+                    ).expires_at
+                    < binding.expires_at
+                    or role in selected[workspace_id]
+                ):
+                    raise MaterialDeniedError("RECOVERY_BINDINGS_REQUIRED")
+                selected[workspace_id][role] = binding
+    finally:
+        await rows.close()
+    result = {}
+    for workspace_id, credentials in selected.items():
+        if set(credentials) != {"agent", "github"}:
             raise MaterialDeniedError("RECOVERY_BINDINGS_REQUIRED")
-        selected[role] = matches[0]
-    return HostedWorkspace.model_validate(
-        {"workspace_id": old.workspace_id, "credentials": selected}
+        result[workspace_id] = HostedWorkspace.model_validate(
+            {"workspace_id": workspace_id, "credentials": credentials}
+        )
+    return result
+
+
+async def _unresolved_operations(session: AsyncSession, workspaces: list[Workspace]) -> set[str]:
+    if not workspaces:
+        return set()
+    owned = {workspace.id: workspace for workspace in workspaces}
+    scopes = values(column("workspace_id", Workspace.id.type), name="operation_workspaces").data(
+        [(key,) for key in owned]
     )
+    candidates = (
+        select(Operation)
+        .where(
+            Operation.workspace_id == scopes.c.workspace_id,
+            Operation.status.not_in(_OP_TERMINAL),
+        )
+        .correlate(scopes)
+        .limit(MAX_ACTIVE_OPERATIONS_PER_WORKSPACE + 1)
+        .lateral("active_operations")
+    )
+    rows = await session.stream_scalars(
+        select(aliased(Operation, candidates))
+        .select_from(scopes.join(candidates, true()))
+        .options(raiseload("*"))
+        .execution_options(yield_per=256)
+    )
+    counts: Counter[str] = Counter()
+    unresolved = set()
+    try:
+        async for operation in rows:
+            counts[operation.workspace_id] += 1
+            if counts[operation.workspace_id] > MAX_ACTIVE_OPERATIONS_PER_WORKSPACE:
+                _unresolved()
+            if not _passive_monitor_operation(operation, owned[operation.workspace_id]):
+                unresolved.add(operation.workspace_id)
+    finally:
+        await rows.close()
+    return unresolved
 
 
 @dataclass
@@ -177,7 +249,10 @@ async def inspect_retained_work(
         # Quiescence does not inventory logical tasks without any owned attempt.
         _unresolved()
     idle = await database_quiescent(session)
-    if not idle:
+    attention = Workspace.task_policy[RECOVERY_POLICY_KEY]["disposition"].as_string() == "attention"
+    # Parked terminal outcomes remain unresolved after their stale claims are
+    # cleared, even though idle/drain quiescence no longer sees active work.
+    if not idle or await session.scalar(select(select(Workspace.id).where(attention).exists())):
         if previous is None:
             _unresolved()
         active_attempt = TaskAttempt.status.not_in(_TERMINAL)
@@ -263,9 +338,8 @@ async def inspect_retained_work(
                     .exists(),
                 )
             )
-        for query in invalid:
-            if (await session.execute(query.limit(1))).first() is not None:
-                _unresolved()
+        if await session.scalar(select(or_(*(query.exists() for query in invalid)))):
+            _unresolved()
 
         # The lifecycle mutex already serializes all ordinary guarded writes.
         # Historical events and terminal rows are evidence, not recovery work.
@@ -274,7 +348,7 @@ async def inspect_retained_work(
             Workspace.status.not_in(_TERMINAL),
             Workspace.execution_claimed_by.is_not(None),
             Workspace.monitor_claimed_by.is_not(None),
-            Workspace.task_policy[RECOVERY_POLICY_KEY]["disposition"].as_string() == "attention",
+            attention,
             and_(
                 Workspace.compose_project_name.is_not(None),
                 ~terminal_runtime_effectively_released_expr(correlated_to=Workspace),
@@ -284,19 +358,77 @@ async def inspect_retained_work(
                 for model, active in families
             ),
         )
-        workspaces = list(
-            await session.scalars(
-                select(Workspace)
+        attempt = TaskAttempt.workspace_id == Workspace.id
+        facts = (
+            select(TaskAttempt.id).where(attempt).exists(),
+            select(TaskAttempt.id)
+            .where(
+                attempt,
+                or_(
+                    TaskAttempt.status != "requested",
+                    TaskAttempt.attempt_number != 1,
+                    TaskAttempt.parent_attempt_id.is_not(None),
+                    TaskAttempt.redispatch_from_attempt_id.is_not(None),
+                ),
+            )
+            .exists(),
+            select(TaskAttempt.id)
+            .where(attempt, TaskAttempt.status.not_in({"monitoring_pr", *_TERMINAL}))
+            .exists(),
+            select(Operation.id).where(Operation.workspace_id == Workspace.id).exists(),
+            select(ValidationRun.id).where(ValidationRun.workspace_id == Workspace.id).exists(),
+            select(ValidationRun.id)
+            .where(ValidationRun.workspace_id == Workspace.id, active_validation)
+            .exists(),
+            select(CallbackDelivery.id)
+            .where(CallbackDelivery.workspace_id == Workspace.id, active_callback)
+            .exists(),
+            select(ResourceReservation.id)
+            .where(ResourceReservation.workspace_id == Workspace.id, active_reservation)
+            .exists(),
+            select(MergeCandidate.id)
+            .where(MergeCandidate.workspace_id == Workspace.id, active_merge)
+            .exists(),
+            select(MergeCandidate.id)
+            .where(
+                MergeCandidate.workspace_id == Workspace.id,
+                active_merge,
+                or_(
+                    MergeCandidate.status != "open",
+                    MergeCandidate.pr_url.is_distinct_from(Workspace.pr_url),
+                    MergeCandidate.pr_number.is_distinct_from(Workspace.pr_number),
+                ),
+            )
+            .exists(),
+        )
+        inventory = (
+            await session.execute(
+                select(Workspace, *facts)
                 .where(actionable)
                 .options(raiseload("*"))
                 .order_by(Workspace.id)
                 .limit(MAX_RETAINED_WORKSPACES + 1)
-                .with_for_update()
+                .with_for_update(of=Workspace)
             )
-        )
-        if len(workspaces) > MAX_RETAINED_WORKSPACES:
+        ).all()
+        if len(inventory) > MAX_RETAINED_WORKSPACES:
             _unresolved()
-        for workspace in workspaces:
+        unresolved_operations = await _unresolved_operations(session, [row[0] for row in inventory])
+        associations = {}
+        for row in inventory:
+            (
+                workspace,
+                has_attempt,
+                bad_queue_attempt,
+                bad_monitor_attempt,
+                has_ops,
+                has_runs,
+                pending_run,
+                pending_callback,
+                reserved,
+                has_merge,
+                bad_merge,
+            ) = row
             prior = (workspace.task_policy or {}).get(RECOVERY_POLICY_KEY)
             old = HostedWorkspace.model_validate((workspace.task_policy or {}).get("hosted_node"))
             if workspace.node_id not in (None, identity.owner) or old.workspace_id != workspace.id:
@@ -314,83 +446,14 @@ async def inspect_retained_work(
                 and old_identity.boot_epoch < previous.boot_epoch
             ):
                 _unresolved()
-            attempt = TaskAttempt.workspace_id == workspace.id
-            (
-                has_attempt,
-                bad_queue_attempt,
-                bad_monitor_attempt,
-                has_ops,
-                has_runs,
-                pending_run,
-                pending_callback,
-                reserved,
-                has_merge,
-                bad_merge,
-            ) = (
-                await session.execute(
-                    select(
-                        select(TaskAttempt.id).where(attempt).exists(),
-                        select(TaskAttempt.id)
-                        .where(
-                            attempt,
-                            or_(
-                                TaskAttempt.status != "requested",
-                                TaskAttempt.attempt_number != 1,
-                                TaskAttempt.parent_attempt_id.is_not(None),
-                                TaskAttempt.redispatch_from_attempt_id.is_not(None),
-                            ),
-                        )
-                        .exists(),
-                        select(TaskAttempt.id)
-                        .where(attempt, TaskAttempt.status.not_in({"monitoring_pr", *_TERMINAL}))
-                        .exists(),
-                        select(Operation.id).where(Operation.workspace_id == workspace.id).exists(),
-                        select(ValidationRun.id)
-                        .where(ValidationRun.workspace_id == workspace.id)
-                        .exists(),
-                        select(ValidationRun.id)
-                        .where(ValidationRun.workspace_id == workspace.id, active_validation)
-                        .exists(),
-                        select(CallbackDelivery.id)
-                        .where(CallbackDelivery.workspace_id == workspace.id, active_callback)
-                        .exists(),
-                        select(ResourceReservation.id)
-                        .where(ResourceReservation.workspace_id == workspace.id, active_reservation)
-                        .exists(),
-                        select(MergeCandidate.id)
-                        .where(MergeCandidate.workspace_id == workspace.id, active_merge)
-                        .exists(),
-                        select(MergeCandidate.id)
-                        .where(
-                            MergeCandidate.workspace_id == workspace.id,
-                            active_merge,
-                            or_(
-                                MergeCandidate.status != "open",
-                                MergeCandidate.pr_url.is_distinct_from(workspace.pr_url),
-                                MergeCandidate.pr_number.is_distinct_from(workspace.pr_number),
-                            ),
-                        )
-                        .exists(),
-                    )
-                )
-            ).one()
             if not has_attempt:
                 _unresolved()
-            ops = list(
-                await session.scalars(
-                    select(Operation)
-                    .where(Operation.workspace_id == workspace.id, active_operation)
-                    .options(raiseload("*"))
-                    .limit(MAX_ACTIVE_OPERATIONS_PER_WORKSPACE + 1)
-                )
+            unresolved = (
+                workspace.id in unresolved_operations
+                or pending_run
+                or pending_callback
+                or bad_merge
             )
-            if len(ops) > MAX_ACTIVE_OPERATIONS_PER_WORKSPACE:
-                _unresolved()
-            unresolved = any(
-                op.status not in _OP_TERMINAL and not _passive_monitor_operation(op, workspace)
-                for op in ops
-            )
-            unresolved |= pending_run or pending_callback or bad_merge
             queued = (
                 workspace.status == "requested"
                 and not parked
@@ -434,13 +497,15 @@ async def inspect_retained_work(
                 # HTTP admission reserves this node before provisioning stamps
                 # placement. A reserved unknown outcome may only be parked.
                 _unresolved()
-            fresh = (
-                await _fresh_association(session, old, identity)
-                if disposition != "attention"
-                else None
-            )
-            changes.append((workspace, disposition, fresh))
+            if disposition != "attention":
+                associations[workspace.id] = old
+            changes.append((workspace, disposition, None))
             counts[disposition] += 1
+        fresh = await _fresh_associations(session, associations, identity)
+        changes = [
+            (workspace, disposition, fresh.get(workspace.id))
+            for workspace, disposition, _ in changes
+        ]
 
     acceptance = RecoveryAcceptance(
         **value.model_dump(),
@@ -505,53 +570,74 @@ async def reconcile(
             .where(Grant.preparation.in_(retired), Grant.revoked.is_(False))
             .values(revoked=True, current=None, pending=None)
         )
+    mutable = []
     for workspace, disposition, fresh in changes:
         prior = (workspace.task_policy or {}).get(RECOVERY_POLICY_KEY)
         if prior and prior.get("disposition") == "attention":
             # Its immutable fence already contains the unresolved outcome. A
             # later boot counts it without rewriting evidence or reopening it.
             continue
-        # Revoke retained legacy leases before marking attention immutable.
-        await session.execute(
-            update(WorkspaceSecretLease)
-            .where(
-                WorkspaceSecretLease.workspace_id == workspace.id,
-                WorkspaceSecretLease.status.not_in(("revoked", "released")),
-            )
-            .values(
-                status="revoked",
-                revoked_at=datetime.now(UTC),
-                revoke_reason_code="HOSTED_RECOVERY_REVOKED",
-            )
+        mutable.append((workspace, disposition, fresh))
+    if not mutable:
+        return acceptance
+    workspace_ids = [workspace.id for workspace, _, _ in mutable]
+    # Preserve the original ordering: revoke leases, fence claims, insert events,
+    # then install immutable attention. Every statement still runs its triggers.
+    await session.execute(
+        update(WorkspaceSecretLease)
+        .where(
+            WorkspaceSecretLease.workspace_id.in_(workspace_ids),
+            WorkspaceSecretLease.status.not_in(("revoked", "released")),
         )
-        await session.flush()
-        workspace.execution_claimed_by = workspace.execution_claim_expires_at = None
-        workspace.node_id = identity.owner
-        workspace.monitor_claimed_by = workspace.monitor_claim_expires_at = None
-        workspace.execution_claim_epoch += 1
-        workspace.version += 1
-        workspace.event_sequence += 1
-        # Event first so an existing attention row's guard needs no mutation
-        # escape hatch. Subsequent boots retain the original parked disposition.
-        session.add(
-            WorkspaceEvent(
-                id=str(uuid4()),
-                workspace_id=workspace.id,
-                event_type="workspace.recovery_accepted",
-                old_state=workspace.status,
-                new_state=workspace.status,
-                reason_code="RECOVERY_ATTENTION_REQUIRED"
+        .values(
+            status="revoked",
+            revoked_at=datetime.now(UTC),
+            revoke_reason_code="HOSTED_RECOVERY_REVOKED",
+        )
+    )
+    changed = set(
+        await session.scalars(
+            update(Workspace)
+            .where(Workspace.id.in_(workspace_ids))
+            .values(
+                execution_claimed_by=None,
+                execution_claim_expires_at=None,
+                node_id=identity.owner,
+                monitor_claimed_by=None,
+                monitor_claim_expires_at=None,
+                execution_claim_epoch=Workspace.execution_claim_epoch + 1,
+                version=Workspace.version + 1,
+                event_sequence=Workspace.event_sequence + 1,
+            )
+            .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
+        )
+    )
+    if changed != set(workspace_ids):
+        _unresolved()
+    events = []
+    policies = []
+    for workspace, disposition, fresh in mutable:
+        # These ORM objects retain the locked pre-update snapshot; do not dirty
+        # them and accidentally flush a per-row update over the bulk statements.
+        events.append(
+            {
+                "id": str(uuid4()),
+                "workspace_id": workspace.id,
+                "event_type": "workspace.recovery_accepted",
+                "old_state": workspace.status,
+                "new_state": workspace.status,
+                "reason_code": "RECOVERY_ATTENTION_REQUIRED"
                 if disposition == "attention"
                 else "RECOVERY_ACCEPTED",
-                event_order=workspace.event_sequence,
-                payload={
+                "event_order": workspace.event_sequence + 1,
+                "payload": {
                     **value.model_dump(),
                     "identity": gate.identity,
                     "disposition": disposition,
                 },
-            )
+            }
         )
-        await session.flush()
         policy = {
             **workspace.task_policy,
             RECOVERY_POLICY_KEY: {
@@ -562,14 +648,25 @@ async def reconcile(
                 "reason_code": "RECOVERY_ATTENTION_REQUIRED"
                 if disposition == "attention"
                 else "RECOVERY_ACCEPTED",
-                "workspace_version": workspace.version,
-                "execution_claim_epoch": workspace.execution_claim_epoch,
+                "workspace_version": workspace.version + 1,
+                "execution_claim_epoch": workspace.execution_claim_epoch + 1,
             },
         }
         if fresh is not None:
             policy["hosted_node"] = fresh.model_dump(mode="json")
-        workspace.task_policy = policy
-        await session.flush()
+        policies.append((workspace.id, policy))
+    await session.execute(insert(WorkspaceEvent).values(events))
+    policy_rows = values(
+        column("workspace_id", Workspace.id.type),
+        column("task_policy", Workspace.task_policy.type),
+        name="recovery_policies",
+    ).data(policies)
+    await session.execute(
+        update(Workspace)
+        .where(Workspace.id == policy_rows.c.workspace_id)
+        .values(task_policy=policy_rows.c.task_policy)
+        .execution_options(synchronize_session=False)
+    )
     return acceptance
 
 

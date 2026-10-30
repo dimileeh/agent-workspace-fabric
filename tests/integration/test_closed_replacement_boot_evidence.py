@@ -145,7 +145,8 @@ async def test_closed_candidate_boot_is_read_only_with_retained_nonterminal_rows
         <= datetime.now(UTC) + timedelta(seconds=30)
     )
     assert await rows(case.factory) == before
-    assert await case.runtime.observe(case.receiver.identity) is None
+    health = await case.runtime.observe(case.receiver.identity)
+    assert health is not None and health.quiescent and health.retained_state_verified
     readiness = (await case.client.get(PREFIX + "/readiness")).json()
     assert readiness["state"] == "recovering" and readiness["admission_closed"]
     assert (

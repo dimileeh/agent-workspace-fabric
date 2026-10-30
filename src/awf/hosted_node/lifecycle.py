@@ -67,7 +67,15 @@ class NodeLifecycle:
                 and fresh(host.expires_at)
                 and row.phase in ("recovering", "ready")
                 and row.drain_generation is None
-                and (row.phase == "recovering" or await database_quiescent(session))
+                and (
+                    row.phase == "recovering"
+                    or await database_quiescent(session)
+                    or (
+                        row.maintenance_generation is not None
+                        and row.recovery_key is not None
+                        and row.recovery_acceptance is not None
+                    )
+                )
             ):
                 raise MaterialDeniedError("BOOT_EVIDENCE_UNAVAILABLE", 503)
             # The epoch comes from the locked durable gate, not discovery or a
@@ -157,6 +165,11 @@ class NodeLifecycle:
             bindings = proposal.bindings()
             if bindings and await _bounded(self.verify_bindings(bindings)) is not True:
                 raise MaterialDeniedError("RECOVERY_BINDINGS_REQUIRED")
+            # Obtain genuinely fresh physical/host evidence after preflight, not
+            # an old proof with a renewed timestamp. Final revalidation stays atomic.
+            proof = await _bounded(self.verify_recovery(self.identity, previous, value.receipt_ref))
+            if proof is None:
+                raise MaterialDeniedError("RECOVERY_EVIDENCE_UNAVAILABLE", 503)
             async with self.factory.begin() as session:
                 row = await locked(session, self.identity)
                 self.require_evidence(row, proof, previous, value.receipt_ref)

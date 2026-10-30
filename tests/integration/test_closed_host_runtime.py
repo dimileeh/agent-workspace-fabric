@@ -96,7 +96,10 @@ async def test_genuine_composition_acknowledges_drains_aborts_but_never_runtime(
         await create(receiver.factory)
     assert (await client.post(PREFIX + "/drain/abort", json={"generation": 1})).status_code == 200
     await create(receiver.factory)
-    assert await runtime.observe(receiver.identity) is None
+    assert await runtime.observe(receiver.identity) is not None
+    busy = (await client.get(PREFIX + "/readiness")).json()
+    assert busy["node_ready"] and not busy["runtime_ready"]
+    assert not busy["database_quiescent"] and not busy["quiescent"]
 
 
 @pytest.mark.parametrize("cause", ["approval", "workspaces", "container", "mount", "boot"])
@@ -178,8 +181,11 @@ async def test_reboot_unresolved_work_is_409_only_with_valid_host_proof(
         assert response.json()["error_code"] == (
             "RECOVERY_EVIDENCE_UNAVAILABLE" if host_failure else "RECOVERY_OUTCOME_UNRESOLVED"
         )
-        assert (await rebooted.get(PREFIX + "/readiness")).json()["admission_closed"]
-        assert await fresh_runtime.observe(identity) is None
+        readiness = (await rebooted.get(PREFIX + "/readiness")).json()
+        assert readiness["admission_closed"] and not readiness["node_ready"]
+        assert not readiness["runtime_ready"] and not readiness["database_quiescent"]
+        health = await fresh_runtime.observe(identity)
+        assert (health is None) == (host_failure is not None)
         observation = await fresh_runtime.observe_boot(identity)
         if host_failure is None:
             assert observation is not None
