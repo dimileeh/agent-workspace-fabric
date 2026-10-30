@@ -9,6 +9,7 @@ files, is never handed to the agent, since rolling back could not keep them apar
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -23,6 +24,7 @@ from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeComm
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import ACKNOWLEDGES, UNJUDGED
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import _judge
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 pytestmark = pytest.mark.unit
 
@@ -174,6 +176,34 @@ async def test_an_untouched_worktree_keeps_the_answer(tmp_path: Path) -> None:
         "judged",
     )
     assert _snapshot(worktree) == before
+
+
+async def test_a_concurrent_writer_waits_for_the_check_and_keeps_its_commit(
+    tmp_path: Path,
+) -> None:
+    # The writer starts after the snapshot; were the lock released there, its
+    # commit would read as the agent's and the rollback would rewind it.
+    worktree = _worktree(tmp_path)
+    writers: list[asyncio.Task[None]] = []
+
+    async def writer() -> None:
+        async with hold_exclusive_worktree_writer_lock(worktree):
+            (worktree / "other.py").write_text("w = 1\n")
+            _git(worktree, "add", "other.py")
+            _git(worktree, "commit", "-qm", "concurrent writer")
+
+    async def run_agent(**kwargs: Any) -> Any:
+        writers.append(asyncio.create_task(writer()))
+        await asyncio.sleep(0.3)
+        return SimpleNamespace(stdout=_ACK)
+
+    runner = _runner(tmp_path, lambda: None)
+    runner._run_monitor_agent_with_service_recovery = run_agent
+
+    assert await _check(runner) == (ACKNOWLEDGES, "judged")
+    await asyncio.wait_for(writers[0], timeout=10)
+    assert _git(worktree, "log", "-1", "--format=%s").strip() == "concurrent writer"
+    assert (worktree / "other.py").read_text() == "w = 1\n"
 
 
 @pytest.mark.parametrize(

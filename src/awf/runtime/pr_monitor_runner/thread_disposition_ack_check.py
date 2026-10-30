@@ -65,6 +65,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
 )
+from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 _AUDIT_ACTION = "review_thread_disposition_ack_check"
 _LOG_SOURCE = "disposition_ack"
@@ -206,34 +207,37 @@ async def _judge(
         # The prompt would cut the reply off: a new point past the cap would go unseen.
         return UNJUDGED, "reply_truncated"
     worktree = self._worktrees_root / workspace_id
-    before = await _worktree_fingerprint(self, worktree)
-    if before is None:
-        return UNJUDGED, "worktree_probe_failed"
-    if before[1]:
-        # A rollback could not keep these apart from the agent's edits: a staged or
-        # edited untracked file would be lost or go unseen. Do not run it.
-        return UNJUDGED, "worktree_dirty"
-    try:
-        result = await self._run_monitor_agent_with_service_recovery(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            prompt=prompt,
-            log_source=_LOG_SOURCE,
-            state=state,
-        )
-    except AgentRunError as exc:
-        await _restore_worktree(self, workspace_id, worktree, before)
-        # Provider recovery first, as for every monitor agent run: it raises a
-        # ProviderRecovery* error for a 429 / quota / auth failure.
-        await self._handle_provider_agent_run_error(workspace_id, exc)
-        return UNJUDGED, f"agent_failed:{exc.reason_code}"
-    except _AGENT_INFRASTRUCTURE_ERRORS as exc:
-        await _restore_worktree(self, workspace_id, worktree, before)
-        return UNJUDGED, f"agent_failed:{type(exc).__name__}"
-    if await _restore_worktree(self, workspace_id, worktree, before):
-        # A judgment-only run must not touch the branch; its answer is not trusted.
-        return UNJUDGED, "worktree_changed"
+    # One writer-lock section from the snapshot through the rollback: another
+    # writer's commit in between would otherwise read as the agent's and be undone.
+    async with hold_exclusive_worktree_writer_lock(worktree):
+        before = await _worktree_fingerprint(self, worktree)
+        if before is None:
+            return UNJUDGED, "worktree_probe_failed"
+        if before[1]:
+            # A rollback could not keep these apart from the agent's edits: a staged or
+            # edited untracked file would be lost or go unseen. Do not run it.
+            return UNJUDGED, "worktree_dirty"
+        try:
+            result = await self._run_monitor_agent_with_service_recovery(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                log_source=_LOG_SOURCE,
+                state=state,
+            )
+        except AgentRunError as exc:
+            await _restore_worktree(self, workspace_id, worktree, before)
+            # Provider recovery first, as for every monitor agent run: it raises a
+            # ProviderRecovery* error for a 429 / quota / auth failure.
+            await self._handle_provider_agent_run_error(workspace_id, exc)
+            return UNJUDGED, f"agent_failed:{exc.reason_code}"
+        except _AGENT_INFRASTRUCTURE_ERRORS as exc:
+            await _restore_worktree(self, workspace_id, worktree, before)
+            return UNJUDGED, f"agent_failed:{type(exc).__name__}"
+        if await _restore_worktree(self, workspace_id, worktree, before):
+            # A judgment-only run must not touch the branch; its answer is not trusted.
+            return UNJUDGED, "worktree_changed"
     answer = parse_ack_answer(result.stdout)
     if answer is None:
         return UNJUDGED, "unparseable_answer"
