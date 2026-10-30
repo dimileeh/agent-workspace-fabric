@@ -176,8 +176,10 @@ class HostRuntime:
     async def observe_boot(self, identity: Identity) -> HostBootObservation | None:
         try:
             async with asyncio.timeout(4):
-                sample = await self._observe(identity)
-                if sample is not None:
+                # Pin a physically quiet candidate before retained work can be
+                # reconciled. Logical history is not evidence of live execution.
+                sample = await self._observe(identity, require_database_quiescent=False)
+                if sample is not None and sample.execution_quiescent:
                     assert self.config.lifecycle
                     return HostBootObservation(
                         identity,

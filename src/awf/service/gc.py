@@ -22,6 +22,7 @@ from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 from awf.runtime.inspection import RuntimeInspector
 from awf.service import gc_classify as _gc_classify
 from awf.service import gc_predicates as _gc_predicates
@@ -250,6 +251,7 @@ async def plan_terminal_workspace_gc(
             candidate_stmt = (
                 select(Workspace)
                 .where(Workspace.status.in_(sorted(eligible_statuses)))
+                .where(recovery_allows_work())
                 .where(candidate_predicate)
                 .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
             )
@@ -261,6 +263,7 @@ async def plan_terminal_workspace_gc(
             preserved_stmt = (
                 select(Workspace)
                 .where(Workspace.status.in_(sorted(eligible_statuses)))
+                .where(recovery_allows_work())
                 .where(preserved_predicate)
                 .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
             )
@@ -276,6 +279,7 @@ async def plan_terminal_workspace_gc(
             age_capped_stmt = (
                 select(Workspace)
                 .where(age_capped_predicate)
+                .where(recovery_allows_work())
                 .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
             )
             if row_limit is not None:

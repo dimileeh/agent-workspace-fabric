@@ -12,6 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from awf.db.enums import MONITOR_BLOCK_RESUME_PHASE_PREFIX, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord, Workspace
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 
 
 async def list_resumable_blocked_ids(
@@ -118,6 +119,7 @@ async def list_resumable_blocked_ids(
         Workspace.block_resume_phase.notlike(f"{escaped_prefix}%", escape=like_escape),
     )
     stmt = select(Workspace.id).where(
+        recovery_allows_work(),
         Workspace.status == WorkspaceStatus.blocked.value,
         not_monitor_origin,
         or_(actionable_hint, active_grant_exists),
@@ -183,6 +185,7 @@ async def list_resumable_recovering_ids(
         cooldown_reached = not_before <= now_utc.isoformat()
     cooldown_elapsed = and_(not_before.isnot(None), cooldown_reached)
     stmt = select(Workspace.id).where(
+        recovery_allows_work(),
         Workspace.status == WorkspaceStatus.recovering.value,
         cooldown_elapsed,
     )

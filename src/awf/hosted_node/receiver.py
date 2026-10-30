@@ -57,6 +57,16 @@ class Receiver:
         from awf.hosted_node.lifecycle import NodeLifecycle
 
         self.lifecycle = NodeLifecycle(factory, identity) if config.lifecycle else None
+        if self.lifecycle is not None:
+            self.lifecycle.verify_bindings = self.verify_recovery_bindings
+
+    async def verify_recovery_bindings(self, bindings: list[Binding]) -> bool:
+        # Material reads precede the final transaction. Acceptance rechecks the
+        # exact receipt snapshot under the owner/lifecycle locks afterward.
+        for binding in bindings:
+            if (await self.status(binding)).status != "current":
+                return False
+        return True
 
     @classmethod
     async def start(

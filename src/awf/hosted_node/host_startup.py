@@ -3,7 +3,7 @@
 import os
 import stat
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,6 +14,7 @@ from awf.hosted_node.host_database import validate_database
 from awf.hosted_node.host_docker import DockerObservation
 from awf.hosted_node.host_linux import LinuxSnapshot, directory
 from awf.hosted_node.host_runtime import HostRuntime
+from awf.hosted_node.physical_fence import PhysicalFenceVerifier, physical_fence_client
 from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.schemas import Identity
 
@@ -84,8 +85,14 @@ async def start_hosted(
         boot_epoch=1,
     )
     host_config = config.host
-    async with docker_client(host_config) as client:
+    async with AsyncExitStack() as clients:
+        client = await clients.enter_async_context(docker_client(host_config))
         host = HostRuntime(config, factory, provisional, DockerObservation(host_config, client))
+        if host_config.physical_fence_authority is not None:
+            authority_client = await clients.enter_async_context(physical_fence_client())
+            host.verify_physical_fence = PhysicalFenceVerifier(
+                host_config.physical_fence_authority, config.owner, authority_client
+            ).verify
         host.baseline = await host.host_io(host.linux.sample)
         await host.host_io(lambda: validate_socket(host_config))
         with host_lease(host_config, host.baseline):

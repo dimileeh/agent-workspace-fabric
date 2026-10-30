@@ -30,6 +30,7 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.db.models import ResourceReservation, Workspace
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 from awf.service.config import DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID
 from awf.service.scheduler import (
     AGE_BOOST_INTERVAL_SECONDS,
@@ -90,7 +91,7 @@ def _schedulable_workspace_ids_stmt(
         scoring_at=scoring_at,
         dialect_name=dialect_name,
     )
-    stmt = select(Workspace).where(Workspace.status == status.value)
+    stmt = select(Workspace).where(Workspace.status == status.value, recovery_allows_work())
     if node_id is not None:
         stmt = stmt.where(_scheduler_node_scope_condition(status=status, node_id=node_id))
     if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
@@ -167,6 +168,7 @@ def _monitoring_pr_deferred_active_execution_claim_stmt(
             Workspace.execution_claimed_by.in_(sorted(fresh_execution_claim_owner_ids)),
         )
     stmt = select(Workspace).where(
+        recovery_allows_work(),
         Workspace.status == WorkspaceStatus.monitoring_pr.value,
         or_(
             Workspace.monitor_claim_expires_at.is_(None),

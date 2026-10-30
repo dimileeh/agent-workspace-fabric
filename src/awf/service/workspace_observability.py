@@ -233,7 +233,7 @@ async def list_workspace_stale_reasons_response(
 
 
 def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
-    """Project the persisted awaiting-human attention flag for API/overview responses.
+    """Project persisted human waits and hosted recovery attention for API reads.
 
     A PR-monitor ``NotifyHuman`` escalation (HUMAN_WAIT) stamps
     ``awaiting_human_since``/``awaiting_human_reason`` while the workspace keeps
@@ -241,20 +241,33 @@ def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
     operator-driven exits (cancel/stop/destroy go through ``controls.py``), so
     surface them only while the live status is ``monitoring_pr`` — the same
     status gate used for ``blocked_at``. ``attention_required`` is the derived
-    boolean operators key off.
+    boolean operators key off. Hosted recovery attention instead preserves the
+    original status; expose its durable marker without inventing a human-wait
+    timestamp or overwriting an existing live human episode.
     """
     awaiting_since = getattr(ws, "awaiting_human_since", None)
     flagged = str(ws.status) == WorkspaceStatus.monitoring_pr.value and awaiting_since is not None
-    if not flagged:
+    policy = getattr(ws, "task_policy", None)
+    recovery = policy.get("hosted_recovery") if isinstance(policy, dict) else None
+    recovery_attention = (
+        isinstance(policy, dict)
+        and isinstance(policy.get("hosted_node"), dict)
+        and isinstance(recovery, dict)
+        and recovery.get("disposition") == "attention"
+    )
+    if not flagged and not recovery_attention:
         return {
             "attention_required": False,
             "awaiting_human_since": None,
             "awaiting_human_reason": None,
         }
+    reason = getattr(ws, "awaiting_human_reason", None) if flagged else None
+    if recovery_attention and not reason:
+        reason = "RECOVERY_ATTENTION_REQUIRED"
     return {
         "attention_required": True,
-        "awaiting_human_since": awaiting_since,
-        "awaiting_human_reason": getattr(ws, "awaiting_human_reason", None),
+        "awaiting_human_since": awaiting_since if flagged else None,
+        "awaiting_human_reason": reason,
     }
 
 

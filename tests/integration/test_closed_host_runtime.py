@@ -180,7 +180,12 @@ async def test_reboot_unresolved_work_is_409_only_with_valid_host_proof(
         )
         assert (await rebooted.get(PREFIX + "/readiness")).json()["admission_closed"]
         assert await fresh_runtime.observe(identity) is None
-        assert await fresh_runtime.observe_boot(identity) is None
+        observation = await fresh_runtime.observe_boot(identity)
+        if host_failure is None:
+            assert observation is not None
+            assert observation.identity == identity
+        else:
+            assert observation is None
         with pytest.raises(DBAPIError, match="NODE_ADMISSION_CLOSED"):
             await create(receiver.factory)
 

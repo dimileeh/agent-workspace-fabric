@@ -26,6 +26,13 @@ class NodeLifecycleRow(Base):
     phase: Mapped[str] = mapped_column(String(16), nullable=False)
     recovery_key: Mapped[str | None] = mapped_column(String(128))
     receipt_ref: Mapped[str | None] = mapped_column(String(128))
+    recovery_acceptance: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     drain_generation: Mapped[int | None] = mapped_column(BigInteger)
     aborted_through: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    maintenance_generation: Mapped[int | None] = mapped_column(BigInteger)
+    maintenance_released_through: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

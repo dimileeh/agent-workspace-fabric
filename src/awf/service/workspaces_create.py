@@ -242,6 +242,8 @@ async def create_workspace_row(
         owned_path_overlap_coordination_warnings(overlaps),
     )
 
+    if isinstance(hosted_authority, WorkspaceAuthority):
+        await hosted_authority.guard_new_workspace(session)
     ws = await repo.create(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
