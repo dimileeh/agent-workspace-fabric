@@ -26,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import secrets
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -55,7 +57,12 @@ from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint_git_confi
     _snapshot_outer_gitfile_text,
     _write_local_git_config_file_at,
 )
-from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import _read_worktree_regular_text_at
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import (
+    _open_worktree_regular_file_under_root,
+    _read_opened_regular_file_snapshot,
+    _read_worktree_regular_text_at,
+    _residue_regular_hash_budget,
+)
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_pinned_worktree_command,
@@ -114,6 +121,10 @@ _AGENT_INFRASTRUCTURE_ERRORS = (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     TimeoutError,
 )
+_DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_TMP_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+# A pre-run ignored file: its bytes, permission bits, owner and group.
+_IgnoredFile = tuple[bytes, int, int, int]
 _OUTCOMES: dict[str, tuple[str, str]] = {
     ACKNOWLEDGES: ("acknowledged", REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED),
     NEW_POINT: ("new_point", REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT),
@@ -244,7 +255,8 @@ async def _judge(
     # writer's commit in between would otherwise read as the agent's and be undone.
     async with hold_exclusive_worktree_writer_lock(worktree):
         before = await _worktree_fingerprint(self, worktree)
-        if before is None:
+        ignored = await _snapshot_ignored_files(self, worktree) if before is not None else None
+        if before is None or ignored is None:
             return UNJUDGED, "worktree_probe_failed"
         if before[1]:
             # A rollback could not keep these apart from the agent's edits: a staged or
@@ -264,13 +276,13 @@ async def _judge(
                     state=state,
                 )
             except AgentRunError as exc:
-                await _restore_worktree(self, workspace_id, worktree, before, linkage)
+                await _restore_worktree(self, workspace_id, worktree, before, linkage, ignored)
                 # Provider recovery first, as for every monitor agent run: it raises a
                 # ProviderRecovery* error for a 429 / quota / auth failure.
                 await self._handle_provider_agent_run_error(workspace_id, exc)
                 return UNJUDGED, f"agent_failed:{exc.reason_code}"
             except _AGENT_INFRASTRUCTURE_ERRORS as exc:
-                await _restore_worktree(self, workspace_id, worktree, before, linkage)
+                await _restore_worktree(self, workspace_id, worktree, before, linkage, ignored)
                 return UNJUDGED, f"agent_failed:{type(exc).__name__}"
             except (
                 asyncio.CancelledError,
@@ -279,9 +291,9 @@ async def _judge(
             ):
                 # ``UNJUDGED`` is already saved, so a restart takes the fallback, whose
                 # repair would refuse the agent's edits: roll back under the lock first.
-                await _restore_worktree(self, workspace_id, worktree, before, linkage)
+                await _restore_worktree(self, workspace_id, worktree, before, linkage, ignored)
                 raise
-            if await _restore_worktree(self, workspace_id, worktree, before, linkage):
+            if await _restore_worktree(self, workspace_id, worktree, before, linkage, ignored):
                 # A judgment-only run must not touch the branch; its answer is not trusted.
                 return UNJUDGED, "worktree_changed"
     answer = parse_ack_answer(result.stdout)
@@ -377,12 +389,97 @@ async def _ignored_content_identity(worktree: Path, status: str) -> str | None:
         return None
 
 
+async def _snapshot_ignored_files(self: Any, worktree: Path) -> dict[str, _IgnoredFile] | None:
+    """Pre-run copies of the ignored files the rollback can write back; ``None`` if unprobed.
+
+    Ignored directories and files past the regular-hash byte budgets are not
+    copied: a change to them fails the check closed.
+    """
+    try:
+        result = await _run_git(
+            self, worktree, None, "status", "--porcelain", "-z", "--ignored=matching"
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    paths = [
+        path
+        for path in _ignored_paths_from_status_stdout(result.stdout, is_z=True)
+        if not path.endswith("/") and not is_under_agent_runtime_root(path)
+    ]
+
+    def snapshot() -> dict[str, _IgnoredFile]:
+        files: dict[str, _IgnoredFile] = {}
+        with _residue_regular_hash_budget():
+            for path in paths:
+                saved = _read_ignored_file(worktree, path)
+                if saved is not None:
+                    files[path] = saved
+        return files
+
+    return await asyncio.to_thread(snapshot)
+
+
+def _read_ignored_file(worktree: Path, path: str) -> _IgnoredFile | None:
+    """An ignored regular file's bytes, mode and owner, read without following links."""
+    try:
+        with _open_worktree_regular_file_under_root(worktree, path) as fh:
+            st = os.fstat(fh.fileno())
+            data = _read_opened_regular_file_snapshot(fh)
+    except OSError:
+        return None
+    if data is None:
+        return None
+    return data, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid
+
+
+def _restore_ignored_files(worktree: Path, ignored: dict[str, _IgnoredFile]) -> None:
+    """Write back each pre-run ignored file the agent changed or deleted.
+
+    Each is replaced through a fresh inode under parents opened without following
+    links, so a symlink the agent left in its place is replaced, never followed.
+    One that cannot be written stays changed, and the final probe fails closed.
+    """
+    for path, saved in ignored.items():
+        if _read_ignored_file(worktree, path) == saved:
+            continue
+        with contextlib.suppress(OSError):
+            _write_ignored_file(worktree, path, saved)
+
+
+def _write_ignored_file(worktree: Path, path: str, saved: _IgnoredFile) -> None:
+    data, mode, uid, gid = saved
+    *parents, name = Path(path).parts
+    dir_fd = os.open(worktree, _DIR_OPEN_FLAGS)
+    try:
+        for part in parents:
+            child_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        tmp_name = f".{name}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(tmp_name, _TMP_OPEN_FLAGS, 0o600, dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                os.fchown(fh.fileno(), uid, gid)
+                os.fchmod(fh.fileno(), mode)
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            raise
+    finally:
+        os.close(dir_fd)
+
+
 async def _restore_worktree(
     self: Any,
     workspace_id: str,
     worktree: Path,
     before: tuple[str, str, str, str, str],
     linkage: tuple[str | None, tuple[int, str] | None],
+    ignored: dict[str, _IgnoredFile],
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
 
@@ -399,8 +496,9 @@ async def _restore_worktree(
     holding the same branch and tree would read as clean and steer the fallback's
     repair there. HEAD is re-attached to its pre-run ref
     before the resets, which would otherwise move a branch the agent checked out.
-    An ignored file the agent changed cannot be restored: the check fails closed.
-    The live probes clear index hide flags only through the pinned pre-run git dirs.
+    An ignored file the agent changed or deleted is written back from its pre-run
+    copy in ``ignored``; one that was not copied (an ignored directory or an
+    oversized file) cannot be restored, so the check fails closed. The live probes clear index hide flags only through the pinned pre-run git dirs.
     """
     gitfile, commondir = linkage
     relinked = False
@@ -435,6 +533,7 @@ async def _restore_worktree(
             restored = await _git_ok(
                 self, worktree, pin, "--literal-pathspecs", "clean", "-ffd", "--", *added
             )
+        await asyncio.to_thread(_restore_ignored_files, worktree, ignored)
         # The live probe also fails while the gitfile still points elsewhere.
         restored = restored and await _post_run_fingerprint(self, worktree, pin) == before
     if not restored:
