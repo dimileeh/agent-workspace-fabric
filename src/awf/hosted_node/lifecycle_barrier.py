@@ -89,15 +89,13 @@ def replace_barrier(connection: Connection) -> None:
                 after_row := CASE WHEN TG_OP = 'DELETE' THEN '{}'::jsonb ELSE to_jsonb(NEW) END;
                 IF (TG_TABLE_NAME = 'workspaces'
                     AND before_row #>> '{task_policy,hosted_recovery,disposition}' = 'attention')
-                   OR (TG_TABLE_NAME = 'tasks' AND EXISTS (
-                       SELECT 1 FROM task_attempts a JOIN workspaces w ON w.id = a.workspace_id
-                       WHERE a.task_id IN (before_row->>'id', after_row->>'id')
-                         AND w.task_policy::jsonb #>> '{hosted_recovery,disposition}' = 'attention'
-                   ))
-                   OR (TG_TABLE_NAME NOT IN ('workspaces', 'workspace_events', 'tasks') AND EXISTS (
+                   OR (TG_TABLE_NAME NOT IN ('workspaces', 'workspace_events') AND EXISTS (
                        SELECT 1 FROM workspaces w
-                       WHERE w.id IN (before_row->>'workspace_id', after_row->>'workspace_id')
-                         AND w.task_policy::jsonb #>> '{hosted_recovery,disposition}' = 'attention'
+                       WHERE w.task_policy::jsonb #>> '{hosted_recovery,disposition}' = 'attention'
+                         AND (w.id IN (before_row->>'workspace_id', after_row->>'workspace_id')
+                           OR (TG_TABLE_NAME = 'tasks' AND EXISTS (
+                               SELECT 1 FROM task_attempts a WHERE a.workspace_id = w.id
+                                 AND a.task_id IN (before_row->>'id', after_row->>'id'))))
                    )) THEN
                     RAISE EXCEPTION 'RECOVERY_ATTENTION_REQUIRED' USING ERRCODE = '55000';
                 END IF;
