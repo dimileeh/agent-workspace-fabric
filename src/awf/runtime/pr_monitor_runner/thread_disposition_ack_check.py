@@ -42,6 +42,8 @@ from awf.runtime.pr_monitor_runner.agent_service_recovery import (
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint_git_config import (
     _open_snapshotted_git_dir_for_restore,
+    _restore_worktree_git_linkage,
+    _snapshot_outer_gitfile_text,
 )
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.git_utils import (
@@ -232,6 +234,8 @@ async def _judge(
             # A rollback could not keep these apart from the agent's edits: a staged or
             # edited untracked file would be lost or go unseen. Do not run it.
             return UNJUDGED, "worktree_dirty"
+        # The rollback's pin admits the linked mirror through this gitfile.
+        _, gitfile = _snapshot_outer_gitfile_text(worktree)
         try:
             result = await self._run_monitor_agent_with_service_recovery(
                 workspace_id=workspace_id,
@@ -242,15 +246,15 @@ async def _judge(
                 state=state,
             )
         except AgentRunError as exc:
-            await _roll_back_run(self, workspace_id, worktree, before, state, saved_push)
+            await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
             # Provider recovery first, as for every monitor agent run: it raises a
             # ProviderRecovery* error for a 429 / quota / auth failure.
             await self._handle_provider_agent_run_error(workspace_id, exc)
             return UNJUDGED, f"agent_failed:{exc.reason_code}"
         except _AGENT_INFRASTRUCTURE_ERRORS as exc:
-            await _roll_back_run(self, workspace_id, worktree, before, state, saved_push)
+            await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
             return UNJUDGED, f"agent_failed:{type(exc).__name__}"
-        if await _roll_back_run(self, workspace_id, worktree, before, state, saved_push):
+        if await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push):
             # A judgment-only run must not touch the branch; its answer is not trusted.
             return UNJUDGED, "worktree_changed"
     answer = parse_ack_answer(result.stdout)
@@ -264,6 +268,7 @@ async def _roll_back_run(
     workspace_id: str,
     worktree: Path,
     before: tuple[str, str, str],
+    gitfile: str | None,
     state: MonitorState,
     saved_push: tuple[str | None, bool],
 ) -> bool:
@@ -280,7 +285,7 @@ async def _roll_back_run(
         with contextlib.suppress(OSError):
             probe = await _run_git(self, worktree, None, "rev-parse", "HEAD")
             run_head = probe.stdout.strip() if probe.returncode == 0 else None
-    changed = await _restore_worktree(self, workspace_id, worktree, before)
+    changed = await _restore_worktree(self, workspace_id, worktree, before, gitfile)
     if not self._deps.adapter.is_hosted:
         return changed
     start_head = before[0].strip()
@@ -326,7 +331,11 @@ async def _worktree_fingerprint(
 
 
 async def _restore_worktree(
-    self: Any, workspace_id: str, worktree: Path, before: tuple[str, str, str]
+    self: Any,
+    workspace_id: str,
+    worktree: Path,
+    before: tuple[str, str, str],
+    gitfile: str | None,
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
 
@@ -335,16 +344,19 @@ async def _restore_worktree(
     The index is reset first: a hard reset deletes every index entry missing
     from HEAD, and an ignored file the agent force-added predates the run.
     The rollback runs through the pre-run git dirs, never the live ``.git``: the
-    agent may have retargeted it at another repository.
+    agent may have retargeted it at another repository. A gitfile the agent
+    deleted or broke is first rewritten from its pre-run text: the pin admits
+    the linked mirror only through it.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
         return False
+    if after is None and gitfile is not None:
+        _restore_worktree_git_linkage(worktree, gitfile)
     head = before[0].strip()
     with _pinned_git_dirs(worktree, before[2]) as pin:
         restored = (
-            after is not None
-            and pin is not None
+            pin is not None
             and await _git_ok(self, worktree, pin, "reset", "-q", "--mixed", head)
             and await _git_ok(self, worktree, pin, "reset", "--hard", head)
         )

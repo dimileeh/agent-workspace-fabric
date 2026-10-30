@@ -364,6 +364,29 @@ async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_pat
     assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
 
 
+async def test_the_rollback_still_runs_when_the_agent_deleted_the_gitfile(tmp_path: Path) -> None:
+    # The live probe fails without .git; the agent's commit must not stay on the branch.
+    worktree, _ = _linked_worktrees(tmp_path)
+    before = _snapshot(worktree)
+    gitfile = (worktree / ".git").read_text()
+
+    def agent() -> Any:
+        (worktree / "core.py").write_text("x = 2\n")
+        _git(worktree, "commit", "-qam", "agent commit")
+        (worktree / "scratch.py").write_text("z = 1\n")
+        (worktree / ".git").unlink()
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        runner = _runner(tmp_path / "worktrees", agent)
+        assert await _check(runner) == (UNJUDGED, "worktree_changed")
+
+    assert (worktree / ".git").read_text() == gitfile
+    assert _snapshot(worktree) == before
+    assert not (worktree / "scratch.py").exists()
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
 def _hosted(tmp_path: Path) -> tuple[Path, Path, str]:
     # A worktree tracking a PR branch ``feature`` on a bare remote.
     worktree = _worktree(tmp_path)
