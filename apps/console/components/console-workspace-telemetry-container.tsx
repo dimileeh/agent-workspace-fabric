@@ -10,6 +10,7 @@ import {
   type TelemetryViewWindow,
 } from "@/lib/console-workspace-telemetry";
 import type { ConsoleCapabilities } from "@/lib/types";
+import { projectVMTelemetry, vmTelemetryFreshness } from "@/lib/console-vm-telemetry";
 import { useWorkspaceTelemetry } from "@/hooks/use-workspace-telemetry";
 import { ConsoleWorkspaceTelemetry } from "./console-workspace-telemetry";
 import { Panel } from "./console-dashboard-shared";
@@ -57,20 +58,26 @@ function TelemetryRead({
   // Dense series depend only on the response; clock ticks age metadata alone.
   // Pass negotiated widget gates so inferred envelope partial and freshness
   // do not fire from hidden unsupported sections.
+  const vmData = state.data && "resource_kind" in state.data ? state.data : null;
+  const podData = state.data && !("resource_kind" in state.data) ? state.data : null;
+  const vmProjected = useMemo(() => vmData ? projectVMTelemetry(vmData) : null, [vmData]);
   const projected = useMemo(
     () =>
-      state.data
-        ? projectWorkspaceTelemetryView(state.data, {
+      podData
+        ? projectWorkspaceTelemetryView(podData, {
             expectTelemetry: gates[0],
             expectAllocation: gates[1],
             expectCost: gates[2],
           })
         : null,
-    [state.data, gates[0], gates[1], gates[2]],
+    [podData, gates[0], gates[1], gates[2]],
   );
-  const model = projected && state.data ? {
+  const model = vmProjected && vmData ? {
+    ...vmProjected,
+    ...vmTelemetryFreshness(vmData, now, { telemetry: gates[0], allocation: gates[1], cost: gates[2] }),
+  } : projected && podData ? {
     ...projected,
-    ...projectWorkspaceTelemetryFreshness(state.data, projected, now, {
+    ...projectWorkspaceTelemetryFreshness(podData, projected, now, {
       expectTelemetry: gates[0],
       expectAllocation: gates[1],
     }),
