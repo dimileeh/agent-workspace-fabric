@@ -49,10 +49,8 @@ _HOSTED_NODE_MATERIAL_REVISION = "b986c2d3e4f5"
 _NODE_IDLE_GATE_REVISION = "ca97d3e4f506"
 # Admission-only maintenance hold on the existing lifecycle row.
 _NODE_MAINTENANCE_REVISION = "db08e4f50617"
-# Atomic retained-work acceptance metadata.
+# Current head: atomic retained-work acceptance metadata.
 _RETAINED_ACCEPTANCE_REVISION = "ec19f5061728"
-# Current head: guarded writes rewrite the lifecycle gate only to clear idle.
-_IDLE_GATE_CLEAR_ONLY_REVISION = "fa20b3c4d5e6"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -120,10 +118,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_IDLE_GATE_CLEAR_ONLY_REVISION]
-    clear_only = script.get_revision(_IDLE_GATE_CLEAR_ONLY_REVISION)
-    assert clear_only is not None
-    assert clear_only.down_revision == _RETAINED_ACCEPTANCE_REVISION
+    assert script.get_heads() == [_RETAINED_ACCEPTANCE_REVISION]
     accepted_head = script.get_revision(_RETAINED_ACCEPTANCE_REVISION)
     assert accepted_head is not None
     assert accepted_head.down_revision == _NODE_MAINTENANCE_REVISION
