@@ -5,8 +5,8 @@ disposition (:mod:`~.thread_disposition_ack`) and re-polls. This step runs on th
 next poll, before ``decide()``, where no merge lock is held. For each flagged
 thread it re-reads that one thread, and for each of the bot's comments with no
 judgment yet it runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``,
-``NEW_POINT``, or ``UNJUDGED`` when the agent failed, answered unusably or
-changed the worktree) is persisted at once, so a restart cannot re-run it, and
+``NEW_POINT``, or ``UNJUDGED`` when the reply is too long to quote whole, or the
+agent failed, answered unusably or changed the worktree) is persisted at once, so a restart cannot re-run it, and
 gets one reason-coded log line and one audit event without any comment body. A
 check is recorded ``UNJUDGED`` before the agent starts, so even a crash mid-run
 cannot repeat it; only a provider failure, which goes to the monitor's provider
@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     AckJudgment,
     ack_check_prompt,
     ack_refetch_failures,
+    ack_reply_fits,
     acknowledgement_view,
     comment_identity,
     parse_ack_answer,
@@ -154,6 +155,7 @@ async def judge_pending_disposition_acks(
                         compose_project=compose_project,
                         compose_file=compose_file,
                         state=state,
+                        reply=comment.body,
                         prompt=ack_check_prompt(
                             thread.opener.body if thread.opener else "",
                             view.viewer_comment_bodies[-1],
@@ -193,9 +195,13 @@ async def _judge(
     compose_project: str,
     compose_file: Path,
     state: MonitorState,
+    reply: str,
     prompt: str,
 ) -> tuple[AckJudgment, str]:
     """Run the judgment-only agent check; return the judgment and why."""
+    if not ack_reply_fits(reply):
+        # The prompt would cut the reply off: a new point past the cap would go unseen.
+        return UNJUDGED, "reply_truncated"
     worktree = self._worktrees_root / workspace_id
     before = await _worktree_fingerprint(self, worktree)
     if before is None:

@@ -20,7 +20,8 @@ once per identity, across re-adoption too:
   runner step (:mod:`~.thread_disposition_ack_check`) judges it outside the merge lock.
   After :data:`MAX_ACK_REFETCH_FAILURES` failed re-reads of the thread, its
   unjudged comments are recorded ``UNJUDGED`` instead, so it cannot re-poll forever.
-* any comment ``NEW_POINT`` or ``UNJUDGED`` (agent failure, unparseable answer):
+* any comment ``NEW_POINT`` or ``UNJUDGED`` (agent failure, unparseable answer,
+  or a reply too long to quote whole):
   the full thread is kept, which is today's path to the fallback reopen.
 
 Human comments, and comments by anyone but the thread's opening bot, keep
@@ -179,6 +180,14 @@ def ack_check_prompt(opener_body: str, disposition_reply: str, newer_reply: str)
         "AWF-DISPOSITION-ACK: NEW_POINT\n"
         "and print no other line containing AWF-DISPOSITION-ACK."
     )
+
+
+def ack_reply_fits(newer_reply: str) -> bool:
+    """Whether :func:`ack_check_prompt` quotes ``newer_reply`` whole.
+
+    A truncated reply is never judged: a new point past the cap would go unseen.
+    """
+    return len(redact_secrets(newer_reply)) <= _EVIDENCE_MAX_CHARS
 
 
 def _evidence(name: str, text: str) -> str:

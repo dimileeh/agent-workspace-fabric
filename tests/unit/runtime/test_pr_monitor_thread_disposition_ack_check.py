@@ -593,3 +593,22 @@ async def test_an_unreadable_worktree_fails_the_check_without_running_the_agent(
     assert state.threads_addressed_ids[_ack_key()] == UNJUDGED
     [event] = await _ack_events(factory, workspace_id)
     assert event["evidence"]["detail"] == "worktree_probe_failed"
+
+
+async def test_a_reply_too_long_to_quote_whole_fails_the_check_without_running_the_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # The prompt would cut the reply off, and a new point past the cap would go
+    # unseen: the reply is never judged, so the fallback re-triages the thread.
+    long_reply = thread_comment(f"{BOT_ACK} {'x' * 4000} Please also fix X.", comment_id="3")
+    state, _, workspace_id, runner = await _flagged(factory, tmp_path, trailing=(long_reply,))
+
+    await _judge(runner, workspace_id, state)
+
+    assert runner._deps.adapter.calls == []
+    persisted = await _persisted(factory, workspace_id)
+    key = _disposition_ack_key(_SILENT, comment_identity(long_reply))
+    assert persisted.threads_addressed_ids[key] == UNJUDGED
+    [event] = await _ack_events(factory, workspace_id)
+    assert (event["outcome"], event["evidence"]["detail"]) == ("check_failed", "reply_truncated")

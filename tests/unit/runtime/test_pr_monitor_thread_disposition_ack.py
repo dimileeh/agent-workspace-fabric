@@ -37,6 +37,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     NEW_POINT,
     UNJUDGED,
     ack_check_prompt,
+    ack_reply_fits,
     acknowledgement_views,
     comment_identity,
     parse_ack_answer,
@@ -329,6 +330,12 @@ def test_ack_check_prompt_quotes_redacted_capped_evidence_and_forbids_changes() 
     assert "do not modify files, run commands, or commit" in prompt
     assert "AWF-DISPOSITION-ACK: ACKNOWLEDGES" in prompt
     assert "AWF-DISPOSITION-ACK: NEW_POINT" in prompt
+
+
+def test_only_a_reply_the_prompt_quotes_whole_fits_the_check() -> None:
+    # A truncated reply could hide a new point past the cap, so it is never judged.
+    assert ack_reply_fits("x" * 4000) is True
+    assert ack_reply_fits("x" * 4001) is False
 
 
 async def test_a_bot_reply_on_a_thread_resolved_by_another_login_is_not_checked(
