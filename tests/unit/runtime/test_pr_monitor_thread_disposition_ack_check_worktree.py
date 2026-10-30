@@ -363,6 +363,79 @@ async def test_a_dirty_worktree_is_never_handed_to_the_agent(tmp_path: Path, pat
     assert (worktree / path).read_text() == "in progress\n"
 
 
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+async def test_a_tracked_file_the_agent_hid_from_status_and_overwrote_is_rolled_back(
+    tmp_path: Path, flag: str
+) -> None:
+    # A hide flag keeps the overwrite out of porcelain status: the flags are
+    # cleared before every probe, so the edit reads as a change and is undone.
+    worktree = _worktree(tmp_path)
+    before = _snapshot(worktree)
+
+    def agent() -> Any:
+        _git(worktree, "update-index", flag, "core.py")
+        (worktree / "core.py").write_text("x = 2\n")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_changed")
+
+    assert _snapshot(worktree) == before
+    assert _git(worktree, "ls-files", "-v") == "H core.py\n"
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
+async def test_a_tracked_edit_hidden_before_the_run_is_never_handed_to_the_agent(
+    tmp_path: Path,
+) -> None:
+    worktree = _worktree(tmp_path)
+    _git(worktree, "update-index", "--assume-unchanged", "core.py")
+    (worktree / "core.py").write_text("in progress\n")
+    calls: list[str] = []
+
+    def agent() -> Any:
+        calls.append("run")
+        return SimpleNamespace(stdout=_ACK)
+
+    assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_dirty")
+
+    assert calls == []
+    assert (worktree / "core.py").read_text() == "in progress\n"
+
+
+class _LsFilesMissingRunner(FakeCommandRunner):
+    async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+        if "ls-files" in args:
+            raise OSError("git is missing")
+        return await super().run(args, **kwargs)
+
+
+def _ls_files_fails(cmd: FakeCommandRunner) -> None:
+    cmd.respond_when(lambda args: "ls-files" in args, returncode=128, stderr="bad index")
+
+
+@pytest.mark.parametrize(
+    ("make_cmd", "script"),
+    [
+        pytest.param(FakeCommandRunner, _ls_files_fails, id="ls-files-fails"),
+        pytest.param(_LsFilesMissingRunner, lambda _cmd: None, id="ls-files-raises"),
+    ],
+)
+async def test_unclearable_hide_flags_are_never_handed_to_the_agent(
+    tmp_path: Path, make_cmd: Callable[[], FakeCommandRunner], script: Any
+) -> None:
+    cmd = make_cmd()
+    script(cmd)
+    calls: list[str] = []
+
+    def agent() -> Any:
+        calls.append("run")
+        return SimpleNamespace(stdout=_ACK)
+
+    assert await _check(_runner(tmp_path, agent, cmd)) == (UNJUDGED, "worktree_probe_failed")
+    assert calls == []
+
+
 def _dirty_after_agent(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) -> None:
     # A real git dir to pin, so the rollback's own commands run.
     cmd.respond_when(lambda args: "--git-dir" in args, stdout=f"{git_dir}\n{git_dir}\n")

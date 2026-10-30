@@ -37,6 +37,7 @@ from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedThreadComment
 from awf.common.github_client import RepoRef
 from awf.node.git_manager import git_env_without_object_lookup_overrides
+from awf.runtime.git_index_hide_flags import clear_index_hide_flags_via_run_git
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
@@ -294,8 +295,20 @@ async def _worktree_fingerprint(
 ) -> tuple[str, str, str, str, str] | None:
     """HEAD, ``git status --porcelain -z``, git dirs, HEAD's ref and ignored content.
 
-    ``None`` if a probe failed.
+    Index hide flags (``assume-unchanged`` / ``skip-worktree``) are cleared
+    first: a tracked file the agent flagged and overwrote would otherwise stay
+    out of the status. ``None`` if a probe failed.
     """
+
+    async def run_git(args: list[str]) -> CommandResult:
+        return await _run_git(self, worktree, pin, *args)
+
+    try:
+        cleared = await clear_index_hide_flags_via_run_git(run_git)
+    except OSError:
+        return None
+    if not cleared:
+        return None
     outputs: list[str] = []
     for args in (
         ("rev-parse", "HEAD"),
