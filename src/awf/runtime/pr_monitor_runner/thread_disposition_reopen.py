@@ -96,8 +96,8 @@ async def reopen_unverified_threads(
     """Reopen ``gate``'s unverified threads; re-poll, or block on those left resolved.
 
     The gate's unverified flag is kept, so the poll that lists a reopened thread
-    open re-triages it. Only a reopen that landed counts toward the cap. A
-    malformed count reads as exhausted, so the monitor never loops on it. Once
+    open re-triages it. Only a reopen that landed counts toward the cap, and its
+    count is persisted as soon as it lands. A malformed count reads as exhausted, so the monitor never loops on it. Once
     the forge reports no reopen API, no further thread is tried.
     """
     if not gate.unverified:
@@ -138,6 +138,9 @@ async def reopen_unverified_threads(
             continue
         reopened[thread_id] = count + 1
         state.mark_addressed(_disposition_auto_reopen_key(thread_id), str(count + 1))
+        # The thread is open on the forge now: save its count before any further
+        # forge call, audit write, or poll wait, so a restart cannot exceed the cap.
+        await self._persist_state(workspace_id, state)
     exhausted = [
         tid for tid, why in left.items() if why == REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED
     ]

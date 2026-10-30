@@ -13,6 +13,7 @@ fails, today's ``NotifyHuman`` blocker applies — never a workspace failure.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -60,6 +61,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition_reply import reply_before_
 from awf.service.pr_monitor_adoption_seed import seedable_monitor_state
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.unit.runtime._monitor_runner_fixtures import RecordedSleep
 from tests.unit.runtime._thread_disposition_fixtures import settled_baseline_state
 from tests.unit.runtime.test_pr_monitor_thread_disposition_gate import (
     _AUDIT,
@@ -484,3 +486,35 @@ async def test_the_reopen_count_survives_a_state_reload(
 
     assert reloaded.threads_addressed_ids[_disposition_auto_reopen_key(_SILENT)] == "1"
     assert reloaded.threads_addressed_ids[_disposition_unverified_key(_SILENT)] == _UNVERIFIED
+
+
+class _StopDuringPollWait(RecordedSleep):
+    """The worker stops during the poll wait that follows a landed reopen."""
+
+    async def __call__(self, seconds: float) -> None:
+        await super().__call__(seconds)
+        raise asyncio.CancelledError
+
+
+async def test_a_landed_reopen_count_is_saved_before_the_poll_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # The thread is already reopened on the forge, so a worker stopping during
+    # the wait must not lose the count: a restart would otherwise reopen it past
+    # the cap (PRRT_kwDOSJAM6s6x4TUg).
+    state = handled_state()
+    gh = ReopenForge(FakeCommandRunner(), audit=audit_of(bot_acked()))
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    runner._deps = replace(runner._deps, sleep=_StopDuringPollWait())
+
+    with pytest.raises(asyncio.CancelledError):
+        await _execute(runner, workspace_id, NotifyHuman(), state)
+
+    assert gh.unresolved == [_SILENT]
+    assert runner._deps.sleep.calls == [60]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    reloaded = _load_state(None, ws)
+    assert reloaded.threads_addressed_ids[_disposition_auto_reopen_key(_SILENT)] == "1"
