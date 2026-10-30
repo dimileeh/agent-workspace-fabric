@@ -21,10 +21,14 @@ acknowledgement, and anything else takes the bounded fallback reopen.
 
 from __future__ import annotations
 
+import contextlib
+import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.forge_thread_audit import AuditedThreadComment
@@ -32,8 +36,14 @@ from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint_git_config import (
+    _open_snapshotted_git_dir_for_restore,
+)
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
-from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.git_utils import (
+    git_pinned_worktree_command,
+    git_worktree_command,
+)
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.path_parsing import _untracked_paths_from_porcelain_z
@@ -244,28 +254,31 @@ async def _judge(
     return answer, "judged"
 
 
-async def _worktree_fingerprint(self: Any, worktree: Path) -> tuple[str, str] | None:
-    """HEAD and ``git status --porcelain -z`` of the worktree; ``None`` if a probe failed."""
+async def _worktree_fingerprint(
+    self: Any, worktree: Path, pin: tuple[Path, Path] | None = None
+) -> tuple[str, str, str] | None:
+    """HEAD, ``git status --porcelain -z`` and git dirs; ``None`` if a probe failed."""
     outputs: list[str] = []
     for args in (
         ("rev-parse", "HEAD"),
         # Every untracked leaf, so a file added under an untracked directory shows.
         ("status", "--porcelain", "-z", "--untracked-files=all"),
+        # A retargeted gitfile or ``commondir`` reads as a change, and the rollback
+        # pins these pre-run directories.
+        ("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"),
     ):
         try:
-            result = await self._deps.runner.run(
-                git_worktree_command(worktree, *args), timeout_seconds=_PROBE_TIMEOUT_SECONDS
-            )
+            result = await _run_git(self, worktree, pin, *args)
         except OSError:
             return None
         if result.returncode != 0:
             return None
         outputs.append(result.stdout)
-    return outputs[0], outputs[1]
+    return outputs[0], outputs[1], outputs[2]
 
 
 async def _restore_worktree(
-    self: Any, workspace_id: str, worktree: Path, before: tuple[str, str]
+    self: Any, workspace_id: str, worktree: Path, before: tuple[str, str, str]
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
 
@@ -273,22 +286,27 @@ async def _restore_worktree(
     commits and edits, and every untracked path left is one the agent added.
     The index is reset first: a hard reset deletes every index entry missing
     from HEAD, and an ignored file the agent force-added predates the run.
+    The rollback runs through the pre-run git dirs, never the live ``.git``: the
+    agent may have retargeted it at another repository.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
         return False
     head = before[0].strip()
-    restored = (
-        after is not None
-        and await _git_ok(self, worktree, "reset", "-q", "--mixed", head)
-        and await _git_ok(self, worktree, "reset", "--hard", head)
-    )
-    reset = await _worktree_fingerprint(self, worktree) if restored else None
-    added = sorted(_untracked_paths_from_porcelain_z(reset[1])) if reset is not None else []
-    if added:
-        restored = await _git_ok(
-            self, worktree, "--literal-pathspecs", "clean", "-ffd", "--", *added
+    with _pinned_git_dirs(worktree, before[2]) as pin:
+        restored = (
+            after is not None
+            and pin is not None
+            and await _git_ok(self, worktree, pin, "reset", "-q", "--mixed", head)
+            and await _git_ok(self, worktree, pin, "reset", "--hard", head)
         )
+        reset = await _worktree_fingerprint(self, worktree, pin) if restored else None
+        added = sorted(_untracked_paths_from_porcelain_z(reset[1])) if reset is not None else []
+        if pin is not None and added:
+            restored = await _git_ok(
+                self, worktree, pin, "--literal-pathspecs", "clean", "-ffd", "--", *added
+            )
+    # The live probe also fails while the gitfile still points elsewhere.
     if not (restored and await _worktree_fingerprint(self, worktree) == before):
         # Fail closed: the fallback's repair then refuses the dirty worktree.
         _log.warning(
@@ -299,15 +317,59 @@ async def _restore_worktree(
     return True
 
 
-async def _git_ok(self: Any, worktree: Path, *args: str) -> bool:
-    """Run one git command in the worktree; whether it succeeded."""
+@contextlib.contextmanager
+def _pinned_git_dirs(worktree: Path, git_dirs: str) -> Iterator[tuple[Path, Path] | None]:
+    """Hold no-follow opens of the pre-run git dir and common dir.
+
+    Yields their ``/proc/<pid>/fd/<n>`` paths, so no path swap after the open
+    steers the rollback; ``None`` when either is missing or outside the
+    worktree's approved roots.
+    """
+    paths = git_dirs.splitlines()
+    if len(paths) != 2:
+        yield None
+        return
+    with contextlib.ExitStack() as stack:
+        fds = [
+            stack.enter_context(
+                _open_snapshotted_git_dir_for_restore(Path(path), outer_worktree_path=worktree)
+            )
+            for path in paths
+        ]
+        if fds[0] is None or fds[1] is None:
+            yield None
+            return
+        pid = os.getpid()
+        yield Path(f"/proc/{pid}/fd/{fds[0]}"), Path(f"/proc/{pid}/fd/{fds[1]}")
+
+
+async def _git_ok(self: Any, worktree: Path, pin: tuple[Path, Path], *args: str) -> bool:
+    """Run one pinned git command in the worktree; whether it succeeded."""
     try:
-        result = await self._deps.runner.run(
-            git_worktree_command(worktree, *args), timeout_seconds=_PROBE_TIMEOUT_SECONDS
-        )
+        result = await _run_git(self, worktree, pin, *args)
     except OSError:
         return False
     return bool(result.returncode == 0)
+
+
+async def _run_git(
+    self: Any, worktree: Path, pin: tuple[Path, Path] | None, *args: str
+) -> CommandResult:
+    """Run git in the worktree, through the pinned git dir and common dir if given."""
+    result: CommandResult
+    if pin is None:
+        result = await self._deps.runner.run(
+            git_worktree_command(worktree, *args), timeout_seconds=_PROBE_TIMEOUT_SECONDS
+        )
+    else:
+        git_dir, common_dir = pin
+        result = await self._deps.runner.run(
+            git_pinned_worktree_command(git_dir, worktree, *args),
+            cwd=str(worktree),
+            env={**os.environ, "GIT_COMMON_DIR": str(common_dir)},
+            timeout_seconds=_PROBE_TIMEOUT_SECONDS,
+        )
+    return result
 
 
 async def _record_judgment(

@@ -230,22 +230,25 @@ async def test_a_dirty_worktree_is_never_handed_to_the_agent(tmp_path: Path, pat
     assert (worktree / path).read_text() == "in progress\n"
 
 
-def _dirty_after_agent(cmd: FakeCommandRunner, ran: list[str]) -> None:
+def _dirty_after_agent(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) -> None:
+    # A real git dir to pin, so the rollback's own commands run.
+    cmd.respond_when(lambda args: "--git-dir" in args, stdout=f"{git_dir}\n{git_dir}\n")
     cmd.respond_when(lambda args: "rev-parse" in args, stdout="abc\n")
     cmd.respond_when(lambda args: "status" in args and bool(ran), stdout="?? scratch.py\0")
 
 
-def _reset_fails(cmd: FakeCommandRunner, ran: list[str]) -> None:
+def _reset_fails(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) -> None:
     cmd.respond_when(lambda args: "reset" in args, returncode=1, stderr="locked")
-    _dirty_after_agent(cmd, ran)
+    _dirty_after_agent(cmd, ran, git_dir)
 
 
-def _clean_fails(cmd: FakeCommandRunner, ran: list[str]) -> None:
+def _clean_fails(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) -> None:
     cmd.respond_when(lambda args: "clean" in args, returncode=1, stderr="denied")
-    _dirty_after_agent(cmd, ran)
+    _dirty_after_agent(cmd, ran, git_dir)
 
 
-def _probe_fails_after(cmd: FakeCommandRunner, ran: list[str]) -> None:
+def _probe_fails_after(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) -> None:
+    del git_dir
     cmd.respond_when(lambda args: "rev-parse" in args and bool(ran), returncode=128)
 
 
@@ -273,7 +276,9 @@ async def test_a_failed_rollback_fails_the_check_closed_and_is_logged(
     # Left dirty, the fallback's repair refuses the worktree: never a judgment.
     cmd = make_cmd()
     ran: list[str] = []
-    script(cmd, ran)
+    git_dir = tmp_path / "ws" / ".git"
+    git_dir.mkdir(parents=True)
+    script(cmd, ran, git_dir)
 
     def agent() -> Any:
         ran.append("run")
@@ -282,5 +287,76 @@ async def test_a_failed_rollback_fails_the_check_closed_and_is_logged(
     with structlog.testing.capture_logs() as captured:
         assert await _check(_runner(tmp_path, agent, cmd)) == (UNJUDGED, "worktree_changed")
 
+    [log] = [r for r in captured if r["event"] == _RESTORE_FAILED]
+    assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
+
+
+def _linked_worktrees(tmp_path: Path) -> tuple[Path, Path]:
+    # AWF's layout: ``<root>/worktrees/<id>`` linked to ``<root>/mirrors/<repo>.git``.
+    (tmp_path / "seed").mkdir()
+    seed = _worktree(tmp_path / "seed")
+    mirror = tmp_path / "mirrors" / "repo.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(mirror)], check=True)
+    for name in ("ws", "other"):
+        subprocess.run(
+            [
+                "git",
+                "--git-dir",
+                str(mirror),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                name,
+                str(tmp_path / "worktrees" / name),
+            ],
+            check=True,
+        )
+    other = tmp_path / "worktrees" / "other"
+    _git(other, "config", "user.email", "awf@example.com")
+    _git(other, "config", "user.name", "AWF Test")
+    (other / "other.py").write_text("o = 1\n")
+    _git(other, "add", "other.py")
+    _git(other, "commit", "-qm", "other workspace")
+    return tmp_path / "worktrees" / "ws", other
+
+
+async def test_a_linked_worktree_is_rolled_back_through_its_pinned_git_dir(
+    tmp_path: Path,
+) -> None:
+    worktree, _ = _linked_worktrees(tmp_path)
+    before = _snapshot(worktree)
+
+    def agent() -> Any:
+        (worktree / "core.py").write_text("x = 2\n")
+        _git(worktree, "commit", "-qam", "agent commit")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        runner = _runner(tmp_path / "worktrees", agent)
+        assert await _check(runner) == (UNJUDGED, "worktree_changed")
+
+    assert _snapshot(worktree) == before
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
+async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_path: Path) -> None:
+    # A reset through the live gitfile would move the other workspace's branch.
+    worktree, other = _linked_worktrees(tmp_path)
+    other_head = _git(other, "rev-parse", "HEAD")
+    other_git_dir = _git(other, "rev-parse", "--absolute-git-dir").strip()
+
+    def agent() -> Any:
+        (worktree / "core.py").write_text("x = 2\n")
+        _git(worktree, "commit", "-qam", "agent commit")
+        (worktree / ".git").write_text(f"gitdir: {other_git_dir}\n")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        runner = _runner(tmp_path / "worktrees", agent)
+        assert await _check(runner) == (UNJUDGED, "worktree_changed")
+
+    assert _git(other, "rev-parse", "HEAD") == other_head
+    assert _git(other, "status", "--porcelain") == ""
     [log] = [r for r in captured if r["event"] == _RESTORE_FAILED]
     assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
