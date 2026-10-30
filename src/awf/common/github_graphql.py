@@ -315,7 +315,10 @@ query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int
           isOutdated
           resolvedBy { login }
           comments(first: 100) {
-            nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+            nodes {
+              id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt
+              author { __typename login }
+            }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -338,7 +341,10 @@ query ReviewThreadDispositionAuditOne($threadId: ID!) {
       resolvedBy { login }
       pullRequest { number repository { nameWithOwner } }
       comments(first: 100) {
-        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+        nodes {
+          id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt
+          author { __typename login }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -352,7 +358,10 @@ query ReviewThreadDispositionAuditComments($threadId: ID!, $cursor: String!) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $cursor) {
-        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+        nodes {
+          id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt
+          author { __typename login }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }

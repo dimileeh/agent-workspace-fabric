@@ -19,6 +19,13 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   (:func:`~thread_disposition.retire_reopened_dispositions`). The runner does
   that reopen itself, at most twice per thread, after the gate returns
   (:mod:`~awf.runtime.pr_monitor_runner.thread_disposition_reopen`, #1138).
+  Two refinements run in front of that fallback (#1138): a reply by the
+  thread's own opening bot after AWF's marker is judged once by the agent, and
+  an ACKNOWLEDGES judgment keeps the marker as the disposition
+  (:mod:`~awf.runtime.pr_monitor_runner.thread_disposition_ack`); and a ``fixed``
+  disposition that crossed a moved-head re-adoption live certifies nothing until
+  its commits are confirmed in the adopted head
+  (:mod:`~awf.runtime.pr_monitor_runner.thread_disposition_readopt`).
 * The gate never writes to the forge: it decides on ONE complete audit.
 * Every disposition the monitor records is bound to the conversation it answers
   once an audit sees its reply resolved, and holds only while an audit shows that
@@ -46,6 +53,7 @@ from awf.runtime.monitor_state_keys import (
     _REVIEW_THREAD_AUDIT_UNAVAILABLE_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_CONVERSATIONS_STATE_KEY,
     _REVIEW_THREAD_DISPOSITION_BASELINE_STATE_KEY,
+    _disposition_readopt_pending_key,
     _disposition_retired_key,
     _disposition_unverified_key,
     _item_disposition_key,
@@ -58,6 +66,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     LEGACY_BASELINE,
     RESOLVED_BY_OTHERS,
     REVIEW_THREAD_AUDIT_UNAVAILABLE,
+    REVIEW_THREAD_DISPOSITION_ACK_CHECK_PENDING,
     REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE,
     REVIEW_THREAD_DISPOSITION_UNVERIFIED,
     DispositionClass,
@@ -68,6 +77,7 @@ from awf.runtime.pr_monitor_runner.thread_disposition import (
     retire_item_disposition,
     unverified_blocker_message,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_ack import acknowledgement_views
 
 _AUDIT_CONTEXT = "review_thread_audit"
 _AUDIT_ACTION = "review_thread_disposition_audit"
@@ -153,6 +163,9 @@ async def review_thread_disposition_gate(
             summary=missing_login,
             detail=missing_login,
         )
+    # #1138 D1: a judged bot acknowledgement is not newer feedback; one still to
+    # judge keeps its binding until the next poll's runner step judges it.
+    audit, ack_pending = acknowledgement_views(state, audit, viewer=viewer)
     _retire_broken_bindings(
         state, audit, viewer=viewer, workspace_id=workspace_id, pr_number=pr_number
     )
@@ -160,6 +173,7 @@ async def review_thread_disposition_gate(
         self,
         audit,
         viewer=viewer,
+        ack_pending=ack_pending,
         workspace_id=workspace_id,
         pr_number=pr_number,
         status=status,
@@ -175,6 +189,7 @@ async def _verify_audit(
     audit: ReviewThreadAudit,
     *,
     viewer: str,
+    ack_pending: frozenset[str] = frozenset(),
     workspace_id: str,
     pr_number: int,
     status: PRStatus,
@@ -215,6 +230,8 @@ async def _verify_audit(
         digests[thread.thread_id] = thread.conversation_digest
         if disposition_marker_class(thread.viewer_comment_bodies, thread_id=thread.thread_id):
             marked.add(thread.thread_id)
+        if thread.thread_id in ack_pending:
+            continue  # neither certified nor unverified until its bot reply is judged
         # Only a marker after the newest feedback dispositions the current
         # conversation; an older one answered feedback that has since moved on.
         disposition_class = disposition_marker_class(
@@ -264,6 +281,16 @@ async def _verify_audit(
                 pr_number=pr_number,
                 thread_ids=undecided,
                 reason_code="REVIEW_THREAD_FEEDBACK_AFTER_DECISION",
+            )
+            return DispositionGateResult(retry=True, feedback_changed=True)
+        if ack_pending:
+            # The next poll's runner step asks the agent, outside the merge lock.
+            _log.info(
+                "monitor.review_thread_disposition_ack_check_pending",
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                thread_ids=sorted(ack_pending),
+                reason_code=REVIEW_THREAD_DISPOSITION_ACK_CHECK_PENDING,
             )
             return DispositionGateResult(retry=True, feedback_changed=True)
         return DispositionGateResult(count_rows=disposition_count_rows(counts))
@@ -333,8 +360,12 @@ def _disposition_holds(
     the marker is the evidence — unless it is a reply this monitor (or a moved-head
     re-adoption, PRRT_kwDOSJAM6s6vdu03) retired, or the
     thread holds a retired reply whose conversation AWF never read, which could be
-    any marker in it (PRRT_kwDOSJAM6s6vc8NC).
+    any marker in it (PRRT_kwDOSJAM6s6vc8NC). A ``fixed`` record that crossed a
+    moved-head re-adoption live holds only once its commits were confirmed in the
+    adopted head (#1138): until then this fails closed.
     """
+    if _disposition_readopt_pending_key(thread.thread_id) in state.threads_addressed_ids:
+        return False
     disposition = read_item_disposition(state, thread.thread_id)
     if disposition is None:
         retired = {

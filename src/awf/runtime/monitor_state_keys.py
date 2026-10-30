@@ -173,6 +173,36 @@ def _disposition_auto_reopen_key(thread_id: str) -> str:
     return f"__awf_disposition_auto_reopened__:{thread_id}"
 
 
+def _disposition_ack_key(thread_id: str, comment_identity: str) -> str:
+    """Build state key recording the agent's judgment of a bot reply after AWF's marker.
+
+    Keyed by the thread and the reply's identity (#1138): its id, author and
+    body hash, so an edit is a new identity. The value is ``ACKNOWLEDGES``,
+    ``NEW_POINT`` or ``UNJUDGED`` (the check failed); every judgment is kept, so
+    the check runs at most once per identity, across re-adoption too.
+    """
+    return f"__awf_disposition_ack__:{thread_id}:{comment_identity}"
+
+
+def _disposition_ack_pending_key(thread_id: str) -> str:
+    """Build state key asking the next poll to judge a thread's bot replies (#1138).
+
+    The disposition gate sets it; the runner step that runs the agent outside the
+    merge lock clears it. It is per-workspace bookkeeping and never crosses re-adoption.
+    """
+    return f"__awf_disposition_ack_pending__:{thread_id}"
+
+
+def _disposition_readopt_pending_key(thread_id: str) -> str:
+    """Build state key marking a ``fixed`` disposition that crossed a moved head live (#1138).
+
+    The value is the adopted head SHA. Until the runner step confirms every
+    commit the disposition cites is an ancestor of that head, the gate certifies
+    nothing on it; a failed check retires it as a moved-head adoption always did.
+    """
+    return f"__awf_disposition_readopt_pending__:{thread_id}"
+
+
 def _disposition_retired_key(thread_id: str, conversation_digest: str) -> str:
     """Build state key recording an AWF disposition reply that was retired (#1018).
 
