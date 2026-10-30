@@ -265,7 +265,7 @@ def get_comment_repair_reasons(
                 "the forge status; AWF retries the re-read on the next two polls first."
             ),
             (
-                "The agent run failed, its answer had no single valid AWF-DISPOSITION-ACK line, "
+                "The agent run failed, its answer had no valid AWF-DISPOSITION-ACK line, "
                 "it changed the worktree during a judgment-only run, or the thread could not "
                 "be re-read on three polls. A failed check is recorded and never retried; a "
                 "provider outage goes to provider recovery instead and is not a failed check."

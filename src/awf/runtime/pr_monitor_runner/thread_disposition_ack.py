@@ -54,7 +54,6 @@ AckJudgment = Literal["ACKNOWLEDGES", "NEW_POINT", "UNJUDGED"]
 ACK_JUDGMENTS: frozenset[str] = frozenset({ACKNOWLEDGES, NEW_POINT, UNJUDGED})
 # Failed re-reads of one flagged thread before its check counts as failed.
 MAX_ACK_REFETCH_FAILURES = 3
-_ANSWER_PREFIX = "AWF-DISPOSITION-ACK:"
 _ANSWER_RE = re.compile(r"AWF-DISPOSITION-ACK: (ACKNOWLEDGES|NEW_POINT)")
 _EVIDENCE_MAX_CHARS = 4000
 
@@ -200,11 +199,12 @@ def _evidence(name: str, text: str) -> str:
 
 
 def parse_ack_answer(stdout: str) -> Literal["ACKNOWLEDGES", "NEW_POINT"] | None:
-    """The agent's answer: exactly one record line, and it is the final non-empty line."""
-    from awf.runtime.pr_monitor_runner.helpers_verdict import _final_non_empty_line
+    """The agent's answer: the last exact record line; output after it is ignored.
 
-    final = _final_non_empty_line(stdout)
-    match = _ANSWER_RE.fullmatch(final.strip()) if final is not None else None
-    if match is None or sum(_ANSWER_PREFIX in line for line in stdout.splitlines()) != 1:
-        return None
-    return ACKNOWLEDGES if match.group(1) == ACKNOWLEDGES else NEW_POINT
+    Lines that are not exact records are skipped. No exact record is no answer.
+    """
+    for line in reversed(stdout.splitlines()):
+        match = _ANSWER_RE.fullmatch(line.strip())
+        if match is not None:
+            return ACKNOWLEDGES if match.group(1) == ACKNOWLEDGES else NEW_POINT
+    return None

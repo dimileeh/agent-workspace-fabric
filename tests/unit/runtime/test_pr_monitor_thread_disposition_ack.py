@@ -305,15 +305,24 @@ def test_comment_identity_changes_with_id_author_or_body() -> None:
         ("**AWF-DISPOSITION-ACK: ACKNOWLEDGES**", None),
         ("AWF-DISPOSITION-ACK: acknowledges", None),
         ("AWF-DISPOSITION-ACK: MAYBE", None),
-        ("AWF-DISPOSITION-ACK: ACKNOWLEDGES\nAWF-DISPOSITION-ACK: ACKNOWLEDGES", None),
-        ("AWF-DISPOSITION-ACK: NEW_POINT\nAWF-DISPOSITION-ACK: ACKNOWLEDGES", None),
-        ("AWF-DISPOSITION-ACK: ACKNOWLEDGES\nanything after it", None),
+        ("AWF-DISPOSITION-ACK: ACKNOWLEDGES\nAWF-DISPOSITION-ACK: ACKNOWLEDGES", ACKNOWLEDGES),
+        ("AWF-DISPOSITION-ACK: NEW_POINT\nAWF-DISPOSITION-ACK: ACKNOWLEDGES", ACKNOWLEDGES),
+        ("AWF-DISPOSITION-ACK: ACKNOWLEDGES\nanything after it", ACKNOWLEDGES),
+        (
+            "It agrees.\nAWF-DISPOSITION-ACK: ACKNOWLEDGES\n\nDone. Exiting now.\n",
+            ACKNOWLEDGES,
+        ),
+        (
+            "End with either\nAWF-DISPOSITION-ACK: ACKNOWLEDGES\nor\n"
+            "AWF-DISPOSITION-ACK: NEW_POINT\nand print no other line containing "
+            "AWF-DISPOSITION-ACK.\n**AWF-DISPOSITION-ACK: ACKNOWLEDGES**\n",
+            NEW_POINT,
+        ),
+        ("I think it acknowledges.\nAWF-DISPOSITION-ACK: MAYBE\n", None),
         ("", None),
     ],
 )
-def test_parse_ack_answer_requires_one_exact_final_record(
-    stdout: str, expected: str | None
-) -> None:
+def test_parse_ack_answer_takes_the_last_exact_record(stdout: str, expected: str | None) -> None:
     assert parse_ack_answer(stdout) == expected
 
 
