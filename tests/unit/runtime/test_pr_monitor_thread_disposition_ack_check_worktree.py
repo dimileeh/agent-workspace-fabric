@@ -25,6 +25,10 @@ from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import thread_disposition_ack_check as ack_check
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import ACKNOWLEDGES, UNJUDGED
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import _judge
+from awf.runtime.pr_monitor_runner.types import (
+    _MonitorAgentServiceRecoveryFailedError,
+    _MonitorAgentServiceRecoverySupersededError,
+)
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 pytestmark = pytest.mark.unit
@@ -266,6 +270,32 @@ async def test_edits_before_a_cancelled_run_are_rolled_back_before_it_propagates
 
     with pytest.raises(asyncio.CancelledError):
         await check
+    assert _snapshot(worktree) == before
+    assert not (worktree / "scratch.py").exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_MonitorAgentServiceRecoveryFailedError, id="recovery-failed"),
+        pytest.param(_MonitorAgentServiceRecoverySupersededError, id="recovery-superseded"),
+    ],
+)
+async def test_edits_before_an_abandoned_service_recovery_are_rolled_back_before_it_propagates(
+    tmp_path: Path, error: type[RuntimeError]
+) -> None:
+    # As for a cancellation: ``UNJUDGED`` is already saved, so the fallback's
+    # repair would later refuse the agent's left-over edits.
+    worktree = _worktree(tmp_path)
+    before = _snapshot(worktree)
+
+    def agent() -> Any:
+        (worktree / "core.py").write_text("x = 2\n")
+        (worktree / "scratch.py").write_text("y = 1\n")
+        raise error("recovery abandoned")
+
+    with pytest.raises(error):
+        await _check(_runner(tmp_path, agent))
     assert _snapshot(worktree) == before
     assert not (worktree / "scratch.py").exists()
 
