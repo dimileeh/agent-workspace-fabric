@@ -10,6 +10,20 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class AuditedThreadComment:
+    """One review-thread comment as the bot-acknowledgement check needs it (#1138).
+
+    ``author_is_bot`` is the forge's own account type (GitHub's ``Bot`` actor),
+    never a name or text heuristic; a deleted author is not a bot.
+    """
+
+    comment_id: str
+    author_login: str | None
+    author_is_bot: bool
+    body: str
+
+
+@dataclass(frozen=True)
 class AuditedReviewThread:
     """One review thread as the disposition gate needs it, resolved ones included.
 
@@ -29,6 +43,13 @@ class AuditedReviewThread:
     ``external_comment_bodies`` holds the plain-text bodies of the comments by anyone but
     the token's identity, oldest first: the ones ``fetch_pr_status`` lists, as it lists
     them (it lists only an unresolved thread with any), so an edit shows up there too.
+
+    For the bot-acknowledgement check (#1138), ``opener`` is the thread's first
+    comment and ``trailing_comments`` are the comments posted after the newest
+    one the token's identity authored, oldest first (empty without such a
+    comment). ``without_trailing`` is this same thread as it would read without
+    them (their edits ignored too); ``None`` when there are none. All three stay
+    empty on a forge that cannot report them, which keeps today's semantics.
     """
 
     thread_id: str
@@ -41,6 +62,9 @@ class AuditedReviewThread:
     conversation_digest: str = ""
     conversation_digest_before_reply: str = ""
     external_comment_bodies: tuple[str, ...] = ()
+    opener: AuditedThreadComment | None = None
+    trailing_comments: tuple[AuditedThreadComment, ...] = ()
+    without_trailing: AuditedReviewThread | None = None
 
     @property
     def current_viewer_comment_bodies(self) -> tuple[str, ...]:
