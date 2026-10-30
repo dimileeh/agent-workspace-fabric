@@ -306,6 +306,7 @@ async def test_sync_hosted_worktree_fails_closed_when_current_head_is_unavailabl
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE"
+    assert excinfo.value.details == {"reported_terminal_head_sha": "b" * 40}
     assert runner.calls == [
         [
             "git",

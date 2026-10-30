@@ -517,6 +517,7 @@ async def _sync_hosted_worktree_to_terminal_head(
                 agent=self._deps.adapter.name,
                 result=current_head,
                 reason_code=_HOSTED_REMOTE_HEAD_DELTA_UNAVAILABLE_REASON,
+                details=reported,
             )
     fetch = await self._deps.runner.run(
         [
