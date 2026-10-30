@@ -267,19 +267,24 @@ async def _restore_worktree(
 
     ``before`` is clean, so resetting to its HEAD discards only the agent's
     commits and edits, and every untracked path left is one the agent added.
+    The index is reset first: a hard reset deletes every index entry missing
+    from HEAD, and an ignored file the agent force-added predates the run.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
         return False
-    restored = after is not None and await _git_ok(
-        self, worktree, "reset", "--hard", before[0].strip()
+    head = before[0].strip()
+    restored = (
+        after is not None
+        and await _git_ok(self, worktree, "reset", "-q", "--mixed", head)
+        and await _git_ok(self, worktree, "reset", "--hard", head)
     )
-    if restored and after is not None:
-        added = sorted(_untracked_paths_from_porcelain_z(after[1]))
-        if added:
-            restored = await _git_ok(
-                self, worktree, "--literal-pathspecs", "clean", "-ffd", "--", *added
-            )
+    reset = await _worktree_fingerprint(self, worktree) if restored else None
+    added = sorted(_untracked_paths_from_porcelain_z(reset[1])) if reset is not None else []
+    if added:
+        restored = await _git_ok(
+            self, worktree, "--literal-pathspecs", "clean", "-ffd", "--", *added
+        )
     if not (restored and await _worktree_fingerprint(self, worktree) == before):
         # Fail closed: the fallback's repair then refuses the dirty worktree.
         _log.warning(

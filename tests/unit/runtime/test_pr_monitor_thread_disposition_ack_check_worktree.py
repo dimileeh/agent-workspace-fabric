@@ -110,6 +110,31 @@ async def test_an_answer_from_a_run_that_changed_the_worktree_is_rejected_and_ro
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
+async def test_the_rollback_keeps_an_ignored_file_the_agent_force_added(tmp_path: Path) -> None:
+    # Ignored files leave the worktree clean, so the check runs; a hard reset
+    # alone would delete the force-added file as an index entry absent from HEAD.
+    worktree = _worktree(tmp_path)
+    (worktree / ".gitignore").write_text(".env\n")
+    _git(worktree, "add", ".gitignore")
+    _git(worktree, "commit", "-qm", "ignore .env")
+    (worktree / ".env").write_text("TOKEN=keep\n")
+    before = _snapshot(worktree)
+
+    def agent() -> Any:
+        _git(worktree, "add", "-f", ".env")
+        (worktree / "staged.txt").write_text("agent\n")
+        _git(worktree, "add", "staged.txt")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_changed")
+
+    assert _snapshot(worktree) == before
+    assert (worktree / ".env").read_text() == "TOKEN=keep\n"
+    assert not (worktree / "staged.txt").exists()
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
 def _agent_error() -> Any:
     raise AgentRunError(agent="claude_code", result=CommandResult(1, "", "x"))
 
