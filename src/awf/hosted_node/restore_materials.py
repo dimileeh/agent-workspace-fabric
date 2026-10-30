@@ -1,6 +1,6 @@
 """Exact journal-bound credentials may stage without granting execution authority."""
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.models import Workspace
 from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.lifecycle_models import NodeLifecycleRow
 from awf.hosted_node.lifecycle_store import locked
 from awf.hosted_node.restore_quarantine import evidence_fresh
 from awf.hosted_node.restore_reconciliation_inventory import context
@@ -27,6 +28,13 @@ async def deny_material(_value: RestoreMaterialRequest) -> None:
     return None
 
 
+def requires_permit(quarantine: object, policy: dict[str, Any] | None) -> bool:
+    marker = (policy or {}).get("hosted_recovery", {})
+    return quarantine is not None or bool(
+        marker.get("restore_id") and marker.get("disposition") == "attention"
+    )
+
+
 async def request(
     receiver: "Receiver",
     session: AsyncSession,
@@ -36,11 +44,14 @@ async def request(
     if receiver.lifecycle is None:
         return None
     gate = await locked(session, receiver.identity)
-    workspace = await session.get(Workspace, value.workspace_id) if value is not None else None
-    marker = (workspace.task_policy or {}).get("hosted_recovery", {}) if workspace else {}
-    if gate.restore_quarantine is None and not (
-        marker.get("restore_id") and marker.get("disposition") == "attention"
-    ):
+    policy = (
+        await session.scalar(
+            select(Workspace.task_policy).where(Workspace.id == value.workspace_id)
+        )
+        if value is not None
+        else None
+    )
+    if not requires_permit(gate.restore_quarantine, policy):
         return None
     if value is None or operation is None:
         raise MaterialDeniedError("RESTORE_QUARANTINED")
@@ -114,6 +125,22 @@ async def authorize(
     from awf.hosted_node.lifecycle import _bounded
 
     if receiver.lifecycle is None:
+        return None
+    # This read only avoids an unnecessary external-permit preflight. It grants
+    # no write authority: allow() rechecks identity and state under the existing
+    # mutation lock, including a concurrent transition into quarantine.
+    async with receiver.factory() as session:
+        observed = (
+            await session.execute(
+                select(
+                    NodeLifecycleRow.restore_quarantine,
+                    select(Workspace.task_policy)
+                    .where(Workspace.id == value.workspace_id)
+                    .scalar_subquery(),
+                ).where(NodeLifecycleRow.singleton == 1)
+            )
+        ).one_or_none()
+    if observed is not None and not requires_permit(*observed):
         return None
     async with receiver.factory.begin() as session:
         await receiver.authority(session, lock=True)

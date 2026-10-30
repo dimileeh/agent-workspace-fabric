@@ -15,7 +15,6 @@ from typing import Any
 from awf.hosted_node.checkpoint_cut import (
     CheckpointRoots,
     HeldConnection,
-    require,
     validate_checkpoint_cut,
 )
 from awf.hosted_node.identity import MaterialDeniedError
@@ -42,6 +41,11 @@ MANIFEST_FIELDS = frozenset(
         "marker_observed_at",
     )
 )
+
+
+def require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise MaterialDeniedError(reason)
 
 
 async def validate_restored_cut(
@@ -111,5 +115,7 @@ async def validate_restored_cut(
         )
         require(evidence_fresh(authority.expires_at), "RESTORE_AUTHORITY_EXPIRED")
         return authority
+    except MaterialDeniedError:
+        raise
     except (ValueError, KeyError, TypeError, RecursionError):
         raise MaterialDeniedError("RESTORE_MANIFEST_INVALID") from None

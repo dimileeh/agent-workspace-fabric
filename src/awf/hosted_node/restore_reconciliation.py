@@ -120,8 +120,27 @@ def bindings(proof: RestoreReconciliationEvidence) -> list[Binding]:
     ]
 
 
-async def supersede(session: AsyncSession, journal: RestoreReconciliationRow) -> None:
-    retired = bindings(RestoreReconciliationEvidence.model_validate(journal.plan))
+async def supersede(
+    session: AsyncSession,
+    journal: RestoreReconciliationRow,
+    current: RestoreReconciliationEvidence,
+) -> None:
+    retained = set(bindings(current))
+    retained_preparations = {
+        (item.namespace, item.workspace_id, item.preparation_id) for item in retained
+    }
+    retired = [
+        binding
+        for binding in bindings(RestoreReconciliationEvidence.model_validate(journal.plan))
+        if binding not in retained
+    ]
+    # Revocation applies to a preparation. A changed binding cannot silently
+    # retain another grant under that same preparation in the new decision.
+    if any(
+        (old.namespace, old.workspace_id, old.preparation_id) in retained_preparations
+        for old in retired
+    ):
+        raise MaterialDeniedError("RESTORE_RECONCILIATION_CONFLICT")
     if retired:
         preparations = select(PreparationRow.id).where(
             PreparationRow.owner == journal.owner,
@@ -224,7 +243,7 @@ async def reconcile_restore(service: "NodeLifecycle", value: RecoveryAcknowledge
                 or staged.idempotency_key == value.idempotency_key
             ):
                 raise MaterialDeniedError("RESTORE_RECONCILIATION_CONFLICT")
-            await supersede(session, staged)
+            await supersede(session, staged, proof)
             staged = None
         if staged is not None:
             if staged.plan_sha256 != plan_hash or staged.state != "staged":

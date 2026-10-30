@@ -1,6 +1,7 @@
 """Fresh restore credentials stage through real HTTP before exact SQL acceptance."""
 
 import base64
+import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -116,7 +117,9 @@ async def resumable_restore(ready_node, monkeypatch, request):
     client, receiver, workspaces, binding = await fixture.restore(ready_node)
     directory = tempfile.TemporaryDirectory(dir="/dev/shm")
     receiver.store = MaterialStore(Path(directory.name))
-    receiver.views = RuntimeViews(receiver.store, identity=receiver.identity)
+    receiver.views = RuntimeViews(
+        receiver.store, identity=receiver.identity, agent_gid=os.getegid()
+    )
     receiver.config = receiver.config.model_copy(update={"runtime_enabled": True})
     receiver.lifecycle.verify_bindings = receiver.verify_recovery_bindings
     receiver.lifecycle.observe_runtime = AsyncMock(return_value=True)

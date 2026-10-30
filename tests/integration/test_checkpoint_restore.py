@@ -108,6 +108,7 @@ async def test_actual_restored_cut_preserves_current_authority_without_extending
         "mapping",
         "duplicate",
         "oversize",
+        "volume",
     ],
 )
 async def test_restore_denies_interrupted_mismatched_or_unpinned_cut(ready_node, tmp_path, fault):
@@ -148,8 +149,10 @@ async def test_restore_denies_interrupted_mismatched_or_unpinned_cut(ready_node,
             )
         elif fault == "duplicate":
             raw = raw.replace(b'"schema_version":1', b'"schema_version":2,"schema_version":1')
-        else:
+        elif fault == "oversize":
             raw = b" " * 65537
+        else:
+            roots = replace(roots, persistent_volumes=("unsupported-db",))
         if fault in {"extra", "marker", "proof", "revision", "observed"}:
             raw = encoded(manifest)
         # Even authority-pinned malformed bytes cannot bypass the local validator.
@@ -160,7 +163,19 @@ async def test_restore_denies_interrupted_mismatched_or_unpinned_cut(ready_node,
                     update={"manifest_sha256": hashlib.sha256(raw).hexdigest()}
                 ),
             )
-        with pytest.raises(MaterialDeniedError, match="(?:CHECKPOINT|RESTORE)"):
+        reason = {
+            "digest": "RESTORE_MANIFEST_MISMATCH",
+            "marker": "RESTORE_MARKER_MISMATCH",
+            "proof": "RESTORE_FILES_MISMATCH",
+            "release": "RESTORE_RELEASE_MISMATCH",
+            "revision": "RESTORE_RELEASE_MISMATCH",
+            "files": "RESTORE_FILES_MISMATCH",
+            "observed": "RESTORE_CUT_TIME_MISMATCH",
+            "expired": "RESTORE_AUTHORITY_EXPIRED",
+            "schema": "RESTORE_RELEASE_MISMATCH",
+            "volume": "CHECKPOINT_UNSUPPORTED_VOLUME",
+        }.get(fault, "RESTORE_MANIFEST_INVALID")
+        with pytest.raises(MaterialDeniedError, match=f"^{reason}$"):
             await validate_restored_cut(
                 connection, raw, authority, roots, release, time.monotonic() + 5
             )

@@ -1,13 +1,38 @@
 """PostgreSQL's dump CHECK definitions must reparse to the identical fingerprint."""
 
 import asyncio
+import subprocess
+import sys
 
+import pytest
 from sqlalchemy import text
 
 from awf.db.session import make_engine
 from awf.hosted_node.checkpoint_cut import schema_fingerprint
 from tests.postgres import postgres_empty_test_url
 from tests.unit.hosted_node.test_lifecycle_migration import _migrate
+
+
+@pytest.mark.parametrize("entrypoint", ["awf.hosted_node.lifecycle_models", "awf.db.models"])
+def test_cold_model_import_registers_restore_foreign_key_targets(entrypoint):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"""
+import importlib
+importlib.import_module({entrypoint!r})
+from awf.db.base import Base
+assert {{'hosted_node_lifecycle', 'hosted_restore_reconciliations', 'hosted_restore_row_holds'}} <= {{t.name for t in Base.metadata.sorted_tables}}
+foreign = next(iter(Base.metadata.tables['hosted_node_lifecycle'].c.restore_reconciliation_id.foreign_keys))
+assert foreign.column.table.name == 'hosted_restore_reconciliations'
+""",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 async def test_migrated_restore_check_definitions_have_stable_pg_dump_roundtrip():

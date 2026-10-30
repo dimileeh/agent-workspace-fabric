@@ -268,6 +268,8 @@ async def inventory(
             )
             for workspace_id, count, digest in histories
         )
+    if len(projected) > MAX_RESTORE_ROWS:
+        raise MaterialDeniedError("RESTORE_INVENTORY_UNSUPPORTED")
     payload = {
         "version": 1,
         "preimage_format": "postgres-jsonb-row-sha256-v1",

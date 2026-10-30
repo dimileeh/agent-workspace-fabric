@@ -10,11 +10,27 @@ from datetime import UTC, datetime
 from typing import NoReturn
 
 from pydantic import ValidationError
-from sqlalchemy import DateTime, and_, case, cast, column, insert, or_, select, true, update, values
+from sqlalchemy import (
+    DateTime,
+    and_,
+    case,
+    cast,
+    column,
+    false,
+    func,
+    insert,
+    or_,
+    select,
+    true,
+    update,
+    values,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, raiseload
+from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.ids import new_event_id
+from awf.db.base import Base
 from awf.db.models import (
     CallbackDelivery,
     CallbackSubscription,
@@ -241,9 +257,35 @@ async def inspect_retained_work(
     previous = Identity.model_validate(gate.previous_identity) if gate.previous_identity else None
     counts: Counter[str] = Counter()
     changes: list[tuple[Workspace, str, HostedWorkspace | None]] = []
+    restored = None
+    if gate.restore_reconciliation_id is not None:
+        from awf.hosted_node.restore_reconciliation_inventory import context
+
+        restored, _ = await context(session, gate)
+        if (
+            previous is None
+            or restored.checkpoint.identity.owner != identity.owner
+            or restored.boot_epoch_floor >= previous.boot_epoch
+            or (restored.target_disk_ref, restored.target_database_ref)
+            != (gate.disk_ref, gate.database_ref)
+        ):
+            _unresolved()
+
+    def held(model: type[Base]) -> ColumnElement[bool]:
+        # These rows remain fenced by the same SQL predicate after acceptance.
+        # Recognizing containment is not permission to resume or mutate them.
+        return (
+            func.awf_restore_row_held(
+                model.__tablename__,
+                func.to_jsonb(Base.metadata.tables[model.__tablename__].table_valued()),
+            )
+            if restored is not None
+            else false()
+        )
+
     if await session.scalar(
         select(Task.id)
-        .where(~select(TaskAttempt.id).where(TaskAttempt.task_id == Task.id).exists())
+        .where(~select(TaskAttempt.id).where(TaskAttempt.task_id == Task.id).exists(), ~held(Task))
         .limit(1)
     ):
         # Quiescence does not inventory logical tasks without any owned attempt.
@@ -273,13 +315,15 @@ async def inspect_retained_work(
         )
         invalid = [
             select(ServiceGCRequest.id).where(
-                ServiceGCRequest.status.not_in(("completed", "failed", "expired"))
+                ServiceGCRequest.status.not_in(("completed", "failed", "expired")),
+                ~held(ServiceGCRequest),
             ),
             select(ResourceReservation.id).where(
                 active_reservation, ResourceReservation.node_id != identity.owner
             ),
             select(CallbackDelivery.id).where(
                 active_callback,
+                ~held(CallbackDelivery),
                 or_(
                     CallbackDelivery.workspace_id.is_(None),
                     ~select(CallbackSubscription.id)
@@ -291,7 +335,9 @@ async def inspect_retained_work(
         for model, active in families:
             invalid.append(
                 select(model.id).where(
-                    active, ~select(Workspace.id).where(Workspace.id == model.workspace_id).exists()
+                    active,
+                    ~held(model),
+                    ~select(Workspace.id).where(Workspace.id == model.workspace_id).exists(),
                 )
             )
         for model, active in (
@@ -330,6 +376,7 @@ async def inspect_retained_work(
             invalid.append(
                 select(CallbackDelivery.id).where(
                     active_callback,
+                    ~held(CallbackDelivery),
                     reference.is_not(None),
                     ~select(model.id)
                     .where(
@@ -413,7 +460,19 @@ async def inspect_retained_work(
         ).all()
         if len(inventory) > MAX_RETAINED_WORKSPACES:
             _unresolved()
-        unresolved_operations = await _unresolved_operations(session, [row[0] for row in inventory])
+
+        def restore_attention(workspace: Workspace) -> bool:
+            prior = (workspace.task_policy or {}).get(RECOVERY_POLICY_KEY)
+            return bool(
+                restored is not None
+                and isinstance(prior, dict)
+                and prior.get("restore_id") == restored.restore_id
+                and prior.get("disposition") == "attention"
+            )
+
+        unresolved_operations = await _unresolved_operations(
+            session, [row[0] for row in inventory if not restore_attention(row[0])]
+        )
         associations = {}
         for row in inventory:
             (
@@ -430,6 +489,18 @@ async def inspect_retained_work(
                 bad_merge,
             ) = row
             prior = (workspace.task_policy or {}).get(RECOVERY_POLICY_KEY)
+            if restore_attention(workspace):
+                assert isinstance(prior, dict)
+                parked_identity = Identity.model_validate(prior["identity"])
+                if (
+                    workspace.node_id not in (None, identity.owner)
+                    or parked_identity.owner != identity.owner
+                    or parked_identity.boot_epoch > previous.boot_epoch
+                ):
+                    _unresolved()
+                changes.append((workspace, "attention", None))
+                counts["attention"] += 1
+                continue
             old = HostedWorkspace.model_validate((workspace.task_policy or {}).get("hosted_node"))
             if workspace.node_id not in (None, identity.owner) or old.workspace_id != workspace.id:
                 _unresolved()

@@ -1,10 +1,10 @@
 """Fixed restore transforms; uncertain external work is never replayed or cancelled."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -16,6 +16,7 @@ from awf.hosted_node.models import Grant, PreparationRow, Receipt
 from awf.hosted_node.restore_reconciliation_models import RestoreReconciliationRow, RestoreRowHold
 from awf.hosted_node.restore_reconciliation_mutations import Mutations
 from awf.hosted_node.restore_reconciliation_schemas import (
+    MAX_RESTORE_ROWS,
     RestoreInventory,
     RestoreReconciliationEvidence,
 )
@@ -234,6 +235,30 @@ async def apply_decisions(
             }
         )
     inserts, edits = [], []
+    resumed = [(row.family, row.row_id) for row in proof.rows if row.disposition == "resume"]
+    inherited = (
+        list(
+            await session.scalars(
+                select(RestoreRowHold)
+                .where(
+                    RestoreRowHold.owner == proof.identity.owner,
+                    RestoreRowHold.restore_id != proof.binding.restore_id,
+                    RestoreRowHold.state == "held",
+                    tuple_(RestoreRowHold.family, RestoreRowHold.row_id).in_(resumed),
+                )
+                .order_by(RestoreRowHold.restore_id, RestoreRowHold.family, RestoreRowHold.row_id)
+                .limit(MAX_RESTORE_ROWS + 1)
+                .with_for_update()
+            )
+        )
+        if resumed
+        else []
+    )
+    if len(inherited) > MAX_RESTORE_ROWS:
+        raise MaterialDeniedError("RESTORE_INVENTORY_UNSUPPORTED")
+    inherited_by_row: dict[tuple[str, str], list[RestoreRowHold]] = defaultdict(list)
+    for prior in inherited:
+        inherited_by_row[prior.family, prior.row_id].append(prior)
     for row_decision in proof.rows:
         raw = records[row_decision.family, row_decision.row_id]
         if row_decision.disposition == "resume" and (
@@ -266,6 +291,19 @@ async def apply_decisions(
             inserts.append(after)
         else:
             edits.append({"key": key, "changes": after})
+        for prior in inherited_by_row.get((row_decision.family, row_decision.row_id), ()):
+            if prior.preimage_sha256 != row_decision.preimage_sha256:
+                raise MaterialDeniedError("RESTORE_PREIMAGE_CHANGED")
+            edits.append(
+                {
+                    "key": {**key, "restore_id": prior.restore_id},
+                    "changes": {
+                        "state": "resolved",
+                        "reason_code": "RESTORE_CURRENT_EVIDENCE",
+                        "resolved_journal_id": journal.id,
+                    },
+                }
+            )
     acceptance = RecoveryAcceptance(
         idempotency_key=proof.idempotency_key,
         receipt_ref=proof.receipt_ref,

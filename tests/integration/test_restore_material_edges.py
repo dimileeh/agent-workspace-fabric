@@ -4,10 +4,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 
 from awf.hosted_node import restore_materials
 from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.lifecycle_models import NodeLifecycleRow
+from awf.hosted_node.models import PreparationRow
 from awf.hosted_node.restore_reconciliation_models import RestoreReconciliationRow
 from awf.hosted_node.schemas import Binding, Preparation
 from tests.integration.test_checkpoint_marker import schema_revision as schema_revision
@@ -15,6 +17,67 @@ from tests.integration.test_node_idle_gate import node as node
 from tests.integration.test_node_maintenance import ready_node as ready_node
 from tests.integration.test_restore_material_staging import resumable_restore as resumable_restore
 from tests.integration.test_restore_material_staging import staged
+from tests.integration.test_restore_reconciliation_guards import row_holds as row_holds
+from tests.unit.test_hosted_runtime_contract import hosted_create
+
+
+async def test_ordinary_material_preflight_is_one_read_not_a_second_lock_transaction(ready_node):
+    _, receiver, _ = ready_node
+    value = Binding.model_validate(hosted_create()["hosted"]["credentials"]["agent"])
+    statements = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    engine = receiver.factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        assert await restore_materials.authorize(receiver, value, "install") is None
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    reads = [statement for statement in statements if "set_config(" not in statement]
+    assert len(reads) == 1 and len(statements) <= 2
+    assert reads[0].lstrip().startswith("SELECT") and "FOR UPDATE" not in reads[0]
+
+
+async def test_restore_after_ordinary_preflight_still_denies_final_mutation(
+    ready_node, monkeypatch
+):
+    from tests.integration.test_restore_quarantine import restore
+
+    client, receiver, _ = ready_node
+    old = restore_materials.authorize
+
+    async def interrupted(*args):
+        permit = await old(*args)
+        assert permit is None
+        await restore(ready_node)
+        return permit
+
+    monkeypatch.setattr(restore_materials, "authorize", interrupted)
+    value = hosted_create()["hosted"]["credentials"]["agent"]
+    response = await client.post(
+        "/v1/hosted-node/preparations",
+        json={field: value[field] for field in Preparation.model_fields},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error_code"] == "RESTORE_QUARANTINED"
+    async with receiver.factory() as session:
+        assert await session.scalar(select(PreparationRow.id)) is None
+
+
+async def test_open_node_preflight_still_requires_permit_for_held_workspace(row_holds):
+    from awf.db.models import Workspace
+
+    receiver = row_holds
+    async with receiver.factory() as session:
+        assert (await session.get(NodeLifecycleRow, 1)).restore_quarantine is None
+        workspace = await session.scalar(select(Workspace).order_by(Workspace.id))
+        assert workspace.task_policy["hosted_recovery"]["disposition"] == "attention"
+    value = Binding.model_validate(hosted_create()["hosted"]["credentials"]["agent"])
+    value = value.model_copy(update={"workspace_id": workspace.id, "identity": receiver.identity})
+    with pytest.raises(MaterialDeniedError, match="RESTORE_QUARANTINED"):
+        await restore_materials.authorize(receiver, value, "install")
 
 
 @pytest.mark.parametrize(

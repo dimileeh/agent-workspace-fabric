@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from awf.db.base import Base
+from awf.hosted_node import restore_reconciliation_models as restore_reconciliation_models  # noqa: F401
 
 
 class NodeLifecycleRow(Base):
