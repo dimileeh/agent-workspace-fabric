@@ -80,6 +80,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
@@ -258,6 +259,10 @@ async def _judge(
         except _AGENT_INFRASTRUCTURE_ERRORS as exc:
             await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
             return UNJUDGED, f"agent_failed:{type(exc).__name__}"
+        except _MonitorPolicyBlockedError as exc:
+            # The delta gate refused a hosted head the sync already checked out.
+            await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
+            return UNJUDGED, f"policy_blocked:{exc.reason_code}"
         if await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push):
             # A judgment-only run must not touch the branch; its answer is not trusted.
             return UNJUDGED, "worktree_changed"

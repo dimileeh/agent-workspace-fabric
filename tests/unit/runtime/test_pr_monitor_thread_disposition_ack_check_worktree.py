@@ -24,6 +24,7 @@ from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeComm
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import ACKNOWLEDGES, UNJUDGED
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import _judge
+from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 pytestmark = pytest.mark.unit
@@ -470,6 +471,10 @@ def _refused() -> Any:
     )
 
 
+def _policy_blocked() -> Any:
+    raise _MonitorPolicyBlockedError("protected path", reason_code="PROTECTED_SCOPE_PUSH_BLOCKED")
+
+
 @pytest.mark.parametrize(
     ("recorded", "finish", "detail"),
     [
@@ -477,6 +482,13 @@ def _refused() -> Any:
         # The delta gate refused the synced head: published, yet not in the state.
         pytest.param(
             False, _refused, "agent_failed:HOSTED_REMOTE_HEAD_DELTA_REJECTED", id="gate-refused"
+        ),
+        # Supply-chain or protected-scope policy refused the synced head.
+        pytest.param(
+            False,
+            _policy_blocked,
+            "policy_blocked:PROTECTED_SCOPE_PUSH_BLOCKED",
+            id="policy-blocked",
         ),
     ],
 )
