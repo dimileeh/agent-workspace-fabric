@@ -639,7 +639,17 @@ async def enter_blocked_for_resume_setup_failure(
     pause's epoch-fenced CAS clears the directive hint (so the worker does not
     auto-resume straight back into the same failure — no loop) and the operator
     can re-issue ``guide`` once the underlying provisioning issue is resolved.
+
+    A conformance decision remains unanswered until the agent runs with a fresh
+    directive. Keep that block category across setup failures so a file grant
+    cannot bypass the decision; the reason code still records the setup failure.
     """
+    ws = await self._load_workspace(workspace_id)
+    block_type = (
+        PLAN_CONFORMANCE_DECISION_BLOCK_TYPE
+        if ws is not None and ws.block_type == PLAN_CONFORMANCE_DECISION_BLOCK_TYPE
+        else RESUME_SETUP_FAILURE_BLOCK_TYPE
+    )
     return await enter_blocked_for_protected_violation(
         self,
         workspace_id=workspace_id,
@@ -647,7 +657,7 @@ async def enter_blocked_for_resume_setup_failure(
         violations=(),
         resume_phase=resume_phase,
         execution_owner_id=execution_owner_id,
-        block_type=RESUME_SETUP_FAILURE_BLOCK_TYPE,
+        block_type=block_type,
         block_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
         stale_action="enter_blocked_for_resume_setup_failure",
         recovery_finalize_reason_code=RESUME_SETUP_FAILED_REASON_CODE,

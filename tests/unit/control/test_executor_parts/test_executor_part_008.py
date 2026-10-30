@@ -661,12 +661,14 @@ async def test_hosted_blocked_directive_resume_uses_hosted_env_probe(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("decision_pending", [False, True])
 async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    decision_pending: bool,
 ) -> None:
     """A setup failure on a blocked-resume re-pauses into ``blocked``, not ``failed`` (#743).
 
@@ -676,6 +678,12 @@ async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
     ws_id = await _seed_resumable_blocked_workspace(
         factory, grant_path=None, directive="revert the protected change"
     )
+    if decision_pending:
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.block_type = "plan_conformance_decision"
+            await session.commit()
     # Unhealthy env → setup runs; then setup fails (e.g. uv venv --python 3.14).
     monkeypatch.setattr(
         executor._validation,
@@ -717,7 +725,10 @@ async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
         # Re-blocked (operator-recoverable), NOT terminally failed.
         assert ws.status == WorkspaceStatus.blocked.value
         assert ws.block_reason_code == RESUME_SETUP_FAILED_REASON_CODE
-        assert ws.block_type == RESUME_SETUP_FAILURE_BLOCK_TYPE
+        expected_type = (
+            "plan_conformance_decision" if decision_pending else RESUME_SETUP_FAILURE_BLOCK_TYPE
+        )
+        assert ws.block_type == expected_type
     # No agent fix-pass ran (setup died before the agent).
     agent_calls = [call for call in fake.calls if call.input_bytes is not None]
     assert agent_calls == []

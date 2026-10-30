@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.control.executor.planning_artifacts import handle_agent_planning_result
 from awf.control.executor.types import _PlanningNeedsHuman
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import parse_conformance_report
@@ -125,6 +126,148 @@ async def test_decision_resume_rechecks_hint_and_reuses_original_baseline(
     assert baseline == _BASELINE
     assert "answer the paused plan-conformance decision" in resumed.task_prompt
     assert resumed.task_prompt.endswith(directive)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directive", [None, "Retain the dependency pin."])
+async def test_decision_survives_repeated_resume_setup_failures(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    directive: str | None,
+) -> None:
+    from awf.service.controls import WorkspaceGuideEmptyDirectiveError
+    from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
+        _service,
+    )
+
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+    await executor._persist_block_baseline_coverage(ws_id, baseline_coverage=_BASELINE)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        ws.block_type = "plan_conformance_decision"
+        ws.block_epoch = 1
+        await session.commit()
+
+    for failure in range(2):
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.status = "running"
+            ws.pending_operator_hint = {
+                "reason": "operator answer",
+                "directive": "Approve the dependency update.",
+                "status": "pending",
+            }
+            await session.commit()
+        begin = await executor._begin_execution(
+            ws_id,
+            resume_reason="blocked",
+            execution_owner_id="worker-a",
+            execution_lease_expires_at=None,
+        )
+        assert begin is not None and not begin[1]
+        assert await executor.enter_blocked_for_resume_setup_failure(
+            workspace_id=ws_id,
+            from_status=WorkspaceStatus.running,
+            resume_phase="setup",
+            execution_owner_id="worker-a",
+        )
+        ws = await _get(factory, ws_id)
+        assert ws.status == "blocked"
+        assert ws.block_type == "plan_conformance_decision"
+        assert ws.block_reason_code == "RESUME_SETUP_FAILED"
+        assert ws.block_epoch == failure + 2
+        assert ws.pending_operator_hint is None
+        # Initial conformance pauses have not persisted a validation handoff.
+        assert ws.block_planning_conformance_handoff is None
+
+    async with factory() as session:
+        service, _, _ = _service(session)
+        with pytest.raises(WorkspaceGuideEmptyDirectiveError):
+            await service.guide_workspace(
+                ws_id,
+                directive="",
+                reason="approved",
+                grants=["pyproject.toml"],
+                approve_policy_downgrade=True,
+            )
+        await session.rollback()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        # Even an active legacy/corrupt grant must not bypass the decision.
+        session.add(
+            OperatorGrantAuditRecord(
+                id=f"grant_{ws_id}",
+                workspace_id=ws_id,
+                operator="operator",
+                reason="approved",
+                normalized_path="pyproject.toml",
+                block_epoch=ws.block_epoch,
+            )
+        )
+        if directive:
+            ws.pending_operator_hint = {
+                "reason": "fresh answer",
+                "directive": directive,
+                "status": "pending",
+            }
+        await session.flush()
+        assert (ws_id in await repo.list_resumable_blocked_ids(limit=10)) == bool(directive)
+        ws.status = "running"
+        await session.commit()
+
+    result = await executor._begin_execution(
+        ws_id,
+        resume_reason="blocked",
+        execution_owner_id="worker-a",
+        execution_lease_expires_at=None,
+    )
+    if directive is None:
+        assert result is None
+        assert (await _get(factory, ws_id)).status == "blocked"
+    else:
+        assert result is not None
+        resumed, skip_agent, disable_fixes, baseline = result
+        assert not skip_agent and disable_fixes
+        assert baseline == _BASELINE
+        assert "answer the paused plan-conformance decision" in resumed.task_prompt
+        assert resumed.task_prompt.endswith(directive)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("workspace_exists", [False, True])
+async def test_decision_setup_failure_ignores_missing_or_superseded_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    workspace_exists: bool,
+) -> None:
+    ws_id = await _seed_running(factory) if workspace_exists else "missing-workspace"
+    executor = _executor(factory, tmp_path)
+    if workspace_exists:
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            ws.block_type = "plan_conformance_decision"
+            ws.block_epoch = 1
+            await session.commit()
+
+    assert not await executor.enter_blocked_for_resume_setup_failure(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        resume_phase="setup",
+        execution_owner_id="stale-worker",
+    )
+    if workspace_exists:
+        ws = await _get(factory, ws_id)
+        assert ws.status == "running"
+        assert ws.block_type == "plan_conformance_decision"
+        assert ws.block_epoch == 1
+        assert ws.execution_claimed_by == "worker-a"
 
 
 @pytest.mark.unit
