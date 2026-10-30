@@ -408,6 +408,27 @@ async def test_work_between_observations_resets_idle_cooldown(node):
     assert after > before
 
 
+async def test_guarded_writes_rewrite_lifecycle_row_only_to_clear_idle(node):
+    # Every guarded row write used to re-UPDATE the singleton gate. Within one
+    # bulk transaction that chain of dead versions made each later trigger's
+    # FOR UPDATE lookup slower, so recovery acceptance scaled quadratically.
+    client, receiver, _ = node
+    evidence(receiver)
+    assert (await acknowledge(client)).status_code == 200
+    assert (await client.get(PREFIX + "/readiness")).json()["idle_since"]
+
+    async def gate():
+        async with receiver.factory.begin() as session:
+            query = text("SELECT xmin::text AS version, idle_since FROM hosted_node_lifecycle")
+            return (await session.execute(query)).one()
+
+    await terminal_workspace(receiver)
+    cleared = await gate()
+    assert cleared.idle_since is None
+    await terminal_workspace(receiver)
+    assert await gate() == cleared
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

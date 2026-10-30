@@ -66,18 +66,21 @@ class Receiver:
         if slots is None:
             return False
         # Batch only recovery preflight. The caller retains its five-second bound;
-        # ordinary material status/expiry cleanup is unchanged.
-        for offset in range(0, len(slots), 8):
-            async with asyncio.TaskGroup() as group:
-                checks = [
-                    group.create_task(asyncio.to_thread(self.store.exists, directory, slot))
-                    for directory, slot in slots[offset : offset + 8]
-                ]
-            if not all(check.result() for check in checks):
-                return False
+        # ordinary material status/expiry cleanup is unchanged. Eight threads each
+        # check one stripe, so a full cohort costs eight thread hops, not one per slot.
+        async with asyncio.TaskGroup() as group:
+            checks = [
+                group.create_task(asyncio.to_thread(self._slots_exist, slots[stripe::8]))
+                for stripe in range(min(8, len(slots)))
+            ]
+        if not all(check.result() for check in checks):
+            return False
         # A revoke, expiry or superseding fence during file I/O must dominate.
         # Final acceptance separately rechecks the complete retained-row snapshot.
         return await self._recovery_material_slots(bindings) == slots
+
+    def _slots_exist(self, slots: list[tuple[str, str]]) -> bool:
+        return all(self.store.exists(directory, slot) for directory, slot in slots)
 
     async def _recovery_material_slots(
         self, bindings: list[Binding]
