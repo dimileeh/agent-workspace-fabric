@@ -343,6 +343,8 @@ async def test_sync_hosted_worktree_fails_closed_when_pr_head_fetch_fails(
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_FETCH_FAILED"
     assert excinfo.value.result.stderr == "fatal: could not fetch PR head"
+    # The head is published already: a caller's rollback still needs it.
+    assert excinfo.value.details == {"reported_terminal_head_sha": "b" * 40}
     assert runner.calls == [
         [
             "git",
@@ -431,6 +433,7 @@ async def test_sync_hosted_worktree_rejects_remote_head_mismatch(tmp_path: Path)
         )
 
     assert excinfo.value.reason_code == "HOSTED_REMOTE_HEAD_MISMATCH"
+    assert excinfo.value.details == {"reported_terminal_head_sha": "b" * 40}
 
 
 @pytest.mark.unit

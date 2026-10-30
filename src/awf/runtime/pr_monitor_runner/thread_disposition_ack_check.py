@@ -246,7 +246,11 @@ async def _judge(
                 state=state,
             )
         except AgentRunError as exc:
-            await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
+            # A hosted head the sync then failed to fetch or reset is on the PR alone.
+            reported = exc.details.get("reported_terminal_head_sha")
+            await _roll_back_run(
+                self, workspace_id, worktree, before, gitfile, state, saved_push, reported
+            )
             # Provider recovery first, as for every monitor agent run: it raises a
             # ProviderRecovery* error for a 429 / quota / auth failure.
             await self._handle_provider_agent_run_error(workspace_id, exc)
@@ -271,12 +275,14 @@ async def _roll_back_run(
     gitfile: str | None,
     state: MonitorState,
     saved_push: tuple[str | None, bool],
+    reported: str | None = None,
 ) -> bool:
     """Roll back the check's run, locally and on a hosted PR head; whether it changed anything.
 
     A hosted agent publishes its terminal commit to the PR branch before AWF syncs
     it into the worktree and records it as ``last_push_sha``, so a local reset alone
-    would leave the rejected commit on the live PR.
+    would leave the rejected commit on the live PR. ``reported`` is that commit
+    when the sync failed before the worktree or the state could record it.
     """
     run_head: str | None = None
     if self._deps.adapter.is_hosted:
@@ -291,6 +297,8 @@ async def _roll_back_run(
     start_head = before[0].strip()
     recorded = (state.last_push_sha, state.hosted_terminal_head_advanced) != saved_push
     published = (state.last_push_sha or "").strip() if recorded else run_head
+    if not published or published.lower() == start_head.lower():
+        published = (reported or "").strip()
     if not published or published.lower() == start_head.lower():
         return changed
     rolled_back = await _rollback_hosted_terminal_head_on_remote(

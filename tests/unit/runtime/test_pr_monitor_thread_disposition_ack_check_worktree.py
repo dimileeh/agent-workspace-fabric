@@ -499,6 +499,34 @@ async def test_a_hosted_run_that_published_a_head_is_rolled_back_on_the_pr_too(
     assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (start, False)
 
 
+async def test_a_hosted_head_the_sync_failed_to_fetch_is_rolled_back_on_the_pr_too(
+    tmp_path: Path,
+) -> None:
+    # Published, yet neither the local HEAD nor the state names it: only the
+    # sync's error carries the head the hosted agent reported.
+    worktree, remote, start = _hosted(tmp_path)
+    state = MonitorState(last_push_sha=start)
+
+    def agent() -> Any:
+        head = _publish(worktree, remote)
+        _git(worktree, "reset", "-q", "--hard", start)
+        raise AgentRunError(
+            agent="codex_cloud",
+            result=CommandResult(1, "", "fatal: could not fetch PR head"),
+            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+            details={"reported_terminal_head_sha": head},
+        )
+
+    assert await _check_with(_hosted_runner(tmp_path, remote, agent), state) == (
+        UNJUDGED,
+        "agent_failed:HOSTED_REMOTE_HEAD_FETCH_FAILED",
+    )
+
+    assert _git(remote, "rev-parse", "refs/heads/feature").strip() == start
+    assert _git(worktree, "rev-parse", "HEAD").strip() == start
+    assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (start, False)
+
+
 async def test_a_failed_hosted_rollback_keeps_the_published_head_in_the_state(
     tmp_path: Path,
 ) -> None:

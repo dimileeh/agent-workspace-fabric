@@ -494,6 +494,9 @@ async def _sync_hosted_worktree_to_terminal_head(
             ),
             reason_code="HOSTED_REMOTE_HEAD_IDENTITY_MISSING",
         )
+    # The head is already published: a failed sync leaves it on the PR branch, so
+    # its errors carry it for a caller that has to roll it back.
+    reported = {"reported_terminal_head_sha": terminal_head_sha}
     git_env = git_env_without_object_lookup_overrides()
     delta_base_sha = _nonblank_str(operation_start_head)
     if delta_base_sha is None:
@@ -533,6 +536,7 @@ async def _sync_hosted_worktree_to_terminal_head(
             agent=self._deps.adapter.name,
             result=fetch,
             reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
+            details=reported,
         )
     rev_parse = await self._deps.runner.run(
         [
@@ -558,6 +562,7 @@ async def _sync_hosted_worktree_to_terminal_head(
                 ),
             ),
             reason_code="HOSTED_REMOTE_HEAD_MISMATCH",
+            details=reported,
         )
     reset = await self._deps.runner.run(
         [
@@ -576,6 +581,7 @@ async def _sync_hosted_worktree_to_terminal_head(
             agent=self._deps.adapter.name,
             result=reset,
             reason_code="HOSTED_REMOTE_HEAD_SYNC_FAILED",
+            details=reported,
         )
     await _gate_hosted_terminal_head_delta(
         self,
