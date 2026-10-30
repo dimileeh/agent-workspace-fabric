@@ -1,0 +1,232 @@
+{
+  "resource_kind": "vm_node",
+  "workspace": {
+    "org_id": "org",
+    "project_id": "project",
+    "workspace_record_id": "ws",
+    "owner_record_id": "owner",
+    "authorization_generation": 1
+  },
+  "node": {
+    "org_id": "org",
+    "node_id": "node",
+    "provider_id": "102",
+    "recovery_generation": 3,
+    "boot_generation": 4
+  },
+  "previous_node": {
+    "org_id": "org",
+    "node_id": "node",
+    "provider_id": "101",
+    "recovery_generation": 2,
+    "boot_generation": 3
+  },
+  "historical_nodes": [
+    {
+      "org_id": "org",
+      "node_id": "node",
+      "provider_id": "18446744073709551615",
+      "recovery_generation": 1,
+      "boot_generation": 2
+    },
+    {
+      "org_id": "org",
+      "node_id": "node",
+      "provider_id": "101",
+      "recovery_generation": 2,
+      "boot_generation": 3
+    }
+  ],
+  "node_visibility": "authorized",
+  "window_end_at": "2026-10-30T10:00:00Z",
+  "view": "1h",
+  "state": "partial",
+  "quality": "partial",
+  "observed_at": "2026-10-30T09:59:00Z",
+  "stale_after_seconds": 300,
+  "cpu_utilization_samples": [
+    {
+      "boot_generation": 2,
+      "metric_type": "compute.googleapis.com/instance/cpu/utilization",
+      "sample_time": "2026-10-30T09:57:00+00:00",
+      "value": "0.5",
+      "unit": "ratio",
+      "quality": "ok"
+    },
+    {
+      "boot_generation": 3,
+      "metric_type": "compute.googleapis.com/instance/cpu/utilization",
+      "sample_time": "2026-10-30T09:58:00+00:00",
+      "value": "0.25",
+      "unit": "ratio",
+      "quality": "ok"
+    },
+    {
+      "boot_generation": 4,
+      "metric_type": "compute.googleapis.com/instance/cpu/utilization",
+      "sample_time": "2026-10-30T09:59:00+00:00",
+      "value": "0.63",
+      "unit": "ratio",
+      "quality": "ok"
+    }
+  ],
+  "memory_bytes_samples": [],
+  "reservation": {
+    "observed_at": "2026-10-30T09:59:00Z",
+    "state": "active",
+    "quality": "ok",
+    "values": {
+      "id": "reservation",
+      "steady_cpu": 2.0,
+      "steady_memory_gb": 4.0,
+      "peak_cpu": 4.0,
+      "peak_memory_gb": 8.0,
+      "disk_mb": 1024,
+      "dind_slots": 1,
+      "phase": "execution",
+      "reserved_at": "2026-10-30T09:50:00+00:00",
+      "released_at": null
+    }
+  },
+  "workspace_cost": {
+    "estimated_usd": null,
+    "currency": "USD",
+    "estimate_state": "unallocated",
+    "rate_table_version": "",
+    "priced_interval_seconds": 0,
+    "unpriced_interval_seconds": 0,
+    "evidence": {}
+  },
+  "node_cost": {
+    "scope": "shared_node_observed_window",
+    "observed_powered_seconds": 3600,
+    "observed_idle_seconds": 30,
+    "observed_storage_gib_seconds": "6000",
+    "observed_idle_storage_gib_seconds": null,
+    "coverage": "partial",
+    "compute": {
+      "estimated_usd": "0.015733117",
+      "currency": "USD",
+      "estimate_state": "partial",
+      "rate_table_version": "gce-doha-reviewed-2026-10-30",
+      "priced_interval_seconds": 60,
+      "unpriced_interval_seconds": 3540,
+      "evidence": {
+        "allocation_kind": "shared_node",
+        "source": "gce_full_instance",
+        "excluded": [
+          "credits",
+          "taxes",
+          "llm",
+          "shared_infrastructure"
+        ],
+        "coverage": "observed_intervals_only",
+        "interval_unit": "resource_seconds",
+        "rates": [
+          {
+            "version": "gce-doha-reviewed-2026-10-30",
+            "sku": "n2-standard-16",
+            "unit": "instance_hour",
+            "per_hour": "0.94398704",
+            "currency": "USD",
+            "effective_at": "2026-10-30T04:42:28+00:00",
+            "source_url": "https://cloud.google.com/products/compute/pricing/general-purpose?hl=en",
+            "source_sha256": "d2b592ec594853ff7c0c1925ad0342a53b68d2d74741ea33d6886b278c99285a"
+          }
+        ],
+        "unpriced_reason": "missing_profile_or_reviewed_rate"
+      }
+    },
+    "idle_compute": {
+      "estimated_usd": "0.007866559",
+      "currency": "USD",
+      "estimate_state": "complete",
+      "rate_table_version": "gce-doha-reviewed-2026-10-30",
+      "priced_interval_seconds": 30,
+      "unpriced_interval_seconds": 0,
+      "evidence": {
+        "allocation_kind": "shared_node",
+        "source": "core_quiescence",
+        "excluded": [
+          "credits",
+          "taxes",
+          "llm",
+          "shared_infrastructure"
+        ],
+        "coverage": "observed_intervals_only",
+        "interval_unit": "resource_seconds",
+        "rates": [
+          {
+            "version": "gce-doha-reviewed-2026-10-30",
+            "sku": "n2-standard-16",
+            "unit": "instance_hour",
+            "per_hour": "0.94398704",
+            "currency": "USD",
+            "effective_at": "2026-10-30T04:42:28+00:00",
+            "source_url": "https://cloud.google.com/products/compute/pricing/general-purpose?hl=en",
+            "source_sha256": "d2b592ec594853ff7c0c1925ad0342a53b68d2d74741ea33d6886b278c99285a"
+          }
+        ],
+        "unpriced_reason": null
+      }
+    },
+    "persistent_storage": {
+      "estimated_usd": "0.000277397",
+      "currency": "USD",
+      "estimate_state": "complete",
+      "rate_table_version": "gce-doha-reviewed-2026-10-30",
+      "priced_interval_seconds": 60,
+      "unpriced_interval_seconds": 0,
+      "evidence": {
+        "allocation_kind": "shared_node",
+        "source": "sampled_disk_allocation",
+        "excluded": [
+          "credits",
+          "taxes",
+          "llm",
+          "shared_infrastructure"
+        ],
+        "coverage": "observed_intervals_only",
+        "interval_unit": "resource_seconds",
+        "rates": [
+          {
+            "version": "gce-doha-reviewed-2026-10-30",
+            "sku": "pd-balanced",
+            "unit": "gib_hour",
+            "per_hour": "0.000166438",
+            "currency": "USD",
+            "effective_at": "2026-10-30T04:42:28+00:00",
+            "source_url": "https://cloud.google.com/compute/disks-image-pricing?hl=en",
+            "source_sha256": "1153f2e2c9a5b098e9a223f4dbdea75eb01c6c8c49803e86001ea34432656062"
+          }
+        ],
+        "unpriced_reason": null
+      }
+    },
+    "idle_storage": {
+      "estimated_usd": null,
+      "currency": "USD",
+      "estimate_state": "unpriced",
+      "rate_table_version": "",
+      "priced_interval_seconds": 0,
+      "unpriced_interval_seconds": 0,
+      "evidence": {
+        "allocation_kind": "shared_node",
+        "source": "stopped_disk_allocation",
+        "excluded": [
+          "credits",
+          "taxes",
+          "llm",
+          "shared_infrastructure"
+        ],
+        "coverage": "observed_intervals_only",
+        "interval_unit": "resource_seconds",
+        "rates": [],
+        "unpriced_reason": "duration_unknown"
+      }
+    }
+  },
+  "data_quality_notes": [
+    "memory_unavailable"
+  ]
+}

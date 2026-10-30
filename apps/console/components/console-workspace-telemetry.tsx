@@ -1,10 +1,11 @@
 "use client";
 
 import { Cpu, HardDrive, Wallet } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { Fact, Panel } from "@/components/console-dashboard-shared";
 import { bytes, formatDateTime } from "@/lib/format";
+import type { VMEstimate, VMTelemetryView } from "@/lib/console-vm-telemetry";
 import type {
   TelemetryViewWindow,
   WorkspaceTelemetrySeriesPoint,
@@ -17,7 +18,7 @@ import {
 } from "@/lib/console-workspace-telemetry";
 
 export type ConsoleWorkspaceTelemetryProps = {
-  viewModel: WorkspaceTelemetryView;
+  viewModel: WorkspaceTelemetryView | VMTelemetryView;
   selectedView: TelemetryViewWindow;
   onViewChange: (view: TelemetryViewWindow) => void;
   mode?: "live" | "historical";
@@ -128,7 +129,7 @@ function SeriesSparkline({
   points,
   label,
 }: {
-  points: WorkspaceTelemetrySeriesPoint[];
+  points: Pick<WorkspaceTelemetrySeriesPoint, "sampleTime" | "value" | "quality">[];
   label: string;
 }) {
   const geom = useMemo(() => {
@@ -231,6 +232,154 @@ function fillAgainstLimit(used: number | null, limit: number | null): number | n
   return (used / limit) * 100;
 }
 
+function TelemetryWindowSelector({ displayedView, selectedView, onViewChange }: {
+  displayedView: TelemetryViewWindow; selectedView: TelemetryViewWindow; onViewChange: (view: TelemetryViewWindow) => void;
+}) {
+  return <div className="inline-flex rounded-[var(--radius-control)] border border-line p-0.5"
+    role="tablist" aria-label="Telemetry window" data-testid="telemetry-view-selector"
+    data-awf-displayed-view={displayedView} data-awf-requested-view={selectedView}>
+    {TELEMETRY_VIEWS.map(view => {
+      const selected = displayedView === view, requested = selectedView === view && !selected;
+      return <button key={view} type="button" role="tab" aria-selected={selected}
+        data-testid={`telemetry-view-${view}`} data-awf-view-pending={requested ? "true" : undefined}
+        title={requested ? `Requested ${view}; showing ${displayedView}` : undefined}
+        className={`rounded-[var(--radius-control)] px-2 py-0.5 text-[11px] font-medium transition ${selected ? "bg-surface-2 text-fg" : "text-fg-muted hover:text-fg"}`}
+        onClick={() => onViewChange(view)}>{view}</button>;
+    })}
+  </div>;
+}
+
+function vmBytes(value: number | null): string {
+  if (value === null) return "Unavailable";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; }
+  return `${Number(value.toPrecision(4))} ${units[index]}`;
+}
+
+function VMEstimateFact({ label, estimate }: { label: string; estimate: VMEstimate | null }) {
+  const amount = estimate?.estimated_usd;
+  return <div className="min-w-0 border-t border-line py-2 text-xs">
+    <div className="flex flex-wrap justify-between gap-2">
+      <span className="font-semibold text-fg">{label}</span>
+      <span className="tnum text-fg-strong">{amount == null ? "Unpriced" : `${formatWorkloadUsd(Number(amount))} (observed)`}</span>
+    </div>
+    {estimate && <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-muted">
+      <span>{estimate.estimate_state}</span>
+      <span className="tnum">Priced {estimate.priced_interval_seconds}s / unpriced {estimate.unpriced_interval_seconds}s</span>
+    </div>}
+    {estimate?.rate_table_version && <details className="mt-1 min-w-0 text-[11px] text-fg-muted">
+      <summary className="cursor-pointer break-words">Rate table: {estimate.rate_table_version}</summary>
+      {estimate.evidence.rates?.map((rate, index) => <div key={index} className="mt-1 break-all">
+        <div>{rate.sku}: {rate.per_hour} USD/{rate.unit === "instance_hour" ? "instance-hour" : "GiB-hour"}</div>
+        <div>Applicable from {formatDateTime(rate.effective_at)}</div>
+        <a className="underline" href={rate.source_url} target="_blank" rel="noreferrer">Published rate</a>
+        <div className="mono">SHA256 {rate.source_sha256}</div>
+      </div>)}
+    </details>}
+  </div>;
+}
+
+function VMWorkspaceTelemetry({ viewModel, selectedView, onViewChange, mode, requestError, lastGoodAt,
+  showTelemetry, showAllocation, showCost }: {
+  viewModel: VMTelemetryView; selectedView: TelemetryViewWindow; onViewChange: (view: TelemetryViewWindow) => void;
+  mode: "live" | "historical"; requestError: string | null; lastGoodAt: string | null;
+  showTelemetry: boolean; showAllocation: boolean; showCost: boolean;
+}) {
+  const { data, cpu, memory } = viewModel;
+  const [selectedBoot, setSelectedBoot] = useState(data.node?.boot_generation ?? 0);
+  const boots = [...new Set([...(data.node ? [data.node.boot_generation] : []),
+    ...cpu.series.map(s => s.bootGeneration), ...memory.series.map(s => s.bootGeneration)])].sort((a, b) => a - b);
+  const boot = boots.includes(selectedBoot) ? selectedBoot : data.node?.boot_generation;
+  const stale = (mode === "live" && viewModel.isStale) || viewModel.hasFutureTimestamp
+    || (showTelemetry && (data.state === "stale" || cpu.quality === "stale" || memory.quality === "stale"))
+    || (showAllocation && data.reservation?.quality === "stale");
+  const reservation = data.reservation?.values;
+  const cost = data.node_cost;
+  const historical = data.historical_nodes.length ? data.historical_nodes : data.previous_node ? [data.previous_node] : [];
+  if (!showTelemetry && !showAllocation && !showCost) return null;
+  return <Panel title="VM resources" icon={<Cpu size={16} aria-hidden />} stale={Boolean(stale)} className="min-w-0"
+    action={<div className="flex flex-wrap items-center gap-2">
+      <span className="text-[10px] font-medium text-attention-text" data-testid="telemetry-partial-indicator">⚠ partial</span>
+      {showTelemetry && <TelemetryWindowSelector displayedView={data.view} selectedView={selectedView} onViewChange={onViewChange} />}
+    </div>}>
+    <div className="flex min-w-0 flex-col gap-3" data-testid="console-workspace-telemetry" data-awf-resource-kind="vm_node">
+      {requestError && <div className="break-words text-xs text-danger-text" data-testid="telemetry-request-error">{requestError}</div>}
+      {lastGoodAt && <div className="text-[11px] text-fg-muted" data-testid="telemetry-last-good">Last good {formatDateTime(lastGoodAt)}</div>}
+      {(showTelemetry || showCost) && data.node && <div className="min-w-0 text-[11px] text-fg-muted">
+        <div>{mode === "historical" ? "Historical" : "Observed"} shared node</div>
+        <div className="mono break-all">{data.node.node_id} / physical {data.node.provider_id}</div>
+        <div className="tnum">Recovery {data.node.recovery_generation} / Boot {data.node.boot_generation}</div>
+        {historical.length > 0 && <details className="mt-1">
+          <summary className="cursor-pointer">Physical history ({historical.length})</summary>
+          {historical.map(node => <div key={node.provider_id} className="mono mt-1 break-all">
+            Physical {node.provider_id} / recovery {node.recovery_generation} / recorded boot {node.boot_generation}
+          </div>)}
+        </details>}
+      </div>}
+      {showTelemetry && data.node_visibility === "not_authorized" && <div className="text-xs text-fg-muted">Shared-node metrics unavailable for this scope</div>}
+      {showTelemetry && data.node && <>
+        <div className="text-[11px] text-fg-muted">Current boot / shared-node measurements</div>
+        <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+          <div className="min-w-0">
+            <ResourceMeter label="CPU" icon={<Cpu size={13} aria-hidden />} usedLabel={cpu.value === null ? "Unavailable" : `${Number((cpu.value * 100).toPrecision(4))}%`}
+              requestLabel="" limitLabel="" showAllocation={false} fillPct={cpu.value === null ? null : cpu.value * 100} partial={cpu.quality !== "ok"} />
+            <div className="mt-1 text-[11px] text-fg-muted">CPU utilization / {formatDateTime(cpu.sampleTime)}</div>
+          </div>
+          <div className="min-w-0">
+            <ResourceMeter label="Memory" icon={<HardDrive size={13} aria-hidden />} usedLabel={vmBytes(memory.value)}
+              requestLabel="" limitLabel="" showAllocation={false} fillPct={null} partial={memory.quality !== "ok"} />
+            <div className="mt-1 text-[11px] text-fg-muted">{memory.value === null ? "Memory unavailable" : `Used memory / ${formatDateTime(memory.sampleTime)}`}</div>
+          </div>
+        </div>
+        <div className="min-w-0" data-vm-boot={boot}>
+          <label className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">Measured history
+            <select aria-label="Telemetry boot" value={boot} onChange={event => setSelectedBoot(Number(event.target.value))}
+              className="max-w-full rounded-[var(--radius-control)] border border-line bg-surface px-2 py-1 text-fg">
+              {boots.map(value => <option key={value} value={value}>Boot {value}</option>)}
+            </select>
+          </label>
+          <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+            <div className="min-w-0"><div className="label-caps mb-1">CPU utilization</div><SeriesSparkline points={cpu.series.find(s => s.bootGeneration === boot)?.points ?? []} label="cpu" /></div>
+            <div className="min-w-0"><div className="label-caps mb-1">Memory bytes</div><SeriesSparkline points={memory.series.find(s => s.bootGeneration === boot)?.points ?? []} label="memory" /></div>
+          </div>
+        </div>
+      </>}
+      {showAllocation && <div className="min-w-0">
+        <div className="label-caps mb-2">Own reservation</div>
+        {reservation ? <>
+          <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+            <Fact label="Steady CPU" value={`${reservation.steady_cpu} cores`} />
+            <Fact label="Peak CPU" value={`${reservation.peak_cpu} cores`} />
+            <Fact label="Steady memory" value={`${reservation.steady_memory_gb} GB`} />
+            <Fact label="Peak memory" value={`${reservation.peak_memory_gb} GB`} />
+            <Fact label="Reserved disk" value={reservation.disk_mb === null ? "Unknown" : `${reservation.disk_mb} MB`} />
+            <Fact label="DinD slots" value={String(reservation.dind_slots)} />
+          </div>
+          <div className="mt-1 break-words text-[11px] text-fg-muted">{reservation.phase} / {data.reservation?.quality} / {formatDateTime(data.reservation?.observed_at)}</div>
+        </> : <div className="text-xs text-fg-muted">{data.reservation?.state === "none" ? "No active reservation" : "Reservation not recorded"}</div>}
+      </div>}
+      {showCost && <div className="min-w-0 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 font-semibold"><span>Workspace resource cost</span><span>Unallocated</span></div>
+        {cost && <>
+          <div className="mt-3 flex items-center gap-1.5 font-semibold"><Wallet size={13} aria-hidden />Shared node / partial resource estimate</div>
+          <div className="mt-1 text-[11px] text-fg-muted">Observed intervals only; not a workspace bill. LLM, credits, taxes and shared infrastructure excluded.</div>
+          <div className="my-2 grid min-w-0 gap-2 sm:grid-cols-2">
+            <Fact label="Powered (observed)" value={cost.observed_powered_seconds === null ? "Unknown" : `${cost.observed_powered_seconds}s`} />
+            <Fact label="Idle powered (observed)" value={cost.observed_idle_seconds === null ? "Unknown" : `${cost.observed_idle_seconds}s`} />
+            <Fact label="Storage (observed)" value={cost.observed_storage_gib_seconds === null ? "Unknown" : `${cost.observed_storage_gib_seconds} GiB-seconds`} />
+            <Fact label="Idle storage (observed)" value={cost.observed_idle_storage_gib_seconds === null ? "Unknown" : `${cost.observed_idle_storage_gib_seconds} GiB-seconds`} />
+          </div>
+          <VMEstimateFact label="Compute" estimate={cost.compute} />
+          <VMEstimateFact label="Idle compute (included in compute)" estimate={cost.idle_compute} />
+          <VMEstimateFact label="Persistent storage" estimate={cost.persistent_storage} />
+          <VMEstimateFact label="Idle storage (included in storage)" estimate={cost.idle_storage} />
+        </>}
+      </div>}
+    </div>
+  </Panel>;
+}
+
 /**
  * Compact workspace resource + allocation estimate view.
  * Props-driven only — does not fetch or poll.
@@ -252,6 +401,10 @@ export function ConsoleWorkspaceTelemetry({
   if (!available) {
     return null;
   }
+
+  if ("kind" in viewModel) return <VMWorkspaceTelemetry viewModel={viewModel}
+    selectedView={selectedView} onViewChange={onViewChange} mode={mode} requestError={requestError}
+    lastGoodAt={lastGoodAt} showTelemetry={showTelemetry} showAllocation={showAllocation} showCost={showCost} />;
 
   const admitted = showAllocation ? viewModel.admitted : null;
   const cpuLimitLabel =
@@ -321,42 +474,7 @@ export function ConsoleWorkspaceTelemetry({
               </span>
             ) : null}
             {showTelemetry ? (
-              <div
-                className="inline-flex rounded-[var(--radius-control)] border border-line p-0.5"
-                role="tablist"
-                aria-label="Telemetry window"
-                data-testid="telemetry-view-selector"
-                data-awf-displayed-view={displayedView}
-                data-awf-requested-view={selectedView}
-              >
-                {TELEMETRY_VIEWS.map((view) => {
-                  const selected = displayedView === view;
-                  const requested = selectedView === view && !selected;
-                  return (
-                    <button
-                      key={view}
-                      type="button"
-                      role="tab"
-                      aria-selected={selected}
-                      data-testid={`telemetry-view-${view}`}
-                      data-awf-view-pending={requested ? "true" : undefined}
-                      title={
-                        requested
-                          ? `Requested ${view}; showing ${displayedView}`
-                          : undefined
-                      }
-                      className={`rounded-[var(--radius-control)] px-2 py-0.5 text-[11px] font-medium transition ${
-                        selected
-                          ? "bg-surface-2 text-fg"
-                          : "text-fg-muted hover:text-fg"
-                      }`}
-                      onClick={() => onViewChange(view)}
-                    >
-                      {view}
-                    </button>
-                  );
-                })}
-              </div>
+              <TelemetryWindowSelector displayedView={displayedView} selectedView={selectedView} onViewChange={onViewChange} />
             ) : null}
           </div>
         ) : null
