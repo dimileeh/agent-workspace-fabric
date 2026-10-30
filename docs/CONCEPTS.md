@@ -558,7 +558,25 @@ continuity. Over the cap, on a forge with no reopen API (Bitbucket), or when the
 reopen fails, that thread falls back to the `NotifyHuman` blocker, which names
 `REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED`, `…_UNSUPPORTED` or `…_FAILED`
 and still asks the operator to reopen it; the workspace is never failed. The flag then
-reads `reopened` until the gate certifies the thread's new disposition. While it
+reads `reopened` until the gate certifies the thread's new disposition. Two refinements
+run in front of that reopen, so the common causes certify without one. First, a
+reply after AWF's marker by the forge Bot account that opened the thread (its
+account type, never a name or text pattern), on a thread still resolved by AWF's
+identity, is judged once per comment identity (id, author and body; an edit is
+new) by a judgment-only agent check on the next poll, never under the merge lock
+(`REVIEW_THREAD_DISPOSITION_ACK_CHECK_PENDING` meanwhile). `ACKNOWLEDGES` keeps the
+marker as the disposition with no reply and no reopen
+(`REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED`); `NEW_POINT` or a failed check
+(`…_ACK_NEW_POINT`, `…_ACK_CHECK_FAILED`) takes the reopen. The judgment crosses
+re-adoption. Human comments, and comments by anyone but that bot, still supersede
+the marker. Second, on a moved-head re-adoption a bound `fixed` /
+`fixed_branch_evidence` disposition crosses live instead of retired. The
+successor's first poll checks each cited commit with `git merge-base
+--is-ancestor` against the adopted head and fails closed
+(`REVIEW_THREAD_DISPOSITION_READOPT_CARRIED` / `…_READOPT_RETIRED`), and the gate
+certifies nothing on it until then; the binding check still requires the thread
+resolved by AWF's identity with an unchanged conversation. `false_positive` keeps
+its moved-head retirement. While it
 does, outdated hygiene does not re-seed the thread's verdict from branch
 evidence in the re-triage's place, and that poll step never clears the
 re-triage's own verdict again. The flag crosses a PR re-adoption. The gate itself

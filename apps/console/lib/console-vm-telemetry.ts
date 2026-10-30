@@ -222,6 +222,11 @@ export function projectVMTelemetry(data: VMTelemetry) {
 }
 export type VMTelemetryView = ReturnType<typeof projectVMTelemetry> & { isStale?: boolean; hasFutureTimestamp?: boolean };
 
+// A null selection follows the current boot, so a reboot or recovery moves the history with the meters.
+export function resolveVMTelemetryBoot(selected: number | null, current: number | undefined, boots: number[]) {
+  return selected !== null && boots.includes(selected) ? selected : current;
+}
+
 export function vmTelemetryFreshness(data: VMTelemetry, now: number,
   gates: { telemetry: boolean; allocation: boolean; cost?: boolean } = { telemetry: true, allocation: true, cost: true }) {
   const samples = gates.telemetry ? [latestSample(data.cpu_utilization_samples, data.node?.boot_generation), latestSample(data.memory_bytes_samples, data.node?.boot_generation)] : [];

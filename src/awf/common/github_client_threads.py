@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
+from awf.common.forge_thread_audit import (
+    AuditedReviewThread,
+    AuditedThreadComment,
+    ReviewThreadAudit,
+)
 from awf.common.github_client_parsing import (
     _clean_optional_str,
     _connection_nodes,
@@ -210,6 +215,30 @@ async def _audited_thread(
         page = _dig(payload, "data", "node", "comments")
         comment_nodes.extend(_audit_comment_nodes(page))
         cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
+    snapshot = _thread_snapshot(node, thread_id, comment_nodes)
+    viewer_indexes = [
+        index
+        for index, comment in enumerate(comment_nodes)
+        if comment.get("viewerDidAuthor") is True
+    ]
+    # #1138: the comments after AWF's newest reply, and the thread read without
+    # them, for the gate's one-time bot-acknowledgement check.
+    trailing_start = viewer_indexes[-1] + 1 if viewer_indexes else len(comment_nodes)
+    trailing = tuple(_thread_comment(comment) for comment in comment_nodes[trailing_start:])
+    return replace(
+        snapshot,
+        opener=_thread_comment(comment_nodes[0]) if comment_nodes else None,
+        trailing_comments=trailing,
+        without_trailing=_thread_snapshot(node, thread_id, comment_nodes[:trailing_start])
+        if trailing
+        else None,
+    )
+
+
+def _thread_snapshot(
+    node: dict[str, Any], thread_id: str, comment_nodes: list[dict[str, Any]]
+) -> AuditedReviewThread:
+    """The thread as ``comment_nodes`` (oldest first) read: bodies, supersession, digests."""
     viewer_bodies: list[str] = []
     viewer_ids: list[str] = []
     viewer_posted_at: list[datetime | None] = []
@@ -250,6 +279,17 @@ async def _audited_thread(
             for comment in comment_nodes
             if comment.get("viewerDidAuthor") is not True
         ),
+    )
+
+
+def _thread_comment(comment: dict[str, Any]) -> AuditedThreadComment:
+    """One comment's identity and author type; a deleted author is not a bot."""
+    body = comment.get("body")
+    return AuditedThreadComment(
+        comment_id=_comment_id(comment) or "",
+        author_login=_clean_optional_str(_dig(comment, "author", "login")),
+        author_is_bot=_dig(comment, "author", "__typename") == "Bot",
+        body=body if isinstance(body, str) else "",
     )
 
 

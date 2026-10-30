@@ -723,7 +723,8 @@ class PullRequestMonitorAdoptionService:
         the predecessor's is the head it last processed; when they diverge the
         branch moved under the predecessor's verdicts, so the head-dependent
         ``fix_committed`` / ``false_positive`` entries are dropped and re-triaged
-        rather than trusted.
+        rather than trusted; a bound ``fixed`` disposition crosses live pending
+        the successor's check that its commits are in the adopted head (#1138).
         """
         if superseded_workspace is None:
             return []
@@ -733,6 +734,7 @@ class PullRequestMonitorAdoptionService:
                 adopted_head_sha=workspace.monitor_last_commit_sha,
                 predecessor_head_sha=superseded_workspace.monitor_last_commit_sha,
             ),
+            adopted_head_sha=workspace.monitor_last_commit_sha,
         )
         if not seeded:
             return []

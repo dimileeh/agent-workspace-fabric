@@ -61,6 +61,12 @@ from awf.runtime.pr_monitor_runner.helpers import (
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
 from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
 from awf.runtime.pr_monitor_runner.thread_disposition import retire_reopened_dispositions
+from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import (
+    judge_pending_disposition_acks,
+)
+from awf.runtime.pr_monitor_runner.thread_disposition_readopt import (
+    verify_readopted_dispositions,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -396,6 +402,31 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 # poll lists open again was reopened, which retires that reply
                 # before anything can resolve the thread again on it.
                 retire_reopened_dispositions(state, status, workspace_id=workspace_id)
+                # #1138: settle what the disposition gate left for a normal poll,
+                # outside any merge lock: a ``fixed`` disposition that crossed a
+                # moved-head re-adoption live (D2), and the one-time agent check
+                # of a bot reply after AWF's marker (D1). The gate re-audits after.
+                await verify_readopted_dispositions(
+                    self,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    state=state,
+                    base_branch=ws.branch_base,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                )
+                await judge_pending_disposition_acks(
+                    self,
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    state=state,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    base_branch=ws.branch_base,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                )
                 # Resolve threads the monitor already addressed that have since
                 # gone OUTDATED (addressed by an edit elsewhere). They drop out of
                 # ``unresolved_inline_threads`` — so ``decide()`` never re-runs the

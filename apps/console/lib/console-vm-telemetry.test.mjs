@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { parseVMTelemetry, projectVMTelemetry, vmTelemetryFreshness } from "./console-vm-telemetry.ts";
+import { parseVMTelemetry, projectVMTelemetry, resolveVMTelemetryBoot, vmTelemetryFreshness } from "./console-vm-telemetry.ts";
 
 // Exported through the frozen Cloud VMTelemetryResponse, not a hand-invented DTO.
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/console-workspace-telemetry/vm-node.json", import.meta.url)));
@@ -94,6 +94,14 @@ test("current VM meter never relabels prior boot samples or absent memory as zer
   assert.ok(view.cpu.series.every(s => s.points.length === 1));
   p.cpu_utilization_samples.pop();
   assert.equal(projectVMTelemetry(p).cpu.value, null);
+});
+
+test("boot history follows the current boot after a reboot unless a prior boot was picked", () => {
+  assert.equal(resolveVMTelemetryBoot(null, 4, [2, 3, 4]), 4);
+  assert.equal(resolveVMTelemetryBoot(null, 5, [2, 3, 4, 5]), 5);
+  assert.equal(resolveVMTelemetryBoot(3, 5, [2, 3, 4, 5]), 3);
+  assert.equal(resolveVMTelemetryBoot(1, 5, [2, 3, 4, 5]), 5);
+  assert.equal(resolveVMTelemetryBoot(null, undefined, [2]), undefined);
 });
 
 test("sample ages and reservation ages are independent of hidden widget sections", () => {

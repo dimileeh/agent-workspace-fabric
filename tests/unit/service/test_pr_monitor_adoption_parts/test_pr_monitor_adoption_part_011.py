@@ -442,3 +442,34 @@ class TestPullRequestMonitorAdoptionSeedingPart011:
         action = decide(status, monitor_state, MonitorConfig(auto_merge=True))
 
         assert isinstance(action, AddressOperatorHint)
+
+
+@pytest.mark.unit
+async def test_moved_head_adoption_checks_a_fixed_disposition_against_the_adopted_head(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#1138 D2: the seed is handed the freshly fetched PR head as the ancestry target."""
+    thread_id = "PRRT_kwDOSJAM6s6fNhZo"
+    disposition = {
+        "v": 1,
+        "item_id": thread_id,
+        "class": "fixed",
+        "verdict": "fix_committed",
+        "reason": None,
+        "commits": ["c" * 40],
+        "reply_comment_id": "991",
+        "conversation_digest": "b" * 64,
+        "resolved": True,
+    }
+    previous_id = await _adopt(factory)
+    await _fail_with_monitor_state(
+        factory,
+        previous_id,
+        {f"__awf_item_disposition__:{thread_id}": json.dumps(disposition, sort_keys=True)},
+    )
+
+    fresh_id = await _adopt(factory, head_sha="f" * 40)
+
+    state = await _monitor_state(factory, fresh_id)
+    assert state[f"__awf_disposition_readopt_pending__:{thread_id}"] == "f" * 40
+    assert json.loads(state[f"__awf_item_disposition__:{thread_id}"])["reply_comment_id"] == "991"
