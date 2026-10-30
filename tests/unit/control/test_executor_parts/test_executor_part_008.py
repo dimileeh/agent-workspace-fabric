@@ -733,6 +733,41 @@ async def test_blocked_resume_setup_failure_reblocks_instead_of_failing(
     agent_calls = [call for call in fake.calls if call.input_bytes is not None]
     assert agent_calls == []
 
+    if decision_pending:
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.pending_operator_hint is None
+            assert ws.block_planning_conformance_handoff is None
+            # Simulate a stale worker resuming from a legacy grant without a
+            # fresh directive after setup failed before the decision agent ran.
+            s.add(
+                OperatorGrantAuditRecord(
+                    id=f"grant_{ws_id}",
+                    workspace_id=ws_id,
+                    operator="op@example.com",
+                    reason="approved protected change",
+                    normalized_path="pyproject.toml",
+                    block_epoch=ws.block_epoch,
+                )
+            )
+            ws.status = WorkspaceStatus.running.value
+            await s.commit()
+
+        calls_before_resume = list(fake.calls)
+        await executor.resume_blocked_execution(ws_id)
+
+        # Reject before setup, validation, agent execution, or push can run.
+        assert fake.calls == calls_before_resume
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_type == "plan_conformance_decision"
+            assert ws.block_reason_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+            assert ws.block_epoch == 3
+        assert (await _active_grant(factory, ws_id)).consumed_at is None
+
 
 _PENDING_CONFORMANCE_HANDOFF = {
     "plan_path": "docs/awf-plans/ws.md",
