@@ -774,6 +774,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service gc`
 **Docs Link:** [docs/REASON_CATALOG.md#orphan_resources_present](#orphan_resources_present)
 
+### PLAN_CONFORMANCE_NEEDS_HUMAN
+**Problem:** Plan conformance is paused for a specific operator decision.
+**Likely Cause:** The agent reported missing operator authority or external dependency input.
+**Operator Fix:** Read conformance.json or the workspace transition event, then supply the decision using guide --directive. A file grant alone cannot resume this pause; normal validation and merge gates remain required.
+**Related Command:** `awf workspace guide <workspace_id> --directive '<your decision>'`
+**Docs Link:** [docs/REASON_CATALOG.md#plan_conformance_needs_human](#plan_conformance_needs_human)
+
 ### PORT_CLOSED
 **Problem:** Required local port is not accepting connections.
 **Likely Cause:** The service is not running or the port is in use by another process.

@@ -831,7 +831,7 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         )
 
         assert ok is True
-        assert trace == ["hosted_setup", "setup_events", "repair_hooks", "preflight"]
+        assert trace == ["hosted_setup", "setup_events", "repair_hooks"]
         assert mark_failed_calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
@@ -847,7 +847,6 @@ class TestSyncFeaturePrHandoffStaleAfterMonitorBuilt:
         assert completed_events[0].payload == {
             "source": "hosted_pr_adoption",
             "phase_names": ["setup", "pre_agent"],
-            "profile_preflight_passed": True,
         }
 
     @pytest.mark.unit

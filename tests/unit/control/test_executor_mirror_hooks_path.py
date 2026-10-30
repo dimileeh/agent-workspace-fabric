@@ -25,7 +25,7 @@ from awf.db.enums import (
 from awf.db.models import Operation, Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.validation import ValidationCommandResult
+from awf.runtime.validation import ValidationCommandResult, ValidationResult
 
 
 class _NoTrustedGitRootsExecutor:
@@ -338,7 +338,7 @@ async def test_execute_repairs_mirror_hooks_path_after_setup_failure(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult(
+            return ValidationResult(
                 commands=[
                     ValidationCommandResult(
                         command="git config --local core.hooksPath /dev/null && false",
@@ -619,7 +619,7 @@ async def test_execute_repairs_mirror_hooks_path_after_successful_setup_before_r
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -749,10 +749,10 @@ async def test_execute_repairs_mirror_hooks_path_again_before_agent_launch(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -905,10 +905,10 @@ async def test_execute_repairs_mirror_hooks_path_after_baseline_coverage_cleanup
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -1068,10 +1068,10 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_before_no_work_retu
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(

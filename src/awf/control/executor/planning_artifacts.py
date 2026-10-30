@@ -8,19 +8,35 @@ commit → validate → push pipeline.
 
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from awf.common.audit import redact_audit_value
 from awf.common.logging import get_logger
 from awf.control.executor.helpers import _failure_salvage_payload
 from awf.control.executor.types import (
     _ExpectedBaseShaLaunchSettled,
+    _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
-from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION, render_workspace_path
-from awf.service.artifacts import deposit_workspace_planning_artifacts
+from awf.db.enums import PLAN_CONFORMANCE_DECISION_BLOCK_TYPE, FailureReason, WorkspaceStatus
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    MAX_CONFORMANCE_GAPS,
+    MAX_CONFORMANCE_TEXT_CHARS,
+    PLAN_CONFORMANCE_NEEDS_HUMAN,
+    render_workspace_path,
+)
+from awf.service.artifacts import (
+    DEPOSITED_CONFORMANCE_NAME,
+    DEPOSITED_PLAN_NAME,
+    _deposit_one_planning_artifact,
+    deposit_workspace_planning_artifacts,
+    workspace_artifact_dir,
+)
 
 _log = get_logger(__name__)
 
@@ -138,14 +154,25 @@ async def handle_agent_planning_result(
     worktree_path: Path,
     profile: Any,
     planning_failure: Any,
+    execution_owner_id: str | None = None,
 ) -> tuple[_PlanningValidationHandoff | None, bool]:
     """Interpret the agent/planning run result.
 
     Returns ``(handoff, should_return)`` where ``handoff`` is the planning
     validation handoff to thread into validation (``None`` when none applies)
     and ``should_return`` signals that ``execute`` must stop because the
-    workspace was already marked FAILED.
+    workspace was failed, paused for a decision, or otherwise settled.
     """
+    if isinstance(planning_failure, _PlanningNeedsHuman):
+        await pause_for_conformance_decision(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            decision=planning_failure,
+            from_status=WorkspaceStatus.running,
+            execution_owner_id=execution_owner_id,
+        )
+        return None, True
     if isinstance(planning_failure, _PlanningValidationHandoff):
         await self._record_planning_validation_handoff_event(
             workspace_id=workspace_id,
@@ -197,3 +224,101 @@ async def handle_agent_planning_result(
             )
         return None, True
     return None, False
+
+
+async def pause_for_conformance_decision(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    decision: _PlanningNeedsHuman,
+    from_status: WorkspaceStatus,
+    execution_owner_id: str | None,
+) -> None:
+    """Publish decision evidence and a fenced pause, never an implementation success.
+
+    valid report -> owner-fenced transition -> artifacts -> commit blocked
+    The artifact callback runs only after winning the row lock/CAS and before
+    publishing the transaction, so stale workers cannot overwrite newer evidence.
+    """
+    report = decision.report
+    evidence = redact_audit_value(
+        {
+            "status": report.status.value,
+            "summary": report.summary[:MAX_CONFORMANCE_TEXT_CHARS],
+            "decision_request": report.decision_request,
+            "reason_code": PLAN_CONFORMANCE_NEEDS_HUMAN,
+            "gaps": [
+                {"kind": gap.kind.value, "detail": gap.detail[:MAX_CONFORMANCE_TEXT_CHARS]}
+                for gap in report.gaps[:MAX_CONFORMANCE_GAPS]
+            ],
+            "plan_path": decision.plan_path.as_posix(),
+            "report_path": decision.report_path.as_posix(),
+            "phase": decision.phase,
+            "validation_run_id": decision.validation_run_id,
+        }
+    )
+
+    def deposit() -> None:
+        artifact_dir = workspace_artifact_dir(
+            self._config.compose_projects_root.parent, workspace_id
+        )
+        _deposit_one_planning_artifact(
+            artifact_dir=artifact_dir,
+            workspace_id=workspace_id,
+            source=worktree_path / decision.plan_path,
+            dest_name=DEPOSITED_PLAN_NAME,
+            worktree_root=worktree_path.resolve(),
+        )
+        # Serialize the accepted report (possibly from stdout), not an old file.
+        # The managed artifact root is not agent-writable. Atomic replacement
+        # prevents partial reads and does not follow an existing destination link.
+        temporary: Path | None = None
+        try:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=artifact_dir, prefix=".decision-", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(evidence, stream, indent=2)
+                stream.write("\n")
+            temporary.replace(artifact_dir / DEPOSITED_CONFORMANCE_NAME)
+        except OSError as exc:
+            _log.warning(
+                "executor.conformance_decision_artifact_failed",
+                workspace_id=workspace_id,
+                error_type=type(exc).__name__,
+            )
+            # Do not present an older report as the current question. The exact
+            # bounded decision survives in the transition event even on disk failure.
+            try:
+                (artifact_dir / DEPOSITED_CONFORMANCE_NAME).unlink(missing_ok=True)
+            except OSError:
+                _log.warning(
+                    "executor.conformance_decision_stale_artifact_retained",
+                    workspace_id=workspace_id,
+                )
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    _log.warning(
+                        "executor.conformance_decision_artifact_temp_retained",
+                        workspace_id=workspace_id,
+                    )
+
+    await self.enter_blocked_for_protected_violation(
+        workspace_id=workspace_id,
+        from_status=from_status,
+        violations=[],
+        resume_phase=decision.phase,
+        execution_owner_id=execution_owner_id,
+        block_type=PLAN_CONFORMANCE_DECISION_BLOCK_TYPE,
+        block_reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+        transition_reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+        recovery_finalize_reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+        recovery_finalize_message="Plan conformance requires an operator decision.",
+        extra_payload={"conformance": evidence},
+        before_publish=deposit,
+    )

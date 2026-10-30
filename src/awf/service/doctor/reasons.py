@@ -1362,6 +1362,17 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service gc",
         "docs/REASON_CATALOG.md#completed_pr_not_merged",
     ),
+    "PLAN_CONFORMANCE_NEEDS_HUMAN": _ReasonText(
+        "Plan conformance is paused for a specific operator decision.",
+        (
+            "Read conformance.json or the workspace transition event, then supply the decision "
+            "using guide --directive. A file grant alone cannot resume this pause; normal "
+            "validation and merge gates remain required."
+        ),
+        "The agent reported missing operator authority or external dependency input.",
+        "awf workspace guide <workspace_id> --directive '<your decision>'",
+        "docs/REASON_CATALOG.md#plan_conformance_needs_human",
+    ),
     "CONFORMANCE_REQUIRES_AWF_VALIDATION": _ReasonText(
         (
             "Plan conformance found no deterministic implementation gap, but "

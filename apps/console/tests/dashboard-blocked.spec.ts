@@ -68,6 +68,49 @@ test("inspector shows the protected violation and both guide resolution commands
   );
 });
 
+for (const hasReport of [true, false]) {
+  test(`conformance decision requires an answer and exposes report availability (${hasReport})`, async ({ page }) => {
+    await page.route("**/api/awf/workspaces/ws_blocked1", async (route) => {
+      const workspace = blockedWorkspace();
+      await fulfillJson(route, {
+        ...workspace,
+        block_state: {
+          ...workspace.block_state,
+          block_type: "plan_conformance_decision",
+          block_reason_code: "PLAN_CONFORMANCE_NEEDS_HUMAN",
+          violations: [],
+        },
+      });
+    });
+    await page.route("**/api/awf/workspaces/ws_blocked1/artifacts*", async (route) => {
+      await fulfillJson(route, listEnvelope(hasReport ? [{ relative_path: "conformance.json" }] : []));
+    });
+    await page.route("**/api/awf/workspaces/ws_blocked1/artifacts/download*", async (route) => {
+      await fulfillJson(route, {
+        status: "needs_human", summary: "Dependency update needs approval.",
+        decision_request: "Approve updating the pinned dependency?",
+      });
+    });
+    await page.goto("/");
+    await waitForConsoleReady(page);
+    await openInspector(page, "ws_blocked1");
+    const block = page.getByTestId("blocked-violation-block");
+    await expect(block).toContainText("An operator decision is required");
+    await expect(block).toContainText("awf workspace guide ws_blocked1 --directive '<your decision>'");
+    await expect(block).not.toContainText("Approve & keep");
+    await expect(block).not.toContainText("Revert");
+    await expect(block).not.toContainText("--grant");
+    const artifacts = block.getByTestId("task-artifacts");
+    if (hasReport) {
+      await artifacts.getByRole("button", { name: "Validation", exact: true }).click();
+      await expect(artifacts).toContainText("Approve updating the pinned dependency?");
+    } else {
+      await expect(artifacts).toContainText("Conformance report unavailable");
+      await expect(artifacts).toContainText("workspace timeline");
+    }
+  });
+}
+
 function kpiCard(page: Page, label: string) {
   return page
     .getByText(label, { exact: true })

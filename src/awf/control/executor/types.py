@@ -55,6 +55,17 @@ class _ExpectedBaseShaLaunchSettled:
 
 
 @dataclass(frozen=True)
+class _PlanningNeedsHuman:
+    """Explicit successful conformance invocation requesting operator input."""
+
+    report: PlanConformanceReport
+    plan_path: Path
+    report_path: Path
+    phase: Literal["conformance", "post_validation_conformance"]
+    validation_run_id: str | None = None
+
+
+@dataclass(frozen=True)
 class _PlanningValidationHandoff:
     report: PlanConformanceReport
     plan_path: Path

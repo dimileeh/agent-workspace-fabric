@@ -16,6 +16,7 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.validation import ValidationResult
 
 
 class _NoTrustedGitRootsExecutor:
@@ -68,10 +69,10 @@ async def test_execute_repairs_mirror_hooks_path_before_post_agent_commit(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -266,10 +267,10 @@ async def test_execute_marks_post_agent_missing_head_when_recovery_helper_absent
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -438,10 +439,10 @@ async def test_execute_recovers_missing_head_before_agent_cleanup_failure(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -642,10 +643,10 @@ async def test_execute_repairs_agent_cleanup_failure_before_service_recovery_ret
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -849,10 +850,10 @@ async def test_execute_preserves_agent_cleanup_failure_when_recovered_head_verif
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -1028,10 +1029,10 @@ async def test_execute_preserves_agent_cleanup_failure_when_head_recovery_fails(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -1207,10 +1208,10 @@ async def test_execute_fails_blocked_agent_cleanup_recovery_verification_protect
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(

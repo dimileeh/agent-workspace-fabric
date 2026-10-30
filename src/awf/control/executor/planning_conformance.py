@@ -47,6 +47,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.types import (
     _ConformanceSalvageExecutionResult,
+    _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
@@ -66,6 +67,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
     CONFORMANCE_REQUIRES_AWF_VALIDATION,
     PlanConformanceReport,
+    PlanConformanceStatus,
     agent_artifact_path,
     build_conformance_failure_evidence,
     build_conformance_prompt,
@@ -264,7 +266,7 @@ async def _run_post_validation_conformance_check(
     hosted_pr_identity: dict[str, Any] | None = None,
     conformance_scope_baseline: _PostValidationConformanceScopeBaseline | None = None,
     require_hosted_terminal_head: bool = True,
-) -> _PlanningRunFailure | None:
+) -> _PlanningRunFailure | _PlanningNeedsHuman | None:
     # Post-validation conformance is strictly report-only, regardless of
     # ordinary planning unexplained-deviation policy. ``profile`` is still needed
     # to pin the AWF validation command set in the prompt (#743).
@@ -429,6 +431,14 @@ async def _run_post_validation_conformance_check(
     if report_text is None and compare_result.stdout:
         report_text = compare_result.stdout
     report = parse_conformance_report(report_text or "")
+    if report.status == PlanConformanceStatus.needs_human:
+        return _PlanningNeedsHuman(
+            report=report,
+            plan_path=handoff.plan_path,
+            report_path=handoff.report_path,
+            phase="post_validation_conformance",
+            validation_run_id=validation_run_id,
+        )
     if not report.satisfied:
         # This recheck runs only inside the ``val_result.all_passed`` branch, so
         # AWF has produced every piece of evidence it is configured to produce.

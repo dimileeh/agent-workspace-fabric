@@ -53,6 +53,7 @@ from awf.control.executor.quality_gates import (
 from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.types import (
     _CoverageEvidenceResult,
+    _PlanningNeedsHuman,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
@@ -592,7 +593,7 @@ async def run_validation_and_fix_cycle(
             coverage_evidence_source_run_id=coverage_evidence.source_run_id,
         )
         if val_result.all_passed:
-            conformance_failure: _PlanningRunFailure | None = None
+            conformance_failure: _PlanningRunFailure | _PlanningNeedsHuman | None = None
             if planning_validation_handoff is not None:
                 conformance_handoff = planning_validation_handoff
                 if adapter is None or _is_adapter_retired(adapter):
@@ -810,6 +811,20 @@ async def run_validation_and_fix_cycle(
                             successful_validation_run_id=successful_validation_run_id,
                             successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                         )
+                if isinstance(conformance_failure, _PlanningNeedsHuman):
+                    await _planning_artifacts.pause_for_conformance_decision(
+                        self,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        decision=conformance_failure,
+                        from_status=WorkspaceStatus.validating,
+                        execution_owner_id=execution_owner_id,
+                    )
+                    return ExecutionValidationResult(
+                        stop=True,
+                        successful_validation_run_id=successful_validation_run_id,
+                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+                    )
                 if conformance_failure is not None:
                     remaining_conformance_iterations = max(
                         0,

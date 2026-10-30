@@ -738,6 +738,46 @@ _PENDING_CONFORMANCE_HANDOFF = {
 
 
 @pytest.mark.unit
+async def test_post_validation_decision_pauses_before_push(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.control.executor.types import _PlanningNeedsHuman
+    from awf.runtime.planning import parse_conformance_report
+    from tests.unit.runtime.test_conformance_decision import decision_payload
+
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        block_planning_conformance_handoff=_PENDING_CONFORMANCE_HANDOFF,
+    )
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id, conformance_handoff=True)
+
+    async def needs_decision(
+        *, handoff: Any, validation_run_id: str, **_kwargs: Any
+    ) -> _PlanningNeedsHuman:
+        return _PlanningNeedsHuman(
+            report=parse_conformance_report(decision_payload()),
+            plan_path=handoff.plan_path,
+            report_path=handoff.report_path,
+            phase="post_validation_conformance",
+            validation_run_id=validation_run_id,
+        )
+
+    monkeypatch.setattr(executor, "_run_post_validation_conformance_check", needs_decision)
+    await executor.resume_blocked_execution(ws_id)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        assert ws.block_reason_code == "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        assert ws.block_resume_phase == "post_validation_conformance"
+        assert ws.pending_operator_hint is None
+    assert not any("push" in call.args or "gh" in call.args for call in fake.calls)
+
+
+@pytest.mark.unit
 async def test_blocked_resume_grant_runs_conformance_check_from_persisted_handoff(
     executor: WorkspaceExecutor,
     fake: FakeCommandRunner,

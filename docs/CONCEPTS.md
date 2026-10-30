@@ -150,6 +150,27 @@ This works the same way for Codex, Claude Code, Cursor, Antigravity, OpenCode, G
 and future adapters because the control plane invokes normal non-interactive agent
 runs for each phase and stores the plan/report inside the workspace.
 
+A conformance report may instead return the exact status `needs_human` when a
+specific missing operator decision, permission, or external dependency input
+prevents safe progress and no authorized in-scope alternative exists. It must
+include nonblank `summary` and `decision_request` strings, each at most 1000
+characters. Ordinary unfinished work, failed tests, self-imposed constraints,
+and missing AWF-owned validation evidence remain `needs_iteration` outcomes.
+
+At either conformance checkpoint, only a valid current report from a successful
+agent invocation can pause the workspace with `PLAN_CONFORMANCE_NEEDS_HUMAN`
+(`block_type=plan_conformance_decision`). AWF keeps the worktree, warm runtime,
+original coverage baseline, plan and accepted conformance report. Bounded,
+redacted decision evidence is also recorded in the workspace transition event
+if artifact storage is unavailable. No PR is pushed by that pause.
+
+Read the report in the Console's blocked card (or the workspace timeline), then
+answer with `awf workspace guide <workspace-id> --directive '<your decision>'`.
+A file grant alone cannot resume a conformance decision. A directive resumes
+planning and implementation in the same checkout, without bypassing conformance,
+validation, coverage, protected-file checks, or merge policy. Cancelling the
+workspace remains available when the task should not continue.
+
 Preview the profile AWF would resolve for a checkout:
 
 ```bash

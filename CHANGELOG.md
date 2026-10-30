@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Plan-conformance checks can now pause for a specific operator decision instead
+  of exhausting implementation retries. The console shows the question and
+  report; resume the same workspace with `awf workspace guide <id> --directive
+  "<answer>"`. Validation and merge gates still apply.
+- Fixed validation profiles being rejected solely because a `uv run` command
+  did not repeat the development-extra flag after dependency setup. AWF now
+  relies on actual setup and command results.
+- Stabilized hosted-worker lifecycle tests under parallel coverage by using
+  their shared test watchdog instead of short, nested machine-speed deadlines.
 - Added first-class Cursor Auto routing selection across REST, CLI, MCP, stored
   workspace policy, execution, and console observability. Use
   `cursor_auto_mode=cost|balance|intelligence` (CLI:
