@@ -291,23 +291,19 @@ async def _judge(
 
 
 async def _worktree_fingerprint(
-    self: Any, worktree: Path, pin: tuple[Path, Path] | None = None
+    self: Any,
+    worktree: Path,
+    pin: tuple[Path, Path] | None = None,
+    *,
+    clear_hide_flags: bool = True,
 ) -> tuple[str, str, str, str, str] | None:
     """HEAD, ``git status --porcelain -z``, git dirs, HEAD's ref and ignored content.
 
     Index hide flags (``assume-unchanged`` / ``skip-worktree``) are cleared
-    first: a tracked file the agent flagged and overwrote would otherwise stay
-    out of the status. ``None`` if a probe failed.
+    first unless ``clear_hide_flags`` is false: a tracked file the agent flagged
+    and overwrote would otherwise stay out of the status. ``None`` if a probe failed.
     """
-
-    async def run_git(args: list[str]) -> CommandResult:
-        return await _run_git(self, worktree, pin, *args)
-
-    try:
-        cleared = await clear_index_hide_flags_via_run_git(run_git)
-    except OSError:
-        return None
-    if not cleared:
+    if clear_hide_flags and not await _clear_hide_flags(self, worktree, pin):
         return None
     outputs: list[str] = []
     for args in (
@@ -335,6 +331,31 @@ async def _worktree_fingerprint(
     if ignored is None:
         return None
     return outputs[0], outputs[1], outputs[2], outputs[3], ignored
+
+
+async def _post_run_fingerprint(
+    self: Any, worktree: Path, pin: tuple[Path, Path] | None
+) -> tuple[str, str, str, str, str] | None:
+    """The live fingerprint after the run, its hide flags cleared only through ``pin``.
+
+    The live ``.git`` may still name another repository, whose index the clear
+    would otherwise rewrite.
+    """
+    if pin is not None and not await _clear_hide_flags(self, worktree, pin):
+        return None
+    return await _worktree_fingerprint(self, worktree, clear_hide_flags=False)
+
+
+async def _clear_hide_flags(self: Any, worktree: Path, pin: tuple[Path, Path] | None) -> bool:
+    """Clear the index hide flags, through ``pin`` if given; whether that succeeded."""
+
+    async def run_git(args: list[str]) -> CommandResult:
+        return await _run_git(self, worktree, pin, *args)
+
+    try:
+        return bool(await clear_index_hide_flags_via_run_git(run_git))
+    except OSError:
+        return False
 
 
 async def _ignored_content_identity(worktree: Path, status: str) -> str | None:
@@ -379,17 +400,18 @@ async def _restore_worktree(
     repair there. HEAD is re-attached to its pre-run ref
     before the resets, which would otherwise move a branch the agent checked out.
     An ignored file the agent changed cannot be restored: the check fails closed.
+    The live probes clear index hide flags only through the pinned pre-run git dirs.
     """
-    after = await _worktree_fingerprint(self, worktree)
-    if after == before:
-        return False
     gitfile, commondir = linkage
+    relinked = False
     if gitfile is not None and _snapshot_outer_gitfile_text(worktree) != (True, gitfile):
         _restore_worktree_git_linkage(worktree, gitfile)
+        relinked = True
     if commondir is not None:
         git_dir_fd, text = commondir
         if _read_worktree_regular_text_at(git_dir_fd, "commondir") != text:
             _write_local_git_config_file_at(git_dir_fd, "commondir", f"{text}\n")
+            relinked = True
     head = before[0].strip()
     ref = before[3].strip()
     attach = (
@@ -398,6 +420,9 @@ async def _restore_worktree(
         else ("symbolic-ref", "HEAD", ref)
     )
     with _pinned_git_dirs(worktree, before[2]) as pin:
+        after = await _post_run_fingerprint(self, worktree, pin)
+        if not relinked and after == before:
+            return False
         restored = (
             pin is not None
             and await _git_ok(self, worktree, pin, *attach)
@@ -410,8 +435,9 @@ async def _restore_worktree(
             restored = await _git_ok(
                 self, worktree, pin, "--literal-pathspecs", "clean", "-ffd", "--", *added
             )
-    # The live probe also fails while the gitfile still points elsewhere.
-    if not (restored and await _worktree_fingerprint(self, worktree) == before):
+        # The live probe also fails while the gitfile still points elsewhere.
+        restored = restored and await _post_run_fingerprint(self, worktree, pin) == before
+    if not restored:
         # Fail closed: the fallback's repair then refuses the dirty worktree.
         _log.warning(
             "monitor.review_thread_disposition_ack_worktree_restore_failed",

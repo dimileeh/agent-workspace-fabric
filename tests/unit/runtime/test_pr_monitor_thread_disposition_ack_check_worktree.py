@@ -458,6 +458,12 @@ def _probe_fails_after(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) ->
     cmd.respond_when(lambda args: "rev-parse" in args and bool(ran), returncode=128)
 
 
+def _pinned_hide_flags_unclearable(cmd: FakeCommandRunner, ran: list[str], git_dir: Path) -> None:
+    # The post-run probes clear hide flags only through the pinned index.
+    cmd.respond_when(lambda args: "ls-files" in args and bool(ran), returncode=128)
+    _dirty_after_agent(cmd, ran, git_dir)
+
+
 class _ResetMissingRunner(FakeCommandRunner):
     async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
         if "reset" in args:
@@ -474,6 +480,9 @@ class _ResetMissingRunner(FakeCommandRunner):
         # Every command "succeeds", yet the re-probe still sees the agent's file.
         pytest.param(FakeCommandRunner, _dirty_after_agent, id="still-dirty"),
         pytest.param(FakeCommandRunner, _probe_fails_after, id="probe-fails-after"),
+        pytest.param(
+            FakeCommandRunner, _pinned_hide_flags_unclearable, id="hide-flags-unclearable-after"
+        ),
     ],
 )
 async def test_a_failed_rollback_fails_the_check_closed_and_is_logged(
@@ -570,6 +579,29 @@ async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_pat
     # place, the fallback's repair would see the other workspace's clean tree.
     assert (worktree / ".git").read_text() == gitfile
     assert _snapshot(worktree) == before
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
+async def test_the_hide_flag_clear_never_follows_a_gitfile_the_agent_retargeted(
+    tmp_path: Path,
+) -> None:
+    # The post-run probe clears index hide flags: through a retargeted gitfile it
+    # would rewrite the other workspace's index (PRRT_kwDOSJAM6s6yE8Lw).
+    worktree, other = _linked_worktrees(tmp_path)
+    _git(other, "update-index", "--assume-unchanged", "other.py")
+    gitfile = (worktree / ".git").read_text()
+    other_git_dir = _git(other, "rev-parse", "--absolute-git-dir").strip()
+
+    def agent() -> Any:
+        (worktree / ".git").write_text(f"gitdir: {other_git_dir}\n")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        runner = _runner(tmp_path / "worktrees", agent)
+        assert await _check(runner) == (UNJUDGED, "worktree_changed")
+
+    assert "h other.py\n" in _git(other, "ls-files", "-v")
+    assert (worktree / ".git").read_text() == gitfile
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
