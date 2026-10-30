@@ -549,3 +549,36 @@ async def test_audit_fails_closed_on_a_reply_with_no_posting_time_after_an_edit(
     assert audited[0].current_viewer_comment_bodies == ()
     query = next(a for a in fake.calls[1].args if a.startswith("query="))
     assert "createdAt" in query and "lastEditedAt" in query
+
+
+async def test_unresolve_thread_posts_unresolve_review_thread_once() -> None:
+    """#1138: AWF reopens a disposition-unverified thread so it is re-triaged."""
+    fake = FakeCommandRunner()
+    fake.queue_result(
+        stdout=json.dumps(
+            {"data": {"unresolveReviewThread": {"thread": {"id": "T1", "isResolved": False}}}}
+        )
+    )
+    assert await GitHubClient(fake).unresolve_thread(thread_id="PRRT_test_a") is True
+    args = fake.calls[0].args
+    assert args[:3] == ["gh", "api", "graphql"]
+    assert any(a.startswith("query=") and "unresolveReviewThread" in a for a in args)
+    assert "threadId=PRRT_test_a" in args
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (1, ""),  # gh failure (e.g. HTTP 502): a mutation is never blindly retried
+        (0, json.dumps({"errors": [{"message": "Resource not accessible"}]})),
+    ],
+)
+async def test_unresolve_thread_raises_on_failure_without_retry(
+    returncode: int, stdout: str
+) -> None:
+    fake = FakeCommandRunner()
+    fake.queue_result(returncode=returncode, stdout=stdout, stderr="HTTP 502")
+    with pytest.raises(GitHubClientError):
+        await GitHubClient(fake).unresolve_thread(thread_id="PRRT_test_a")
+    assert len(fake.calls) == 1

@@ -14,9 +14,11 @@ after the thread's newest feedback (an older marker answered earlier feedback).
   person's or bot's own disposition and never block; they are counted.
 * A failing thread turns into ``NotifyHuman`` with
   ``REVIEW_THREAD_DISPOSITION_UNVERIFIED`` listing the ids — never a workspace
-  failure. The operator clears one by reopening it: the next poll re-triages it
-  through the normal fix cycle, which posts a fresh disposition before resolving
-  it (:func:`~thread_disposition.retire_reopened_dispositions`).
+  failure. A reopen clears one: the next poll re-triages it through the normal
+  fix cycle, which posts a fresh disposition before resolving it
+  (:func:`~thread_disposition.retire_reopened_dispositions`). The runner does
+  that reopen itself, at most twice per thread, after the gate returns
+  (:mod:`~awf.runtime.pr_monitor_runner.thread_disposition_reopen`, #1138).
 * The gate never writes to the forge: it decides on ONE complete audit.
 * Every disposition the monitor records is bound to the conversation it answers
   once an audit sees its reply resolved, and holds only while an audit shows that
@@ -80,6 +82,7 @@ class DispositionGateResult:
     count_rows: tuple[tuple[str, int], ...] | None = None  # cert line 1; None = unsupported
     audit_unavailable: bool = False  # ``blocker`` is REVIEW_THREAD_AUDIT_UNAVAILABLE
     feedback_changed: bool = False  # caller must wait outside the merge lock
+    unverified: tuple[str, ...] = ()  # the ``blocker``'s thread ids, for the auto-reopen
 
 
 async def review_thread_disposition_gate(
@@ -297,7 +300,9 @@ async def _verify_audit(
             monitor_log=monitor_log,
             evidence={"thread_ids": unverified, "disposition_counts": dict(counts)},
         )
-    return DispositionGateResult(blocker=unverified_blocker_message(unverified))
+    return DispositionGateResult(
+        blocker=unverified_blocker_message(unverified), unverified=tuple(unverified)
+    )
 
 
 def _current_disposition_bodies(thread: AuditedReviewThread) -> tuple[str, ...]:

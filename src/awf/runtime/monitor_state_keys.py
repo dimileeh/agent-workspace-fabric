@@ -163,6 +163,16 @@ def _disposition_unverified_key(thread_id: str) -> str:
     return f"__awf_disposition_unverified__:{thread_id}"
 
 
+def _disposition_auto_reopen_key(thread_id: str) -> str:
+    """Build state key counting AWF's automatic reopens of an unverified thread (#1138).
+
+    The value is the decimal count of reopens that landed. AWF reopens a thread
+    the disposition gate flagged at most twice over the PR's life, so the next
+    poll re-triages it; past that the gate's blocker asks the operator instead.
+    """
+    return f"__awf_disposition_auto_reopened__:{thread_id}"
+
+
 def _disposition_retired_key(thread_id: str, conversation_digest: str) -> str:
     """Build state key recording an AWF disposition reply that was retired (#1018).
 

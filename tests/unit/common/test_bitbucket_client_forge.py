@@ -47,6 +47,16 @@ def test_bitbucket_client_satisfies_forge_client_protocol() -> None:
     assert isinstance(_client(), ForgeClient)
 
 
+async def test_unresolve_thread_reports_unsupported_without_a_request() -> None:
+    """#1138: Bitbucket has no reopen call yet, so the gate keeps today's blocker."""
+    from tests.unit.common.test_bitbucket_client_parts._helpers import FakeBitbucket, make_client
+
+    fake = FakeBitbucket()
+
+    assert await make_client(fake).unresolve_thread(thread_id="bb:o/r#1:2") is False
+    assert fake.requests == []
+
+
 def test_forge_client_protocol_typing_accepts_bitbucket_client() -> None:
     def _consume(forge: ForgeClient) -> ForgeClient:
         return forge
