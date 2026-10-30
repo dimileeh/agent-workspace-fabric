@@ -559,3 +559,37 @@ async def test_repeated_re_read_faults_end_in_a_failed_check_and_the_fallback(
     await _execute(runner, workspace_id, NotifyHuman(), state)
     assert gh.unresolved == [_SILENT]
     assert runner._deps.adapter.calls == []
+
+
+class _GitMissingRunner(FakeCommandRunner):
+    async def run(self, args: list[str], **kwargs: Any) -> CommandResult:
+        if "rev-parse" in args:
+            raise OSError("git is missing")
+        return await super().run(args, **kwargs)
+
+
+def _unreadable_worktree() -> FakeCommandRunner:
+    cmd = FakeCommandRunner()
+    cmd.respond_when(lambda args: "rev-parse" in args, returncode=128, stderr="not a git repo")
+    return cmd
+
+
+@pytest.mark.parametrize("make_cmd", [_unreadable_worktree, _GitMissingRunner])
+async def test_an_unreadable_worktree_fails_the_check_without_running_the_agent(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    make_cmd: Any,
+) -> None:
+    # Without a before-snapshot AWF could not tell whether the agent changed the
+    # branch, so it does not run it at all.
+    state = handled_state()
+    gh = _CountingForge(make_cmd(), audit=audit_of(acked_thread(_SILENT, _MARKER)))
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+    await _gate(runner, workspace_id, state)
+
+    await _judge(runner, workspace_id, state)
+
+    assert runner._deps.adapter.calls == []
+    assert state.threads_addressed_ids[_ack_key()] == UNJUDGED
+    [event] = await _ack_events(factory, workspace_id)
+    assert event["evidence"]["detail"] == "worktree_probe_failed"

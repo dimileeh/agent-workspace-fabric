@@ -33,9 +33,11 @@ from awf.runtime.pr_monitor import NotifyHuman
 from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import (
     ACKNOWLEDGES,
+    MAX_ACK_REFETCH_FAILURES,
     NEW_POINT,
     UNJUDGED,
     ack_check_prompt,
+    acknowledgement_views,
     comment_identity,
     parse_ack_answer,
     record_ack_judgment,
@@ -327,3 +329,41 @@ def test_ack_check_prompt_quotes_redacted_capped_evidence_and_forbids_changes() 
     assert "do not modify files, run commands, or commit" in prompt
     assert "AWF-DISPOSITION-ACK: ACKNOWLEDGES" in prompt
     assert "AWF-DISPOSITION-ACK: NEW_POINT" in prompt
+
+
+async def test_a_bot_reply_on_a_thread_resolved_by_another_login_is_not_checked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Someone else's resolution is their own disposition: nothing to verify or ask.
+    state = handled_state()
+    thread = acked_thread(_SILENT, _MARKER, resolved_by="octocat")
+    gh = ReopenForge(FakeCommandRunner(), audit=audit_of(thread))
+    workspace_id, runner = await _release_runner(factory, tmp_path, gh)
+
+    result = await _gate(runner, workspace_id, state)
+
+    assert result.count_rows is not None
+    assert dict(result.count_rows)["resolved by others"] == 1
+    assert _disposition_ack_pending_key(_SILENT) not in state.threads_addressed_ids
+
+
+def test_the_refetch_cap_fails_only_the_comments_still_unjudged() -> None:
+    state = handled_state()
+    ack = thread_comment(BOT_ACK, comment_id="3")
+    later = thread_comment("Thanks again.", comment_id="4")
+    record_ack_judgment(state, _SILENT, ack, ACKNOWLEDGES)
+    state.mark_addressed(_disposition_ack_pending_key(_SILENT), str(MAX_ACK_REFETCH_FAILURES))
+    thread = acked_thread(_SILENT, _MARKER, trailing=(ack, later))
+
+    viewed, pending = acknowledgement_views(state, audit_of(thread), viewer="awf-operator")
+
+    assert pending == frozenset()
+    assert viewed.threads == (thread,)  # the full thread: the fallback re-triages it
+    assert state.threads_addressed_ids[_disposition_ack_key(_SILENT, comment_identity(ack))] == (
+        ACKNOWLEDGES
+    )
+    assert state.threads_addressed_ids[_disposition_ack_key(_SILENT, comment_identity(later))] == (
+        UNJUDGED
+    )
+    assert _disposition_ack_pending_key(_SILENT) not in state.threads_addressed_ids
