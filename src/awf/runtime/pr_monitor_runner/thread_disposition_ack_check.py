@@ -361,14 +361,15 @@ async def _restore_worktree(
     from HEAD, and an ignored file the agent force-added predates the run.
     The rollback runs through the pre-run git dirs, never the live ``.git``: the
     agent may have retargeted it at another repository. A gitfile the agent
-    deleted or broke is first rewritten from its pre-run text: the pin admits
-    the linked mirror only through it. HEAD is re-attached to its pre-run ref
+    deleted, broke or retargeted is first rewritten from its pre-run text: the
+    pin admits the linked mirror only through it, and a retarget to another valid
+    worktree would otherwise survive the rollback. HEAD is re-attached to its pre-run ref
     before the resets, which would otherwise move a branch the agent checked out.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
         return False
-    if after is None and gitfile is not None:
+    if gitfile is not None and _snapshot_outer_gitfile_text(worktree) != (True, gitfile):
         _restore_worktree_git_linkage(worktree, gitfile)
     head = before[0].strip()
     ref = before[3].strip()

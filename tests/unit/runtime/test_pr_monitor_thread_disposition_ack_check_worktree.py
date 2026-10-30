@@ -377,6 +377,8 @@ async def test_a_linked_worktree_is_rolled_back_through_its_pinned_git_dir(
 async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_path: Path) -> None:
     # A reset through the live gitfile would move the other workspace's branch.
     worktree, other = _linked_worktrees(tmp_path)
+    before = _snapshot(worktree)
+    gitfile = (worktree / ".git").read_text()
     other_head = _git(other, "rev-parse", "HEAD")
     other_git_dir = _git(other, "rev-parse", "--absolute-git-dir").strip()
 
@@ -392,8 +394,11 @@ async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_pat
 
     assert _git(other, "rev-parse", "HEAD") == other_head
     assert _git(other, "status", "--porcelain") == ""
-    [log] = [r for r in captured if r["event"] == _RESTORE_FAILED]
-    assert log["reason_code"] == "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"
+    # The still-valid retarget is undone too (PRRT_kwDOSJAM6s6x94oc): left in
+    # place, the fallback's repair would see the other workspace's clean tree.
+    assert (worktree / ".git").read_text() == gitfile
+    assert _snapshot(worktree) == before
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
 async def test_the_rollback_still_runs_when_the_agent_deleted_the_gitfile(tmp_path: Path) -> None:
