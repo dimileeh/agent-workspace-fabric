@@ -5,11 +5,12 @@ disposition (:mod:`~.thread_disposition_ack`) and re-polls. This step runs on th
 next poll, before ``decide()``, where no merge lock is held. For each flagged
 thread it re-reads that one thread, and for each of the bot's comments with no
 judgment yet it runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``,
-``NEW_POINT``, or ``UNJUDGED`` when the reply is too long to quote whole, or the
-agent failed, answered unusably or changed the worktree) is persisted at once, so a restart cannot re-run it, and
-gets one reason-coded log line and one audit event without any comment body. The
-check runs only on a clean worktree, and anything the agent changed there, or published
-to a hosted PR head, is
+``NEW_POINT``, or ``UNJUDGED`` when the adapter is hosted, the reply is too long to
+quote whole, or the agent failed, answered unusably or changed the worktree) is
+persisted at once, so a restart cannot re-run it, and gets one reason-coded log
+line and one audit event without any comment body. A hosted adapter is never
+asked: its run publishes to the PR head, which a local rollback cannot undo. The
+check runs only on a clean worktree, and anything the agent changed there is
 rolled back at once, so the fallback's repair can start. A
 check is recorded ``UNJUDGED`` before the agent starts, so even a crash mid-run
 cannot repeat it; only a provider failure, which goes to the monitor's provider
@@ -37,9 +38,6 @@ from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
-from awf.runtime.pr_monitor_runner.agent_service_recovery import (
-    _rollback_hosted_terminal_head_on_remote,
-)
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint_git_config import (
     _open_snapshotted_git_dir_for_restore,
     _restore_worktree_git_linkage,
@@ -80,7 +78,6 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
     _MonitorMirrorHooksPathRepairFailedError,
-    _MonitorPolicyBlockedError,
 )
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
@@ -220,11 +217,13 @@ async def _judge(
     prompt: str,
 ) -> tuple[AckJudgment, str]:
     """Run the judgment-only agent check; return the judgment and why."""
+    if self._deps.adapter.is_hosted:
+        # A hosted run publishes to the PR head: never asked, the fallback re-triages.
+        return UNJUDGED, "hosted_adapter"
     if not ack_reply_fits(reply):
         # The prompt would cut the reply off: a new point past the cap would go unseen.
         return UNJUDGED, "reply_truncated"
     worktree = self._worktrees_root / workspace_id
-    saved_push = (state.last_push_sha, state.hosted_terminal_head_advanced)
     # One writer-lock section from the snapshot through the rollback: another
     # writer's commit in between would otherwise read as the agent's and be undone.
     async with hold_exclusive_worktree_writer_lock(worktree):
@@ -247,77 +246,21 @@ async def _judge(
                 state=state,
             )
         except AgentRunError as exc:
-            # A hosted head the sync then failed to fetch or reset is on the PR alone.
-            reported = exc.details.get("reported_terminal_head_sha")
-            await _roll_back_run(
-                self, workspace_id, worktree, before, gitfile, state, saved_push, reported
-            )
+            await _restore_worktree(self, workspace_id, worktree, before, gitfile)
             # Provider recovery first, as for every monitor agent run: it raises a
             # ProviderRecovery* error for a 429 / quota / auth failure.
             await self._handle_provider_agent_run_error(workspace_id, exc)
             return UNJUDGED, f"agent_failed:{exc.reason_code}"
         except _AGENT_INFRASTRUCTURE_ERRORS as exc:
-            await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
+            await _restore_worktree(self, workspace_id, worktree, before, gitfile)
             return UNJUDGED, f"agent_failed:{type(exc).__name__}"
-        except _MonitorPolicyBlockedError as exc:
-            # The delta gate refused a hosted head the sync already checked out.
-            await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push)
-            return UNJUDGED, f"policy_blocked:{exc.reason_code}"
-        if await _roll_back_run(self, workspace_id, worktree, before, gitfile, state, saved_push):
+        if await _restore_worktree(self, workspace_id, worktree, before, gitfile):
             # A judgment-only run must not touch the branch; its answer is not trusted.
             return UNJUDGED, "worktree_changed"
     answer = parse_ack_answer(result.stdout)
     if answer is None:
         return UNJUDGED, "unparseable_answer"
     return answer, "judged"
-
-
-async def _roll_back_run(
-    self: Any,
-    workspace_id: str,
-    worktree: Path,
-    before: tuple[str, str, str, str],
-    gitfile: str | None,
-    state: MonitorState,
-    saved_push: tuple[str | None, bool],
-    reported: str | None = None,
-) -> bool:
-    """Roll back the check's run, locally and on a hosted PR head; whether it changed anything.
-
-    A hosted agent publishes its terminal commit to the PR branch before AWF syncs
-    it into the worktree and records it as ``last_push_sha``, so a local reset alone
-    would leave the rejected commit on the live PR. ``reported`` is that commit
-    when the sync failed before the worktree or the state could record it.
-    """
-    run_head: str | None = None
-    if self._deps.adapter.is_hosted:
-        # Read before the local reset: a hosted head synced but then refused by the
-        # delta gate is published without being recorded in the state.
-        with contextlib.suppress(OSError):
-            probe = await _run_git(self, worktree, None, "rev-parse", "HEAD")
-            run_head = probe.stdout.strip() if probe.returncode == 0 else None
-    changed = await _restore_worktree(self, workspace_id, worktree, before, gitfile)
-    if not self._deps.adapter.is_hosted:
-        return changed
-    start_head = before[0].strip()
-    recorded = (state.last_push_sha, state.hosted_terminal_head_advanced) != saved_push
-    published = (state.last_push_sha or "").strip() if recorded else run_head
-    if not published or published.lower() == start_head.lower():
-        published = (reported or "").strip()
-    if not published or published.lower() == start_head.lower():
-        return changed
-    rolled_back = await _rollback_hosted_terminal_head_on_remote(
-        self,
-        workspace_id=workspace_id,
-        hosted_pr_identity=await self._hosted_pr_identity_for_workspace(workspace_id, state=state),
-        rollback_target_sha=start_head,
-        expected_remote_head_sha=published,
-    )
-    if rolled_back:
-        state.last_push_sha, state.hosted_terminal_head_advanced = saved_push
-    # Otherwise the state keeps the published head it still has, and the
-    # reason-coded rollback failure is already logged.
-    return True
 
 
 async def _worktree_fingerprint(

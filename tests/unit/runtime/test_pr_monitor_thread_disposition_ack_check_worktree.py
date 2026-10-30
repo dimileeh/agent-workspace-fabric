@@ -24,7 +24,6 @@ from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeComm
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import ACKNOWLEDGES, UNJUDGED
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import _judge
-from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 pytestmark = pytest.mark.unit
@@ -424,170 +423,16 @@ async def test_the_rollback_still_runs_when_the_agent_deleted_the_gitfile(tmp_pa
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
-def _hosted(tmp_path: Path) -> tuple[Path, Path, str]:
-    # A worktree tracking a PR branch ``feature`` on a bare remote.
+async def test_a_hosted_adapter_is_never_asked_and_the_check_is_unjudged(tmp_path: Path) -> None:
+    # A hosted run publishes to the PR head, which a local rollback cannot undo:
+    # the agent never runs and the fallback re-triages the thread.
     worktree = _worktree(tmp_path)
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
-    _git(worktree, "push", "-q", str(remote), "HEAD:refs/heads/feature")
-    return worktree, remote, _git(worktree, "rev-parse", "HEAD").strip()
-
-
-def _publish(worktree: Path, remote: Path) -> str:
-    # What a hosted run does: publish a commit, then AWF syncs the worktree to it.
-    clone = worktree.parent / "hosted"
-    subprocess.run(["git", "clone", "-q", "-b", "feature", str(remote), str(clone)], check=True)
-    (clone / "core.py").write_text("x = 2\n")
-    _git(clone, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qam", "hosted")
-    _git(clone, "push", "-q", "origin", "feature")
-    _git(worktree, "fetch", "-q", str(remote), "feature")
-    _git(worktree, "reset", "-q", "--hard", "FETCH_HEAD")
-    return _git(worktree, "rev-parse", "HEAD").strip()
-
-
-def _hosted_runner(tmp_path: Path, remote: Path, agent: Callable[[], Any]) -> Any:
-    runner = _runner(tmp_path, agent)
+    before = _snapshot(worktree)
+    calls: list[str] = []
+    runner = _runner(tmp_path, lambda: calls.append("agent"))
     runner._deps.adapter.is_hosted = True
 
-    async def identity(workspace_id: str, *, state: Any = None) -> dict[str, object]:
-        return {"repo_url": str(remote), "head_ref": "feature"}
+    assert await _check(runner) == (UNJUDGED, "hosted_adapter")
 
-    runner._hosted_pr_identity_for_workspace = identity
-    return runner
-
-
-async def _check_with(runner: Any, state: MonitorState) -> tuple[str, str]:
-    return await _judge(
-        runner,
-        workspace_id="ws",
-        compose_project="proj",
-        compose_file=Path("/tmp/compose.yml"),
-        state=state,
-        reply="Thanks, that makes sense.",
-        prompt="judge",
-    )
-
-
-def _refused() -> Any:
-    raise AgentRunError(
-        agent="codex_cloud",
-        result=CommandResult(1, "", "refused"),
-        reason_code="HOSTED_REMOTE_HEAD_DELTA_REJECTED",
-    )
-
-
-def _policy_blocked() -> Any:
-    raise _MonitorPolicyBlockedError("protected path", reason_code="PROTECTED_SCOPE_PUSH_BLOCKED")
-
-
-@pytest.mark.parametrize(
-    ("recorded", "finish", "detail"),
-    [
-        pytest.param(True, lambda: SimpleNamespace(stdout=_ACK), "worktree_changed", id="synced"),
-        # The delta gate refused the synced head: published, yet not in the state.
-        pytest.param(
-            False, _refused, "agent_failed:HOSTED_REMOTE_HEAD_DELTA_REJECTED", id="gate-refused"
-        ),
-        # Supply-chain or protected-scope policy refused the synced head.
-        pytest.param(
-            False,
-            _policy_blocked,
-            "policy_blocked:PROTECTED_SCOPE_PUSH_BLOCKED",
-            id="policy-blocked",
-        ),
-    ],
-)
-async def test_a_hosted_run_that_published_a_head_is_rolled_back_on_the_pr_too(
-    tmp_path: Path, recorded: bool, finish: Callable[[], Any], detail: str
-) -> None:
-    worktree, remote, start = _hosted(tmp_path)
-    state = MonitorState(last_push_sha=start)
-
-    def agent() -> Any:
-        head = _publish(worktree, remote)
-        if recorded:
-            state.last_push_sha, state.hosted_terminal_head_advanced = head, True
-        return finish()
-
-    assert await _check_with(_hosted_runner(tmp_path, remote, agent), state) == (UNJUDGED, detail)
-
-    assert _git(remote, "rev-parse", "refs/heads/feature").strip() == start
-    assert _git(worktree, "rev-parse", "HEAD").strip() == start
-    assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (start, False)
-
-
-async def test_a_hosted_head_the_sync_failed_to_fetch_is_rolled_back_on_the_pr_too(
-    tmp_path: Path,
-) -> None:
-    # Published, yet neither the local HEAD nor the state names it: only the
-    # sync's error carries the head the hosted agent reported.
-    worktree, remote, start = _hosted(tmp_path)
-    state = MonitorState(last_push_sha=start)
-
-    def agent() -> Any:
-        head = _publish(worktree, remote)
-        _git(worktree, "reset", "-q", "--hard", start)
-        raise AgentRunError(
-            agent="codex_cloud",
-            result=CommandResult(1, "", "fatal: could not fetch PR head"),
-            reason_code="HOSTED_REMOTE_HEAD_FETCH_FAILED",
-            details={"reported_terminal_head_sha": head},
-        )
-
-    assert await _check_with(_hosted_runner(tmp_path, remote, agent), state) == (
-        UNJUDGED,
-        "agent_failed:HOSTED_REMOTE_HEAD_FETCH_FAILED",
-    )
-
-    assert _git(remote, "rev-parse", "refs/heads/feature").strip() == start
-    assert _git(worktree, "rev-parse", "HEAD").strip() == start
-    assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (start, False)
-
-
-async def test_a_failed_hosted_rollback_keeps_the_published_head_in_the_state(
-    tmp_path: Path,
-) -> None:
-    # The lease sees the PR moved on again, so nothing is overwritten and the
-    # state still names the head the PR carries.
-    worktree, remote, start = _hosted(tmp_path)
-    state = MonitorState(last_push_sha=start)
-    published: list[str] = []
-
-    def agent() -> Any:
-        published.append(_publish(worktree, remote))
-        state.last_push_sha, state.hosted_terminal_head_advanced = published[0], True
-        later = _git(
-            remote,
-            "-c",
-            "user.email=a@b",
-            "-c",
-            "user.name=a",
-            "commit-tree",
-            f"{start}^{{tree}}",
-            "-p",
-            published[0],
-            "-m",
-            "later",
-        ).strip()
-        _git(remote, "update-ref", "refs/heads/feature", later)
-        return SimpleNamespace(stdout=_ACK)
-
-    with structlog.testing.capture_logs() as captured:
-        result = await _check_with(_hosted_runner(tmp_path, remote, agent), state)
-
-    assert result == (UNJUDGED, "worktree_changed")
-    assert (state.last_push_sha, state.hosted_terminal_head_advanced) == (published[0], True)
-    [log] = [
-        r for r in captured if r["event"] == "monitor.hosted_terminal_head_remote_rollback_failed"
-    ]
-    assert log["reason_code"] == "HOSTED_REMOTE_HEAD_ROLLBACK_FAILED"
-
-
-async def test_a_hosted_run_that_published_nothing_keeps_the_answer(tmp_path: Path) -> None:
-    worktree, remote, start = _hosted(tmp_path)
-    state = MonitorState(last_push_sha=start)
-    runner = _hosted_runner(tmp_path, remote, lambda: SimpleNamespace(stdout=_ACK))
-
-    assert await _check_with(runner, state) == (ACKNOWLEDGES, "judged")
-    assert _git(remote, "rev-parse", "refs/heads/feature").strip() == start
-    assert state.last_push_sha == start
+    assert calls == []
+    assert _snapshot(worktree) == before
