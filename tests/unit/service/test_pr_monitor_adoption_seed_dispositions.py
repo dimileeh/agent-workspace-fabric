@@ -336,3 +336,34 @@ def test_unverified_flags_cross_regardless_of_head(value: str, head_continuity: 
 )
 def test_malformed_unverified_flags_never_cross(key: str, value: str) -> None:
     assert seedable_monitor_state({key: value}, head_continuity=True) == {}
+
+
+_AUTO_REOPENED = "__awf_disposition_auto_reopened__:"
+
+
+@pytest.mark.parametrize("value", ["1", "2", "17"])
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_auto_reopen_counts_cross_regardless_of_head(value: str, head_continuity: bool) -> None:
+    """The per-thread automatic-reopen count bounds AWF's reopens over the PR's life (#1138).
+
+    Left behind, a successor would reopen the same thread twice more. It records
+    thread history, not code, and only makes the successor stricter.
+    """
+    key = f"{_AUTO_REOPENED}PRRT_test_flagged"
+
+    assert seedable_monitor_state({key: value}, head_continuity=head_continuity) == {key: value}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (f"{_AUTO_REOPENED}__awf_notify__:x", "1"),
+        (f"{_AUTO_REOPENED}", "1"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "0"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "x"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "01"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "1000"),
+    ],
+)
+def test_malformed_auto_reopen_counts_never_cross(key: str, value: str) -> None:
+    assert seedable_monitor_state({key: value}, head_continuity=True) == {}

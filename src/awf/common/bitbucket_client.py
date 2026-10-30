@@ -718,6 +718,11 @@ class BitbucketClient(_BitbucketHttpMixin, _BitbucketUrlsMixin):
                 ) from exc
             raise
 
+    async def unresolve_thread(self, *, thread_id: str) -> bool:
+        """Report reopen unsupported: the disposition audit is unsupported here too (#1138)."""
+        del thread_id
+        return False
+
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         """Post a disposition reply for ``thread_id`` and return the new comment id.
 

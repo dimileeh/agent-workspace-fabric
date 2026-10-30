@@ -542,11 +542,22 @@ reused or adopted PR, a thread the monitor already recorded a disposition for
 (or that carries an AWF marker at all) was handled after the rollout, so no
 baseline ever exempts it.
 
-There is no acknowledgement directive: an operator clears a flagged thread by
-reopening it. The next poll that lists the thread open clears its verdict, so
-`decide()` re-triages it through the normal fix cycle, which posts a fresh
-disposition reply before resolving it. Without this, a FIXED or FALSE POSITIVE
-thread whose comments did not change would never re-enter triage. The flag then
+There is no acknowledgement directive: a reopen clears a flagged thread. The
+next poll that lists the thread open clears its verdict, so `decide()`
+re-triages it through the normal fix cycle, which posts a fresh disposition
+reply before resolving it. Without this, a FIXED or FALSE POSITIVE thread whose
+comments did not change would never re-enter triage. AWF performs that reopen
+itself (#1138): two causes flag threads AWF did handle — a review bot replying in
+the thread after AWF's reply, and a re-adoption on a moved head retiring that
+reply — so the runner, after the gate returns and never under the merge lock,
+reopens each flagged thread (`unresolveReviewThread` on GitHub), records
+`REVIEW_THREAD_DISPOSITION_AUTO_REOPENED` (one log line and one audit event per
+reopened set) and re-polls instead of notifying. Each thread is reopened at most
+twice over the PR's life; the count crosses re-adoption regardless of head
+continuity. Over the cap, on a forge with no reopen API (Bitbucket), or when the
+reopen fails, that thread falls back to the `NotifyHuman` blocker, which names
+`REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED`, `…_UNSUPPORTED` or `…_FAILED`
+and still asks the operator to reopen it; the workspace is never failed. The flag then
 reads `reopened` until the gate certifies the thread's new disposition. While it
 does, outdated hygiene does not re-seed the thread's verdict from branch
 evidence in the re-triage's place, and that poll step never clears the

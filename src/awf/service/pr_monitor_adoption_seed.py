@@ -201,6 +201,16 @@ _CONVERSATION_DIGEST_RE = re.compile(r"^(?:[0-9a-f]{64})?$")
 _DISPOSITION_UNVERIFIED_PREFIX = "__awf_disposition_unverified__:"
 _DISPOSITION_UNVERIFIED_VALUES = frozenset({"REVIEW_THREAD_DISPOSITION_UNVERIFIED", "reopened"})
 
+# ``__awf_disposition_auto_reopened__:<thread id>`` counts AWF's automatic reopens
+# of a thread the disposition gate flagged (#1138): at most two per thread over
+# the PR's life, then the gate's blocker asks the operator. Left behind, a
+# successor would reopen the same thread twice more. It records thread history
+# rather than code and only makes the successor stricter, so it crosses
+# regardless of head continuity: a positive decimal count under a verdict-key
+# thread id.
+_DISPOSITION_AUTO_REOPENED_PREFIX = "__awf_disposition_auto_reopened__:"
+_AUTO_REOPEN_COUNT_RE = re.compile(r"^[1-9][0-9]{0,2}$")
+
 # ``__awf_review_thread_disposition_baseline__`` (``awf.runtime.monitor_state_keys``)
 # is the disposition gate's one-time legacy baseline: the unmarked AWF
 # resolutions its first run exempted, and the proof that first run happened
@@ -294,6 +304,7 @@ def seedable_monitor_state(
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
             or _is_disposition_retired_tombstone(key)
             or _is_disposition_unverified_flag(key, value)
+            or _is_disposition_auto_reopen_count(key, value)
             or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
@@ -443,6 +454,14 @@ def _is_disposition_unverified_flag(key: str, value: str) -> bool:
         key.startswith(_DISPOSITION_UNVERIFIED_PREFIX)
         and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_UNVERIFIED_PREFIX) :]) is not None
         and value in _DISPOSITION_UNVERIFIED_VALUES
+    )
+
+
+def _is_disposition_auto_reopen_count(key: str, value: str) -> bool:
+    return (
+        key.startswith(_DISPOSITION_AUTO_REOPENED_PREFIX)
+        and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_AUTO_REOPENED_PREFIX) :]) is not None
+        and _AUTO_REOPEN_COUNT_RE.match(value) is not None
     )
 
 

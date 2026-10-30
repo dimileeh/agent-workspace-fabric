@@ -69,6 +69,15 @@ REVIEW_THREAD_DISPOSITION_UNVERIFIED = "REVIEW_THREAD_DISPOSITION_UNVERIFIED"
 REVIEW_THREAD_AUDIT_UNAVAILABLE = "REVIEW_THREAD_AUDIT_UNAVAILABLE"
 # Rollout: the first gate run recorded unmarked AWF resolutions as a legacy baseline.
 REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE = "REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE"
+# AWF reopened unverified threads itself so the next poll re-triages them (#1138).
+REVIEW_THREAD_DISPOSITION_AUTO_REOPENED = "REVIEW_THREAD_DISPOSITION_AUTO_REOPENED"
+# Why AWF left an unverified thread resolved for the operator to reopen (#1138):
+# its per-thread reopen cap is spent, the forge has no reopen API, or it failed.
+REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED = "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED"
+REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_UNSUPPORTED = (
+    "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_UNSUPPORTED"
+)
+REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED = "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED"
 
 DispositionClass = Literal[
     "fixed",
@@ -104,6 +113,12 @@ _PAYLOAD_VERSION = 1
 _UNSAFE_URL_CHARACTERS = frozenset('<>"`')
 _BLOCKER_LISTED_IDS = 10
 _BLOCKER_MAX_CHARS = 560
+# Stable text only (no forge error): the blocker keys the NotifyHuman dedupe.
+_AUTO_REOPEN_REASON_TEXT: dict[str, str] = {
+    REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED: "already reopened twice",
+    REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_UNSUPPORTED: "the forge cannot reopen threads",
+    REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED: "the reopen failed",
+}
 
 
 @dataclass(frozen=True)
@@ -559,14 +574,24 @@ def disposition_count_rows(counts: Mapping[str, int]) -> tuple[tuple[str, int], 
     return tuple((_LABELS[key], int(counts.get(key, 0))) for key in keys)
 
 
-def unverified_blocker_message(thread_ids: Sequence[str]) -> str:
-    """Reason-coded NotifyHuman text listing the unverified thread ids (bounded)."""
+def unverified_blocker_message(
+    thread_ids: Sequence[str], *, auto_reopen_reasons: Sequence[str] = ()
+) -> str:
+    """Reason-coded NotifyHuman text listing the unverified thread ids (bounded).
+
+    ``auto_reopen_reasons`` are the codes for why AWF did not reopen the listed
+    threads itself (#1138); each is named once, before the operator's remedy.
+    """
     head = (
         f"{REVIEW_THREAD_DISPOSITION_UNVERIFIED}: {len(thread_ids)} review thread(s) "
         "resolved by AWF's identity carry no AWF disposition reply: "
     )
+    reasons = "; ".join(
+        f"{code}: {_AUTO_REOPEN_REASON_TEXT[code]}" for code in dict.fromkeys(auto_reopen_reasons)
+    )
     tail = (
-        "; to clear one, reopen it: AWF re-triages it through the normal fix cycle and "
+        (f"; AWF did not reopen them automatically ({reasons})" if reasons else "")
+        + "; to clear one, reopen it: AWF re-triages it through the normal fix cycle and "
         "posts a fresh disposition before resolving it"
     )
     listed: list[str] = []

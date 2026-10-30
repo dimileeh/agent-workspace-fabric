@@ -182,13 +182,18 @@ class _LockLog:
 
 
 async def _merge_under_lock_log(
-    factory: async_sessionmaker[AsyncSession], tmp_path: Path, gh: _MergeMethodClient
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    gh: _MergeMethodClient,
+    *,
+    state: MonitorState | None = None,
+    lock: _LockLog | None = None,
 ) -> tuple[bool | None, MonitorState, _LockLog, str]:
     workspace_id = await seed_monitoring_workspace(factory)
     gh.expect_context(
         repo=_TEST_REPO, pr_number=_TEST_PR_NUMBER, base_branch=_TEST_DEFAULT_BASE_BRANCH
     )
-    lock = _LockLog()
+    lock = lock or _LockLog()
     runner = make_runner(
         factory=factory,
         cmd=FakeCommandRunner(),
@@ -198,7 +203,7 @@ async def _merge_under_lock_log(
         gh=gh,
         merge_coordinator=lock,
     )
-    state = settled_baseline_state()
+    state = state if state is not None else settled_baseline_state()
     terminal = await runner._execute(
         action=Merge(),
         workspace_id=workspace_id,
