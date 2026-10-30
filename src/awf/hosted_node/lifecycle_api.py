@@ -19,6 +19,7 @@ from awf.hosted_node.lifecycle_schemas import (
     Drain,
     LifecycleStatus,
     Maintenance,
+    MaintenanceBegin,
     RecoveryAcknowledgement,
 )
 
@@ -64,8 +65,8 @@ async def drain(value: Drain, service: Service) -> LifecycleStatus:
 
 
 @router.post("/maintenance/begin", response_model=LifecycleStatus)
-async def begin_maintenance(value: Maintenance, service: Service) -> LifecycleStatus:
-    return await service.begin_maintenance(value.generation)
+async def begin_maintenance(value: MaintenanceBegin, service: Service) -> LifecycleStatus:
+    return await service.begin_maintenance(value.generation, value.checkpoint)
 
 
 @router.post("/maintenance/release", response_model=LifecycleStatus)

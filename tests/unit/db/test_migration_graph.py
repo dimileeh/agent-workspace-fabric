@@ -49,8 +49,11 @@ _HOSTED_NODE_MATERIAL_REVISION = "b986c2d3e4f5"
 _NODE_IDLE_GATE_REVISION = "ca97d3e4f506"
 # Admission-only maintenance hold on the existing lifecycle row.
 _NODE_MAINTENANCE_REVISION = "db08e4f50617"
-# Current head: atomic retained-work acceptance metadata.
+# Atomic retained-work acceptance metadata.
 _RETAINED_ACCEPTANCE_REVISION = "ec19f5061728"
+# Checkpoint intent followed by exact restore reconciliation.
+_CHECKPOINT_REVISION = "fd2af6172839"
+_RESTORE_RECONCILIATION_REVISION = "b830e6d9a142"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -118,7 +121,13 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_RETAINED_ACCEPTANCE_REVISION]
+    assert script.get_heads() == [_RESTORE_RECONCILIATION_REVISION]
+    restored_head = script.get_revision(_RESTORE_RECONCILIATION_REVISION)
+    assert restored_head is not None
+    assert restored_head.down_revision == _CHECKPOINT_REVISION
+    checkpoint = script.get_revision(_CHECKPOINT_REVISION)
+    assert checkpoint is not None
+    assert checkpoint.down_revision == _RETAINED_ACCEPTANCE_REVISION
     accepted_head = script.get_revision(_RETAINED_ACCEPTANCE_REVISION)
     assert accepted_head is not None
     assert accepted_head.down_revision == _NODE_MAINTENANCE_REVISION

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.models import Owner
+from awf.hosted_node.restore_schemas import RestoreBootEvidence
 from awf.hosted_node.schemas import Identity
 
 
@@ -20,7 +21,12 @@ class WorkspaceScopeDeniedError(MaterialDeniedError):
     """A consumer was denied after its stop and credential retraction succeeded."""
 
 
-async def boot(config: HostedSettings, factory: async_sessionmaker[AsyncSession]) -> Identity:
+async def boot(
+    config: HostedSettings,
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    restore: RestoreBootEvidence | None = None,
+) -> Identity:
     async with factory.begin() as session:
         inserted = await session.scalar(
             insert(Owner)
@@ -53,6 +59,25 @@ async def boot(config: HostedSettings, factory: async_sessionmaker[AsyncSession]
             and config.incarnation != row.incarnation
         ):
             raise MaterialDeniedError("IDENTITY_ROLLBACK")
+        restore_binding = None
+        if restore is not None:
+            from awf.hosted_node.lifecycle_models import NodeLifecycleRow
+            from awf.hosted_node.restore_quarantine import validate_restore_boot
+
+            restore_binding = await validate_restore_boot(session, config, restore)
+            if previous != restore_binding.checkpoint.identity:
+                raise MaterialDeniedError("RESTORE_IDENTITY_MISMATCH")
+            gate = await session.get(NodeLifecycleRow, 1)
+            assert gate is not None
+            # Only the verified restore mapping may change storage. This row is
+            # locked until the closed boot and quarantine commit together.
+            gate.disk_ref = restore_binding.target_disk_ref
+            gate.database_ref = restore_binding.target_database_ref
+            gate.restore_quarantine = {
+                "state": "pending",
+                "binding": restore_binding.model_dump(mode="json"),
+            }
+            row.boot_epoch = max(row.boot_epoch, restore_binding.boot_epoch_floor)
         row.incarnation = config.incarnation
         row.recovery_generation = config.recovery_generation
         row.boot_epoch += 1

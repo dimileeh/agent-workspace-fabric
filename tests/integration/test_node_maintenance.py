@@ -29,7 +29,8 @@ from tests.integration.test_node_idle_gate import node as node
 async def ready_node(node):
     client, receiver, _ = node
     evidence(receiver)
-    assert (await acknowledge(client)).status_code == 200
+    response = await acknowledge(client)
+    assert response.status_code == 200, response.text
     return node
 
 

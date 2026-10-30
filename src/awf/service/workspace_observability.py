@@ -251,9 +251,18 @@ def workspace_attention_fields(ws: Workspace) -> dict[str, Any]:
     recovery = policy.get("hosted_recovery") if isinstance(policy, dict) else None
     recovery_attention = (
         isinstance(policy, dict)
-        and isinstance(policy.get("hosted_node"), dict)
         and isinstance(recovery, dict)
         and recovery.get("disposition") == "attention"
+        and (
+            isinstance(policy.get("hosted_node"), dict)
+            or (
+                isinstance(recovery.get("restore_id"), str)
+                and bool(recovery["restore_id"])
+                and isinstance(recovery.get("identity"), dict)
+                and recovery["identity"].get("owner") == getattr(ws, "node_id", None)
+                and bool(getattr(ws, "node_id", None))
+            )
+        )
     )
     if not flagged and not recovery_attention:
         return {

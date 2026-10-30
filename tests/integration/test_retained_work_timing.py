@@ -26,6 +26,7 @@ async def cohort(authority, tmp_path, count, *, resumable_count=None):
     if resumable_count is None:
         resumable_count = count
     values = []
+    attempts = []
     async with factory.begin() as session:
         for index in range(count):
             current = deepcopy(value)
@@ -66,8 +67,7 @@ async def cohort(authority, tmp_path, count, *, resumable_count=None):
                     prompt="Never call a provider",
                 )
             )
-            await session.flush()
-            session.add(
+            attempts.append(
                 TaskAttempt(
                     id=f"attempt-{index}",
                     task_id=f"task-{index}",
@@ -80,9 +80,19 @@ async def cohort(authority, tmp_path, count, *, resumable_count=None):
                     base_branch="main",
                 )
             )
+        await session.flush()
+        session.add_all(attempts)
     async with replacement(authority, tmp_path) as retained:
-        for index, current in enumerate(values[:resumable_count]):
-            await fresh_bindings((*retained[:4], current, retained[5]), prefix=f"current-{index}-")
+        # Stage every real HTTP preparation/install, with bounded independent
+        # callers. Per-binding ordering and the production owner lock remain.
+        for start in range(0, resumable_count, 8):
+            async with asyncio.TaskGroup() as group:
+                for index in range(start, min(start + 8, resumable_count)):
+                    group.create_task(
+                        fresh_bindings(
+                            (*retained[:4], values[index], retained[5]), prefix=f"current-{index}-"
+                        )
+                    )
         yield retained
 
 
@@ -104,7 +114,9 @@ async def test_preparation_does_not_consume_recovery_proof(
     # The max-total case therefore parks unknown running outcomes as well as
     # resuming work; no material-capacity bypass is valid.
     resumable_count = min(count, 512)
+    setup_started = time.monotonic()
     async with cohort(authority, tmp_path, count, resumable_count=resumable_count) as retained:
+        record_property("setup_seconds", time.monotonic() - setup_started)
         client, runtime, factory, previous, _, _ = retained
         remaining = min(
             (datetime.fromisoformat(binding["expires_at"]) - datetime.now(UTC)).total_seconds()

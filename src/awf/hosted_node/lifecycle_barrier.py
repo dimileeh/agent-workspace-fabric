@@ -66,6 +66,9 @@ def install_barrier(connection: Connection) -> None:
 
 
 def replace_barrier(connection: Connection) -> None:
+    from awf.hosted_node.restore_reconciliation_barrier import replace_restore_barrier
+
+    replace_restore_barrier(connection)
     # The historical idle-gate migration imports this installer before the
     # additive columns exist. JSON row access also keeps its downgrade usable.
     connection.execute(
@@ -87,6 +90,16 @@ def replace_barrier(connection: Connection) -> None:
                 END IF;
                 before_row := CASE WHEN TG_OP = 'INSERT' THEN '{}'::jsonb ELSE to_jsonb(OLD) END;
                 after_row := CASE WHEN TG_OP = 'DELETE' THEN '{}'::jsonb ELSE to_jsonb(NEW) END;
+                IF awf_restore_transition(TG_TABLE_NAME,before_row,after_row) THEN
+                    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+                    RETURN NEW;
+                END IF;
+                IF to_jsonb(gate) #>> '{restore_quarantine,state}' = 'held' THEN
+                    RAISE EXCEPTION 'RESTORE_QUARANTINED' USING ERRCODE = '55000';
+                END IF;
+                IF awf_restore_row_held(TG_TABLE_NAME,before_row) OR awf_restore_row_held(TG_TABLE_NAME,after_row) THEN
+                    RAISE EXCEPTION 'RESTORE_ROW_HELD' USING ERRCODE='55000';
+                END IF;
                 IF (TG_TABLE_NAME = 'workspaces'
                     AND before_row #>> '{task_policy,hosted_recovery,disposition}' = 'attention')
                    OR (TG_TABLE_NAME = 'tasks' AND EXISTS (
@@ -94,10 +107,12 @@ def replace_barrier(connection: Connection) -> None:
                        WHERE a.task_id IN (before_row->>'id', after_row->>'id')
                          AND w.task_policy::jsonb #>> '{hosted_recovery,disposition}' = 'attention'
                    ))
-                   OR (TG_TABLE_NAME NOT IN ('workspaces', 'workspace_events', 'tasks') AND EXISTS (
+                   OR (TG_TABLE_NAME NOT IN ('workspaces', 'tasks') AND EXISTS (
                        SELECT 1 FROM workspaces w
                        WHERE w.id IN (before_row->>'workspace_id', after_row->>'workspace_id')
                          AND w.task_policy::jsonb #>> '{hosted_recovery,disposition}' = 'attention'
+                         AND (TG_TABLE_NAME <> 'workspace_events'
+                              OR w.task_policy::jsonb #>> '{hosted_recovery,restore_id}' IS NOT NULL)
                    )) THEN
                     RAISE EXCEPTION 'RECOVERY_ATTENTION_REQUIRED' USING ERRCODE = '55000';
                 END IF;
@@ -125,6 +140,21 @@ async def verify_barrier(session: AsyncSession) -> None:
     """)
     )
     if set(result.scalars()) != set(GUARDED_TABLES):
+        from awf.hosted_node.identity import MaterialDeniedError
+
+        raise MaterialDeniedError("NODE_BARRIER_UNAVAILABLE", 503)
+    metadata = await session.execute(
+        text("""
+        SELECT c.relname FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+        WHERE t.tgname='awf_restore_metadata' AND t.tgenabled IN ('O','A')
+          AND c.relnamespace=current_schema()::regnamespace
+    """)
+    )
+    if set(metadata.scalars()) != {
+        "hosted_node_lifecycle",
+        "hosted_restore_reconciliations",
+        "hosted_restore_row_holds",
+    }:
         from awf.hosted_node.identity import MaterialDeniedError
 
         raise MaterialDeniedError("NODE_BARRIER_UNAVAILABLE", 503)

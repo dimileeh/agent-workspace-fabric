@@ -125,7 +125,12 @@ async def test_lifecycle_default_deny_leaves_recovery_unacknowledged(monkeypatch
     factory = MagicMock()
     lifecycle = NodeLifecycle(factory, NEW)
     row = SimpleNamespace(
-        previous_identity=OLD.model_dump(), recovery_key=None, receipt_ref=None, phase="recovering"
+        previous_identity=OLD.model_dump(),
+        recovery_key=None,
+        receipt_ref=None,
+        phase="recovering",
+        restore_quarantine=None,
+        restore_reconciliation_id=None,
     )
     monkeypatch.setattr("awf.hosted_node.lifecycle.locked", AsyncMock(return_value=row))
     if wired_host:
