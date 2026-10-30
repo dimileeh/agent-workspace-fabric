@@ -39,10 +39,13 @@ from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_state_keys import _disposition_ack_key, _disposition_ack_pending_key
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.comment_verdict_residue_fingerprint_git_config import (
+    _gitfile_target_path_without_follow,
     _open_snapshotted_git_dir_for_restore,
     _restore_worktree_git_linkage,
     _snapshot_outer_gitfile_text,
+    _write_local_git_config_file_at,
 )
+from awf.runtime.pr_monitor_runner.comment_verdict_residue_io import _read_worktree_regular_text_at
 from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EVENT
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_pinned_worktree_command,
@@ -236,27 +239,29 @@ async def _judge(
             return UNJUDGED, "worktree_dirty"
         # The rollback's pin admits the linked mirror through this gitfile.
         _, gitfile = _snapshot_outer_gitfile_text(worktree)
-        try:
-            result = await self._run_monitor_agent_with_service_recovery(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                log_source=_LOG_SOURCE,
-                state=state,
-            )
-        except AgentRunError as exc:
-            await _restore_worktree(self, workspace_id, worktree, before, gitfile)
-            # Provider recovery first, as for every monitor agent run: it raises a
-            # ProviderRecovery* error for a 429 / quota / auth failure.
-            await self._handle_provider_agent_run_error(workspace_id, exc)
-            return UNJUDGED, f"agent_failed:{exc.reason_code}"
-        except _AGENT_INFRASTRUCTURE_ERRORS as exc:
-            await _restore_worktree(self, workspace_id, worktree, before, gitfile)
-            return UNJUDGED, f"agent_failed:{type(exc).__name__}"
-        if await _restore_worktree(self, workspace_id, worktree, before, gitfile):
-            # A judgment-only run must not touch the branch; its answer is not trusted.
-            return UNJUDGED, "worktree_changed"
+        with _held_linked_commondir(worktree, gitfile) as commondir:
+            linkage = (gitfile, commondir)
+            try:
+                result = await self._run_monitor_agent_with_service_recovery(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    log_source=_LOG_SOURCE,
+                    state=state,
+                )
+            except AgentRunError as exc:
+                await _restore_worktree(self, workspace_id, worktree, before, linkage)
+                # Provider recovery first, as for every monitor agent run: it raises a
+                # ProviderRecovery* error for a 429 / quota / auth failure.
+                await self._handle_provider_agent_run_error(workspace_id, exc)
+                return UNJUDGED, f"agent_failed:{exc.reason_code}"
+            except _AGENT_INFRASTRUCTURE_ERRORS as exc:
+                await _restore_worktree(self, workspace_id, worktree, before, linkage)
+                return UNJUDGED, f"agent_failed:{type(exc).__name__}"
+            if await _restore_worktree(self, workspace_id, worktree, before, linkage):
+                # A judgment-only run must not touch the branch; its answer is not trusted.
+                return UNJUDGED, "worktree_changed"
     answer = parse_ack_answer(result.stdout)
     if answer is None:
         return UNJUDGED, "unparseable_answer"
@@ -294,7 +299,7 @@ async def _restore_worktree(
     workspace_id: str,
     worktree: Path,
     before: tuple[str, str, str, str],
-    gitfile: str | None,
+    linkage: tuple[str | None, tuple[int, str] | None],
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
 
@@ -306,14 +311,22 @@ async def _restore_worktree(
     agent may have retargeted it at another repository. A gitfile the agent
     deleted, broke or retargeted is first rewritten from its pre-run text: the
     pin admits the linked mirror only through it, and a retarget to another valid
-    worktree would otherwise survive the rollback. HEAD is re-attached to its pre-run ref
+    worktree would otherwise survive the rollback. A retargeted ``commondir`` is
+    rewritten too, through the git dir held open since before the run: a mirror
+    holding the same branch and tree would read as clean and steer the fallback's
+    repair there. HEAD is re-attached to its pre-run ref
     before the resets, which would otherwise move a branch the agent checked out.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
         return False
+    gitfile, commondir = linkage
     if gitfile is not None and _snapshot_outer_gitfile_text(worktree) != (True, gitfile):
         _restore_worktree_git_linkage(worktree, gitfile)
+    if commondir is not None:
+        git_dir_fd, text = commondir
+        if _read_worktree_regular_text_at(git_dir_fd, "commondir") != text:
+            _write_local_git_config_file_at(git_dir_fd, "commondir", f"{text}\n")
     head = before[0].strip()
     ref = before[3].strip()
     attach = (
@@ -343,6 +356,23 @@ async def _restore_worktree(
             reason_code=REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
         )
     return True
+
+
+@contextlib.contextmanager
+def _held_linked_commondir(worktree: Path, gitfile: str | None) -> Iterator[tuple[int, str] | None]:
+    """Hold a no-follow open of the pre-run linked git dir, with its ``commondir`` text.
+
+    Opened before the run: once ``commondir`` is retargeted, the approved roots no
+    longer admit this worktree's mirror, so the git dir could not be reopened to
+    restore it. ``None`` for a checkout with no gitfile or no ``commondir``.
+    """
+    git_dir = _gitfile_target_path_without_follow(worktree, gitfile) if gitfile else None
+    if git_dir is None:
+        yield None
+        return
+    with _open_snapshotted_git_dir_for_restore(git_dir, outer_worktree_path=worktree) as fd:
+        text = _read_worktree_regular_text_at(fd, "commondir") if fd is not None else None
+        yield (fd, text) if fd is not None and text else None
 
 
 @contextlib.contextmanager

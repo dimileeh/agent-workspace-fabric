@@ -400,6 +400,37 @@ async def test_the_rollback_never_follows_a_gitfile_the_agent_retargeted(tmp_pat
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
+async def test_the_rollback_restores_a_commondir_the_agent_retargeted(tmp_path: Path) -> None:
+    # A second mirror with the same branch and tree reads as a clean checkout, so a
+    # retarget left in place would steer the fallback's repair into it
+    # (PRRT_kwDOSJAM6s6x-DWU).
+    worktree, _ = _linked_worktrees(tmp_path)
+    second = tmp_path / "mirrors" / "second.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(tmp_path / "mirrors" / "repo.git"), str(second)],
+        check=True,
+    )
+    before = _snapshot(worktree)
+    commondir = Path(_git(worktree, "rev-parse", "--absolute-git-dir").strip()) / "commondir"
+    commondir_text = commondir.read_text()
+    second_head = _git(second, "rev-parse", "ws")
+
+    def agent() -> Any:
+        (worktree / "core.py").write_text("x = 2\n")
+        _git(worktree, "commit", "-qam", "agent commit")
+        commondir.write_text(f"{second}\n")
+        return SimpleNamespace(stdout=_ACK)
+
+    with structlog.testing.capture_logs() as captured:
+        runner = _runner(tmp_path / "worktrees", agent)
+        assert await _check(runner) == (UNJUDGED, "worktree_changed")
+
+    assert commondir.read_text() == commondir_text
+    assert _git(second, "rev-parse", "ws") == second_head
+    assert _snapshot(worktree) == before
+    assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
+
+
 async def test_the_rollback_still_runs_when_the_agent_deleted_the_gitfile(tmp_path: Path) -> None:
     # The live probe fails without .git; the agent's commit must not stay on the branch.
     worktree, _ = _linked_worktrees(tmp_path)
