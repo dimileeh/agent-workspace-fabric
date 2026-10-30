@@ -346,6 +346,7 @@ export function TaskArtifactsSection({
   const [view, setView] = useState<TaskArtifactView | null>(null);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(true);
   // The list refetch and an artifact download are independent failure sources
   // that must not share one error slot: a poll-driven list refetch succeeds and
   // clears its own error, but it must NOT dismiss a download failure raised by an
@@ -359,6 +360,7 @@ export function TaskArtifactsSection({
 
   useEffect(() => {
     let cancelled = false;
+    setListLoading(true);
     void (async () => {
       let failure: string | null = null;
       const listFailureMessage = (message: string | null): string =>
@@ -421,6 +423,10 @@ export function TaskArtifactsSection({
           return;
         }
         settleListFailure(cause instanceof Error ? cause.message : "Unable to load artifacts.");
+      } finally {
+        if (!cancelled) {
+          setListLoading(false);
+        }
       }
     })();
     return () => {
@@ -519,7 +525,10 @@ export function TaskArtifactsSection({
           {downloadError ?? listError}
         </div>
       ) : null}
-      {decisionRequired && !showValidation ? (
+      {decisionRequired && listLoading && !showValidation ? (
+        <p className="text-xs text-fg-muted">Loading artifacts…</p>
+      ) : null}
+      {decisionRequired && !listLoading && !showValidation ? (
         <p className="text-xs text-fg-muted">
           Conformance report unavailable. Read the decision details in the workspace timeline
           before supplying a directive.
