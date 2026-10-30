@@ -935,6 +935,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#review_thread_audit_unavailable](#review_thread_audit_unavailable)
 
+### REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED
+**Problem:** The agent judged a review bot's reply after AWF's disposition to be an acknowledgement, so AWF's disposition stands.
+**Likely Cause:** The bot that opened the thread replied after AWF's disposition reply. Such a reply is judged once per comment version; an edit is judged again.
+**Operator Fix:** No action is required. AWF posted no new reply and did not reopen the thread; it counts in the cert under its disposition class.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_acknowledged](#review_thread_disposition_acknowledged)
+
+### REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED
+**Problem:** AWF could not judge a review bot's reply after its disposition, so it re-triages the thread instead.
+**Likely Cause:** The agent run failed, its answer had no single valid AWF-DISPOSITION-ACK line, it changed the worktree during a judgment-only run, or the thread could not be re-read. A failed judgment is recorded and never retried.
+**Operator Fix:** No action is required: the thread takes the automatic reopen and a fresh disposition. If the monitor log shows a forge re-read fault, AWF retries the check on the next poll; check the token and the forge status if it persists.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_ack_check_failed](#review_thread_disposition_ack_check_failed)
+
+### REVIEW_THREAD_DISPOSITION_ACK_CHECK_PENDING
+**Problem:** AWF held READY_TO_MERGE / merge for one poll because a review bot replied in a thread after AWF's disposition reply, and AWF checks that reply first.
+**Likely Cause:** Only the bot account that opened the thread qualifies, and only while AWF's identity resolved the thread. The check never runs under the merge lock.
+**Operator Fix:** No action is required. On the next poll the agent judges once whether the bot only acknowledged the disposition; the monitor then certifies the thread or re-triages it.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_ack_check_pending](#review_thread_disposition_ack_check_pending)
+
+### REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT
+**Problem:** The agent judged a review bot's reply after AWF's disposition to raise a new point, so AWF re-triages the thread.
+**Likely Cause:** The bot that opened the thread disagreed with AWF's disposition or asked for more after it.
+**Operator Fix:** No action is required. AWF reopens the thread (at most twice) and the normal fix cycle posts a fresh disposition before resolving it.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_ack_new_point](#review_thread_disposition_ack_new_point)
+
 ### REVIEW_THREAD_DISPOSITION_AUTO_REOPENED
 **Problem:** AWF reopened review threads its disposition audit could not verify, so the next poll re-triages them.
 **Likely Cause:** A thread AWF's identity resolved had no live disposition: for example a review bot replied in it after AWF's disposition reply, or a re-adoption on a moved head retired that reply.
@@ -969,6 +997,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** No action is required to merge: baseline threads do not block and the READY_TO_MERGE certificate counts them separately. Inspect the thread ids in the audit event if any of them should be reopened.
 **Related Command:** `awf workspace events <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_legacy_baseline](#review_thread_disposition_legacy_baseline)
+
+### REVIEW_THREAD_DISPOSITION_READOPT_CARRIED
+**Problem:** A FIXED disposition from before a re-adoption on a moved head stays valid: its fix commits are in the adopted PR head.
+**Likely Cause:** AWF checked each cited commit with git merge-base --is-ancestor against the head it adopted. The thread must also still be resolved by AWF's identity with no newer comment.
+**Operator Fix:** No action is required. The thread keeps its disposition and is not re-triaged.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_readopt_carried](#review_thread_disposition_readopt_carried)
+
+### REVIEW_THREAD_DISPOSITION_READOPT_RETIRED
+**Problem:** A FIXED disposition from before a re-adoption on a moved head was retired: AWF could not confirm its fix commits are in the adopted PR head.
+**Likely Cause:** A cited commit is not an ancestor of the adopted head (for example after a force-push), the git check failed or timed out, or the record no longer cites a posted fix.
+**Operator Fix:** No action is required. AWF reopens the thread (at most twice) and re-triages it. If the detail is probe_failed, check that the worktree can read the PR's history.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#review_thread_disposition_readopt_retired](#review_thread_disposition_readopt_retired)
 
 ### REVIEW_THREAD_DISPOSITION_UNVERIFIED
 **Problem:** AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's identity carry no AWF disposition reply.

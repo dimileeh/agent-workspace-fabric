@@ -189,7 +189,7 @@ async def _verify_audit(
     audit: ReviewThreadAudit,
     *,
     viewer: str,
-    ack_pending: frozenset[str] = frozenset(),
+    ack_pending: frozenset[str],
     workspace_id: str,
     pr_number: int,
     status: PRStatus,
