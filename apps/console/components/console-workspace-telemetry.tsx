@@ -5,7 +5,7 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import { Fact, Panel } from "@/components/console-dashboard-shared";
 import { bytes, formatDateTime } from "@/lib/format";
-import type { VMEstimate, VMTelemetryView } from "@/lib/console-vm-telemetry";
+import { resolveVMTelemetryBoot, type VMEstimate, type VMTelemetryView } from "@/lib/console-vm-telemetry";
 import type {
   TelemetryViewWindow,
   WorkspaceTelemetrySeriesPoint,
@@ -287,10 +287,10 @@ function VMWorkspaceTelemetry({ viewModel, selectedView, onViewChange, mode, req
   showTelemetry: boolean; showAllocation: boolean; showCost: boolean;
 }) {
   const { data, cpu, memory } = viewModel;
-  const [selectedBoot, setSelectedBoot] = useState(data.node?.boot_generation ?? 0);
+  const [selectedBoot, setSelectedBoot] = useState<number | null>(null);
   const boots = [...new Set([...(data.node ? [data.node.boot_generation] : []),
     ...cpu.series.map(s => s.bootGeneration), ...memory.series.map(s => s.bootGeneration)])].sort((a, b) => a - b);
-  const boot = boots.includes(selectedBoot) ? selectedBoot : data.node?.boot_generation;
+  const boot = resolveVMTelemetryBoot(selectedBoot, data.node?.boot_generation, boots);
   const stale = (mode === "live" && viewModel.isStale) || viewModel.hasFutureTimestamp
     || (showTelemetry && (data.state === "stale" || cpu.quality === "stale" || memory.quality === "stale"))
     || (showAllocation && data.reservation?.quality === "stale");
@@ -334,7 +334,10 @@ function VMWorkspaceTelemetry({ viewModel, selectedView, onViewChange, mode, req
         </div>
         <div className="min-w-0" data-vm-boot={boot}>
           <label className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">Measured history
-            <select aria-label="Telemetry boot" value={boot} onChange={event => setSelectedBoot(Number(event.target.value))}
+            <select aria-label="Telemetry boot" value={boot} onChange={event => {
+              const picked = Number(event.target.value);
+              setSelectedBoot(picked === data.node?.boot_generation ? null : picked);
+            }}
               className="max-w-full rounded-[var(--radius-control)] border border-line bg-surface px-2 py-1 text-fg">
               {boots.map(value => <option key={value} value={value}>Boot {value}</option>)}
             </select>
