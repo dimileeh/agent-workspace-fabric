@@ -100,9 +100,6 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor_runner.git_utils import run_worktree_git
-from awf.runtime.validation import (
-    ValidationResult,
-)
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
 
 
@@ -535,36 +532,6 @@ async def execute(
                 compose_file=compose_file,
                 profile=profile,
             )
-        profile_preflight = getattr(setup_validation_runner, "run_profile_tool_preflight", None)
-        profile_preflight_result = (
-            await profile_preflight(workspace_id=workspace_id, profile=profile)
-            if callable(profile_preflight)
-            else ValidationResult()
-        )
-        if not profile_preflight_result.all_passed:
-            first_fail = profile_preflight_result.first_failure
-            if recovery is not None:
-                await self._finish_active_recovery_operations(
-                    workspace_id=workspace_id,
-                    status=OperationStatus.failed,
-                    reason_code="MONITOR_RECOVERY_PROFILE_PREFLIGHT_FAILED",
-                    error_message=(
-                        f"profile preflight failed: {first_fail.command}"
-                        if first_fail is not None
-                        else "profile preflight failed"
-                    )[:2000],
-                )
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=_failure_reason_for_phase(first_fail),
-                message=(
-                    f"profile preflight failed: {first_fail.command}"
-                    if first_fail is not None
-                    else "profile preflight failed"
-                )[:2000],
-            )
-            return
         if recovery is None and not resume_skip_agent:
             if not hosted_pr_adoption and not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
@@ -717,6 +684,7 @@ async def execute(
                 worktree_path=worktree_path,
                 profile=profile,
                 planning_failure=planning_failure,
+                execution_owner_id=execution_owner_id,
             )
             if planning_should_return:
                 return

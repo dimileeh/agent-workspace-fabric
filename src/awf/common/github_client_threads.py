@@ -1,4 +1,4 @@
-"""GitHub in-thread reply + exhaustive review-thread resolution audit (#1018).
+"""GitHub in-thread reply, thread reopen + exhaustive resolution audit (#1018, #1138).
 
 These are plain async functions bound onto :class:`~awf.common.github_client.GitHubClient`
 as methods (``reply_to_thread = github_client_threads.reply_to_thread``), so the
@@ -27,6 +27,7 @@ from awf.common.github_graphql import (
     _GQL_REVIEW_THREAD_AUDIT,
     _GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
     _GQL_REVIEW_THREAD_AUDIT_ONE,
+    _GQL_UNRESOLVE_THREAD,
 )
 from awf.common.github_retry import RetryPolicy
 
@@ -56,6 +57,20 @@ async def reply_to_thread(self: GitHubClient, *, thread_id: str, body: str) -> s
             stderr="addPullRequestReviewThreadReply returned no comment id",
         )
     return comment_id
+
+
+async def unresolve_thread(self: GitHubClient, *, thread_id: str) -> bool:
+    """Reopen review thread ``thread_id``; GitHub supports it, so always True (#1138).
+
+    A mutation, so ``RetryPolicy.NEVER`` like ``resolve_thread``: a fault raises
+    ``GitHubClientError`` and the caller decides on the next poll.
+    """
+    await self._graphql(
+        query=_GQL_UNRESOLVE_THREAD,
+        variables={"threadId": thread_id},
+        retry_policy=RetryPolicy.NEVER,
+    )
+    return True
 
 
 def _comment_id(comment: dict[str, Any]) -> str | None:

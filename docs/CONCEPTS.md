@@ -150,6 +150,27 @@ This works the same way for Codex, Claude Code, Cursor, Antigravity, OpenCode, G
 and future adapters because the control plane invokes normal non-interactive agent
 runs for each phase and stores the plan/report inside the workspace.
 
+A conformance report may instead return the exact status `needs_human` when a
+specific missing operator decision, permission, or external dependency input
+prevents safe progress and no authorized in-scope alternative exists. It must
+include nonblank `summary` and `decision_request` strings, each at most 1000
+characters. Ordinary unfinished work, failed tests, self-imposed constraints,
+and missing AWF-owned validation evidence remain `needs_iteration` outcomes.
+
+At either conformance checkpoint, only a valid current report from a successful
+agent invocation can pause the workspace with `PLAN_CONFORMANCE_NEEDS_HUMAN`
+(`block_type=plan_conformance_decision`). AWF keeps the worktree, warm runtime,
+original coverage baseline, plan and accepted conformance report. Bounded,
+redacted decision evidence is also recorded in the workspace transition event
+if artifact storage is unavailable. No PR is pushed by that pause.
+
+Read the report in the Console's blocked card (or the workspace timeline), then
+answer with `awf workspace guide <workspace-id> --directive '<your decision>'`.
+A file grant alone cannot resume a conformance decision. A directive resumes
+planning and implementation in the same checkout, without bypassing conformance,
+validation, coverage, protected-file checks, or merge policy. Cancelling the
+workspace remains available when the task should not continue.
+
 Preview the profile AWF would resolve for a checkout:
 
 ```bash
@@ -521,11 +542,22 @@ reused or adopted PR, a thread the monitor already recorded a disposition for
 (or that carries an AWF marker at all) was handled after the rollout, so no
 baseline ever exempts it.
 
-There is no acknowledgement directive: an operator clears a flagged thread by
-reopening it. The next poll that lists the thread open clears its verdict, so
-`decide()` re-triages it through the normal fix cycle, which posts a fresh
-disposition reply before resolving it. Without this, a FIXED or FALSE POSITIVE
-thread whose comments did not change would never re-enter triage. The flag then
+There is no acknowledgement directive: a reopen clears a flagged thread. The
+next poll that lists the thread open clears its verdict, so `decide()`
+re-triages it through the normal fix cycle, which posts a fresh disposition
+reply before resolving it. Without this, a FIXED or FALSE POSITIVE thread whose
+comments did not change would never re-enter triage. AWF performs that reopen
+itself (#1138): two causes flag threads AWF did handle — a review bot replying in
+the thread after AWF's reply, and a re-adoption on a moved head retiring that
+reply — so the runner, after the gate returns and never under the merge lock,
+reopens each flagged thread (`unresolveReviewThread` on GitHub), records
+`REVIEW_THREAD_DISPOSITION_AUTO_REOPENED` (one log line and one audit event per
+reopened set) and re-polls instead of notifying. Each thread is reopened at most
+twice over the PR's life; the count crosses re-adoption regardless of head
+continuity. Over the cap, on a forge with no reopen API (Bitbucket), or when the
+reopen fails, that thread falls back to the `NotifyHuman` blocker, which names
+`REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED`, `…_UNSUPPORTED` or `…_FAILED`
+and still asks the operator to reopen it; the workspace is never failed. The flag then
 reads `reopened` until the gate certifies the thread's new disposition. While it
 does, outdated hygiene does not re-seed the thread's verdict from branch
 evidence in the re-triage's place, and that poll step never clears the

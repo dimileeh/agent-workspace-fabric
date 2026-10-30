@@ -277,6 +277,17 @@ mutation($threadId: ID!) {
 """.strip()
 
 
+# GraphQL: reopen a review thread the disposition gate could not verify (#1138),
+# so the PR monitor re-triages it instead of asking a human to reopen it.
+_GQL_UNRESOLVE_THREAD = """
+mutation($threadId: ID!) {
+  unresolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+""".strip()
+
+
 # GraphQL: post a reply INSIDE a review thread (#1018). AWF's disposition reply
 # precedes every ``resolveReviewThread`` it issues.
 _GQL_ADD_REVIEW_THREAD_REPLY = """

@@ -1029,7 +1029,7 @@ class TestEarlyReturnGuards:
             assert ws.task_prompt == original_prompt
 
     @pytest.mark.unit
-    async def test_non_recovery_profile_preflight_failure_marks_failed(
+    async def test_retired_profile_preflight_cannot_block_agent_entry(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
@@ -1037,12 +1037,7 @@ class TestEarlyReturnGuards:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """A failing profile-tool preflight on the normal path marks the workspace failed.
-
-        Covers the non-recovery branch of the profile-preflight guard: with no
-        recovery operation active, the executor must not finish any recovery
-        operation and must mark the workspace failed with the preflight command.
-        """
+        """A legacy/static validation preflight must not prevent agent entry."""
         from awf.runtime.validation import ValidationCommandResult, ValidationResult
 
         ws_id = await _seed_ready_workspace(factory)
@@ -1067,7 +1062,11 @@ class TestEarlyReturnGuards:
                 ]
             )
 
-        monkeypatch.setattr(executor._validation, "run_profile_tool_preflight", _failing_preflight)
+        monkeypatch.setattr(
+            executor._validation, "run_profile_tool_preflight", _failing_preflight, raising=False
+        )
+        agent_entry = AsyncMock(return_value=False)
+        monkeypatch.setattr(executor, "_run_agent_git_writability_preflight", agent_entry)
         finish_recovery = AsyncMock()
         monkeypatch.setattr(executor, "_finish_active_recovery_operations", finish_recovery)
 
@@ -1075,14 +1074,13 @@ class TestEarlyReturnGuards:
 
         # No recovery operations were finished (the non-recovery branch).
         finish_recovery.assert_not_awaited()
-        # No agent CLI ran — the preflight gate fired first.
+        agent_entry.assert_awaited_once()
         assert fake.calls == []
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert "preflight" in (ws.failure_message or "").lower()
-            assert "which pytest" in (ws.failure_message or "")
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_message is None
 
     @pytest.mark.unit
     async def test_writability_preflight_failure_returns_before_agent_run(

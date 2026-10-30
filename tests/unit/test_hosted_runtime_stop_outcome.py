@@ -84,7 +84,7 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
     async def held_consumer():
         entered.set()
         try:
-            await asyncio.wait_for(release.wait(), 20)
+            await release.wait()
         except asyncio.CancelledError:
             cancelled.set()
             raise
@@ -159,36 +159,37 @@ async def test_actual_worker_authority_loss_persists_failed_without_replay(
                     waiter.cancel()
                     await asyncio.gather(waiter, return_exceptions=True)
 
-            async with asyncio.timeout(30):
-                await enter_consumer()
-                if phase == "resumed_monitor":
-                    built.worker._execution_tasks["ws_cloud_stable"].cancel()
-                    await built.worker.wait_for_execution_tasks()
-                    async with factory() as session:
-                        row = await session.get(Workspace, "ws_cloud_stable")
-                        assert row.status == "monitoring_pr" and row.failure_reason is None
-                    entered.clear()
-                    cancelled.clear()
-                    await enter_consumer()
-                    # Exercise the no-Compose cleanup path after actual ordinary
-                    # monitor recovery, without opting into a different backend.
-                    (work / "compose/ws_cloud_stable/compose.yml").unlink()
-                calls_before_stop = list(agent_calls)
-                inode_before_stop = view.stat().st_ino
+            # Wait for the lifecycle boundary, not a machine-speed deadline.
+            # The shared Postgres-test watchdog still bounds the entire test.
+            await enter_consumer()
+            if phase == "resumed_monitor":
+                built.worker._execution_tasks["ws_cloud_stable"].cancel()
+                await built.worker.wait_for_execution_tasks()
                 async with factory() as session:
                     row = await session.get(Workspace, "ws_cloud_stable")
-                    expected = "running" if phase == "execute" else "monitoring_pr"
-                    assert row.status == expected
-                    if phase == "resumed_monitor":
-                        assert row.monitor_claimed_by is not None
-                        assert not (work / "compose/ws_cloud_stable/compose.yml").exists()
-                    else:
-                        assert row.execution_claimed_by is not None
-                if failure == "authorized_cancel":
-                    built.worker._execution_tasks["ws_cloud_stable"].cancel()
+                    assert row.status == "monitoring_pr" and row.failure_reason is None
+                entered.clear()
+                cancelled.clear()
+                await enter_consumer()
+                # Exercise the no-Compose cleanup path after actual ordinary
+                # monitor recovery, without opting into a different backend.
+                (work / "compose/ws_cloud_stable/compose.yml").unlink()
+            calls_before_stop = list(agent_calls)
+            inode_before_stop = view.stat().st_ino
+            async with factory() as session:
+                row = await session.get(Workspace, "ws_cloud_stable")
+                expected = "running" if phase == "execute" else "monitoring_pr"
+                assert row.status == expected
+                if phase == "resumed_monitor":
+                    assert row.monitor_claimed_by is not None
+                    assert not (work / "compose/ws_cloud_stable/compose.yml").exists()
                 else:
-                    await deny_agent(runtime, payload, failure, monkeypatch)
-                await built.worker.wait_for_execution_tasks()
+                    assert row.execution_claimed_by is not None
+            if failure == "authorized_cancel":
+                built.worker._execution_tasks["ws_cloud_stable"].cancel()
+            else:
+                await deny_agent(runtime, payload, failure, monkeypatch)
+            await built.worker.wait_for_execution_tasks()
             assert cancelled.is_set()
             if failure == "authorized_cancel":
                 assert view.stat().st_ino == inode_before_stop

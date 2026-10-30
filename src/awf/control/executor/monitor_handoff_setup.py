@@ -94,57 +94,6 @@ async def _mark_failed_or_raise_setup_failure(
         ) from exc
 
 
-async def _run_monitor_handoff_profile_preflight(
-    self: Any,
-    *,
-    workspace_id: str,
-    validation: Any,
-    profile: Any,
-) -> bool:
-    profile_preflight = getattr(validation, "run_profile_tool_preflight", None)
-    if not callable(profile_preflight):
-        return True
-    try:
-        profile_preflight_result = await profile_preflight(
-            workspace_id=workspace_id,
-            profile=profile,
-        )
-    except _MonitorHandoffSetupFailureError:
-        raise
-    except Exception as exc:
-        _log.exception(
-            "executor.monitor_handoff_profile_preflight_failed",
-            workspace_id=workspace_id,
-        )
-        safe_error = redact_audit_text(repr(exc))
-        await _mark_failed_or_raise_setup_failure(
-            self,
-            workspace_id=workspace_id,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=f"monitor handoff profile preflight failed: {safe_error}"[:2000],
-            reason_code=PR_MONITOR_SETUP_FAILED_REASON_CODE,
-        )
-        return False
-
-    if profile_preflight_result.all_passed:
-        return True
-
-    first_fail = profile_preflight_result.first_failure
-    failure_message = (
-        f"profile preflight failed: {redact_audit_text(first_fail.command)}"
-        if first_fail is not None
-        else "profile preflight failed"
-    )[:2000]
-    await _mark_failed_or_raise_setup_failure(
-        self,
-        workspace_id=workspace_id,
-        failure_reason=_failure_reason_for_phase(first_fail),
-        message=failure_message,
-        reason_code=(getattr(first_fail, "reason_code", None) if first_fail is not None else None),
-    )
-    return False
-
-
 async def _run_monitor_handoff_validate_toolchain_probe(
     self: Any,
     *,
@@ -412,7 +361,7 @@ async def _run_monitor_handoff_profile_setup(
         # Adopt-pr skips the agent, so the only thing that provisions the validate
         # toolchain is the setup phase just run. Fail early + clearly if a validate
         # tool is still missing, before transitioning to monitoring_pr.
-        if not await _run_monitor_handoff_validate_toolchain_probe(
+        return await _run_monitor_handoff_validate_toolchain_probe(
             self,
             workspace_id=workspace_id,
             validation=validation,
@@ -420,13 +369,6 @@ async def _run_monitor_handoff_profile_setup(
             compose_file=compose_file,
             profile=profile,
             worktree_path=worktree_path,
-        ):
-            return False
-        return await _run_monitor_handoff_profile_preflight(
-            self,
-            workspace_id=workspace_id,
-            validation=validation,
-            profile=profile,
         )
 
     first_fail = setup_result.first_failure
@@ -558,14 +500,6 @@ async def _run_hosted_monitor_handoff_profile_setup(
             pr_identity=pr_identity,
         ):
             return False
-        preflight_passed = await _run_monitor_handoff_profile_preflight(
-            self,
-            workspace_id=workspace_id,
-            validation=validation,
-            profile=profile,
-        )
-        if not preflight_passed:
-            return False
         return await _record_hosted_monitor_handoff_setup_completed(
             self,
             workspace_id=workspace_id,
@@ -612,7 +546,6 @@ async def _record_hosted_monitor_handoff_setup_completed(
             payload={
                 "source": "hosted_pr_adoption",
                 "phase_names": ["setup", "pre_agent"],
-                "profile_preflight_passed": True,
             },
         )
         await session.commit()

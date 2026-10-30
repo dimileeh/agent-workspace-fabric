@@ -39,8 +39,8 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.thread_disposition import REVIEW_THREAD_AUDIT_UNAVAILABLE
-from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
-    review_thread_disposition_gate,
+from awf.runtime.pr_monitor_runner.thread_disposition_reopen import (
+    review_thread_disposition_gate_with_reopen,
 )
 
 
@@ -221,8 +221,9 @@ async def handle_notify_human_action(
 
     disposition_count_rows: tuple[tuple[str, int], ...] | None = None
     if manual_ready_handoff and action.message is None:
-        # #1018: never certify READY_TO_MERGE over a thread AWF resolved silently.
-        gate = await review_thread_disposition_gate(
+        # #1018: never certify READY_TO_MERGE over a thread AWF resolved silently;
+        # #1138: reopen a flagged thread for re-triage first, while under the cap.
+        gate = await review_thread_disposition_gate_with_reopen(
             self,
             workspace_id=workspace_id,
             repo=repo,

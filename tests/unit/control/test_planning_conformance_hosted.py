@@ -166,6 +166,54 @@ def _handoff(report_path: Path) -> _PlanningValidationHandoff:
 
 
 @pytest.mark.unit
+async def test_hosted_post_validation_returns_decision_after_terminal_head_sync(
+    tmp_path: Path,
+) -> None:
+    from awf.control.executor.types import _PlanningNeedsHuman
+    from tests.unit.runtime.test_conformance_decision import decision_payload
+
+    order: list[str] = []
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    report_path = Path("docs/awf-plans/ws_hosted.conformance.json")
+    context = _HostedConformanceContext(report_path=report_path, order=order)
+    context._runner = _HostedSyncRunner(
+        context=context,
+        worktree_path=worktree,
+        report_path=report_path,
+        terminal_head_sha="b" * 40,
+        report_text=decision_payload(),
+    )
+    result = await _run_post_validation_conformance_check(
+        context,
+        adapter=_HostedConformanceAdapter(terminal_head_sha="b" * 40, order=order),
+        workspace=SimpleNamespace(id="ws_hosted", task_prompt="finish the plan"),
+        profile=WorkspaceProfile(name="hosted-conformance"),
+        compose_project="awf_ws_hosted",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree,
+        model=None,
+        handoff=_handoff(report_path),
+        validation_run_id="val_hosted",
+        base_commit="a" * 40,
+        hosted_pr_identity={
+            "head_repo_url": "git@github.com:example/repo.git",
+            "head_ref": "feature",
+        },
+        conformance_scope_baseline=_PostValidationConformanceScopeBaseline(
+            before_compare=set(),
+            before_compare_head="a" * 40,
+            before_dirty_digests={},
+        ),
+    )
+    assert isinstance(result, _PlanningNeedsHuman)
+    assert result.phase == "post_validation_conformance"
+    assert result.validation_run_id == "val_hosted"
+    assert context.recorded_reports == []  # no synthetic success event
+    assert order.index("sync-reset") < order.index("changed-paths")
+
+
+@pytest.mark.unit
 async def test_hosted_post_validation_conformance_syncs_terminal_head_before_scope_reads(
     tmp_path: Path,
 ) -> None:

@@ -863,9 +863,9 @@ class GitHubClient:
             retry_policy=RetryPolicy.NEVER,
         )
 
-    # In-thread reply + exhaustive resolution audit (#1018) live in
-    # ``github_client_threads`` so this module stays under the line cap.
+    # Thread reply/reopen + audit (#1018, #1138) live in ``github_client_threads`` (line cap).
     reply_to_thread = _review_threads.reply_to_thread
+    unresolve_thread = _review_threads.unresolve_thread
     fetch_review_thread_audit = _review_threads.fetch_review_thread_audit
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
