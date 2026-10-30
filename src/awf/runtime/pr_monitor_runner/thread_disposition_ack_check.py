@@ -8,8 +8,8 @@ judgment yet it runs a judgment-only agent check. The judgment (``ACKNOWLEDGES``
 ``NEW_POINT``, or ``UNJUDGED`` when the reply is too long to quote whole, or the
 agent failed, answered unusably or changed the worktree) is persisted at once, so a restart cannot re-run it, and
 gets one reason-coded log line and one audit event without any comment body. The
-check runs only on a worktree with no tracked changes, and anything the agent
-changed there is rolled back at once, so the fallback's repair can start. A
+check runs only on a clean worktree, and anything the agent changed there is
+rolled back at once, so the fallback's repair can start. A
 check is recorded ``UNJUDGED`` before the agent starts, so even a crash mid-run
 cannot repeat it; only a provider failure, which goes to the monitor's provider
 recovery like every other agent run, leaves it pending for a later poll. A
@@ -36,10 +36,7 @@ from awf.runtime.pr_monitor_runner.constants import _AUDIT_COMMENT_RESOLUTION_EV
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.helpers import _redact_and_truncate_forge_error
 from awf.runtime.pr_monitor_runner.logging import _log
-from awf.runtime.pr_monitor_runner.path_parsing import (
-    _porcelain_z_records,
-    _untracked_paths_from_porcelain_z,
-)
+from awf.runtime.pr_monitor_runner.path_parsing import _untracked_paths_from_porcelain_z
 from awf.runtime.pr_monitor_runner.thread_disposition import (
     REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED,
     REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT,
@@ -212,8 +209,9 @@ async def _judge(
     before = await _worktree_fingerprint(self, worktree)
     if before is None:
         return UNJUDGED, "worktree_probe_failed"
-    if any(status != "??" for status, _, _ in _porcelain_z_records(before[1])):
-        # The agent's edits could not be rolled back without these: do not run it.
+    if before[1]:
+        # A rollback could not keep these apart from the agent's edits: a staged or
+        # edited untracked file would be lost or go unseen. Do not run it.
         return UNJUDGED, "worktree_dirty"
     try:
         result = await self._run_monitor_agent_with_service_recovery(
@@ -267,9 +265,8 @@ async def _restore_worktree(
 ) -> bool:
     """Roll back whatever the check's agent changed; return whether it changed anything.
 
-    ``before`` has no tracked changes, so resetting to its HEAD discards only the
-    agent's commits and edits; only the untracked paths the agent added are
-    removed, so pre-existing untracked files stay.
+    ``before`` is clean, so resetting to its HEAD discards only the agent's
+    commits and edits, and every untracked path left is one the agent added.
     """
     after = await _worktree_fingerprint(self, worktree)
     if after == before:
@@ -278,10 +275,7 @@ async def _restore_worktree(
         self, worktree, "reset", "--hard", before[0].strip()
     )
     if restored and after is not None:
-        added = sorted(
-            set(_untracked_paths_from_porcelain_z(after[1]))
-            - set(_untracked_paths_from_porcelain_z(before[1]))
-        )
+        added = sorted(_untracked_paths_from_porcelain_z(after[1]))
         if added:
             restored = await _git_ok(
                 self, worktree, "--literal-pathspecs", "clean", "-ffd", "--", *added

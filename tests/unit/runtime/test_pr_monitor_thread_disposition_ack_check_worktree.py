@@ -3,8 +3,8 @@
 The check is judgment-only, so whatever its agent changes in the worktree is
 rolled back before the answer is weighed; otherwise the fallback's repair would
 refuse the left-over edits as ``PRE_EXISTING_DIRTY_WORKTREE`` and never
-re-triage the thread. A worktree that already has tracked changes is never
-handed to the agent, since rolling back could not keep them apart.
+re-triage the thread. A worktree that is not clean, even with only untracked
+files, is never handed to the agent, since rolling back could not keep them apart.
 """
 
 from __future__ import annotations
@@ -45,9 +45,6 @@ def _worktree(tmp_path: Path) -> Path:
     (worktree / "core.py").write_text("x = 1\n")
     _git(worktree, "add", "core.py")
     _git(worktree, "commit", "-qm", "initial")
-    # Pre-existing untracked work the rollback must keep.
-    (worktree / "notes").mkdir()
-    (worktree / "notes" / "todo.txt").write_text("keep me\n")
     return worktree
 
 
@@ -98,7 +95,8 @@ async def test_an_answer_from_a_run_that_changed_the_worktree_is_rejected_and_ro
         _git(worktree, "add", "extra.py")
         _git(worktree, "commit", "-qm", "agent commit")
         (worktree / "core.py").write_text("x = 3\n")
-        (worktree / "notes" / "new.txt").write_text("agent\n")
+        (worktree / "staged.txt").write_text("agent\n")
+        _git(worktree, "add", "staged.txt")
         (worktree / "scratch").mkdir()
         (worktree / "scratch" / "a.py").write_text("z = 1\n")
         return SimpleNamespace(stdout=_ACK)
@@ -108,7 +106,7 @@ async def test_an_answer_from_a_run_that_changed_the_worktree_is_rejected_and_ro
 
     assert _snapshot(worktree) == before
     assert not (worktree / "extra.py").exists() and not (worktree / "scratch" / "a.py").exists()
-    assert (worktree / "notes" / "todo.txt").read_text() == "keep me\n"
+    assert not (worktree / "staged.txt").exists()
     assert not [r for r in captured if r["event"] == _RESTORE_FAILED]
 
 
@@ -153,11 +151,18 @@ async def test_an_untouched_worktree_keeps_the_answer(tmp_path: Path) -> None:
     assert _snapshot(worktree) == before
 
 
-async def test_a_worktree_with_tracked_changes_is_never_handed_to_the_agent(
-    tmp_path: Path,
-) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("core.py", id="tracked-change"),
+        # A reset would delete it once staged, and an unstaged edit would go unseen.
+        pytest.param("notes/todo.txt", id="untracked-file"),
+    ],
+)
+async def test_a_dirty_worktree_is_never_handed_to_the_agent(tmp_path: Path, path: str) -> None:
     worktree = _worktree(tmp_path)
-    (worktree / "core.py").write_text("x = 'in progress'\n")
+    (worktree / path).parent.mkdir(exist_ok=True)
+    (worktree / path).write_text("in progress\n")
     calls: list[str] = []
 
     def agent() -> Any:
@@ -167,7 +172,7 @@ async def test_a_worktree_with_tracked_changes_is_never_handed_to_the_agent(
     assert await _check(_runner(tmp_path, agent)) == (UNJUDGED, "worktree_dirty")
 
     assert calls == []
-    assert (worktree / "core.py").read_text() == "x = 'in progress'\n"
+    assert (worktree / path).read_text() == "in progress\n"
 
 
 def _dirty_after_agent(cmd: FakeCommandRunner, ran: list[str]) -> None:
