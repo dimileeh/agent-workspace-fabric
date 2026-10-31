@@ -74,8 +74,15 @@ def _non_null_reauthorization(value: object) -> object:
     return value
 
 
+def _reauthorization_schema(schema: dict[str, object]) -> None:
+    # None is an internal omission sentinel, not a valid wire default.
+    schema.pop("default", None)
+
+
 OptionalReauthorization = Annotated[
-    HostedReauthorization | None, BeforeValidator(_non_null_reauthorization)
+    HostedReauthorization | None,
+    BeforeValidator(_non_null_reauthorization, json_schema_input_type=HostedReauthorization),
+    Field(json_schema_extra=_reauthorization_schema),
 ]
 
 

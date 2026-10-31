@@ -554,7 +554,10 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         # to call unconditionally here and on the ``failed`` path.
         await repo.clear_workspace_attention(workspace_id)
         if state_reset is None and (
-            claims_will_reset or monitor_state_changed or remote_push_branch_recovered
+            claims_will_reset
+            or monitor_state_changed
+            or remote_push_branch_recovered
+            or hosted_reauthorization is not None
         ):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {

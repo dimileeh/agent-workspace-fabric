@@ -11257,14 +11257,7 @@
             ]
           },
           "hosted_reauthorization": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/HostedReauthorization"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/HostedReauthorization"
           },
           "operator": {
             "anyOf": [
@@ -13284,14 +13277,7 @@
             ]
           },
           "hosted_reauthorization": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/HostedReauthorization"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/HostedReauthorization"
           },
           "reason": {
             "anyOf": [

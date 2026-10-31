@@ -203,8 +203,11 @@ class PullRequestMonitorAdoptionService:
                     request.hosted.credentials.agent.namespace,
                 )
                 assert source is not None
-                if RepoRef.from_url(source.repo_url) != repo or (
-                    source.pr_number is not None and source.pr_number != pr_number
+                source_repo = RepoRef.from_url(source.repo_url)
+                if (
+                    source_repo.forge != repo.forge
+                    or source_repo.slug().lower() != repo.slug().lower()
+                    or (source.pr_number is not None and source.pr_number != pr_number)
                 ):
                     raise MaterialDeniedError("HOSTED_SOURCE_REPOSITORY_MISMATCH", 403)
             material = await hosted_authority.materials(
@@ -298,8 +301,11 @@ class PullRequestMonitorAdoptionService:
                 )
                 assert source is not None
                 await require_source_quiet(self._session, source)
-                if RepoRef.from_url(source.repo_url) != repo or (
-                    source.pr_number is not None and source.pr_number != pr_number
+                source_repo = RepoRef.from_url(source.repo_url)
+                if (
+                    source_repo.forge != repo.forge
+                    or source_repo.slug().lower() != repo.slug().lower()
+                    or (source.pr_number is not None and source.pr_number != pr_number)
                 ):
                     raise MaterialDeniedError("HOSTED_SOURCE_REPOSITORY_MISMATCH", 403)
             if existing is not None:
