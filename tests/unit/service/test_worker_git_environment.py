@@ -12,29 +12,12 @@ import json
 import os
 import subprocess
 import threading
-from collections.abc import Iterator
-from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
 from awf.service import gitconfig_snapshot as gitconfig_snapshot_mod
 from awf.service import worker as worker_mod
-
-
-@pytest.fixture(autouse=True)
-def _isolate_bundle_leases() -> Iterator[None]:
-    registry = gitconfig_snapshot_mod._ACTIVE_BUNDLE_LEASES
-    original = dict(registry)
-    try:
-        yield
-    finally:
-        for bundle, lease in registry.items():
-            if original.get(bundle) is not lease:
-                with suppress(OSError):
-                    lease.close()
-        registry.clear()
-        registry.update(original)
 
 
 @pytest.mark.unit
