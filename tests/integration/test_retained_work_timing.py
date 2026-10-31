@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError
 
-from awf.db.models import Task, TaskAttempt, Workspace
+from awf.db.models import Task, TaskAttempt, Workspace, WorkspaceEvent
 from awf.hosted_node import retained_work
 from awf.hosted_node.models import Grant, PreparationRow, Receipt
 from tests.integration.test_retained_work_acceptance import ACK, PREFIX, fresh_bindings, replacement
@@ -536,3 +536,48 @@ async def test_newer_grant_tombstone_during_final_proof_denies_acceptance(author
                 "hosted_recovery" in row.task_policy
                 for row in await session.scalars(select(Workspace))
             )
+
+
+async def test_recovery_events_insert_as_one_bounded_executemany(authority, tmp_path):
+    async with cohort(authority, tmp_path, 4, resumable_count=3) as retained:
+        client, _, factory, _, _, _ = retained
+        async with factory() as session:
+            sequences = dict(
+                (await session.execute(select(Workspace.id, Workspace.event_sequence))).all()
+            )
+        inserts = []
+
+        def capture(connection, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("INSERT INTO WORKSPACE_EVENTS"):
+                inserts.append((statement, parameters, executemany))
+
+        engine = factory.kw["bind"].sync_engine
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            response = await asyncio.wait_for(
+                client.post(PREFIX + "/recovery/acknowledge", json=ACK), timeout=5
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        assert response.status_code == 200, response.text
+        # One prepared single-row statement with a parameter set per workspace,
+        # never a multi-VALUES statement whose bind count grows with the cohort.
+        [(statement, parameters, executemany)] = inserts
+        assert executemany is True and len(parameters) == 4
+        assert statement.upper().count("VALUES (") == 1 and "), (" not in statement
+        async with factory() as session:
+            events = (
+                await session.execute(
+                    select(
+                        WorkspaceEvent.workspace_id,
+                        WorkspaceEvent.reason_code,
+                        WorkspaceEvent.event_order,
+                    ).where(WorkspaceEvent.event_type == "workspace.recovery_accepted")
+                )
+            ).all()
+        assert sorted(events) == [
+            ("ws_timing_0", "RECOVERY_ACCEPTED", sequences["ws_timing_0"] + 1),
+            ("ws_timing_1", "RECOVERY_ACCEPTED", sequences["ws_timing_1"] + 1),
+            ("ws_timing_2", "RECOVERY_ACCEPTED", sequences["ws_timing_2"] + 1),
+            ("ws_timing_3", "RECOVERY_ATTENTION_REQUIRED", sequences["ws_timing_3"] + 1),
+        ]

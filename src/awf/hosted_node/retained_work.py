@@ -147,6 +147,8 @@ async def _fresh_associations(
                 anchor = getattr(old[workspace_id].credentials, role)
                 if binding.identity != identity or binding.target != anchor.target:
                     continue
+                # Serialize once per candidate, not once per compared key.
+                dumped = binding.model_dump(mode="json")
                 if (
                     receipt.owner != identity.owner
                     or receipt.grant != grant.id
@@ -161,7 +163,7 @@ async def _fresh_associations(
                     or binding.fence != grant.fence
                     or binding.expires_at <= now
                     or any(
-                        prepared.get(key) != binding.model_dump(mode="json")[key]
+                        prepared.get(key) != dumped[key]
                         for key in (
                             "identity",
                             "namespace",
@@ -745,7 +747,8 @@ async def reconcile(
         if fresh is not None:
             policy["hosted_node"] = fresh.model_dump(mode="json")
         policies.append((workspace.id, policy))
-    await session.execute(insert(WorkspaceEvent).values(events))
+    # One prepared executemany, not a multi-VALUES statement with ~9 binds per row.
+    await session.execute(insert(WorkspaceEvent), events)
     policy_rows = values(
         column("workspace_id", Workspace.id.type),
         column("task_policy", Workspace.task_policy.type),

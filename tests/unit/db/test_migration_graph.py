@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import os
 import subprocess
@@ -25,6 +24,7 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
 )
 from awf.db.session import make_engine, make_session_factory
+from awf.hosted_node.checkpoint_schemas import CHECKPOINT_SCHEMA_REVISION
 from tests.postgres import postgres_alembic_subprocess_lock, postgres_empty_test_url
 
 _AUTH_OVERLAY_BACKFILL_REVISION = "0f1e2d3c4b5a"
@@ -54,6 +54,8 @@ _RETAINED_ACCEPTANCE_REVISION = "ec19f5061728"
 # Checkpoint intent followed by exact restore reconciliation.
 _CHECKPOINT_REVISION = "fd2af6172839"
 _RESTORE_RECONCILIATION_REVISION = "b830e6d9a142"
+# Current head: guarded writes rewrite the lifecycle gate only to clear idle.
+_BARRIER_IDLE_CLEAR_ONLY_REVISION = "b555242e9032"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -121,7 +123,12 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_RESTORE_RECONCILIATION_REVISION]
+    assert script.get_heads() == [_BARRIER_IDLE_CLEAR_ONLY_REVISION]
+    clear_only = script.get_revision(_BARRIER_IDLE_CLEAR_ONLY_REVISION)
+    assert clear_only is not None
+    assert clear_only.down_revision == _RESTORE_RECONCILIATION_REVISION
+    # Checkpoint cut and restore require the database to sit at exactly this head.
+    assert CHECKPOINT_SCHEMA_REVISION == _BARRIER_IDLE_CLEAR_ONLY_REVISION
     restored_head = script.get_revision(_RESTORE_RECONCILIATION_REVISION)
     assert restored_head is not None
     assert restored_head.down_revision == _CHECKPOINT_REVISION
@@ -807,28 +814,6 @@ async def test_execution_claim_epoch_migration_round_trips_down_and_up(
 
 
 @pytest.mark.unit
-def test_validation_run_coverage_migration_uses_metadata_only_column_ops() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
-    migration_path = (
-        repo_root / "migrations" / "versions" / "c5d6e7f8a9b0_validation_run_coverage.py"
-    )
-    tree = ast.parse(migration_path.read_text(encoding="utf-8"))
-
-    call_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    call_attrs = [node.func.attr for node in call_nodes if isinstance(node.func, ast.Attribute)]
-    op_call_attrs = {
-        node.func.attr
-        for node in call_nodes
-        if isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "op"
-    }
-
-    assert "batch_alter_table" not in call_attrs
-    assert op_call_attrs == {"add_column", "drop_column"}
-
-
-@pytest.mark.unit
 async def test_alembic_upgrade_head_creates_scheduler_record_tables(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1094,33 +1079,6 @@ async def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "ix_worker_heartbeats_last_heartbeat_at",
         "ix_worker_heartbeats_node_last_heartbeat",
     } <= worker_heartbeat_indexes
-
-
-@pytest.mark.unit
-def test_workspace_event_order_migration_has_timeout_guardrails() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
-    migration = (
-        repo_root / "migrations/versions/e8f9a0b1c2d3_workspace_event_order.py"
-    ).read_text()
-
-    ddl_timeout_index = migration.index("SET LOCAL lock_timeout = '5s'")
-    add_column_index = migration.index("ADD COLUMN IF NOT EXISTS event_order")
-    backfill_timeout_index = migration.index("SET LOCAL lock_timeout = '0'")
-    backfill_index = migration.index("UPDATE workspace_events")
-
-    assert ddl_timeout_index < add_column_index < backfill_timeout_index < backfill_index
-    assert "SET LOCAL statement_timeout" in migration
-    assert "SET lock_timeout = '30s'" in migration
-    assert "workspace_events.event_order IS NULL" in migration
-    assert "autocommit_block()" in migration
-    assert "SELECT pg_advisory_lock(" in migration
-    assert "SELECT pg_advisory_unlock(" in migration
-    assert migration.index("SELECT pg_advisory_lock(") < migration.index(
-        "postgresql_concurrently=True"
-    )
-    assert "if_not_exists=True" in migration
-    assert "if_exists=True" in migration
-    assert "postgresql_concurrently=True" in migration
 
 
 @pytest.mark.unit

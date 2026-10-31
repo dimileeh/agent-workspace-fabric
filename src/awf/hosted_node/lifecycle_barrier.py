@@ -120,7 +120,11 @@ def replace_barrier(connection: Connection) -> None:
                    AND to_jsonb(gate)->>'maintenance_generation' IS NOT NULL THEN
                     RAISE EXCEPTION 'NODE_MAINTENANCE_HELD' USING ERRCODE = '55000';
                 END IF;
-                UPDATE hosted_node_lifecycle SET idle_since = NULL WHERE singleton = 1;
+                -- Rewrite the locked gate only to clear idle. A no-op rewrite per
+                -- guarded row leaves dead versions every later FOR UPDATE walks.
+                IF gate.idle_since IS NOT NULL THEN
+                    UPDATE hosted_node_lifecycle SET idle_since = NULL WHERE singleton = 1;
+                END IF;
             ELSIF NULLIF(current_setting('awf.node_identity', true), '') IS NOT NULL THEN
                 RAISE EXCEPTION 'NODE_GATE_MISSING' USING ERRCODE = '55000';
             END IF;
