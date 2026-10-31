@@ -25,6 +25,7 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
+from awf.hosted_node.runtime_schemas import HostedControlAuthorization, OptionalReauthorization
 
 CallbackEventType = _schemas_operations.CallbackEventType
 
@@ -127,6 +128,11 @@ class WorkspaceReasonWithLegacyStopStackRequest(_WorkspaceReasonCompatibilityReq
     _ignored_legacy_body_fields: ClassVar[frozenset[str]] = frozenset({"stop_stack"})
 
 
+class WorkspaceRemonitorRequest(WorkspaceReasonWithLegacyStopStackRequest):
+    hosted_authorization: HostedControlAuthorization | None = None
+    hosted_reauthorization: OptionalReauthorization = None
+
+
 class WorkspaceReasonWithLegacyRequestedTierRequest(_WorkspaceReasonCompatibilityRequest):
     """Reason-only request that still accepts deprecated no-op ``requested_tier``."""
 
@@ -185,6 +191,8 @@ class WorkspaceGuideRequest(BaseModel):
     grants: Annotated[list[str], Field(default_factory=list, max_length=64)]
     approve_policy_downgrade: bool = False
     operator: Annotated[str | None, Field(default=None, max_length=256)]
+    hosted_authorization: HostedControlAuthorization | None = None
+    hosted_reauthorization: OptionalReauthorization = None
 
 
 class WorkspaceOperationRequest(WorkspaceReasonRequest):

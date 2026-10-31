@@ -24,6 +24,16 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.lifecycle_operations import (
+    admission_environment,
+    authority_for,
+    lock_materials,
+    new_destination,
+    require_source_quiet,
+)
+from awf.hosted_node.lifecycle_reauthorization import historical_source
+from awf.hosted_node.runtime_schemas import POLICY_KEY, HostedWorkspace, association_matches
 from awf.runtime.planning import build_planning_scope_retry_prompt
 from awf.service import workspaces_retry_feature_pr as _retry_feature_pr
 from awf.service import workspaces_retry_payloads as _retry_payloads
@@ -205,6 +215,7 @@ async def _prefetch_existing_feature_pr_state(
     source: Workspace,
     *,
     pr_lifecycle_checker: PrLifecycleChecker | None,
+    provider_environ: Mapping[str, str] | None = None,
 ) -> _PrefetchedFeaturePrState | None:
     """Fetch forge PR lifecycle/snapshot before acquiring the source row lock.
 
@@ -231,7 +242,11 @@ async def _prefetch_existing_feature_pr_state(
             lifecycle = await pr_lifecycle_checker(source, pr_number)
             prefetched = _PrefetchedFeaturePrState(pr_number=pr_number, lifecycle=lifecycle)
         else:
-            snapshot = await _live_pr_snapshot(source, pr_number)
+            snapshot = (
+                await _live_pr_snapshot(source, pr_number, provider_environ=provider_environ)
+                if provider_environ is not None
+                else await _live_pr_snapshot(source, pr_number)
+            )
             prefetched = _PrefetchedFeaturePrState(
                 pr_number=pr_number,
                 lifecycle=snapshot.lifecycle,
@@ -290,6 +305,7 @@ async def _retry_result_from_idempotent_operation(
     operation: Operation,
     *,
     retry_identity: Mapping[str, Any],
+    hosted: HostedWorkspace | None = None,
 ) -> Any:
     """Reconstruct the accepted retry result for a durable operation replay."""
     workspaces = _workspace_service()
@@ -308,6 +324,12 @@ async def _retry_result_from_idempotent_operation(
         raise workspaces.WorkspaceRetryIdempotencyReplayUnavailableError(
             detail={"operation_id": operation.id},
         )
+    if not association_matches((retried.task_policy or {}).get(POLICY_KEY), hosted):
+        raise workspaces.WorkspaceRetryIdempotencyConflictError()
+    authority = authority_for(repo._session, hosted)
+    if authority is not None:
+        assert hosted is not None
+        await lock_materials(repo._session, authority, hosted)
     return workspaces.WorkspaceRetryResult(
         source_workspace_id=str(retry_identity["source_workspace_id"]),
         new_workspace=retried,
@@ -329,6 +351,7 @@ async def retry_workspace_row(
     http_get: HttpGet | None = None,
     ignore_source_runtime_check: bool = False,
     pr_lifecycle_checker: PrLifecycleChecker | None = None,
+    hosted: HostedWorkspace | None = None,
 ) -> Any:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt.
 
@@ -341,6 +364,23 @@ async def retry_workspace_row(
     workspaces = _workspace_service()
     workspaces_create = _workspace_create()
     resolved_settings = settings or get_settings()
+    hosted_authority = authority_for(session, hosted)
+    if hosted_authority is not None:
+        if hosted is None:
+            raise MaterialDeniedError("HOSTED_WORKSPACE_REQUIRED", 422)
+        if provider_readiness_override:
+            raise MaterialDeniedError("HOSTED_CREDENTIAL_OVERRIDE_FORBIDDEN", 422)
+        source_preview = await _load_retry_preview_outside_request_session(session, workspace_id)
+        await historical_source(
+            session, hosted_authority, source_preview, hosted.credentials.agent.namespace
+        )
+        assert source_preview is not None
+        material = await hosted_authority.materials(hosted, source_preview.agent, current=True)
+        provider_environ = admission_environment(
+            hosted_authority, resolved_settings, material.environment
+        )
+    elif resolved_settings.hosted_node is not None:
+        raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
     repo = WorkspaceRepository(session)
     operations = OperationRepository(session)
     retry_idempotency_key = idempotency_key.strip() if idempotency_key else None
@@ -359,6 +399,7 @@ async def retry_workspace_row(
                 repo,
                 existing_operation,
                 retry_identity=retry_identity,
+                hosted=hosted,
             )
     # Prefetch forge PR state from an unlocked read in a short-lived session.
     # ``get_for_update`` holds SELECT ... FOR UPDATE for the rest of the
@@ -373,12 +414,15 @@ async def retry_workspace_row(
     preview = await _load_retry_preview_outside_request_session(session, workspace_id)
     if preview is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
+    if hosted_authority is None and (preview.task_policy or {}).get(POLICY_KEY):
+        raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
     prefetched_feature_pr: _PrefetchedFeaturePrState | None = None
     prefetch_error: Exception | None = None
     try:
         prefetched_feature_pr = await _prefetch_existing_feature_pr_state(
             preview,
             pr_lifecycle_checker=pr_lifecycle_checker,
+            provider_environ=provider_environ if hosted_authority else None,
         )
     except (
         workspaces.WorkspaceRetryPrStateUnavailableError,
@@ -399,6 +443,7 @@ async def retry_workspace_row(
                 repo,
                 existing_operation,
                 retry_identity=retry_identity,
+                hosted=hosted,
             )
     if prefetch_error is not None:
         raise prefetch_error
@@ -406,6 +451,13 @@ async def retry_workspace_row(
     source = await repo.get_for_update(workspace_id)
     if source is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
+    if hosted_authority is not None:
+        assert hosted is not None
+        await historical_source(
+            session, hosted_authority, source, hosted.credentials.agent.namespace
+        )
+        await require_source_quiet(session, source)
+        await new_destination(session, hosted_authority, hosted)
 
     if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
         raise workspaces.WorkspaceRetryRecoveringInFlightError(source)
@@ -449,6 +501,10 @@ async def retry_workspace_row(
         owned_path_overlap_coordination_warnings(overlaps),
         planning_scope_context=planning_scope_context,
     )
+    if hosted is not None:
+        if target_agent != source.agent:
+            raise MaterialDeniedError("HOSTED_PROVIDER_BINDING_MISMATCH", 422)
+        retried_task_policy[POLICY_KEY] = hosted.model_dump(mode="json")
     # Overlay the source profile's Ollama base URL onto the readiness environ so
     # retry admission probes the same daemon the executor's pre-agent step targets
     # (the retried workspace inherits source.resolved_profile, from which those
@@ -487,12 +543,16 @@ async def retry_workspace_row(
         )
     else:
         _downgrade_unqualified_hosted_adoption_to_local(retried_task_policy)
-        preflight_environ = workspaces_create.overlay_profile_provider_credentials(
-            workspaces_create.overlay_profile_ollama_base_url(
-                provider_environ if provider_environ is not None else os.environ,
+        preflight_environ = (
+            provider_environ
+            if hosted_authority
+            else workspaces_create.overlay_profile_provider_credentials(
+                workspaces_create.overlay_profile_ollama_base_url(
+                    provider_environ if provider_environ is not None else os.environ,
+                    source.resolved_profile,
+                ),
                 source.resolved_profile,
-            ),
-            source.resolved_profile,
+            )
         )
         preflight = await workspaces_create._selected_provider_preflight_for_task_async(
             resolved_settings,
@@ -917,6 +977,7 @@ async def retry_workspace_row(
     )
 
     retried = await repo.create(
+        workspace_id=hosted.workspace_id if hosted else None,
         repo_url=source.repo_url,
         branch_base=source.branch_base,
         task_title=source.task_title,

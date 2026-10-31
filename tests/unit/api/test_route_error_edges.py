@@ -395,7 +395,7 @@ async def test_retry_workspace_reports_source_runtime_not_released_via_retry_err
         raise workspaces_service.WorkspaceRetrySourceRuntimeNotReleasedError("ws_source")
 
     monkeypatch.setattr(workspace_routes, "retry_workspace_row", raise_not_released)
-    session = SimpleNamespace(rollback=AsyncMock())
+    session = SimpleNamespace(rollback=AsyncMock(), info={})
 
     response = await workspace_routes.retry_workspace(
         "ws_source",

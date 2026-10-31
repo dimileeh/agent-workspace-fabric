@@ -25,6 +25,7 @@ from sqlalchemy import (
     update,
     values,
 )
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, raiseload
 from sqlalchemy.sql.elements import ColumnElement
@@ -450,16 +451,23 @@ async def inspect_retained_work(
             )
             .exists(),
         )
-        inventory = (
-            await session.execute(
-                select(Workspace, *facts)
-                .where(actionable)
-                .options(raiseload("*"))
-                .order_by(Workspace.id)
-                .limit(MAX_RETAINED_WORKSPACES + 1)
-                .with_for_update(of=Workspace)
-            )
-        ).all()
+        try:
+            # Ordinary controls may already own a workspace and await our gate.
+            # Refuse the entire acceptance instead of waiting or omitting rows.
+            inventory = (
+                await session.execute(
+                    select(Workspace, *facts)
+                    .where(actionable)
+                    .options(raiseload("*"))
+                    .order_by(Workspace.id)
+                    .limit(MAX_RETAINED_WORKSPACES + 1)
+                    .with_for_update(of=Workspace, nowait=True)
+                )
+            ).all()
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == "55P03":
+                raise MaterialDeniedError("RECOVERY_INVENTORY_BUSY", 409) from None
+            raise
         if len(inventory) > MAX_RETAINED_WORKSPACES:
             _unresolved()
 

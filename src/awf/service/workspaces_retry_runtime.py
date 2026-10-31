@@ -9,6 +9,8 @@ for import compatibility.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +26,7 @@ from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
     has_terminal_runtime_released_event,
 )
+from awf.hosted_node.lifecycle_operations import AdmissionCommandRunner
 
 
 async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLifecycle:
@@ -40,14 +43,21 @@ async def _live_pr_lifecycle(source: Workspace, pr_number: int) -> PullRequestLi
         )
 
 
-async def _live_pr_snapshot(source: Workspace, pr_number: int) -> PullRequestSnapshot:
+async def _live_pr_snapshot(
+    source: Workspace, pr_number: int, *, provider_environ: Mapping[str, str] | None = None
+) -> PullRequestSnapshot:
     """Return the source PR's current lifecycle, head ref, and SHAs from its forge."""
     repo = RepoRef.from_url(source.repo_url)
     forge = concrete_forge_for_repo(
         (source.resolved_profile or {}).get("forge"),
         source.repo_url,
     )
-    async with make_forge_client(forge, AsyncioSubprocessRunner()) as client:
+    runner = (
+        AdmissionCommandRunner(provider_environ)
+        if provider_environ is not None
+        else AsyncioSubprocessRunner()
+    )
+    async with make_forge_client(forge, runner) as client:
         return await client.fetch_pull_request_snapshot(
             repo=repo,
             pr_number=pr_number,
