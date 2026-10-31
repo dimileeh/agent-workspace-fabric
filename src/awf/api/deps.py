@@ -119,8 +119,13 @@ def require_api_token(
     if (
         request is not None
         and request.method == "POST"
-        and request.url.path == "/v1/workspaces"
-        and request.scope.get("state", {}).get("hosted_create_verified") is True
+        and (
+            (
+                request.url.path == "/v1/workspaces"
+                and request.scope.get("state", {}).get("hosted_create_verified") is True
+            )
+            or request.scope.get("state", {}).get("hosted_lifecycle_verified") is True
+        )
     ):
         mark_bearer_auth_verified(request)
         return

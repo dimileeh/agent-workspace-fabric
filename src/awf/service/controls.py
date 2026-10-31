@@ -24,6 +24,9 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     has_terminal_runtime_released_event,
 )
+from awf.hosted_node.lifecycle_operations import control_authority
+from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, remonitor_payload
+from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
 from awf.node.cleanup import (
     WorkspaceCleanupResult,
 )
@@ -396,25 +399,33 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         reason: str | None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
+        hosted_authorization: HostedControlAuthorization | None = None,
+        hosted_reauthorization: HostedReauthorization | None = None,
     ) -> WorkspaceControlResponse:
         """Restart PR monitoring for a workspace that lost its monitor claim."""
-
+        await control_authority(
+            self._session,
+            workspace_id,
+            hosted_authorization,
+            reauthorization=hosted_reauthorization,
+        )
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         workspace_for_payload = await self._require_workspace(repo, workspace_id)
-        payload = _operator_operation_payload(
-            reason=reason,
-            reason_code=_OPERATOR_REMONITOR_REASON_CODE,
-            requested_action=OperationType.remonitor.value,
-            extra=_workspace_pr_operation_context(workspace_for_payload),
+        operation_payload, replay_identity = remonitor_payload(
+            workspace_for_payload,
+            reason,
+            hosted_authorization,
+            hosted_reauthorization,
+            expected_version,
         )
-        operation_payload = _operation_payload(payload, expected_version=expected_version)
         prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
             operation_type=OperationType.remonitor,
             payload=operation_payload,
+            idempotency_payload_identity=replay_identity,
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
@@ -430,6 +441,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         current = WorkspaceStatus(workspace.status)
         if current not in _REMONITOR_ELIGIBLE_STATUSES:
             raise WorkspaceRemonitorStateError(workspace)
+        apply_reauthorization(workspace, hosted_reauthorization)
 
         if not workspace.pr_url:
             raise WorkspaceRemonitorMissingPrUrlError(workspace)

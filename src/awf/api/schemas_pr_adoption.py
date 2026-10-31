@@ -21,6 +21,7 @@ from awf.api.cursor_auto import CursorAutoModeSelectionMixin
 from awf.common.external_id import validate_external_id
 from awf.common.task_tag import validate_task_tag
 from awf.db.enums import AgentRuntime, TaskClass
+from awf.hosted_node.runtime_schemas import HostedWorkspace
 from awf.profiles.models import WorkspaceProfile
 
 OwnedPath = _schemas_operations.OwnedPath
@@ -51,6 +52,10 @@ class PullRequestMonitorAdoptionRequest(CursorAutoModeSelectionMixin):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     repo_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None
+    hosted: HostedWorkspace | None = None
+    source_workspace_id: Annotated[
+        str | None, Field(default=None, pattern=r"^ws_[A-Za-z0-9_-]+$", max_length=128)
+    ] = None
     repo_slug: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
     pr_number: int | None = Field(default=None, ge=1)
     pr_url: Annotated[str | None, Field(default=None, min_length=1, max_length=512)] = None

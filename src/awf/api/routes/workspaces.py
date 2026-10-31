@@ -28,6 +28,7 @@ from awf.api.deps import (
     get_db_session,
     get_db_session_factory,
     require_api_token,
+    resolve_settings_dependency,
 )
 from awf.api.request_admission import (
     WORKSPACE_CREATE_ENDPOINT_FAMILY,
@@ -72,6 +73,8 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.resilience import run_db_operation_with_retry
+from awf.hosted_node.lifecycle_operations import authority_for, commit_hosted
+from awf.hosted_node.runtime_schemas import HostedRetryRequest
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
@@ -737,11 +740,13 @@ async def adopt_pull_request_monitor(
     """Adopt an existing PR into a workspace and begin PR monitoring."""
     fetcher = getattr(request.app.state, "pr_adoption_metadata_fetcher", None)
     try:
-        return await PullRequestMonitorAdoptionService(
+        response = await PullRequestMonitorAdoptionService(
             session,
             metadata_fetcher=fetcher,
             settings=settings,
         ).adopt(payload)
+        await commit_hosted(session)
+        return response
     except PRMonitorAdoptionError as exc:
         # Mirror workspace-create conflict handling: returning JSONResponse must
         # not let get_db_session commit partial adoption mutations (workspace
@@ -770,6 +775,7 @@ async def adopt_pull_request_monitor(
 )
 async def retry_workspace(
     workspace_id: str,
+    payload: HostedRetryRequest | None = None,
     provider_readiness_override: Annotated[bool, Query()] = False,
     provider_readiness_override_reason: Annotated[str | None, Query(max_length=512)] = None,
     idempotency_key: Annotated[
@@ -777,12 +783,15 @@ async def retry_workspace(
         Header(alias="Idempotency-Key", max_length=128),
     ] = None,
     session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> WorkspaceRetryResponse | JSONResponse:
     """Retry a failed workspace, returning 202 on acceptance or 409 on host-port conflict."""
     try:
         result = await retry_workspace_row(
             session,
             workspace_id,
+            hosted=payload.hosted if payload else None,
+            settings=(resolve_settings_dependency(settings) if authority_for(session) else None),
             provider_readiness_override=provider_readiness_override,
             provider_readiness_override_reason=provider_readiness_override_reason,
             idempotency_key=idempotency_key.strip() or None
@@ -799,7 +808,9 @@ async def retry_workspace(
         await session.rollback()
         return _retry_error_response(exc)
 
-    return workspace_retry_response(result)
+    response = workspace_retry_response(result)
+    await commit_hosted(session)
+    return response
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
