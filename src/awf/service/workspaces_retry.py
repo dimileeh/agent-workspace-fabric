@@ -448,9 +448,6 @@ async def retry_workspace_row(
     if prefetch_error is not None:
         raise prefetch_error
 
-    if hosted_authority is not None:
-        assert hosted is not None
-        await new_destination(session, hosted_authority, hosted)
     source = await repo.get_for_update(workspace_id)
     if source is None:
         raise workspaces.WorkspaceRetryNotFoundError(workspace_id)
@@ -460,6 +457,7 @@ async def retry_workspace_row(
             session, hosted_authority, source, hosted.credentials.agent.namespace
         )
         await require_source_quiet(session, source)
+        await new_destination(session, hosted_authority, hosted)
 
     if WorkspaceStatus(source.status) == WorkspaceStatus.recovering:
         raise workspaces.WorkspaceRetryRecoveringInFlightError(source)

@@ -283,8 +283,6 @@ class PullRequestMonitorAdoptionService:
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
         if hosted_authority is not None:
             assert request.hosted is not None
-            await new_destination(self._session, hosted_authority, request.hosted)
-            await reject_pr_attention(self._session, repo, pr_number)
             if request.source_workspace_id:
                 source = await self._session.get(
                     Workspace,
@@ -313,6 +311,8 @@ class PullRequestMonitorAdoptionService:
                     request.hosted.credentials.agent.namespace,
                 )
                 await require_source_quiet(self._session, existing)
+            await new_destination(self._session, hosted_authority, request.hosted)
+            await reject_pr_attention(self._session, repo, pr_number)
         previous_terminal_adoptions = await _terminal_adoption_lineage(
             self._session,
             adoption_history,

@@ -16,6 +16,7 @@ from awf.common.config import Settings, get_settings
 from awf.control.worker import manager
 from awf.db.models import Workspace
 from awf.hosted_node.runtime_consumers import WorkspaceConsumers
+from awf.hosted_node.runtime_schemas import HostedControlAuthorization
 from awf.service import provider_readiness, worker
 from tests.conftest import _ok_workspace_admission_disk_check
 from tests.unit.node.test_provisioner_parts.test_provisioner_part_001 import (
@@ -256,6 +257,10 @@ async def test_authorized_paused_resume_retains_warm_stack(
                 "ws_cloud_stable",
                 directive="Continue without changing protected configuration.",
                 idempotency_key=key,
+                hosted_authorization=HostedControlAuthorization(
+                    namespace=payload["hosted"]["credentials"]["agent"]["namespace"],
+                    actor="caller",
+                ),
             )
             await session.commit()
 
@@ -314,8 +319,8 @@ async def test_authorized_paused_resume_retains_warm_stack(
                 observations["guide_http"] = (
                     "403 HOSTED_RUNTIME_INTEGRATION_REQUIRED; conditional existing internal-service resume only"
                 )
-                # Test the existing paused-resume lifecycle without opening the
-                # hosted HTTP guard. This is not proof of a public hosted guide.
+                # Authorize the positive service call without opening the
+                # ordinary operator's hosted HTTP guard.
                 if phase != "initial_pause":
                     await guide("canonical-service-guide")
             elif phase != "initial_pause":

@@ -136,8 +136,8 @@ async def authorize_rebinding(
         raise MaterialDeniedError("HOSTED_REAUTHORIZATION_PREIMAGE_MISMATCH", 409)
     assert row is not None
     await authority.materials(pair.replacement_association, row.agent, current=True)
-    await lock_materials(session, authority, pair.replacement_association)
     await session.refresh(row, with_for_update=True)
+    await lock_materials(session, authority, pair.replacement_association)
     association = check_source(authority, row, authorization.namespace, historical=True)
     if association not in (pair.expected_association, pair.replacement_association):
         raise MaterialDeniedError("HOSTED_REAUTHORIZATION_PREIMAGE_MISMATCH", 409)

@@ -134,7 +134,7 @@ async def lock_materials(
 async def new_destination(
     session: AsyncSession, authority: WorkspaceAuthority, association: HostedWorkspace
 ) -> None:
-    await lock_materials(session, authority, association, new=True)
+    # Match ordinary create: destination key before the admission mutex.
     await session.execute(
         text(
             "SELECT pg_advisory_xact_lock(hashtext('awf:hosted-workspace'), hashtext(:workspace_id))"
@@ -143,6 +143,7 @@ async def new_destination(
     )
     if await session.get(Workspace, association.workspace_id) is not None:
         raise MaterialDeniedError("HOSTED_WORKSPACE_ID_CONFLICT", 409)
+    await lock_materials(session, authority, association, new=True)
 
 
 async def require_source_quiet(session: AsyncSession, source: Workspace) -> None:
@@ -212,6 +213,7 @@ async def control_authority(
     reauthorization: HostedReauthorization | None = None,
     grants: list[str] | None = None,
     operator: str | None = None,
+    idempotency_key: str | None = None,
 ) -> None:
     authority = authority_for(session, authorization or reauthorization)
     if authority is None:
@@ -227,6 +229,12 @@ async def control_authority(
         raise MaterialDeniedError("HOSTED_CONTROL_AUTHORIZATION_REQUIRED", 403)
     if grants and (not authorization.allow_grants or operator != authorization.actor):
         raise MaterialDeniedError("HOSTED_GUIDE_GRANT_AUTHORIZATION_REQUIRED", 403)
+    # Ordinary controls take the operation key, workspace, then the admission
+    # mutex through their first write. Keep that order before hosted checks.
+    if idempotency_key and (key := idempotency_key.strip()):
+        from awf.db.repositories import OperationRepository
+
+        await OperationRepository(session).acquire_idempotency_key_lock(key)
     if reauthorization is not None:
         from awf.hosted_node.lifecycle_reauthorization import authorize_rebinding
 
@@ -236,8 +244,8 @@ async def control_authority(
     association = check_source(authority, row, authorization.namespace)
     assert row is not None
     await authority.materials(association, row.agent, current=True)
-    await lock_materials(session, authority, association)
     await session.refresh(row, with_for_update=True)
+    await lock_materials(session, authority, association)
     if check_source(authority, row, authorization.namespace) != association:
         raise MaterialDeniedError("HOSTED_WORKSPACE_BINDING_MISMATCH", 403)
 

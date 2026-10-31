@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 
 import pytest
 from sqlalchemy import select
@@ -857,8 +858,13 @@ async def test_retry_blocks_when_prefetched_feature_pr_state_mismatches_locked_r
         source.pr_number = 10
         await session.commit()
 
-    async def _skip_prefetch(_source: Workspace, *, pr_lifecycle_checker: object) -> None:
-        return None
+    async def _skip_prefetch(
+        _source: Workspace,
+        *,
+        pr_lifecycle_checker: object,
+        provider_environ: Mapping[str, str] | None = None,
+    ) -> None:
+        assert provider_environ is None
 
     monkeypatch.setattr(
         workspaces_retry_service,
@@ -919,8 +925,12 @@ async def test_retry_blocks_when_prefetched_feature_pr_number_mismatches_locked_
         await session.commit()
 
     async def _stale_prefetch(
-        _source: Workspace, *, pr_lifecycle_checker: object
+        _source: Workspace,
+        *,
+        pr_lifecycle_checker: object,
+        provider_environ: Mapping[str, str] | None = None,
     ) -> _PrefetchedFeaturePrState:
+        assert provider_environ is None
         return _PrefetchedFeaturePrState(
             pr_number=99,
             lifecycle=PullRequestLifecycle.open,
