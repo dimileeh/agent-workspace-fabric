@@ -10,8 +10,13 @@ from sqlalchemy import DateTime, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from awf.db.enums import MONITOR_BLOCK_RESUME_PHASE_PREFIX, WorkspaceStatus
+from awf.db.enums import (
+    MONITOR_BLOCK_RESUME_PHASE_PREFIX,
+    PLAN_CONFORMANCE_DECISION_BLOCK_TYPE,
+    WorkspaceStatus,
+)
 from awf.db.models import OperatorGrantAuditRecord, Workspace
+from awf.db.repositories.workspace_recovery import recovery_allows_work
 
 
 async def list_resumable_blocked_ids(
@@ -28,6 +33,8 @@ async def list_resumable_blocked_ids(
     acted on it: ``guide`` either arms a non-empty directive in
     ``pending_operator_hint`` (revert/redo) or records at least one grant
     active for the workspace's CURRENT ``block_epoch`` (approve-and-keep).
+    A ``plan_conformance_decision`` block always requires the directive; a file
+    grant cannot answer a missing operator decision.
     Blocked workspaces still awaiting an operator decision carry neither, so
     they are excluded here — otherwise the worker would spin them through
     ``blocked -> running -> blocked`` re-running the same gate every cycle.
@@ -118,9 +125,19 @@ async def list_resumable_blocked_ids(
         Workspace.block_resume_phase.notlike(f"{escaped_prefix}%", escape=like_escape),
     )
     stmt = select(Workspace.id).where(
+        recovery_allows_work(),
         Workspace.status == WorkspaceStatus.blocked.value,
         not_monitor_origin,
-        or_(actionable_hint, active_grant_exists),
+        or_(
+            actionable_hint,
+            and_(
+                active_grant_exists,
+                or_(
+                    Workspace.block_type.is_(None),
+                    Workspace.block_type != PLAN_CONFORMANCE_DECISION_BLOCK_TYPE,
+                ),
+            ),
+        ),
     )
     if node_id is not None:
         stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
@@ -183,6 +200,7 @@ async def list_resumable_recovering_ids(
         cooldown_reached = not_before <= now_utc.isoformat()
     cooldown_elapsed = and_(not_before.isnot(None), cooldown_reached)
     stmt = select(Workspace.id).where(
+        recovery_allows_work(),
         Workspace.status == WorkspaceStatus.recovering.value,
         cooldown_elapsed,
     )

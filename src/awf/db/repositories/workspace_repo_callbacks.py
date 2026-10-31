@@ -48,6 +48,11 @@ from awf.db.repositories.base import (
     _operation_result_with_log_stream_refs,
     resolve_session_dialect_name,
 )
+from awf.db.repositories.workspace_recovery import (
+    recovery_allows_work,
+    restore_callback_allows_work,
+    restore_row_allows_work,
+)
 
 
 class CallbackIdempotencyConflictError(ValueError):
@@ -234,6 +239,7 @@ class CallbackSubscriptionRepository:
             select(CallbackSubscription)
             .where(
                 CallbackSubscription.enabled.is_(True),
+                restore_row_allows_work("callback_subscriptions", CallbackSubscription.id),
                 _callback_subscription_event_type_filter(
                     event_type_candidates,
                     self._dialect_name,
@@ -360,6 +366,16 @@ class CallbackDeliveryRepository:
             select(CallbackDelivery)
             .where(
                 CallbackDelivery.status == CallbackDeliveryStatus.pending.value,
+                restore_callback_allows_work(),
+                or_(
+                    CallbackDelivery.workspace_id.is_(None),
+                    select(Workspace.id)
+                    .where(
+                        Workspace.id == CallbackDelivery.workspace_id,
+                        recovery_allows_work(),
+                    )
+                    .exists(),
+                ),
                 or_(
                     CallbackDelivery.next_attempt_at.is_(None),
                     CallbackDelivery.next_attempt_at <= due_at,

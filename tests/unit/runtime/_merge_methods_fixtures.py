@@ -70,6 +70,7 @@ class _MergeMethodClient:
         status_results: list[PRStatus | GitHubClientError | BitbucketClientError] | None = None,
         recheck_status: PRStatus | None = None,
         resolve_error: GitHubClientError | BitbucketClientError | None = None,
+        unresolve: bool | GitHubClientError = False,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -81,6 +82,8 @@ class _MergeMethodClient:
         self.status_results = status_results
         self.recheck_status = recheck_status
         self.resolve_error = resolve_error
+        self.unresolve = unresolve
+        self.unresolved_threads: list[str] = []
         self.merge_calls: list[str] = []
         self.delete_branch_calls: list[bool] = []
         self.comments: list[str] = []
@@ -179,6 +182,13 @@ class _MergeMethodClient:
         self.resolved_threads.append(thread_id)
         if self.resolve_error is not None:
             raise self.resolve_error
+
+    async def unresolve_thread(self, *, thread_id: str) -> bool:
+        """Record the reopen; by default the forge reports no reopen API (#1138)."""
+        self.unresolved_threads.append(thread_id)
+        if isinstance(self.unresolve, GitHubClientError):
+            raise self.unresolve
+        return self.unresolve
 
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         """Record the disposition reply posted before an outdated-hygiene resolve."""

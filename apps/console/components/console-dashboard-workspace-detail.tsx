@@ -336,14 +336,17 @@ type TaskArtifactView = "plan" | "validation";
 export function TaskArtifactsSection({
   workspaceId,
   refreshKey,
+  decisionRequired = false,
 }: {
   workspaceId: string;
   refreshKey?: string;
+  decisionRequired?: boolean;
 }) {
   const [items, setItems] = useState<ArtifactPresenceItem[]>([]);
   const [view, setView] = useState<TaskArtifactView | null>(null);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(true);
   // The list refetch and an artifact download are independent failure sources
   // that must not share one error slot: a poll-driven list refetch succeeds and
   // clears its own error, but it must NOT dismiss a download failure raised by an
@@ -357,6 +360,7 @@ export function TaskArtifactsSection({
 
   useEffect(() => {
     let cancelled = false;
+    setListLoading(true);
     void (async () => {
       let failure: string | null = null;
       const listFailureMessage = (message: string | null): string =>
@@ -419,6 +423,10 @@ export function TaskArtifactsSection({
           return;
         }
         settleListFailure(cause instanceof Error ? cause.message : "Unable to load artifacts.");
+      } finally {
+        if (!cancelled) {
+          setListLoading(false);
+        }
       }
     })();
     return () => {
@@ -438,7 +446,7 @@ export function TaskArtifactsSection({
   // one of the named artifacts has been deposited for this workspace. Keep
   // rendering when the list request failed so the error banner can surface;
   // otherwise an API failure is indistinguishable from "no artifacts".
-  if (!showPlan && !showValidation && !listError) {
+  if (!showPlan && !showValidation && !listError && !decisionRequired) {
     return null;
   }
 
@@ -516,6 +524,15 @@ export function TaskArtifactsSection({
         <div className="rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-xs text-danger-text">
           {downloadError ?? listError}
         </div>
+      ) : null}
+      {decisionRequired && listLoading && !showValidation ? (
+        <p className="text-xs text-fg-muted">Loading artifacts…</p>
+      ) : null}
+      {decisionRequired && !listLoading && !showValidation ? (
+        <p className="text-xs text-fg-muted">
+          Conformance report unavailable. Read the decision details in the workspace timeline
+          before supplying a directive.
+        </p>
       ) : null}
       {view && !downloadError ? (
         <div data-testid="task-artifact-content" className="rounded-md border border-line bg-surface p-3">
@@ -1167,9 +1184,8 @@ export function ProviderReadinessPreflightBlock({
   );
 }
 
-// Operator-pause inspector block: for a `blocked` workspace (protected quality-gate
-// violation), surfaces the violating path(s) and the two ready-to-run `guide`
-// resolution commands. Reads the full GET's `block_state`; degrades to a
+// Operator-pause inspector: conformance decisions require a directive, while
+// protected-file pauses offer scoped grant/revert commands. Reads `block_state`; degrades to a
 // loading/unavailable line when only the overview snapshot is available.
 export function BlockedViolationBlock({
   workspace,
@@ -1183,6 +1199,7 @@ export function BlockedViolationBlock({
   }
   const blockState = workspace?.block_state ?? null;
   const violations = blockState?.violations ?? [];
+  const decisionRequired = blockState?.block_type === "plan_conformance_decision";
   const commands = formatBlockedResolutionCommands(overview.workspace_id, violations);
   // Prefer the authoritative blocked_at; fall back to the overview proxy while the
   // full workspace fetch is still in flight (overview-only render).
@@ -1211,7 +1228,20 @@ export function BlockedViolationBlock({
             <Fact label="Resume phase" value={blockState.block_resume_phase ?? "—"} />
             <Fact label="Blocked at" value={formatDateTime(blockState.blocked_at)} />
           </div>
-          {violations.length > 0 ? (
+          {decisionRequired ? (
+            <div className="mt-3 grid gap-2">
+              <p className="text-xs">
+                An operator decision is required before work can continue. Read the conformance
+                report, then replace the placeholder with your decision. A file grant alone
+                cannot resume this workspace; normal validation and merge gates still apply.
+              </p>
+              <TaskArtifactsSection
+                workspaceId={overview.workspace_id}
+                refreshKey={overview.updated_at}
+                decisionRequired
+              />
+            </div>
+          ) : violations.length > 0 ? (
             <div className="mt-3 grid gap-1">
               <div className="label-caps">Protected violations</div>
               <ul className="grid gap-1">
@@ -1241,8 +1271,17 @@ export function BlockedViolationBlock({
           )}
           <div className="mt-3 grid gap-2">
             <div className="label-caps">Resolve</div>
-            <BlockedCommand label="Approve & keep" command={commands.grantCommand} />
-            <BlockedCommand label="Revert" command={commands.revertCommand} />
+            {decisionRequired ? (
+              <BlockedCommand
+                label="Provide decision"
+                command={`awf workspace guide ${overview.workspace_id} --directive '<your decision>'`}
+              />
+            ) : (
+              <>
+                <BlockedCommand label="Approve & keep" command={commands.grantCommand} />
+                <BlockedCommand label="Revert" command={commands.revertCommand} />
+              </>
+            )}
           </div>
         </>
       ) : (

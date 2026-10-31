@@ -165,6 +165,14 @@ class ForgeClient(Protocol):
         """Resolve a review thread by node ID."""
         ...
 
+    async def unresolve_thread(self, *, thread_id: str) -> bool:
+        """Reopen a resolved review thread; ``False`` means the forge has no such API.
+
+        The PR monitor reopens a thread the disposition gate could not verify, so
+        it is re-triaged (#1138). A forge fault raises ``ForgeClientError``.
+        """
+        ...
+
     async def reply_to_thread(self, *, thread_id: str, body: str) -> str:
         """Post ``body`` as a reply inside review thread ``thread_id``; return its id.
 

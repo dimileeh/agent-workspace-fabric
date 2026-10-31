@@ -190,6 +190,7 @@ def test_forge_client_protocol_declares_thread_reply_and_audit() -> None:
 
     assert hasattr(ForgeClient, "reply_to_thread")
     assert hasattr(ForgeClient, "fetch_review_thread_audit")
+    assert hasattr(ForgeClient, "unresolve_thread")  # #1138 automatic reopen
     github = GitHubClient(FakeCommandRunner())
     bitbucket = make_client(FakeBitbucket())
     assert isinstance(bitbucket, BitbucketClient)

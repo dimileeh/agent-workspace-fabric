@@ -293,6 +293,11 @@ async def test_cert_refused_when_awf_resolved_thread_lacks_marker_across_paginat
     )
     cmd.respond_when(_is_audit, stdout=_graphql_page(page1, cursor="c1"))
     cmd.respond_when(lambda a: a[:3] == ["gh", "pr", "comment"])
+    # The token may not reopen threads (#1138), so today's blocker still applies.
+    cmd.respond_when(
+        lambda a: any("unresolveReviewThread" in arg for arg in a),
+        stdout=json.dumps({"errors": [{"message": "Resource not accessible by integration"}]}),
+    )
     gh = _RealAudit(cmd)
     workspace_id, runner = await _release_runner(factory, tmp_path, gh)
     state = settled_baseline_state()
@@ -305,6 +310,7 @@ async def test_cert_refused_when_awf_resolved_thread_lacks_marker_across_paginat
     body = comments[0][comments[0].index("--body") + 1]
     assert "is ready to merge" not in body
     assert "REVIEW_THREAD_DISPOSITION_UNVERIFIED" in body
+    assert "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED" in body
     assert _SILENT in body
     assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls)
     since, reason, status = await _attention(factory, workspace_id)

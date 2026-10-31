@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import raiseload
 
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import WorkspaceStatus
@@ -21,7 +23,7 @@ from awf.hosted_node.receiver import Receiver
 from awf.hosted_node.resolver import ProtectedResolver
 from awf.hosted_node.runtime_schemas import POLICY_KEY, HostedWorkspace
 from awf.hosted_node.runtime_views import PublishedView, RuntimeViews, owned_publication
-from awf.hosted_node.schemas import Binding
+from awf.hosted_node.schemas import Binding, Identity
 from awf.node.compose_manager import AuthMount
 from awf.node.secret_mounts import LocalSecretLeaseResolution
 from awf.profiles.compose import AGENT_AUTH_ENV_VARS
@@ -73,7 +75,11 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("IDENTITY_ACKNOWLEDGEMENT_REQUIRED", 403)
         async with self.receiver.factory.begin() as session:
             row = await locked(session, self.receiver.identity)
-            if row.phase != "ready" or row.recovery_key is None:
+            if (
+                row.phase != "ready"
+                or row.recovery_key is None
+                or row.restore_quarantine is not None
+            ):
                 raise MaterialDeniedError("NODE_ADMISSION_CLOSED", 409)
 
     async def admit(self, payload: "WorkspaceCreateRequest") -> AuthorizedMaterials:
@@ -81,7 +87,15 @@ class WorkspaceAuthority:
             raise MaterialDeniedError("HOSTED_WORKSPACE_REQUIRED", 422)
         if payload.preflight.provider_readiness_override or payload.task.provider_recovery:
             raise MaterialDeniedError("HOSTED_CREDENTIAL_OVERRIDE_FORBIDDEN", 422)
+        async with self.receiver.factory.begin() as session:
+            await self.guard_new_workspace(session)
         return await self.materials(payload.hosted, payload.task.agent.value, current=True)
+
+    async def guard_new_workspace(self, session: AsyncSession) -> None:
+        """Hold the node mutex through the caller's workspace insertion commit."""
+        row = await locked(session, self.receiver.identity)
+        if row.maintenance_generation is not None:
+            raise MaterialDeniedError("NODE_MAINTENANCE_HELD", 409)
 
     async def resource_limits(self, workspace_id: str) -> tuple[float, float]:
         await self.workspace(workspace_id)
@@ -107,6 +121,8 @@ class WorkspaceAuthority:
                 raise MaterialDeniedError("HOSTED_WORKSPACE_REQUIRED", 403)
             if row.status == "destroyed" or row.filesystem_reclaimed_at is not None:
                 raise MaterialDeniedError("HOSTED_WORKSPACE_INACTIVE", 403)
+            if (row.task_policy or {}).get("hosted_recovery", {}).get("disposition") == "attention":
+                raise MaterialDeniedError("RECOVERY_ATTENTION_REQUIRED", 409)
             association = _stored_association(row.task_policy[POLICY_KEY])
             agent = row.agent
         if association.workspace_id != workspace_id:
@@ -141,6 +157,10 @@ class WorkspaceAuthority:
             row = await session.get(Workspace, workspace_id)
             if row is None or row.node_id != self.receiver.identity.owner:
                 return False
+            if (row.task_policy or {}).get("hosted_recovery", {}).get("disposition") == "attention":
+                # Physical fencing and boot cleanup already removed execution
+                # authority. Attention is not a credential-loss failure.
+                return True
             inactive = row.status == "destroyed" or row.filesystem_reclaimed_at is not None
         if inactive:
             # Destroy/GC already completed runtime cleanup. Reclaim only the
@@ -165,6 +185,16 @@ class WorkspaceAuthority:
         )
         await self._retract_previous(workspace_id)
 
+    async def retract_retired(self, workspace_id: str) -> None:
+        """Closed-boot cleanup must not remove a newly accepted publication."""
+        try:
+            await self.receiver.identity_status()
+        except MaterialDeniedError as error:
+            if error.reason == "IDENTITY_MISMATCH":
+                await asyncio.to_thread(self.views.remove, workspace_id)
+            raise
+        await self._retract_previous(workspace_id)
+
     async def retract_publication(
         self, workspace_id: str, publication: PublishedView | None
     ) -> None:
@@ -181,14 +211,22 @@ class WorkspaceAuthority:
         # boot's readable view. Only that row's exact older binding is removable.
         await self.receiver.identity_status()
         async with self.receiver.factory() as session:
-            row = await session.get(Workspace, workspace_id)
+            row = await session.get(Workspace, workspace_id, options=[raiseload("*")])
             if row is None or row.node_id != self.receiver.identity.owner:
                 return
             stored = (row.task_policy or {}).get(POLICY_KEY)
             if stored is None:
                 return
             association = _stored_association(stored)
+            recovery = (row.task_policy or {}).get("hosted_recovery")
         previous = association.credentials.agent.identity
+        if (
+            previous == self.receiver.identity
+            and isinstance(recovery, dict)
+            and recovery.get("identity") == previous.model_dump()
+            and recovery.get("previous_identity") is not None
+        ):
+            previous = Identity.model_validate(recovery["previous_identity"])
         if (
             association.workspace_id == workspace_id
             and previous.owner == self.receiver.identity.owner

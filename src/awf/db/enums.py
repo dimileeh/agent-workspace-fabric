@@ -309,6 +309,9 @@ SERVICE_GC_REQUEST_STATUS_FAILED: Final = "failed"
 SERVICE_GC_REQUEST_STATUS_EXPIRED: Final = "expired"
 
 
+PLAN_CONFORMANCE_DECISION_BLOCK_TYPE: Final = "plan_conformance_decision"
+"""A planning decision requires an operator directive, not a grant-only resume."""
+
 MONITOR_BLOCK_RESUME_PHASE_PREFIX: Final = "monitor_"
 """Prefix marking a ``Workspace.block_resume_phase`` as a POST-PR (monitor-origin)
 protected-scope pause.

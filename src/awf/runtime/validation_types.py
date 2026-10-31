@@ -19,24 +19,6 @@ class ProfileExecutionCommand:
 
 
 @dataclass(frozen=True)
-class ProfileValidationToolPreflightFinding:
-    """A profile validation command that can lose its setup-time tooling."""
-
-    command: str
-    tool: str
-    reason_code: str
-    message: str
-
-    def as_metadata(self) -> dict[str, str]:
-        return {
-            "command": self.command,
-            "tool": self.tool,
-            "reason_code": self.reason_code,
-            "message": self.message,
-        }
-
-
-@dataclass(frozen=True)
 class ValidateCommandProbeTarget:
     """A ``validate``-phase command's leading executable plus the command itself.
 

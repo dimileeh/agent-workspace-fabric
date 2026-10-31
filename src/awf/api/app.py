@@ -18,6 +18,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from starlette.types import Lifespan
 
 from awf import __version__
 from awf.api.deps import (
@@ -113,12 +114,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 shutdown_callback_target_validation_executor(wait=False)
 
 
-def create_app(*, use_lifespan: bool = True) -> FastAPI:
+def create_app(*, use_lifespan: bool = True, lifespan: Lifespan[FastAPI] | None = None) -> FastAPI:
     """Build and return a configured AWF FastAPI application.
 
     ``use_lifespan`` defaults to True for production. Tests pass ``use_lifespan=False``
     and call ``configure_database`` themselves so each test gets its own isolated DB.
+    A trusted host may supply ``lifespan`` instead of the normal startup. It owns
+    database/receiver cleanup, authority callbacks and deferring worker startup
+    until restore reconciliation commits. This is not an HTTP-selectable mode.
     """
+    if lifespan is not None and not use_lifespan:
+        raise ValueError("custom lifespan conflicts with use_lifespan=False")
     app = FastAPI(
         title="Agent Workspace Fabric",
         description=(
@@ -129,7 +135,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
-        lifespan=_lifespan if use_lifespan else None,
+        lifespan=lifespan if lifespan is not None else (_lifespan if use_lifespan else None),
     )
     health.reset_egress_audit_summary_counts_task(app.state)
     setattr(app.state, CORE_DISCOVERY_STATE_ATTR, build_core_discovery_payload())

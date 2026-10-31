@@ -159,6 +159,19 @@ _RETIRED_OPERATOR_DECISION_PREFIX = "__operator_decision_retired__:"
 # the new head may have reverted, and posted, the successor's re-triage of the
 # unchanged thread would reuse it whatever its new verdict. A record
 # that does not decode to a known class, or names no thread/comment id, stays.
+#
+# One exception (#1138, D2): on a moved head a posted ``fixed`` /
+# ``fixed_branch_evidence`` reply that cites commits and was bound to a known
+# conversation crosses LIVE when the adopted head is known, as AWF already treats
+# ``fixed`` within one workspace across later commits. It is bound to the
+# conversation it followed and paired with
+# ``__awf_disposition_readopt_pending__:<thread id>`` = the adopted head: the
+# successor's runner step confirms every cited commit is an ancestor of that head
+# (else it retires the record with today's tombstone), and the gate certifies
+# nothing on it until then. Its thread must still be resolved by AWF's identity
+# with that conversation unchanged, which the gate's binding check enforces.
+# ``false_positive`` keeps today's retirement. Under head continuity a leftover
+# readopt key crosses verbatim with its record.
 _ITEM_DISPOSITION_PREFIX = "__awf_item_disposition__:"
 _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
     {"fixed", "fixed_branch_evidence", "false_positive"}
@@ -166,6 +179,8 @@ _HEAD_DEPENDENT_DISPOSITION_CLASSES = frozenset(
 _HEAD_INDEPENDENT_DISPOSITION_CLASSES = frozenset({"deferred"})
 # What ``retire_item_disposition`` clears: with no reply id the gate certifies
 # nothing on the marker, and the next verdict replaces the record.
+_READOPT_LIVE_DISPOSITION_CLASSES = frozenset({"fixed", "fixed_branch_evidence"})
+_DISPOSITION_READOPT_PENDING_PREFIX = "__awf_disposition_readopt_pending__:"
 _RETIRED_REPLY_FIELDS: dict[str, object] = {
     "reply_comment_id": None,
     "conversation_digest": None,
@@ -200,6 +215,29 @@ _CONVERSATION_DIGEST_RE = re.compile(r"^(?:[0-9a-f]{64})?$")
 # ``reopened``, under a verdict-key thread id.
 _DISPOSITION_UNVERIFIED_PREFIX = "__awf_disposition_unverified__:"
 _DISPOSITION_UNVERIFIED_VALUES = frozenset({"REVIEW_THREAD_DISPOSITION_UNVERIFIED", "reopened"})
+
+# ``__awf_disposition_auto_reopened__:<thread id>`` counts AWF's automatic reopens
+# of a thread the disposition gate flagged (#1138): at most two per thread over
+# the PR's life, then the gate's blocker asks the operator. Left behind, a
+# successor would reopen the same thread twice more. It records thread history
+# rather than code and only makes the successor stricter, so it crosses
+# regardless of head continuity: a positive decimal count under a verdict-key
+# thread id.
+_DISPOSITION_AUTO_REOPENED_PREFIX = "__awf_disposition_auto_reopened__:"
+_AUTO_REOPEN_COUNT_RE = re.compile(r"^[1-9][0-9]{0,2}$")
+
+# ``__awf_disposition_ack__:<thread id>:<comment identity>`` records the agent's
+# one-time judgment of a review bot's reply after AWF's disposition (#1138, D1):
+# ``ACKNOWLEDGES`` keeps AWF's marker as the disposition, anything else sends the
+# thread to the fallback reopen. Left behind, a successor would ask the agent
+# about the same comment again. It judges the feedback, not the code, so it
+# crosses regardless of head continuity; an acknowledged comment only stops
+# superseding the marker, and a moved head still retires a ``false_positive``
+# marker. The identity is AWF's own SHA-256 hex. The pending flag that asks the
+# next poll to judge (``__awf_disposition_ack_pending__:``) never crosses.
+_DISPOSITION_ACK_PREFIX = "__awf_disposition_ack__:"
+_DISPOSITION_ACK_VALUES = frozenset({"ACKNOWLEDGES", "NEW_POINT", "UNJUDGED"})
+_FULL_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # ``__awf_review_thread_disposition_baseline__`` (``awf.runtime.monitor_state_keys``)
 # is the disposition gate's one-time legacy baseline: the unmarked AWF
@@ -267,6 +305,7 @@ def seedable_monitor_state(
     previous: Mapping[str, Any] | None,
     *,
     head_continuity: bool = False,
+    adopted_head_sha: str | None = None,
 ) -> dict[str, str]:
     """Return the allowlisted subset of a predecessor's monitor state.
 
@@ -276,7 +315,9 @@ def seedable_monitor_state(
     ``false_positive`` verdicts are dropped and re-triaged -- along with any
     parked operator ruling they answered, which would otherwise be replayed as a
     live directive and recreate the dropped verdict -- while the head-independent
-    dispositions still cross.
+    dispositions still cross. ``adopted_head_sha`` (the successor's starting
+    head, a full SHA or ignored) lets a verified ``fixed`` disposition cross a
+    moved head live, pending the successor's ancestry check (#1138).
 
     The result is key-sorted (deterministic ``copied_keys`` in the seeded event)
     and is always a fresh dict, so callers may mutate it -- e.g. to arm a pending
@@ -294,12 +335,17 @@ def seedable_monitor_state(
             or _is_seedable_disposition(key, value, head_continuity=head_continuity)
             or _is_disposition_retired_tombstone(key)
             or _is_disposition_unverified_flag(key, value)
+            or _is_disposition_auto_reopen_count(key, value)
+            or _is_disposition_ack_judgment(key, value)
+            or (head_continuity and _is_disposition_readopt_pending(key, value))
             or key in (_DISPOSITION_BASELINE_KEY, _DISPOSITION_BASELINE_CONVERSATIONS_KEY)
         )
     }
     if not head_continuity:
+        carried = _moved_head_live_dispositions(previous, adopted_head_sha)
         seeded = _retire_unconfirmed_replies(seeded)
-        seeded.update(_moved_head_reply_tombstones(previous))
+        seeded.update(_moved_head_reply_tombstones(previous, carried=carried))
+        seeded.update(carried)
     return dict(
         sorted(
             _restore_orphaned_operator_decisions(seeded, head_continuity=head_continuity).items()
@@ -376,7 +422,49 @@ def _retire_unconfirmed_replies(seeded: dict[str, str]) -> dict[str, str]:
     return retired
 
 
-def _moved_head_reply_tombstones(previous: Mapping[str, Any]) -> dict[str, str]:
+def _moved_head_live_dispositions(
+    previous: Mapping[str, Any], adopted_head_sha: str | None
+) -> dict[str, str]:
+    """The ``fixed`` records that cross a moved head live, each with its readopt check.
+
+    Only a posted, re-read reply that cites commits and followed a conversation AWF
+    read qualifies (#1138, D2); it is bound to that conversation, as its landed
+    resolve. Without a full adopted head SHA nothing does.
+    """
+    adopted = (adopted_head_sha or "").strip().lower()
+    if _FULL_COMMIT_SHA_RE.match(adopted) is None:
+        return {}
+    carried: dict[str, str] = {}
+    for key, value in previous.items():
+        if not isinstance(value, str) or not _is_seedable_disposition(
+            key, value, head_continuity=True
+        ):
+            continue
+        record = json.loads(value)
+        commits = record.get("commits")
+        reply = record.get("reply_comment_id")
+        followed = record.get("conversation_digest") or record.get("reply_conversation_digest")
+        if (
+            record["class"] not in _READOPT_LIVE_DISPOSITION_CLASSES
+            or not isinstance(reply, str)
+            or not reply.strip()
+            or record.get("reread_pending") is True
+            or not isinstance(commits, list)
+            or not any(isinstance(commit, str) and commit.strip() for commit in commits)
+            or not isinstance(followed, str)
+            or _FULL_DIGEST_RE.match(followed) is None
+        ):
+            continue
+        item_id = key[len(_ITEM_DISPOSITION_PREFIX) :]
+        bound = {**record, "conversation_digest": followed, "resolved": True}
+        carried[key] = json.dumps(bound, sort_keys=True)
+        carried[f"{_DISPOSITION_READOPT_PENDING_PREFIX}{item_id}"] = adopted
+    return carried
+
+
+def _moved_head_reply_tombstones(
+    previous: Mapping[str, Any], *, carried: Mapping[str, str]
+) -> dict[str, str]:
     """Tombstone every posted code-dependent reply a moved head retires.
 
     As ``retire_item_disposition`` does, each is tombstoned by the conversation it
@@ -385,10 +473,13 @@ def _moved_head_reply_tombstones(previous: Mapping[str, Any]) -> dict[str, str]:
     neither record nor tombstone the successor's gate takes that marker as the
     evidence, so a silent re-resolve by the shared identity would certify a fix
     or refutation the moved head may have reverted (PRRT_kwDOSJAM6s6vdUKv,
-    PRRT_kwDOSJAM6s6vdu03).
+    PRRT_kwDOSJAM6s6vdu03). A record that crosses live (``carried``) is retired,
+    with this same tombstone, only if the successor's ancestry check fails.
     """
     tombstones: dict[str, str] = {}
     for key, value in previous.items():
+        if key in carried:
+            continue
         if not isinstance(value, str) or not _is_seedable_disposition(
             key, value, head_continuity=True
         ):
@@ -443,6 +534,31 @@ def _is_disposition_unverified_flag(key: str, value: str) -> bool:
         key.startswith(_DISPOSITION_UNVERIFIED_PREFIX)
         and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_UNVERIFIED_PREFIX) :]) is not None
         and value in _DISPOSITION_UNVERIFIED_VALUES
+    )
+
+
+def _is_disposition_auto_reopen_count(key: str, value: str) -> bool:
+    return (
+        key.startswith(_DISPOSITION_AUTO_REOPENED_PREFIX)
+        and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_AUTO_REOPENED_PREFIX) :]) is not None
+        and _AUTO_REOPEN_COUNT_RE.match(value) is not None
+    )
+
+
+def _is_disposition_ack_judgment(key: str, value: str) -> bool:
+    if not key.startswith(_DISPOSITION_ACK_PREFIX) or value not in _DISPOSITION_ACK_VALUES:
+        return False
+    thread_id, _, identity = key[len(_DISPOSITION_ACK_PREFIX) :].rpartition(":")
+    return (
+        _VERDICT_KEY_RE.match(thread_id) is not None and _FULL_DIGEST_RE.match(identity) is not None
+    )
+
+
+def _is_disposition_readopt_pending(key: str, value: str) -> bool:
+    return (
+        key.startswith(_DISPOSITION_READOPT_PENDING_PREFIX)
+        and _VERDICT_KEY_RE.match(key[len(_DISPOSITION_READOPT_PENDING_PREFIX) :]) is not None
+        and _FULL_COMMIT_SHA_RE.match(value) is not None
     )
 
 

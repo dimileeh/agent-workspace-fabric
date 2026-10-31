@@ -786,6 +786,26 @@
         "title": "CheckResult",
         "type": "object"
       },
+      "CheckpointRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_id": {
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "request_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "request_sha256"
+        ],
+        "title": "CheckpointRequest",
+        "type": "object"
+      },
       "CleanupReadinessResponse": {
         "properties": {
           "action": {
@@ -3212,6 +3232,22 @@
             ],
             "title": "Idle Since"
           },
+          "maintenance_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maintenance Generation"
+          },
+          "maintenance_released_through": {
+            "default": 0,
+            "title": "Maintenance Released Through",
+            "type": "integer"
+          },
           "node_ready": {
             "title": "Node Ready",
             "type": "boolean"
@@ -3219,6 +3255,16 @@
           "quiescent": {
             "title": "Quiescent",
             "type": "boolean"
+          },
+          "recovery_acceptance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecoveryAcceptance"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "runtime_ready": {
             "default": false,
@@ -3315,6 +3361,49 @@
           "source"
         ],
         "title": "LocalCapacitySourceResponse",
+        "type": "object"
+      },
+      "Maintenance": {
+        "additionalProperties": false,
+        "description": "Monotonic hold token, independent of idle-drain generations.",
+        "properties": {
+          "generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "title": "Maintenance",
+        "type": "object"
+      },
+      "MaintenanceBegin": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "generation": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "title": "MaintenanceBegin",
         "type": "object"
       },
       "MaterialStatus": {
@@ -6795,6 +6884,80 @@
           "agent_readiness"
         ],
         "title": "ReadyResponse",
+        "type": "object"
+      },
+      "RecoveryAcceptance": {
+        "additionalProperties": false,
+        "description": "Immutable committed reconciliation snapshot for this exact boot.",
+        "properties": {
+          "attention_workspaces": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Attention Workspaces",
+            "type": "integer"
+          },
+          "database_ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Database Ref",
+            "type": "string"
+          },
+          "disk_ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Disk Ref",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "monitor_workspaces": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Monitor Workspaces",
+            "type": "integer"
+          },
+          "previous_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Identity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "queued_workspaces": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Queued Workspaces",
+            "type": "integer"
+          },
+          "receipt_ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Receipt Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "receipt_ref",
+          "previous_identity",
+          "disk_ref",
+          "database_ref",
+          "queued_workspaces",
+          "monitor_workspaces",
+          "attention_workspaces"
+        ],
+        "title": "RecoveryAcceptance",
         "type": "object"
       },
       "RecoveryAcknowledgement": {
@@ -15759,6 +15922,294 @@
           }
         ],
         "summary": "Abort",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/maintenance/begin": {
+      "post": {
+        "operationId": "begin_maintenance_v1_hosted_node_lifecycle_maintenance_begin_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceBegin"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Begin Maintenance",
+        "tags": [
+          "hosted-node"
+        ]
+      }
+    },
+    "/v1/hosted-node/lifecycle/maintenance/release": {
+      "post": {
+        "operationId": "release_maintenance_v1_hosted_node_lifecycle_maintenance_release_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Owner",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Owner",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Incarnation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Incarnation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Recovery-Generation",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Recovery-Generation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-AWF-Expected-Boot-Epoch",
+            "required": true,
+            "schema": {
+              "title": "X-Awf-Expected-Boot-Epoch",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Maintenance"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Bearer denied"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Identity or controller role denied"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Disabled or preparation absent"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Exact binding or monotonic authority conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Body exceeds 128 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Sanitized invalid request"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostedErrorResponse"
+                }
+              }
+            },
+            "description": "Authority unavailable; acceptance is unknown"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Release Maintenance",
         "tags": [
           "hosted-node"
         ]

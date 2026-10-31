@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -96,30 +96,36 @@ async def test_parallel_create_keys_conflict_without_partial_rows(
     client, headers = create_client
     alternate = await alternate_credentials(runtime, value)
     first_at_insert, release_first = asyncio.Event(), asyncio.Event()
-    second_at_lock = asyncio.Event()
     original_create = WorkspaceRepository.create
-    original_execute = AsyncSession.execute
     calls = 0
-    lock_calls = 0
+    first_backend = None
 
     async def create(self, *args, **kwargs):
-        nonlocal calls
+        nonlocal calls, first_backend
         calls += 1
         if calls == 1:
+            first_backend = await self._session.scalar(text("SELECT pg_backend_pid()"))
             first_at_insert.set()
             await release_first.wait()
         return await original_create(self, *args, **kwargs)
 
-    async def execute(self, statement, *args, **kwargs):
-        nonlocal lock_calls
-        if "hashtext('awf:hosted-workspace')" in str(statement):
-            lock_calls += 1
-            if lock_calls == 2:
-                second_at_lock.set()
-        return await original_execute(self, statement, *args, **kwargs)
+    async def second_blocked():
+        # The node admission mutex may serialize the peer before the workspace
+        # advisory lock. Assert actual blocking, not which lock it reaches first.
+        while True:
+            async with factory() as session:
+                blocked = await session.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                        "WHERE :blocker = ANY(pg_blocking_pids(pid)))"
+                    ),
+                    {"blocker": first_backend},
+                )
+            if blocked:
+                return
+            await asyncio.sleep(0.01)
 
     monkeypatch.setattr(WorkspaceRepository, "create", create)
-    monkeypatch.setattr(AsyncSession, "execute", execute)
     try:
         first = asyncio.create_task(
             client.post(
@@ -133,7 +139,7 @@ async def test_parallel_create_keys_conflict_without_partial_rows(
             )
         )
         try:
-            await asyncio.wait_for(second_at_lock.wait(), 5)
+            await asyncio.wait_for(second_blocked(), 5)
             assert not second.done()
         finally:
             release_first.set()

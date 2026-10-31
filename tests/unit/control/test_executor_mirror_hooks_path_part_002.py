@@ -14,6 +14,7 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.node.git_manager import GitOperationError
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.validation import ValidationResult
 
 
 class _NoTrustedGitRootsExecutor:
@@ -51,10 +52,10 @@ async def test_execute_repairs_mirror_hooks_path_after_agent_cleanup_failure(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(
@@ -210,10 +211,10 @@ async def test_execute_repairs_mirror_hooks_path_after_unexpected_agent_failure(
 
     class _Validation:
         async def run_profile_phases(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
         async def run_profile_tool_preflight(self, **_kwargs: Any) -> object:
-            return execution_flow.ValidationResult()
+            return ValidationResult()
 
     class _Executor(_NoTrustedGitRootsExecutor):
         _config = SimpleNamespace(

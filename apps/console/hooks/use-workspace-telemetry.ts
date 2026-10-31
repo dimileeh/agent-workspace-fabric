@@ -4,9 +4,10 @@ import { useEffect, useState, type MutableRefObject } from "react";
 import { parseApiResponse } from "@/components/console-dashboard-shared";
 import { workspaceTelemetryPath } from "@/lib/console-urls";
 import { parseTelemetryPresentation, isLegitimateNullOwnershipNoResource, type ParsedTelemetryPresentation, type TelemetryViewWindow } from "@/lib/console-workspace-telemetry";
+import { parseVMTelemetry, vmTelemetryResourceIdentity, type VMTelemetry } from "@/lib/console-vm-telemetry";
 
 export type TelemetryReadState = {
-  data: ParsedTelemetryPresentation | null;
+  data: ParsedTelemetryPresentation | VMTelemetry | null;
   error: string | null;
   lastGoodAt: string | null;
 };
@@ -48,9 +49,26 @@ export function useWorkspaceTelemetry({ workspaceId, view, url, authEpoch, epoch
           throw new Error(result.errorCode ? `${result.errorCode}: ${message}` : message);
         }
         const raw = result.data as Record<string, unknown> | null;
+        const query = new URL(url, window.location.origin).searchParams;
+        if (raw?.resource_kind === "vm_node") {
+          const scope = { workspaceId, view, orgId: query.get("org_id"), projectId: query.get("project_id") };
+          const nextIdentity = vmTelemetryResourceIdentity(raw, scope);
+          if (nextIdentity === null) {
+            resourceIdentity = null;
+            setState({ data: null, error: "VM telemetry ownership mismatch", lastGoodAt: null });
+            return;
+          }
+          if (nextIdentity !== resourceIdentity) {
+            resourceIdentity = nextIdentity;
+            setState({ data: null, error: null, lastGoodAt: null });
+          }
+          const parsed = parseVMTelemetry(raw, scope);
+          if (!parsed) throw new Error("Malformed VM telemetry response");
+          setState({ data: parsed, error: null, lastGoodAt: new Date().toISOString() });
+          return;
+        }
         // Ownership is private validation evidence, never UI text or routing authority.
         const owner = raw?.ownership as Record<string, unknown> | null | undefined;
-        const query = new URL(url, window.location.origin).searchParams;
         if (owner === null) {
           // Explicit JSON null is Cloud's no-resource / shared-unallocated contract.
           // Only accept when samples, admitted, and numeric cost are absent.

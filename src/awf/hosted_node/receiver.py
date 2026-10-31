@@ -6,16 +6,22 @@ import binascii
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from awf.hosted_node.config import HostedSettings
 from awf.hosted_node.identity import MaterialDeniedError, boot, check
 from awf.hosted_node.material_store import MaterialStore
 from awf.hosted_node.models import Grant, Owner, PreparationRow, Receipt
+from awf.hosted_node.restore_reconciliation_schemas import (
+    RestoreMaterialPermit,
+    VerifyRestoreMaterial,
+)
+from awf.hosted_node.restore_schemas import RestoreBootEvidence
 from awf.hosted_node.runtime_views import RuntimeViews
 from awf.hosted_node.schemas import (
     Binding,
@@ -54,17 +60,113 @@ class Receiver:
         self.closed = False
         self.views = RuntimeViews(store, identity=identity)
         self._close_task: asyncio.Task[None] | None = None
+        from awf.hosted_node.restore_materials import deny_material
+
+        self.verify_restore_material: VerifyRestoreMaterial = deny_material
         from awf.hosted_node.lifecycle import NodeLifecycle
 
         self.lifecycle = NodeLifecycle(factory, identity) if config.lifecycle else None
+        if self.lifecycle is not None:
+            self.lifecycle.verify_bindings = self.verify_recovery_bindings
+
+    async def verify_recovery_bindings(self, bindings: list[Binding]) -> bool:
+        slots = await self._recovery_material_slots(bindings)
+        if slots is None:
+            return False
+        # Batch only recovery preflight. The caller retains its five-second bound;
+        # ordinary material status/expiry cleanup is unchanged.
+        for offset in range(0, len(slots), 8):
+            async with asyncio.TaskGroup() as group:
+                checks = [
+                    group.create_task(asyncio.to_thread(self.store.exists, directory, slot))
+                    for directory, slot in slots[offset : offset + 8]
+                ]
+            if not all(check.result() for check in checks):
+                return False
+        # A revoke, expiry or superseding fence during file I/O must dominate.
+        # Final acceptance separately rechecks the complete retained-row snapshot.
+        return await self._recovery_material_slots(bindings) == slots
+
+    async def _recovery_material_slots(
+        self, bindings: list[Binding]
+    ) -> list[tuple[str, str]] | None:
+        from awf.hosted_node.retained_work import MAX_RETAINED_WORKSPACES
+
+        expected = {binding.idempotency_key: binding for binding in bindings}
+        if len(expected) != len(bindings) or len(bindings) > 2 * MAX_RETAINED_WORKSPACES:
+            return None
+        for binding in bindings:
+            self.expected(binding)
+        other = aliased(Grant)
+        async with self.factory.begin() as session:
+            await self.authority(session, lock=True)
+            rows = (
+                await session.execute(
+                    select(
+                        PreparationRow,
+                        Grant,
+                        Receipt,
+                        select(func.max(other.fence))
+                        .where(other.preparation == Grant.preparation)
+                        .correlate(Grant)
+                        .scalar_subquery(),
+                        select(func.max(other.authorization_generation))
+                        .where(other.preparation == Grant.preparation)
+                        .correlate(Grant)
+                        .scalar_subquery(),
+                    )
+                    .join(Grant, Grant.preparation == PreparationRow.id)
+                    .join(Receipt, Receipt.grant == Grant.id)
+                    .where(
+                        PreparationRow.owner == self.identity.owner,
+                        Receipt.owner == self.identity.owner,
+                        Receipt.idempotency_key.in_(expected),
+                    )
+                    .order_by(Receipt.id)
+                    .limit(len(bindings) + 1)
+                )
+            ).all()
+            if len(rows) != len(bindings):
+                return None
+            slots = []
+            for prep, grant, receipt, fence, generation in rows:
+                binding = expected[receipt.idempotency_key]
+                if (
+                    receipt.binding != self.binding(binding)
+                    or receipt.state != "installed"
+                    or grant.revoked
+                    or grant.pending is not None
+                    or grant.current != receipt.id
+                    or grant.grant_id != binding.grant_id
+                    or grant.revision != binding.revision
+                    or grant.fence != binding.fence
+                    or grant.authorization_generation != binding.authorization_generation
+                    or fence != binding.fence
+                    or generation != binding.authorization_generation
+                    or binding.expires_at <= datetime.now(UTC)
+                    or prep.namespace != binding.namespace
+                    or prep.workspace_id != binding.workspace_id
+                    or prep.preparation_id != binding.preparation_id
+                    or prep.binding["identity"] != self.identity.model_dump()
+                    or prep.binding["purpose"] != binding.purpose
+                    or prep.binding["target"] != binding.target
+                    or binding.expires_at > datetime.fromisoformat(prep.binding["expires_at"])
+                ):
+                    return None
+                slots.append((prep.id, receipt.id))
+            return slots
 
     @classmethod
     async def start(
-        cls, config: HostedSettings, factory: async_sessionmaker[AsyncSession]
+        cls,
+        config: HostedSettings,
+        factory: async_sessionmaker[AsyncSession],
+        *,
+        restore: RestoreBootEvidence | None = None,
     ) -> "Receiver":
         store = MaterialStore(config.material_root)
         try:
-            identity = await boot(config, factory)
+            identity = await boot(config, factory, restore=restore)
             async with factory() as session:
                 rows = (
                     await session.execute(
@@ -117,15 +219,31 @@ class Receiver:
                 **self.identity.model_dump(), acknowledged=row.acknowledgement is not None
             )
 
+    async def allow_materials(
+        self,
+        session: AsyncSession,
+        value: Preparation | Binding | None = None,
+        permit: RestoreMaterialPermit | None = None,
+        operation: Literal["prepare", "install"] | None = None,
+    ) -> None:
+        from awf.hosted_node.restore_materials import allow
+
+        if self.config.lifecycle is not None:
+            await allow(self, session, value, permit, operation)
+
     @staticmethod
     def future(expiry: datetime) -> None:
         if not datetime.now(UTC) < expiry <= datetime.now(UTC) + timedelta(hours=1):
             raise MaterialDeniedError("INVALID_EXPIRY", 422)
 
     async def prepare(self, value: Preparation) -> None:
+        from awf.hosted_node.restore_materials import authorize
+
         self.future(value.expires_at)
+        permit = await authorize(self, value, "prepare")
         async with self.factory.begin() as session:
             await self.authority(session, lock=True)
+            await self.allow_materials(session, value, permit, "prepare")
             row = await self.preparation(session, value, required=False)
             binding = {**value.model_dump(mode="json"), "identity": self.identity.model_dump()}
             if row:
@@ -172,6 +290,7 @@ class Receiver:
         self, session: AsyncSession, value: PreparationRenewal, metadata: dict[str, Any]
     ) -> tuple[PreparationRow, Grant, Binding, Receipt | None]:
         await self.authority(session, lock=True)
+        await self.allow_materials(session, value.current)
         recorded = await session.scalar(
             select(Receipt).where(
                 Receipt.owner == self.identity.owner,
@@ -339,6 +458,8 @@ class Receiver:
             raise MaterialDeniedError("IDENTITY_MISMATCH", 403)
 
     async def install(self, value: Install, *, refresh: bool = False) -> MaterialStatus:
+        from awf.hosted_node.restore_materials import authorize
+
         self.expected(value)
         try:
             material = base64.b64decode(value.material, validate=True)
@@ -347,10 +468,13 @@ class Receiver:
         if not 1 <= len(material) <= 65536:
             raise MaterialDeniedError("INVALID_MATERIAL", 422)
         operation = "refresh" if refresh else "install"
+        permit_operation: Literal["install"] | None = None if refresh else "install"
+        permit = await authorize(self, value, permit_operation)
         predecessor = value.predecessor if isinstance(value, Refresh) else None
         replay = False
         async with self.factory.begin() as session:
             await self.authority(session, lock=True)
+            await self.allow_materials(session, value, permit, permit_operation)
             prep = await self.preparation(session, value)
             assert prep is not None
             old = await self.receipt(session, value)
@@ -430,8 +554,10 @@ class Receiver:
             )
         finalized = False
         try:
+            permit = await authorize(self, value, permit_operation)
             async with self.factory.begin() as session:
                 await self.authority(session, lock=True)
+                await self.allow_materials(session, value, permit, permit_operation)
                 grant = await self.grant(session, prep, value)
                 row = await session.get(Receipt, slot)
                 assert grant is not None and row is not None

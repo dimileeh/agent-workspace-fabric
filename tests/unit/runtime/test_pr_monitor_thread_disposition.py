@@ -503,6 +503,38 @@ def test_unverified_blocker_message_lists_ten_ids_and_counts_rest() -> None:
     assert "more)" in bounded
 
 
+def test_unverified_blocker_message_names_why_awf_did_not_reopen() -> None:
+    """#1138: below the cap AWF reopens itself; the blocker says why it did not."""
+    exhausted = "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED"
+    unsupported = "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_UNSUPPORTED"
+    failed = "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED"
+    tail = (
+        "; to clear one, reopen it: AWF re-triages it through the normal fix cycle and "
+        "posts a fresh disposition before resolving it"
+    )
+    # No reasons: byte-identical to the gate's own text.
+    assert unverified_blocker_message(["PRRT_test_one"]) == (
+        "REVIEW_THREAD_DISPOSITION_UNVERIFIED: 1 review thread(s) resolved by AWF's "
+        f"identity carry no AWF disposition reply: PRRT_test_one{tail}"
+    )
+    message = unverified_blocker_message(
+        ["PRRT_test_one"], auto_reopen_reasons=(exhausted, exhausted)
+    )
+    assert message == (
+        "REVIEW_THREAD_DISPOSITION_UNVERIFIED: 1 review thread(s) resolved by AWF's "
+        "identity carry no AWF disposition reply: PRRT_test_one; AWF did not reopen them "
+        f"automatically ({exhausted}: already reopened twice){tail}"
+    )
+    ids = [f"PRRT_test_long_{i:010d}" for i in range(12)]
+    bounded = unverified_blocker_message(ids, auto_reopen_reasons=(failed, unsupported, exhausted))
+    assert bounded.startswith("REVIEW_THREAD_DISPOSITION_UNVERIFIED: 12 review thread(s)")
+    assert bounded.endswith(tail)
+    assert len(bounded) <= 560
+    for code in (exhausted, unsupported, failed):
+        assert bounded.count(code) == 1
+    assert ids[0] in bounded and "more)" in bounded
+
+
 def test_clear_addressed_state_by_id_drops_item_disposition() -> None:
     state = MonitorState()
     state.mark_addressed("PRRT_test_a", "false_positive")

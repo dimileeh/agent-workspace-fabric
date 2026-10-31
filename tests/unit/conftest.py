@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import suppress
 from typing import Any
 
 import pytest
@@ -13,6 +15,7 @@ from awf.control.executor import (
 )
 from awf.control.executor.runtime_setup_replay import AgentContainerIdentity
 from awf.runtime.inspection import RuntimeSnapshot
+from awf.service import gitconfig_snapshot
 
 _STABLE_AGENT_IDENTITY = AgentContainerIdentity(
     container_id="unit-test-agent", started_at="2026-01-01T00:00:00Z"
@@ -75,3 +78,25 @@ def _unpaced_resume_restart_failures(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(monitor_resume_restart_escalation, "_sleep", _no_sleep)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_gitconfig_bundle_leases() -> Iterator[None]:
+    """Give every unit test an empty service-gitconfig worker lease registry.
+
+    ``_ACTIVE_BUNDLE_LEASES`` is process-global: any test that materializes a
+    real gitconfig snapshot registers a lease that would otherwise outlive the
+    test and leak into later assertions about the registry. Leases a test opens
+    are closed afterwards so their file descriptors do not accumulate.
+    """
+    registry = gitconfig_snapshot._ACTIVE_BUNDLE_LEASES
+    original = dict(registry)
+    registry.clear()
+    try:
+        yield
+    finally:
+        for lease in registry.values():
+            with suppress(OSError):
+                lease.close()
+        registry.clear()
+        registry.update(original)

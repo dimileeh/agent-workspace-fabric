@@ -144,21 +144,185 @@ def get_comment_repair_reasons(
             "awf workspace events <workspace_id>",
             reason_catalog_link("REVIEW_THREAD_DISPOSITION_LEGACY_BASELINE"),
         ),
+        "REVIEW_THREAD_DISPOSITION_AUTO_REOPENED": reason_text_cls(
+            (
+                "AWF reopened review threads its disposition audit could not verify, so the "
+                "next poll re-triages them."
+            ),
+            (
+                "No action is required. AWF re-triages each reopened thread through the normal "
+                "fix cycle and posts a fresh disposition in the thread before resolving it. It "
+                "reopens a thread at most twice; after that it asks you to reopen it."
+            ),
+            (
+                "A thread AWF's identity resolved had no live disposition: for example a review "
+                "bot replied in it after AWF's disposition reply, or a re-adoption on a moved "
+                "head retired that reply."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_AUTO_REOPENED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED": reason_text_cls(
+            (
+                "AWF did not reopen an unverified review thread itself because it already "
+                "reopened it twice on this PR."
+            ),
+            (
+                "Inspect the thread and reopen it if its disposition should be redone; AWF then "
+                "re-triages it. If a bot keeps replying after every disposition, resolve the "
+                "conversation with the bot's owner first."
+            ),
+            (
+                "Each thread is reopened automatically at most twice over the PR's life, across "
+                "re-adoptions, so a thread that keeps losing its disposition cannot loop."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_EXHAUSTED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_UNSUPPORTED": reason_text_cls(
+            (
+                "AWF did not reopen an unverified review thread itself because the forge has no "
+                "thread-reopen API."
+            ),
+            "Reopen the listed threads by hand; AWF then re-triages each one.",
+            (
+                "Automatic reopen needs a forge call to unresolve a review thread; this forge "
+                "client does not provide one."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_UNSUPPORTED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED": reason_text_cls(
+            "AWF tried to reopen an unverified review thread and the forge rejected the call.",
+            (
+                "Check the token's permissions and the forge error in the monitor log. Reopen "
+                "the thread by hand, or wait: AWF retries the reopen on a later poll."
+            ),
+            (
+                "The unresolve mutation failed (for example a permission error or a forge "
+                "outage). The workspace keeps monitoring."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_FAILED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_ACK_CHECK_PENDING": reason_text_cls(
+            (
+                "AWF held READY_TO_MERGE / merge for one poll because a review bot replied in a "
+                "thread after AWF's disposition reply, and AWF checks that reply first."
+            ),
+            (
+                "No action is required. On the next poll the agent judges once whether the bot "
+                "only acknowledged the disposition; the monitor then certifies the thread or "
+                "re-triages it."
+            ),
+            (
+                "Only the bot account that opened the thread qualifies, and only while AWF's "
+                "identity resolved the thread. The check never runs under the merge lock."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_ACK_CHECK_PENDING"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED": reason_text_cls(
+            (
+                "The agent judged a review bot's reply after AWF's disposition to be an "
+                "acknowledgement, so AWF's disposition stands."
+            ),
+            (
+                "No action is required. AWF posted no new reply and did not reopen the thread; "
+                "it counts in the cert under its disposition class."
+            ),
+            (
+                "The bot that opened the thread replied after AWF's disposition reply. Such a "
+                "reply is judged once per comment version; an edit is judged again."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_ACKNOWLEDGED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT": reason_text_cls(
+            (
+                "The agent judged a review bot's reply after AWF's disposition to raise a new "
+                "point, so AWF re-triages the thread."
+            ),
+            (
+                "No action is required. AWF reopens the thread (at most twice) and the normal "
+                "fix cycle posts a fresh disposition before resolving it."
+            ),
+            (
+                "The bot that opened the thread disagreed with AWF's disposition or asked for "
+                "more after it."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_ACK_NEW_POINT"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED": reason_text_cls(
+            (
+                "AWF could not judge a review bot's reply after its disposition, so it "
+                "re-triages the thread instead."
+            ),
+            (
+                "No action is required: the thread takes the automatic reopen and a fresh "
+                "disposition. If the monitor log shows forge re-read faults, check the token and "
+                "the forge status; AWF retries the re-read on the next two polls first."
+            ),
+            (
+                "The agent run failed, its answer had no valid AWF-DISPOSITION-ACK line, "
+                "it changed the worktree during a judgment-only run, or the thread could not "
+                "be re-read on three polls. A failed check is recorded and never retried; a "
+                "provider outage goes to provider recovery instead and is not a failed check."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_ACK_CHECK_FAILED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_READOPT_CARRIED": reason_text_cls(
+            (
+                "A FIXED disposition from before a re-adoption on a moved head stays valid: its "
+                "fix commits are in the adopted PR head."
+            ),
+            "No action is required. The thread keeps its disposition and is not re-triaged.",
+            (
+                "AWF checked each cited commit with git merge-base --is-ancestor against the "
+                "head it adopted. The thread must also still be resolved by AWF's identity with "
+                "no newer comment."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_READOPT_CARRIED"),
+        ),
+        "REVIEW_THREAD_DISPOSITION_READOPT_RETIRED": reason_text_cls(
+            (
+                "A FIXED disposition from before a re-adoption on a moved head was retired: AWF "
+                "could not confirm its fix commits are in the adopted PR head."
+            ),
+            (
+                "No action is required. AWF reopens the thread (at most twice) and re-triages "
+                "it. If the detail is probe_failed, check that the worktree can read the PR's "
+                "history."
+            ),
+            (
+                "A cited commit is not an ancestor of the adopted head (for example after a "
+                "force-push), the git check failed or timed out, or the record no longer cites "
+                "a posted fix."
+            ),
+            "awf workspace logs <workspace_id>",
+            reason_catalog_link("REVIEW_THREAD_DISPOSITION_READOPT_RETIRED"),
+        ),
         "REVIEW_THREAD_DISPOSITION_UNVERIFIED": reason_text_cls(
             (
                 "AWF refused READY_TO_MERGE / merge because review threads resolved by AWF's "
                 "identity carry no AWF disposition reply."
             ),
             (
-                "Inspect the listed threads and reopen each one. AWF then re-triages it through "
-                "the normal fix cycle and posts a fresh disposition in the thread before "
-                "resolving it. Do not resolve it again by hand under AWF's account."
+                "AWF reopens such a thread itself, at most twice, and re-triages it. When the "
+                "blocker names a REVIEW_THREAD_DISPOSITION_AUTO_REOPEN_* code, inspect the listed "
+                "threads and reopen each one. AWF then re-triages it through the normal fix "
+                "cycle and posts a fresh disposition in the thread before resolving it. Do not "
+                "resolve it again by hand under AWF's account."
             ),
             (
-                "A thread resolved by AWF's own forge identity has no in-thread "
+                "A thread resolved by AWF's own forge identity has no live in-thread "
                 "`AWF:thread-disposition` marker — it was resolved silently (for example before "
-                "AWF replied before every resolve, or by hand under the same account). Threads "
-                "resolved by other logins do not block."
+                "AWF replied before every resolve, or by hand under the same account), a bot "
+                "replied after AWF's reply, or a moved-head re-adoption retired that reply. "
+                "Threads resolved by other logins do not block."
             ),
             "awf workspace events <workspace_id>",
             reason_catalog_link("REVIEW_THREAD_DISPOSITION_UNVERIFIED"),

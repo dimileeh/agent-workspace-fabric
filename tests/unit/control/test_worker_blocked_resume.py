@@ -151,6 +151,47 @@ def _worker(
 
 
 @pytest.mark.unit
+async def test_decision_pause_survives_worker_restart_until_directive(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    blocked_id = await _create_blocked(
+        session_factory,
+        origin_repo,
+        "decision",
+        grant_path="pyproject.toml",
+    )
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).get(blocked_id)
+        assert ws is not None
+        ws.block_type = "plan_conformance_decision"
+        ws.block_reason_code = "PLAN_CONFORMANCE_NEEDS_HUMAN"
+        ws.block_resume_phase = "conformance"
+        await session.commit()
+    executor = _RecordingBlockedExecutor()
+    # Independent worker instances simulate a restart, with an unanswered
+    # question and even a legacy active file grant. Neither may dispatch.
+    for _ in range(2):
+        worker = _worker(session_factory, executor)
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+    assert executor.resume_blocked_calls == []
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).get(blocked_id)
+        assert ws is not None and ws.status == "blocked"
+        ws.pending_operator_hint = {
+            "status": "pending",
+            "directive": "Approve the dependency update.",
+            "reason": "decision",
+        }
+        await session.commit()
+    worker = _worker(session_factory, executor)
+    assert await worker.run_once() == 1
+    await worker.wait_for_execution_tasks()
+    assert executor.resume_blocked_calls == [blocked_id]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "directive,grant_path",
     [("revert the change", None), (None, "pyproject.toml")],

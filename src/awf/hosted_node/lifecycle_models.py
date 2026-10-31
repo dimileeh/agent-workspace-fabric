@@ -3,11 +3,12 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, Integer, String
+from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from awf.db.base import Base
+from awf.hosted_node import restore_reconciliation_models as restore_reconciliation_models  # noqa: F401
 
 
 class NodeLifecycleRow(Base):
@@ -26,6 +27,22 @@ class NodeLifecycleRow(Base):
     phase: Mapped[str] = mapped_column(String(16), nullable=False)
     recovery_key: Mapped[str | None] = mapped_column(String(128))
     receipt_ref: Mapped[str | None] = mapped_column(String(128))
+    recovery_acceptance: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     drain_generation: Mapped[int | None] = mapped_column(BigInteger)
     aborted_through: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    maintenance_generation: Mapped[int | None] = mapped_column(BigInteger)
+    maintenance_released_through: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checkpoint_marker: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
+    restore_quarantine: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
+    restore_reconciliation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("hosted_restore_reconciliations.id"), nullable=True
+    )

@@ -162,11 +162,12 @@ async def test_canonical_create_drives_real_worker_to_pr_monitor_completion(
             response = await client.post("/v1/workspaces", json=payload, headers=headers)
             assert response.status_code == 202, response.text
             assert response.json()["workspace_id"] == "ws_cloud_stable"
-            async with asyncio.timeout(20):
-                await runtime.worker.run_once()
-                tasks = list(runtime.worker._execution_tasks.values())
-                if tasks:
-                    await asyncio.gather(*tasks)
+            # The shared Postgres-test watchdog bounds the whole workflow;
+            # HTTP/Git/DB progress is not required to complete within 20s.
+            await runtime.worker.run_once()
+            tasks = list(runtime.worker._execution_tasks.values())
+            if tasks:
+                await asyncio.gather(*tasks)
             async with factory() as session:
                 workspace = await session.get(Workspace, "ws_cloud_stable")
                 assert workspace is not None

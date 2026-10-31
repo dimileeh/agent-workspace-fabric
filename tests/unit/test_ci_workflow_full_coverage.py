@@ -200,6 +200,12 @@ def test_ci_has_parallel_python_coverage_shards() -> None:
     assert "shopt -s nullglob" in shard_run
     assert "--splits 8" in shard_run
     assert '--group "${{ matrix.shard }}"' in shard_run
+    # No .test_durations file is committed, so duration_based_chunks degrades
+    # to contiguous count-based chunks and packs every slow integration module
+    # into shard 1 (which then hit the 45-minute job timeout). least_duration
+    # interleaves tests across shards even without recorded durations.
+    assert "--splitting-algorithm least_duration" in shard_run
+    assert "duration_based_chunks" not in shard_run
     assert "--timeout=300" in shard_run
     assert "--timeout=120" not in shard_run
     assert "-n 8" not in shard_run

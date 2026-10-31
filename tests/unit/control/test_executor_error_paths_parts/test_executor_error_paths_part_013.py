@@ -842,7 +842,7 @@ class TestExecutorMonitorHandoffSetup:
             assert "adopted PR monitor handoff failed" in (ws.failure_message or "")
 
     @pytest.mark.unit
-    async def test_sync_feature_pr_handoff_profile_preflight_failure_blocks_monitor(
+    async def test_sync_feature_pr_handoff_ignores_retired_static_profile_preflight(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -884,17 +884,13 @@ class TestExecutorMonitorHandoffSetup:
         await executor.execute(ws_id)
 
         assert validation.calls == [("setup", "pre_agent")]
-        assert validation.preflight_calls == [ws_id]
-        assert monitor_runs == []
+        assert validation.preflight_calls == []
+        assert monitor_runs == [ws_id]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == FailureReason.profile_resolution_failure.value
-            assert ws.failure_message == (
-                "profile preflight failed: profile validation tool preflight"
-            )
-            assert ws.events[-1].reason_code == PROFILE_VALIDATION_TOOL_UNAVAILABLE
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_setup_status_recheck_blocks_monitor_factory(

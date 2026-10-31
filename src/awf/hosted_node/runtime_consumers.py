@@ -125,7 +125,11 @@ class WorkspaceConsumers:
             cleanup.result()
             raise
         except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError) as error:
-            await self._stop(workspace_id)
+            if not isinstance(error, MaterialDeniedError) or error.reason not in {
+                "RECOVERY_ATTENTION_REQUIRED",
+                "NODE_ADMISSION_CLOSED",
+            }:
+                await self._stop(workspace_id)
             if isinstance(error, MaterialDeniedError):
                 raise WorkspaceScopeDeniedError(error.reason, error.status) from error
             raise
@@ -252,6 +256,11 @@ class WorkspaceConsumers:
 
     async def admission_check(self) -> bool:
         try:
+            accepted = True
+            try:
+                await self.authority.admission()
+            except MaterialDeniedError:
+                accepted = False
             # Reuse the normal worker poll, including after restart. Retained
             # views and stacks outlive the scope's active-task watcher.
             # Retry known stop failures even if a row left the owned query.
@@ -278,15 +287,22 @@ class WorkspaceConsumers:
                 retained = await self.authority.retained_workspaces(limit=limit)
             for workspace_id in dict.fromkeys([*retry, *retained, *history]):
                 try:
-                    try:
-                        owned = await self.authority.reconcile_workspace(workspace_id)
-                    except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
-                        await self._stop(workspace_id)
+                    if not accepted:
+                        # No ordinary stop or reconciliation before acceptance.
+                        # Retraction touches only this identity's view and an
+                        # exact older binding; an obsolete process cannot
+                        # retract its successor's publication.
+                        await self.authority.retract_retired(workspace_id)
                     else:
-                        if not owned and workspace_id in retry:
-                            # Finish this identity's failed retraction, without
-                            # stopping or touching a successor identity's view.
-                            await self.authority.retract(workspace_id)
+                        try:
+                            owned = await self.authority.reconcile_workspace(workspace_id)
+                        except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
+                            await self._stop(workspace_id)
+                        else:
+                            if not owned and workspace_id in retry:
+                                # Finish this identity's failed retraction, without
+                                # stopping or touching a successor identity's view.
+                                await self.authority.retract(workspace_id)
                 except (MaterialDeniedError, SQLAlchemyError, OSError, TimeoutError):
                     # Keep admission closed across pages without starving later
                     # cleanup. The bounded cursor wraps and retries each failure.

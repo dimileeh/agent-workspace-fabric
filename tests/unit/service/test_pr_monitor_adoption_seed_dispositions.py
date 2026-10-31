@@ -336,3 +336,162 @@ def test_unverified_flags_cross_regardless_of_head(value: str, head_continuity: 
 )
 def test_malformed_unverified_flags_never_cross(key: str, value: str) -> None:
     assert seedable_monitor_state({key: value}, head_continuity=True) == {}
+
+
+_AUTO_REOPENED = "__awf_disposition_auto_reopened__:"
+
+
+@pytest.mark.parametrize("value", ["1", "2", "17"])
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_auto_reopen_counts_cross_regardless_of_head(value: str, head_continuity: bool) -> None:
+    """The per-thread automatic-reopen count bounds AWF's reopens over the PR's life (#1138).
+
+    Left behind, a successor would reopen the same thread twice more. It records
+    thread history, not code, and only makes the successor stricter.
+    """
+    key = f"{_AUTO_REOPENED}PRRT_test_flagged"
+
+    assert seedable_monitor_state({key: value}, head_continuity=head_continuity) == {key: value}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (f"{_AUTO_REOPENED}__awf_notify__:x", "1"),
+        (f"{_AUTO_REOPENED}", "1"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "0"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "x"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "01"),
+        (f"{_AUTO_REOPENED}PRRT_test_flagged", "1000"),
+    ],
+)
+def test_malformed_auto_reopen_counts_never_cross(key: str, value: str) -> None:
+    assert seedable_monitor_state({key: value}, head_continuity=True) == {}
+
+
+# #1138 D2: on a moved head a ``fixed`` / ``fixed_branch_evidence`` disposition
+# whose reply AWF bound to a known conversation crosses live, pending a runner
+# check that its cited commits are ancestors of the adopted head.
+_ADOPTED = "a" * 40
+_FOLLOWED = "b" * 64
+_READOPT = "__awf_disposition_readopt_pending__:"
+_RETIRED = "__awf_disposition_retired__:"
+_ACK = "__awf_disposition_ack__:"
+_ACK_PENDING = "__awf_disposition_ack_pending__:"
+
+
+def _bound(item_id: str, cls: str, **overrides: object) -> str:
+    record = {
+        **json.loads(_disposition(item_id, cls, "fix_committed")),
+        "conversation_digest": _FOLLOWED,
+        "resolved": True,
+        "reply_conversation_digest": _FOLLOWED,
+        "reread_pending": False,
+        **overrides,
+    }
+    return json.dumps(record, sort_keys=True)
+
+
+@pytest.mark.parametrize("cls", ["fixed", "fixed_branch_evidence"])
+@pytest.mark.parametrize(
+    "followed",
+    [
+        {},
+        {"conversation_digest": None, "resolved": False},  # posted, re-read, never audited
+    ],
+)
+def test_a_fixed_disposition_crosses_a_moved_head_live_pending_its_ancestry_check(
+    cls: str, followed: dict[str, object]
+) -> None:
+    key = f"{_PREFIX}PRRT_test_fixed"
+    previous = {"PRRT_test_fixed": "fix_committed", key: _bound("PRRT_test_fixed", cls, **followed)}
+
+    seeded = seedable_monitor_state(previous, head_continuity=False, adopted_head_sha=_ADOPTED)
+
+    record = json.loads(seeded[key])
+    assert record["reply_comment_id"] == "991"
+    assert record["conversation_digest"] == _FOLLOWED and record["resolved"] is True
+    assert seeded[f"{_READOPT}PRRT_test_fixed"] == _ADOPTED
+    assert not any(k.startswith(_RETIRED) for k in seeded)
+    assert "PRRT_test_fixed" not in seeded  # the code-dependent verdict still re-triages
+
+
+@pytest.mark.parametrize("adopted_head_sha", [None, "", "   ", "a" * 7, "A" * 39, "g" * 40])
+def test_without_a_full_adopted_head_nothing_changes_from_today(
+    adopted_head_sha: str | None,
+) -> None:
+    previous = {f"{_PREFIX}PRRT_test_fixed": _bound("PRRT_test_fixed", "fixed")}
+
+    seeded = seedable_monitor_state(
+        previous, head_continuity=False, adopted_head_sha=adopted_head_sha
+    )
+
+    assert seeded == seedable_monitor_state(previous, head_continuity=False)
+    assert seeded == {f"{_RETIRED}PRRT_test_fixed:{_FOLLOWED}": "retired"}
+
+
+@pytest.mark.parametrize(
+    ("cls", "overrides"),
+    [
+        pytest.param("false_positive", {}, id="false-positive"),
+        pytest.param("fixed", {"reread_pending": True}, id="reread-pending"),
+        pytest.param("fixed", {"commits": []}, id="no-commits"),
+        pytest.param("fixed", {"reply_comment_id": None}, id="no-reply"),
+        pytest.param(
+            "fixed",
+            {"conversation_digest": None, "reply_conversation_digest": None},
+            id="conversation-never-read",
+        ),
+        pytest.param("fixed", {"conversation_digest": "not-a-digest"}, id="malformed-digest"),
+    ],
+)
+def test_other_code_dependent_records_keep_todays_moved_head_handling(
+    cls: str, overrides: dict[str, object]
+) -> None:
+    previous = {f"{_PREFIX}PRRT_test_x": _bound("PRRT_test_x", cls, **overrides)}
+
+    seeded = seedable_monitor_state(previous, head_continuity=False, adopted_head_sha=_ADOPTED)
+
+    assert seeded == seedable_monitor_state(previous, head_continuity=False)
+    assert f"{_READOPT}PRRT_test_x" not in seeded
+
+
+def test_a_leftover_readopt_check_crosses_only_under_head_continuity() -> None:
+    key = f"{_PREFIX}PRRT_test_fixed"
+    previous = {key: _bound("PRRT_test_fixed", "fixed"), f"{_READOPT}PRRT_test_fixed": "f" * 40}
+
+    kept = seedable_monitor_state(previous, head_continuity=True, adopted_head_sha="f" * 40)
+    moved = seedable_monitor_state(previous, head_continuity=False, adopted_head_sha=_ADOPTED)
+    blind = seedable_monitor_state(previous, head_continuity=False)
+    malformed = seedable_monitor_state(
+        {**previous, f"{_READOPT}PRRT_test_fixed": "abc"}, head_continuity=True
+    )
+
+    assert kept[f"{_READOPT}PRRT_test_fixed"] == "f" * 40 and kept[key] == previous[key]
+    assert moved[f"{_READOPT}PRRT_test_fixed"] == _ADOPTED  # regenerated from the record
+    assert f"{_READOPT}PRRT_test_fixed" not in blind
+    assert f"{_READOPT}PRRT_test_fixed" not in malformed
+
+
+@pytest.mark.parametrize("head_continuity", [True, False])
+def test_ack_judgments_cross_regardless_of_head_and_the_pending_flag_never_does(
+    head_continuity: bool,
+) -> None:
+    identity = "0123456789abcdef" * 4
+    valid = {
+        f"{_ACK}PRRT_test_a:{identity}": "ACKNOWLEDGES",
+        f"{_ACK}PRRT_test_b:{identity}": "NEW_POINT",
+        f"{_ACK}5120013295:{identity}": "UNJUDGED",
+    }
+    malformed = {
+        f"{_ACK}PRRT_test_c:{identity}": "MAYBE",
+        f"{_ACK}PRRT_test_d:{identity[:63]}": "ACKNOWLEDGES",
+        f"{_ACK}PRRT_test_e:{identity.upper()}": "ACKNOWLEDGES",
+        f"{_ACK}__evil__:{identity}": "ACKNOWLEDGES",
+        f"{_ACK}PRRT_test_f": "ACKNOWLEDGES",
+        f"{_ACK_PENDING}PRRT_test_a": "0",
+    }
+
+    seeded = seedable_monitor_state({**valid, **malformed}, head_continuity=head_continuity)
+
+    assert seeded == valid

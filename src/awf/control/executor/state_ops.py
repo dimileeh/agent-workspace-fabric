@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import enum
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import (
     UTC,
     datetime,
@@ -58,11 +58,13 @@ from awf.control.operator_grants import (
 )
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+    PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
     QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     GrantSpec,
     QualityGateViolation,
 )
 from awf.db.enums import (
+    PLAN_CONFORMANCE_DECISION_BLOCK_TYPE,
     AgentRuntime,
     FailureReason,
     OperationStatus,
@@ -72,6 +74,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
+from awf.runtime.planning import PLAN_CONFORMANCE_NEEDS_HUMAN
 from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
 from awf.service.provider_recovery import (
     _policy_model,
@@ -504,6 +507,9 @@ async def enter_blocked_for_protected_violation(
     execution_owner_id: str | None = None,
     block_type: str = PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     block_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+    transition_reason_code: str = PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
+    extra_payload: Mapping[str, Any] | None = None,
+    before_publish: Callable[[], None] | None = None,
     stale_action: str = "enter_blocked_for_protected_violation",
     recovery_finalize_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     recovery_finalize_message: str = (
@@ -549,6 +555,8 @@ async def enter_blocked_for_protected_violation(
             resume_phase=resume_phase,
             block_type=block_type,
             block_reason_code=block_reason_code,
+            transition_reason_code=transition_reason_code,
+            extra_payload=extra_payload,
             execution_owner_id=execution_owner_id,
         )
         if ws is None:
@@ -593,6 +601,8 @@ async def enter_blocked_for_protected_violation(
         # ``validate`` recovery row before this transition; this additionally
         # covers the ``rebase_only`` recovery, recorded as an
         # ``OperationType.rebase`` row that path does not touch.
+        if before_publish is not None:
+            before_publish()
         await self._finish_active_recovery_operations_in_session(
             session,
             workspace_id=workspace_id,
@@ -629,7 +639,17 @@ async def enter_blocked_for_resume_setup_failure(
     pause's epoch-fenced CAS clears the directive hint (so the worker does not
     auto-resume straight back into the same failure — no loop) and the operator
     can re-issue ``guide`` once the underlying provisioning issue is resolved.
+
+    A conformance decision remains unanswered until the agent runs with a fresh
+    directive. Keep that block category across setup failures so a file grant
+    cannot bypass the decision; the reason code still records the setup failure.
     """
+    ws = await self._load_workspace(workspace_id)
+    block_type = (
+        PLAN_CONFORMANCE_DECISION_BLOCK_TYPE
+        if ws is not None and ws.block_type == PLAN_CONFORMANCE_DECISION_BLOCK_TYPE
+        else RESUME_SETUP_FAILURE_BLOCK_TYPE
+    )
     return await enter_blocked_for_protected_violation(
         self,
         workspace_id=workspace_id,
@@ -637,7 +657,7 @@ async def enter_blocked_for_resume_setup_failure(
         violations=(),
         resume_phase=resume_phase,
         execution_owner_id=execution_owner_id,
-        block_type=RESUME_SETUP_FAILURE_BLOCK_TYPE,
+        block_type=block_type,
         block_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
         stale_action="enter_blocked_for_resume_setup_failure",
         recovery_finalize_reason_code=RESUME_SETUP_FAILED_REASON_CODE,
@@ -1099,6 +1119,8 @@ async def _begin_execution(
     A revert/redo directive re-invokes the agent with the directive appended; an
     approve-and-keep grant skips the agent entirely (``resume_skip_agent``) and
     re-runs setup + full validation.
+    Plan-conformance decisions require a directive and always re-invoke the
+    agent; a missing/unusable hint re-pauses instead of taking the grant shortcut.
 
     ``resume_reason == "recovering"`` re-enters a workspace the worker moved
     ``recovering -> running`` once the provider cooldown elapsed (#612). Unlike
@@ -1150,11 +1172,33 @@ async def _begin_execution(
         hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
         grant_specs = await self._active_operator_grant_specs(workspace_id)
         grants_active = bool(grant_specs)
+        decision_block = ws.block_type == PLAN_CONFORMANCE_DECISION_BLOCK_TYPE
+        if decision_block and (hint is None or not hint.directive):
+            # Recheck after selection/claim: an invalidated hint must not start
+            # an unguided agent or take the grant-only validation shortcut.
+            await self.enter_blocked_for_protected_violation(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                violations=[],
+                resume_phase=ws.block_resume_phase or "conformance",
+                execution_owner_id=execution_owner_id,
+                block_type=PLAN_CONFORMANCE_DECISION_BLOCK_TYPE,
+                block_reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+                transition_reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+                recovery_finalize_reason_code=PLAN_CONFORMANCE_NEEDS_HUMAN,
+                recovery_finalize_message="Conformance resume requires an operator directive.",
+                extra_payload={"resume_rejected": "missing_operator_directive"},
+            )
+            return None
         if hint is not None and hint.directive:
             # Revert/redo: re-invoke the agent with the operator directive.
+            purpose = (
+                "answer the paused plan-conformance decision"
+                if decision_block
+                else "resolve the paused protected quality-gate violation"
+            )
             ws.task_prompt = (
-                f"{ws.task_prompt}\n\n[Operator directive — resolve the paused "
-                f"protected quality-gate violation]\n{hint.directive}"
+                f"{ws.task_prompt}\n\n[Operator directive — {purpose}]\n{hint.directive}"
             )
             # A combined ``--directive ... --grant ...`` guide arms BOTH: the
             # directive re-invokes the agent (``resume_skip_agent`` stays False)

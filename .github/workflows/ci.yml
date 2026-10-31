@@ -151,6 +151,7 @@ jobs:
           uv run --python 3.12 coverage run --parallel-mode -m pytest \
             --splits 8 \
             --group "${{ matrix.shard }}" \
+            --splitting-algorithm least_duration \
             --timeout=300
           mkdir -p coverage-artifacts
           coverage_files=(.coverage.*)

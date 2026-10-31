@@ -1,4 +1,4 @@
-"""GitHub in-thread reply + exhaustive review-thread resolution audit (#1018).
+"""GitHub in-thread reply, thread reopen + exhaustive resolution audit (#1018, #1138).
 
 These are plain async functions bound onto :class:`~awf.common.github_client.GitHubClient`
 as methods (``reply_to_thread = github_client_threads.reply_to_thread``), so the
@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from awf.common.forge_thread_audit import AuditedReviewThread, ReviewThreadAudit
+from awf.common.forge_thread_audit import (
+    AuditedReviewThread,
+    AuditedThreadComment,
+    ReviewThreadAudit,
+)
 from awf.common.github_client_parsing import (
     _clean_optional_str,
     _connection_nodes,
@@ -27,6 +32,7 @@ from awf.common.github_graphql import (
     _GQL_REVIEW_THREAD_AUDIT,
     _GQL_REVIEW_THREAD_AUDIT_COMMENTS_PAGE,
     _GQL_REVIEW_THREAD_AUDIT_ONE,
+    _GQL_UNRESOLVE_THREAD,
 )
 from awf.common.github_retry import RetryPolicy
 
@@ -56,6 +62,20 @@ async def reply_to_thread(self: GitHubClient, *, thread_id: str, body: str) -> s
             stderr="addPullRequestReviewThreadReply returned no comment id",
         )
     return comment_id
+
+
+async def unresolve_thread(self: GitHubClient, *, thread_id: str) -> bool:
+    """Reopen review thread ``thread_id``; GitHub supports it, so always True (#1138).
+
+    A mutation, so ``RetryPolicy.NEVER`` like ``resolve_thread``: a fault raises
+    ``GitHubClientError`` and the caller decides on the next poll.
+    """
+    await self._graphql(
+        query=_GQL_UNRESOLVE_THREAD,
+        variables={"threadId": thread_id},
+        retry_policy=RetryPolicy.NEVER,
+    )
+    return True
 
 
 def _comment_id(comment: dict[str, Any]) -> str | None:
@@ -195,6 +215,30 @@ async def _audited_thread(
         page = _dig(payload, "data", "node", "comments")
         comment_nodes.extend(_audit_comment_nodes(page))
         cursor = _next_cursor(page, operation="fetch_review_thread_audit comments")
+    snapshot = _thread_snapshot(node, thread_id, comment_nodes)
+    viewer_indexes = [
+        index
+        for index, comment in enumerate(comment_nodes)
+        if comment.get("viewerDidAuthor") is True
+    ]
+    # #1138: the comments after AWF's newest reply, and the thread read without
+    # them, for the gate's one-time bot-acknowledgement check.
+    trailing_start = viewer_indexes[-1] + 1 if viewer_indexes else len(comment_nodes)
+    trailing = tuple(_thread_comment(comment) for comment in comment_nodes[trailing_start:])
+    return replace(
+        snapshot,
+        opener=_thread_comment(comment_nodes[0]) if comment_nodes else None,
+        trailing_comments=trailing,
+        without_trailing=_thread_snapshot(node, thread_id, comment_nodes[:trailing_start])
+        if trailing
+        else None,
+    )
+
+
+def _thread_snapshot(
+    node: dict[str, Any], thread_id: str, comment_nodes: list[dict[str, Any]]
+) -> AuditedReviewThread:
+    """The thread as ``comment_nodes`` (oldest first) read: bodies, supersession, digests."""
     viewer_bodies: list[str] = []
     viewer_ids: list[str] = []
     viewer_posted_at: list[datetime | None] = []
@@ -235,6 +279,17 @@ async def _audited_thread(
             for comment in comment_nodes
             if comment.get("viewerDidAuthor") is not True
         ),
+    )
+
+
+def _thread_comment(comment: dict[str, Any]) -> AuditedThreadComment:
+    """One comment's identity and author type; a deleted author is not a bot."""
+    body = comment.get("body")
+    return AuditedThreadComment(
+        comment_id=_comment_id(comment) or "",
+        author_login=_clean_optional_str(_dig(comment, "author", "login")),
+        author_is_bot=_dig(comment, "author", "__typename") == "Bot",
+        body=body if isinstance(body, str) else "",
     )
 
 

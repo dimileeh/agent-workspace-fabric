@@ -160,7 +160,9 @@ class HostRuntime:
                 sample = await self._observe(
                     identity,
                     allow_busy=self.config.runtime_enabled,
-                    require_database_quiescent=not self.config.runtime_enabled,
+                    # Logical retained work is not unhealthy physical storage.
+                    # Lifecycle status still derives idle/drain quiescence.
+                    require_database_quiescent=False,
                 )
                 if sample is not None:
                     return HostObservation(
@@ -176,8 +178,10 @@ class HostRuntime:
     async def observe_boot(self, identity: Identity) -> HostBootObservation | None:
         try:
             async with asyncio.timeout(4):
-                sample = await self._observe(identity)
-                if sample is not None:
+                # Pin a physically quiet candidate before retained work can be
+                # reconciled. Logical history is not evidence of live execution.
+                sample = await self._observe(identity, require_database_quiescent=False)
+                if sample is not None and sample.execution_quiescent:
                     assert self.config.lifecycle
                     return HostBootObservation(
                         identity,

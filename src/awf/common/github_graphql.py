@@ -277,6 +277,17 @@ mutation($threadId: ID!) {
 """.strip()
 
 
+# GraphQL: reopen a review thread the disposition gate could not verify (#1138),
+# so the PR monitor re-triages it instead of asking a human to reopen it.
+_GQL_UNRESOLVE_THREAD = """
+mutation($threadId: ID!) {
+  unresolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+""".strip()
+
+
 # GraphQL: post a reply INSIDE a review thread (#1018). AWF's disposition reply
 # precedes every ``resolveReviewThread`` it issues.
 _GQL_ADD_REVIEW_THREAD_REPLY = """
@@ -304,7 +315,10 @@ query ReviewThreadDispositionAudit($owner: String!, $repo: String!, $number: Int
           isOutdated
           resolvedBy { login }
           comments(first: 100) {
-            nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+            nodes {
+              id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt
+              author { __typename login }
+            }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -327,7 +341,10 @@ query ReviewThreadDispositionAuditOne($threadId: ID!) {
       resolvedBy { login }
       pullRequest { number repository { nameWithOwner } }
       comments(first: 100) {
-        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+        nodes {
+          id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt
+          author { __typename login }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -341,7 +358,10 @@ query ReviewThreadDispositionAuditComments($threadId: ID!, $cursor: String!) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $cursor) {
-        nodes { id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt }
+        nodes {
+          id databaseId body bodyText viewerDidAuthor createdAt lastEditedAt
+          author { __typename login }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }

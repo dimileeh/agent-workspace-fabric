@@ -214,9 +214,12 @@ async def test_late_recovery_completion_cannot_reopen_newer_drain(node, conflict
     else:
         assert not isinstance(result, BaseException)
         assert result.state == "drained" and result.admission_closed
+    # The blocked initial lookup plus the winner's initial/final fresh proofs.
+    assert calls == 3
+    before_replay = calls
     replay = await service.acknowledge(winner)
     assert replay.state == "drained" and replay.drain_generation == 11
-    assert calls == 2  # A persisted replay must not request new external evidence.
+    assert calls == before_replay  # Persisted replay requests no new external evidence.
     async with receiver.factory() as session:
         row = await session.get(NodeLifecycleRow, 1)
         assert (row.phase, row.drain_generation, row.recovery_key, row.receipt_ref) == (

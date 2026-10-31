@@ -65,6 +65,10 @@ from awf.runtime.pr_monitor_runner.thread_disposition_gate import (
     review_thread_audit_fault,
     review_thread_disposition_gate,
 )
+from awf.runtime.pr_monitor_runner.thread_disposition_reopen import (
+    reopen_unverified_threads,
+    review_thread_disposition_gate_with_reopen,
+)
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
     BaseFetchError,
@@ -281,8 +285,9 @@ async def handle_merge_action(
             if handled is not None:
                 return cast(bool | None, handled)
 
-        # #1018: never merge over a thread AWF resolved without its disposition.
-        disposition_gate = await review_thread_disposition_gate(
+        # #1018: never merge over a thread AWF resolved without its disposition
+        # (#1138: a flagged thread under the cap is reopened for re-triage instead).
+        disposition_gate = await review_thread_disposition_gate_with_reopen(
             self,
             workspace_id=workspace_id,
             repo=repo,
@@ -1098,6 +1103,17 @@ async def handle_merge_action(
             )
         if disposition_gate_after_lock is None:  # pragma: no cover - defensive invariant
             raise RuntimeError("merge critical section exited without a disposition audit")
+        # #1138: the lock is released, so reopening the in-lock audit's threads is safe.
+        disposition_gate_after_lock = await reopen_unverified_threads(
+            self,
+            disposition_gate_after_lock,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            state=state,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+        )
         if disposition_gate_after_lock.retry:
             if disposition_gate_after_lock.feedback_changed:
                 await self._deps.sleep(self._config.poll_interval_seconds)
