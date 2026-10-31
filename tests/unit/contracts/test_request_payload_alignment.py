@@ -23,6 +23,11 @@ from awf.api.schemas import (
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation
+from awf.hosted_node.runtime_schemas import (
+    HostedControlAuthorization,
+    HostedReauthorization,
+    HostedWorkspace,
+)
 from awf.mcp.server import build_mcp_server
 from awf.service.workspaces import WorkspaceRetryResult, WorkspaceService
 from tests.unit.contracts._capabilities import CAPABILITIES_BY_NAME
@@ -705,7 +710,11 @@ async def test_rest_controls_ignore_deprecated_body_fields(
         reason: str | None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
+        hosted_authorization: HostedControlAuthorization | None = None,
+        hosted_reauthorization: HostedReauthorization | None = None,
     ) -> WorkspaceControlResponse | Operation:
+        assert hosted_authorization is None
+        assert hosted_reauthorization is None
         calls.append(
             {
                 "workspace_id": workspace_id,
@@ -860,7 +869,11 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         reason: str | None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
+        hosted_authorization: HostedControlAuthorization | None = None,
+        hosted_reauthorization: HostedReauthorization | None = None,
     ) -> WorkspaceControlResponse:
+        assert hosted_authorization is None
+        assert hosted_reauthorization is None
         calls.append(
             {
                 "workspace_id": workspace_id,
@@ -960,7 +973,9 @@ async def test_rest_and_mcp_control_request_payloads_reach_same_backend_contract
         provider_environ: Any | None = None,
         run_subprocess: Any | None = None,
         http_get: Any | None = None,
+        hosted: HostedWorkspace | None = None,
     ) -> WorkspaceRetryResult:
+        assert hosted is None
         calls.append(
             {
                 "workspace_id": workspace_id,

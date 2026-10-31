@@ -57,6 +57,24 @@ def test_hosted_create_metadata_does_not_expose_controller_material_or_activatio
     assert not {"runtime_enabled", "controller_token", "material"} & capability.rest_body_fields
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("capability_name", "hosted_fields"),
+    [
+        ("remonitor_workspace", frozenset({"hosted_authorization", "hosted_reauthorization"})),
+        ("adopt_pr_monitor", frozenset({"hosted", "source_workspace_id"})),
+    ],
+)
+def test_hosted_control_metadata_stays_rest_only(
+    capability_name: str, hosted_fields: frozenset[str]
+) -> None:
+    capability = CAPABILITIES_BY_NAME[capability_name]
+    assert hosted_fields <= capability.rest_body_fields
+    assert not hosted_fields & capability.mcp_request_fields
+    assert not {"--" + field.replace("_", "-") for field in hosted_fields} & capability.cli_options
+    assert not {"runtime_enabled", "controller_token", "material"} & capability.rest_body_fields
+
+
 STATUS_FILTER_PARITY_CAPABILITIES = (
     "workspace_overview",
     "merge_queue",

@@ -19,7 +19,9 @@ from awf.api.schemas import (
     WorkspaceReasonWithLegacyRequestedTierRequest,
     WorkspaceReasonWithLegacyStopStackRequest,
 )
+from awf.api.schemas_responses import WorkspaceRemonitorRequest
 from awf.common.config import Settings, get_settings
+from awf.hosted_node.lifecycle_operations import commit_hosted
 from awf.service.controls import (
     ActiveWorkspaceDestroyError,
     IdempotencyConflictError,
@@ -105,18 +107,30 @@ async def stop_workspace(
 @router.post("/remonitor", response_model=WorkspaceControlResponse)
 async def remonitor_workspace(
     workspace_id: str,
-    payload: WorkspaceReasonWithLegacyStopStackRequest,
+    payload: WorkspaceRemonitorRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
     try:
-        return await _controls(session).remonitor_workspace(
+        response = await _controls(session).remonitor_workspace(
             workspace_id,
             reason=payload.reason,
+            hosted_authorization=(
+                payload.hosted_authorization
+                if isinstance(payload, WorkspaceRemonitorRequest)
+                else None
+            ),
+            hosted_reauthorization=(
+                payload.hosted_reauthorization
+                if isinstance(payload, WorkspaceRemonitorRequest)
+                else None
+            ),
             idempotency_key=_require_idempotency_key(idempotency_key),
             expected_version=_parse_if_match(if_match),
         )
+        await commit_hosted(session)
+        return response
     except WorkspaceControlError as exc:
         raise _http_error(exc) from exc
 
@@ -157,16 +171,20 @@ async def guide_workspace(
     per-status contract (a non-blocked workspace still requires a non-empty
     directive)."""
     try:
-        return await _controls(session).guide_workspace(
+        response = await _controls(session).guide_workspace(
             workspace_id,
             directive=payload.directive,
             reason=payload.reason,
             grants=payload.grants,
             approve_policy_downgrade=payload.approve_policy_downgrade,
             operator=payload.operator,
+            hosted_authorization=payload.hosted_authorization,
+            hosted_reauthorization=payload.hosted_reauthorization,
             idempotency_key=_require_idempotency_key(idempotency_key),
             expected_version=_parse_if_match(if_match),
         )
+        await commit_hosted(session)
+        return response
     except WorkspaceControlError as exc:
         raise _http_error(exc) from exc
 

@@ -41,6 +41,7 @@ from awf.db.repositories import (
 )
 from awf.db.repositories.base import resolve_session_dialect_name
 from awf.db.utils import escape_like_pattern as _escape_like_pattern
+from awf.hosted_node.lifecycle_operations import AdmissionCommandRunner
 from awf.profiles.models import normalize_inline_profile_snapshot
 from awf.runtime.hosted_delegation import (
     HostedDelegationConfigError,
@@ -135,6 +136,7 @@ async def _default_metadata_fetcher(
     *,
     repo: RepoRef,
     pr_number: int,
+    provider_environ: Mapping[str, str] | None = None,
 ) -> PullRequestAdoptionMetadata:
     # ``fetch_pull_request_adoption_metadata`` shells ``gh pr view --repo
     # owner/repo``, which always targets github.com. Forge detection (issue #345)
@@ -155,7 +157,9 @@ async def _default_metadata_fetcher(
             detail={"repo_slug": repo.slug(), "forge": repo.forge},
         )
     return await fetch_pull_request_adoption_metadata(
-        runner=AsyncioSubprocessRunner(),
+        runner=AdmissionCommandRunner(provider_environ)
+        if provider_environ is not None
+        else AsyncioSubprocessRunner(),
         repo=repo,
         pr_number=pr_number,
     )

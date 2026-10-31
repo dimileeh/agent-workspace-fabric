@@ -2,9 +2,9 @@
 
 from typing import Annotated
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import BeforeValidator, Field, ValidationError, model_validator
 
-from awf.hosted_node.schemas import Binding, StrictModel
+from awf.hosted_node.schemas import Binding, Opaque, StrictModel
 
 POLICY_KEY = "hosted_node"
 
@@ -12,6 +12,18 @@ POLICY_KEY = "hosted_node"
 class RuntimeCredentials(StrictModel):
     agent: Binding
     github: Binding
+
+
+class HostedControlAuthorization(StrictModel):
+    """Controller attestation derived from the caller's current authorization."""
+
+    namespace: Opaque
+    actor: Annotated[str, Field(min_length=1, max_length=256, pattern=r"^\S(?:.*\S)?$")]
+    allow_grants: Annotated[bool, Field(strict=True)] = False
+
+
+class HostedRetryRequest(StrictModel):
+    hosted: "HostedWorkspace | None" = None
 
 
 class HostedWorkspace(StrictModel):
@@ -32,6 +44,46 @@ class HostedWorkspace(StrictModel):
         ):
             raise ValueError("HOSTED_WORKSPACE_BINDING_MISMATCH")
         return self
+
+
+class HostedReauthorization(StrictModel):
+    expected_association: HostedWorkspace
+    replacement_association: HostedWorkspace
+
+    @model_validator(mode="after")
+    def fixed_scope_fresh_authority(self) -> "HostedReauthorization":
+        old, new = self.expected_association, self.replacement_association
+        if old.workspace_id != new.workspace_id:
+            raise ValueError("HOSTED_WORKSPACE_BINDING_MISMATCH")
+        for role in ("agent", "github"):
+            before, after = getattr(old.credentials, role), getattr(new.credentials, role)
+            if any(
+                getattr(before, key) != getattr(after, key)
+                for key in ("namespace", "workspace_id", "purpose", "target")
+            ) or any(
+                getattr(before, key) == getattr(after, key)
+                for key in ("preparation_id", "grant_id", "idempotency_key")
+            ):
+                raise ValueError("HOSTED_REAUTHORIZATION_SCOPE_MISMATCH")
+        return self
+
+
+def _non_null_reauthorization(value: object) -> object:
+    if value is None:
+        raise ValueError("HOSTED_REAUTHORIZATION_REQUIRED")
+    return value
+
+
+def _reauthorization_schema(schema: dict[str, object]) -> None:
+    # None is an internal omission sentinel, not a valid wire default.
+    schema.pop("default", None)
+
+
+OptionalReauthorization = Annotated[
+    HostedReauthorization | None,
+    BeforeValidator(_non_null_reauthorization, json_schema_input_type=HostedReauthorization),
+    Field(json_schema_extra=_reauthorization_schema),
+]
 
 
 def association_matches(stored: object, incoming: HostedWorkspace | None) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from functools import partial
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +38,18 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.hosted_node.identity import MaterialDeniedError
+from awf.hosted_node.lifecycle_operations import (
+    admission_environment,
+    authority_for,
+    check_task_join,
+    lock_materials,
+    new_destination,
+    reject_pr_attention,
+    require_source_quiet,
+)
+from awf.hosted_node.lifecycle_reauthorization import historical_source
+from awf.hosted_node.runtime_schemas import POLICY_KEY, association_matches
 from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
     persist_operator_hint,
@@ -173,6 +186,42 @@ class PullRequestMonitorAdoptionService:
         request: PullRequestMonitorAdoptionRequest,
     ) -> PullRequestMonitorAdoptionResponse:
         repo, pr_number = _normalize_request_identity(request)
+        hosted_authority = authority_for(
+            self._session, request.hosted or request.source_workspace_id
+        )
+        if hosted_authority is not None:
+            if request.hosted is None:
+                raise MaterialDeniedError("HOSTED_WORKSPACE_REQUIRED", 422)
+            if request.execution.mode != "local":
+                raise MaterialDeniedError("HOSTED_EXECUTION_MODE_MISMATCH", 422)
+            if request.source_workspace_id:
+                source = await self._session.get(Workspace, request.source_workspace_id)
+                await historical_source(
+                    self._session,
+                    hosted_authority,
+                    source,
+                    request.hosted.credentials.agent.namespace,
+                )
+                assert source is not None
+                source_repo = RepoRef.from_url(source.repo_url)
+                if (
+                    source_repo.forge != repo.forge
+                    or source_repo.slug().lower() != repo.slug().lower()
+                    or (source.pr_number is not None and source.pr_number != pr_number)
+                ):
+                    raise MaterialDeniedError("HOSTED_SOURCE_REPOSITORY_MISMATCH", 403)
+            material = await hosted_authority.materials(
+                request.hosted, request.agent.value, current=True
+            )
+            if self._metadata_fetcher is _default_metadata_fetcher:
+                self._metadata_fetcher = partial(
+                    _default_metadata_fetcher,
+                    provider_environ=admission_environment(
+                        hosted_authority, self._settings, material.environment
+                    ),
+                )
+        elif self._settings.hosted_node is not None:
+            raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
         _raise_if_hosted_delegation_unconfigured(request, self._settings)
         idempotency_key = pr_adoption_idempotency_key(
             repo_slug=repo.slug(),
@@ -197,8 +246,20 @@ class PullRequestMonitorAdoptionService:
             repo_slug=repo.slug(),
             pr_number=pr_number,
         )
+        for previous in adoption_history:
+            if hosted_authority is not None:
+                assert request.hosted is not None
+                await historical_source(
+                    self._session,
+                    hosted_authority,
+                    previous,
+                    request.hosted.credentials.agent.namespace,
+                )
+            elif isinstance(previous.task_policy, dict) and previous.task_policy.get(POLICY_KEY):
+                raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
         live_adoption = _select_live_adoption_workspace(adoption_history)
         if live_adoption is not None:
+            await self._check_hosted_replay(request, live_adoption)
             _raise_if_adoption_forge_mismatch(live_adoption, repo=repo)
             _raise_if_policy_conflicts(live_adoption, request, repo=repo, pr_number=pr_number)
             return await self._response(live_adoption, attached_existing=True)
@@ -212,6 +273,7 @@ class PullRequestMonitorAdoptionService:
                 pr_number=pr_number,
             )
             if _adoption_workspace_is_resumable(existing):
+                await self._check_hosted_replay(request, existing)
                 _raise_if_policy_conflicts(existing, request, repo=repo, pr_number=pr_number)
                 return await self._response(existing, attached_existing=True)
 
@@ -222,6 +284,41 @@ class PullRequestMonitorAdoptionService:
         )
 
         metadata = await self._fetch_metadata(repo=repo, pr_number=pr_number)
+        if hosted_authority is not None:
+            assert request.hosted is not None
+            if request.source_workspace_id:
+                source = await self._session.get(
+                    Workspace,
+                    request.source_workspace_id,
+                    populate_existing=True,
+                    with_for_update=True,
+                )
+                await historical_source(
+                    self._session,
+                    hosted_authority,
+                    source,
+                    request.hosted.credentials.agent.namespace,
+                )
+                assert source is not None
+                await require_source_quiet(self._session, source)
+                source_repo = RepoRef.from_url(source.repo_url)
+                if (
+                    source_repo.forge != repo.forge
+                    or source_repo.slug().lower() != repo.slug().lower()
+                    or (source.pr_number is not None and source.pr_number != pr_number)
+                ):
+                    raise MaterialDeniedError("HOSTED_SOURCE_REPOSITORY_MISMATCH", 403)
+            if existing is not None:
+                await self._session.refresh(existing, with_for_update=True)
+                await historical_source(
+                    self._session,
+                    hosted_authority,
+                    existing,
+                    request.hosted.credentials.agent.namespace,
+                )
+                await require_source_quiet(self._session, existing)
+            await new_destination(self._session, hosted_authority, request.hosted)
+            await reject_pr_attention(self._session, repo, pr_number)
         previous_terminal_adoptions = await _terminal_adoption_lineage(
             self._session,
             adoption_history,
@@ -256,6 +353,22 @@ class PullRequestMonitorAdoptionService:
         except TaskExternalIdConflictError as exc:
             raise _task_external_id_conflict_error(exc) from exc
         return await self._response(workspace, attached_existing=False)
+
+    async def _check_hosted_replay(
+        self, request: PullRequestMonitorAdoptionRequest, row: Workspace
+    ) -> None:
+        policy = row.task_policy if isinstance(row.task_policy, dict) else {}
+        if not association_matches(policy.get(POLICY_KEY), request.hosted):
+            raise MaterialDeniedError("HOSTED_WORKSPACE_ID_CONFLICT", 409)
+        if (
+            request.hosted is not None
+            and policy.get("hosted_source_workspace_id") != request.source_workspace_id
+        ):
+            raise MaterialDeniedError("HOSTED_SOURCE_WORKSPACE_CONFLICT", 409)
+        authority = authority_for(self._session, request.hosted)
+        if authority is not None:
+            assert request.hosted is not None
+            await lock_materials(self._session, authority, request.hosted)
 
     async def _supersede_previous_adoption(
         self,
@@ -440,11 +553,16 @@ class PullRequestMonitorAdoptionService:
         )
         if provider_readiness_preflight is not None:
             task_policy["provider_readiness_preflight"] = dict(provider_readiness_preflight)
+        if request.hosted is not None:
+            task_policy[POLICY_KEY] = request.hosted.model_dump(mode="json")
+            if request.source_workspace_id is not None:
+                task_policy["hosted_source_workspace_id"] = request.source_workspace_id
         operator_reason = _redacted_optional_text(request.reason)
         task_class = request.task_class.value if request.task_class is not None else None
         explicit_external_id = request.external_id is not None
         workspace_repo = WorkspaceRepository(self._session)
         workspace = await workspace_repo.create(
+            workspace_id=request.hosted.workspace_id if request.hosted else None,
             repo_url=repo_url,
             branch_base=metadata.base_ref,
             task_title=(
@@ -489,7 +607,7 @@ class PullRequestMonitorAdoptionService:
             external_id: str | None,
             task_idempotency_key: str | None,
         ) -> Task:
-            return await task_repo.create_or_get(
+            task = await task_repo.create_or_get(
                 repo_url=workspace.repo_url,
                 base_branch=workspace.branch_base,
                 title=workspace.task_title,
@@ -499,6 +617,9 @@ class PullRequestMonitorAdoptionService:
                 task_class=workspace.task_class,
                 owned_paths=list(workspace.owned_paths),
             )
+            if request.hosted is not None:
+                await check_task_join(self._session, task.id, request.hosted)
+            return task
 
         async def _create_generated_task() -> Task:
             task_external_id = workspace.task_external_id or _adoption_external_id(

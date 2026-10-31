@@ -35,6 +35,9 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
+from awf.hosted_node.lifecycle_operations import control_authority
+from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, control_identity
+from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
 from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
     persist_operator_hint,
@@ -79,6 +82,8 @@ async def guide_workspace(
     operator: str | None = None,
     idempotency_key: str | None = None,
     expected_version: int | None = None,
+    hosted_authorization: HostedControlAuthorization | None = None,
+    hosted_reauthorization: HostedReauthorization | None = None,
 ) -> WorkspaceControlResponse:
     """Inject an operator ``directive`` into a live or failed workspace.
 
@@ -91,6 +96,15 @@ async def guide_workspace(
     ``failed`` workspaces (issue #456) it resets to ``monitoring_pr``
     using the same state-reset as ``remonitor``."""
 
+    await control_authority(
+        self._session,
+        workspace_id,
+        hosted_authorization,
+        grants=grants,
+        operator=operator,
+        reauthorization=hosted_reauthorization,
+        idempotency_key=idempotency_key,
+    )
     repo = WorkspaceRepository(self._session)
     operations = OperationRepository(self._session)
     directive_text = (directive or "").strip()
@@ -125,6 +139,7 @@ async def guide_workspace(
             # operator's attribution. The normalization mirrors the value persisted
             # below so " alice "/"alice" replay and None/"" map to the default.
             **({"operator": _normalize_guide_operator(operator)} if grant_inputs else {}),
+            **control_identity(hosted_authorization, hosted_reauthorization),
         },
     )
     # Persist the PR/head context for provenance, but keep it OUT of the
@@ -163,6 +178,7 @@ async def guide_workspace(
     current = WorkspaceStatus(workspace.status)
     if current not in _GUIDE_ELIGIBLE_STATUSES:
         raise WorkspaceGuideStateError(workspace)
+    apply_reauthorization(workspace, hosted_reauthorization)
 
     if current == WorkspaceStatus.blocked:
         if workspace.block_type == PLAN_CONFORMANCE_DECISION_BLOCK_TYPE and not directive_text:
