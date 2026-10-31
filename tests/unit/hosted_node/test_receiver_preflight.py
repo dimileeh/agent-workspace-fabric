@@ -71,7 +71,7 @@ async def test_preflight_checks_every_slot_once_in_at_most_eight_hops(
     assert await receiver.verify_recovery_bindings([]) is True
     # One thread hop per stripe, not one per slot; the stripes partition the cohort.
     assert len(hops) == expected_hops
-    assert sorted(slot for (stripe,) in hops for slot in stripe) == sorted(slots)
+    assert sorted(slot for (stripe, _stop) in hops for slot in stripe) == sorted(slots)
     assert sorted(store.checked) == sorted(slots) and store.peak <= 8
     assert len(lookups) == 2
 
@@ -105,3 +105,59 @@ async def test_unresolvable_bindings_never_touch_material(monkeypatch):
     monkeypatch.setattr(receiver, "_recovery_material_slots", unresolved)
     assert await receiver.verify_recovery_bindings([]) is False
     assert hops == [] and store.checked == []
+
+
+def test_a_missing_slot_stops_the_other_stripes(monkeypatch):
+    store = Store(missing={("ws-1", "slot-1")})
+    receiver, _, _, _ = preflight(monkeypatch, 0, store=store)
+    stop = threading.Event()
+    stripe = [("ws-0", "slot-0"), ("ws-1", "slot-1"), ("ws-2", "slot-2")]
+    assert receiver._slots_exist(stripe, stop) is False
+    assert stop.is_set() and store.checked == stripe[:2]
+    # A sibling stripe observing the flag performs no further lookups.
+    assert receiver._slots_exist([("ws-3", "slot-3")], stop) is False
+    assert store.checked == stripe[:2]
+
+
+class BlockingStore(Store):
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+
+    def exists(self, directory, slot):
+        with self.lock:
+            self.in_flight += 1
+            self.checked.append((directory, slot))
+        try:
+            self.gate.wait(timeout=10)
+            return True
+        finally:
+            with self.lock:
+                self.in_flight -= 1
+
+
+async def wait_until(condition):
+    for _ in range(1000):
+        if condition():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition not reached")
+
+
+async def test_cancelled_preflight_stops_running_stripes_at_their_next_lookup(monkeypatch):
+    store = BlockingStore()
+    receiver, _, lookups, _ = preflight(monkeypatch, 16, store=store)
+    task = asyncio.create_task(receiver.verify_recovery_bindings([]))
+    try:
+        await wait_until(lambda: store.in_flight >= 1)
+        # The caller's timeout cancels the verifier while file reads are in flight.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        store.gate.set()
+    await wait_until(lambda: store.in_flight == 0)
+    await asyncio.sleep(0.05)
+    # Each stripe is [slot-n, slot-n+8]; no running stripe proceeds past its first read.
+    assert store.checked and all(int(slot.split("-")[1]) < 8 for _, slot in store.checked)
+    assert len(lookups) == 1
