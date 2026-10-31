@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import uuid4
@@ -74,18 +75,33 @@ class Receiver:
         if slots is None:
             return False
         # Batch only recovery preflight. The caller retains its five-second bound;
-        # ordinary material status/expiry cleanup is unchanged.
-        for offset in range(0, len(slots), 8):
+        # ordinary material status/expiry cleanup is unchanged. At most eight
+        # threads each check one stripe, so a full cohort costs eight thread hops,
+        # not one per slot. Cancellation cannot stop a running thread, so a shared
+        # stop flag ends every stripe at its next lookup once the outcome is known.
+        stop = threading.Event()
+        try:
             async with asyncio.TaskGroup() as group:
                 checks = [
-                    group.create_task(asyncio.to_thread(self.store.exists, directory, slot))
-                    for directory, slot in slots[offset : offset + 8]
+                    group.create_task(asyncio.to_thread(self._slots_exist, slots[stripe::8], stop))
+                    for stripe in range(min(8, len(slots)))
                 ]
-            if not all(check.result() for check in checks):
-                return False
+        finally:
+            stop.set()
+        if not all(check.result() for check in checks):
+            return False
         # A revoke, expiry or superseding fence during file I/O must dominate.
         # Final acceptance separately rechecks the complete retained-row snapshot.
         return await self._recovery_material_slots(bindings) == slots
+
+    def _slots_exist(self, slots: list[tuple[str, str]], stop: threading.Event) -> bool:
+        for directory, slot in slots:
+            if stop.is_set():
+                return False
+            if not self.store.exists(directory, slot):
+                stop.set()
+                return False
+        return True
 
     async def _recovery_material_slots(
         self, bindings: list[Binding]

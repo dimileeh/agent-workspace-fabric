@@ -2110,8 +2110,10 @@ test("routine refresh drops a selected retained workspace excluded by its reposi
   page,
 }) => {
   let excludeSelectedRetained = false;
+  const overviewRequests: Array<string | null> = [];
   await mockAwfConsoleApi(page);
   await installLargeFleetOverview(page, {
+    onRequest: (cursor) => overviewRequests.push(cursor),
     resolveBatchItem: (item) =>
       excludeSelectedRetained && item.workspace_id === "ws_perf_0202"
         ? { ...item, repo_url: "https://example.com/odd.git" }
@@ -2124,8 +2126,18 @@ test("routine refresh drops a selected retained workspace excluded by its reposi
   await page.getByPlaceholder("exact repo filter").fill("https://example.com/even.git");
   await expect(page.getByTestId("workspace-card-ws_perf_0002")).toBeVisible();
   await expect(page.getByTestId("workspace-card-ws_perf_0001")).toHaveCount(0);
-  await page.getByRole("button", { name: "Load more workspaces" }).click();
-  await expect(page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true })).toBeVisible();
+  // This scenario covers retained-selection removal on routine refresh, while
+  // scroll-to-footer autoload coordination has dedicated coverage. Dispatch
+  // directly so Playwright does not scroll the footer and race that load path.
+  await page.getByRole("button", { name: "Load more workspaces" }).evaluate(
+    (button: HTMLButtonElement) => button.click(),
+  );
+  await expect
+    .poll(() => overviewRequests, { timeout: 10_000 })
+    .toContain(String(PAGE_SIZE));
+  await expect(
+    page.getByText(`1–${PAGE_SIZE} of ${PAGE_SIZE * 2} loaded`, { exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
   await page.getByRole("button", { name: "Next workspace results" }).click();
   await page.getByTestId("workspace-card-ws_perf_0202").click();
   await expect(page).toHaveURL(/workspaceId=ws_perf_0202/);
