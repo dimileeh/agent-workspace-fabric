@@ -427,22 +427,30 @@ def test_read_fd_regular_file_bytes_error_edges(
         calls = {"n": 0}
 
         def _fstat(f: int) -> os.stat_result:
+            if f != fd:
+                return real_fstat(f)
             calls["n"] += 1
             if calls["n"] == 1:
                 return real_fstat(f)
             raise OSError("fstat-after")
 
         monkeypatch.setattr(git_manager_ownership.os, "fstat", _fstat)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+        assert calls["n"] == 0
         assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+        assert calls["n"] == 2
     finally:
+        monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
         os.close(fd)
-    monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
 
     fd = os.open(path, os.O_RDONLY)
     try:
         calls = {"n": 0}
 
         def _mutate(f: int) -> os.stat_result:
+            if f != fd:
+                return real_fstat(f)
             calls["n"] += 1
             st = real_fstat(f)
             if calls["n"] == 1:
@@ -463,20 +471,29 @@ def test_read_fd_regular_file_bytes_error_edges(
             )
 
         monkeypatch.setattr(git_manager_ownership.os, "fstat", _mutate)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+        assert calls["n"] == 0
         assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
+        assert calls["n"] == 2
     finally:
+        monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
         os.close(fd)
-    monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
 
     fd = os.open(path, os.O_RDONLY)
     try:
-        monkeypatch.setattr(
-            git_manager_ownership.os,
-            "fstat",
-            lambda _fd: (_ for _ in ()).throw(OSError("open-fstat")),
-        )
+
+        def _open_fstat(f: int) -> os.stat_result:
+            if f == fd:
+                raise OSError("open-fstat")
+            return real_fstat(f)
+
+        monkeypatch.setattr(git_manager_ownership.os, "fstat", _open_fstat)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert git_manager_ownership._read_fd_regular_file_bytes(fd, max_bytes=64) is None
     finally:
+        monkeypatch.setattr(git_manager_ownership.os, "fstat", real_fstat)
         os.close(fd)
 
 
