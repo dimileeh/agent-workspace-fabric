@@ -322,10 +322,13 @@ def test_read_git_dir_config_text_unstable_size_fails_closed(
     path = tmp_path / "config"
     path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
     real_fstat = os.fstat
+    target = path.stat()
     calls = {"n": 0}
 
     def _growing_fstat(fd: int) -> os.stat_result:
         st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) != (target.st_dev, target.st_ino):
+            return st
         calls["n"] += 1
         if calls["n"] == 1:
             return st
@@ -349,7 +352,11 @@ def test_read_git_dir_config_text_unstable_size_fails_closed(
         )
 
     monkeypatch.setattr(os, "fstat", _growing_fstat)
+    with (tmp_path / "unrelated").open("w+b") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+    assert calls["n"] == 0
     assert git_manager_ownership._read_git_dir_config_text(path) is None  # noqa: SLF001
+    assert calls["n"] == 2
 
 
 @pytest.mark.unit
@@ -1082,27 +1089,42 @@ def test_read_git_dir_config_text_fstat_oserror_fails_closed(
     path = tmp_path / "config"
     path.write_text("[core]\n\tfilemode = true\n", encoding="utf-8")
     real_fstat = os.fstat
+    target = path.stat()
     calls = {"n": 0}
 
     def _fstat_first_fails(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) != (target.st_dev, target.st_ino):
+            return st
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("first fstat failed")
         return real_fstat(fd)
 
     monkeypatch.setattr(os, "fstat", _fstat_first_fails)
+    with (tmp_path / "unrelated").open("w+b") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+    assert calls["n"] == 0
     assert git_manager_ownership._read_git_dir_config_text(path) is None
+    assert calls["n"] == 1
 
     calls["n"] = 0
 
     def _fstat_second_fails(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) != (target.st_dev, target.st_ino):
+            return st
         calls["n"] += 1
         if calls["n"] >= 2:
             raise OSError("post-read fstat failed")
         return real_fstat(fd)
 
     monkeypatch.setattr(os, "fstat", _fstat_second_fails)
+    with (tmp_path / "unrelated").open("w+b") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+    assert calls["n"] == 0
     assert git_manager_ownership._read_git_dir_config_text(path) is None
+    assert calls["n"] == 2
 
 
 @pytest.mark.unit

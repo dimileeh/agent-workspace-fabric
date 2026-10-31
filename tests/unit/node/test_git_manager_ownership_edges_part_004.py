@@ -166,13 +166,17 @@ def test_pinned_snapshot_helper_fail_closed_edges(
         monkeypatch.undo()
 
         real_fstat = os.fstat
+        target = real_fstat(nested_fd)
 
         def _fstat_oserror(fd: int) -> os.stat_result:
-            if fd != nested_fd:
+            info = real_fstat(fd)
+            if fd != nested_fd and (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
                 raise OSError("fstat failed")
             return real_fstat(fd)
 
         monkeypatch.setattr(os, "fstat", _fstat_oserror)
+        with regular.open("rb") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert (
             git_manager_ownership._open_nested_root_directory_fd(Path(f"/proc/self/fd/{nested_fd}"))
             is None
@@ -597,14 +601,18 @@ def test_open_git_dir_directory_fd_fail_closed_edges(
 
     regular = tmp_path / "not-a-dir"
     regular.write_text("x\n", encoding="utf-8")
+    regular.chmod(0o600)
     assert git_manager_ownership._open_git_dir_directory_fd(regular) is None
 
     real_dir = tmp_path / "real-dir"
     real_dir.mkdir()
     real_fstat = os.fstat
+    target = real_dir.stat()
 
     def _not_dir(fd: int) -> os.stat_result:
         st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) != (target.st_dev, target.st_ino):
+            return st
         return os.stat_result(
             (
                 stat.S_IFREG | 0o644,
@@ -621,13 +629,20 @@ def test_open_git_dir_directory_fd_fail_closed_edges(
         )
 
     monkeypatch.setattr(os, "fstat", _not_dir)
+    with regular.open("rb") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
     assert git_manager_ownership._open_git_dir_directory_fd(real_dir) is None
     monkeypatch.setattr(os, "fstat", real_fstat)
 
     def _fstat_oserror(fd: int) -> os.stat_result:
-        raise OSError("fstat failed")
+        info = real_fstat(fd)
+        if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+            raise OSError("fstat failed")
+        return info
 
     monkeypatch.setattr(os, "fstat", _fstat_oserror)
+    with regular.open("rb") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
     assert git_manager_ownership._open_git_dir_directory_fd(real_dir) is None
 
 

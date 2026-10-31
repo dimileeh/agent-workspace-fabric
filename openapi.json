@@ -2948,6 +2948,37 @@
         "title": "HostHomeAuthMountPolicy",
         "type": "object"
       },
+      "HostedControlAuthorization": {
+        "additionalProperties": false,
+        "description": "Controller attestation derived from the caller's current authorization.",
+        "properties": {
+          "actor": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^\\S(?:.*\\S)?$",
+            "title": "Actor",
+            "type": "string"
+          },
+          "allow_grants": {
+            "default": false,
+            "title": "Allow Grants",
+            "type": "boolean"
+          },
+          "namespace": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Namespace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "actor"
+        ],
+        "title": "HostedControlAuthorization",
+        "type": "object"
+      },
       "HostedErrorResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2960,6 +2991,40 @@
           "error_code"
         ],
         "title": "HostedErrorResponse",
+        "type": "object"
+      },
+      "HostedReauthorization": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_association": {
+            "$ref": "#/components/schemas/HostedWorkspace"
+          },
+          "replacement_association": {
+            "$ref": "#/components/schemas/HostedWorkspace"
+          }
+        },
+        "required": [
+          "expected_association",
+          "replacement_association"
+        ],
+        "title": "HostedReauthorization",
+        "type": "object"
+      },
+      "HostedRetryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "hosted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedWorkspace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "HostedRetryRequest",
         "type": "object"
       },
       "HostedWorkspace": {
@@ -6395,6 +6460,16 @@
             "description": "Optional operator directive armed on the adopted workspace as a pending operator hint, addressed ahead of PR review comments but behind base synchronization: an adopted PR that is behind its base (or BEHIND / DIRTY) syncs first -- including, on DIRTY, a conflict-resolution agent pass -- and consumes the hint on a later cycle. It is a repair directive for the agent, not a first-cycle path constraint, so it cannot restrict what base synchronization touches. Use it to steer the repair work (e.g. 'do not edit .github/workflows/*'). Ignored when the request attaches to an already-live adoption; use the guide control for that.",
             "title": "Hint"
           },
+          "hosted": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedWorkspace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "initial_review_grace_period_seconds": {
             "anyOf": [
               {
@@ -6516,6 +6591,19 @@
               }
             ],
             "title": "Repo Url"
+          },
+          "source_workspace_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^ws_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Workspace Id"
           },
           "task_class": {
             "anyOf": [
@@ -11158,6 +11246,19 @@
             "title": "Grants",
             "type": "array"
           },
+          "hosted_authorization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedControlAuthorization"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hosted_reauthorization": {
+            "$ref": "#/components/schemas/HostedReauthorization"
+          },
           "operator": {
             "anyOf": [
               {
@@ -13160,6 +13261,38 @@
           "unactionable_reason_count"
         ],
         "title": "WorkspaceReliabilitySummaryResponse",
+        "type": "object"
+      },
+      "WorkspaceRemonitorRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "hosted_authorization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostedControlAuthorization"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hosted_reauthorization": {
+            "$ref": "#/components/schemas/HostedReauthorization"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "WorkspaceRemonitorRequest",
         "type": "object"
       },
       "WorkspaceRepo": {
@@ -20587,7 +20720,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WorkspaceReasonWithLegacyStopStackRequest"
+                "$ref": "#/components/schemas/WorkspaceRemonitorRequest"
               }
             }
           },
@@ -20713,6 +20846,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/HostedRetryRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
         "responses": {
           "202": {
             "content": {

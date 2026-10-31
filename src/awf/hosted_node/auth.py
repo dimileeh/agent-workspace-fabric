@@ -103,6 +103,25 @@ class HostedGuard:
                     await runtime.admission()
                     scope.setdefault("state", {})["hosted_create_verified"] = True
                     safe = True
+                lifecycle = (
+                    scope["method"] == "POST"
+                    and controller
+                    and runtime is not None
+                    and receiver.config.runtime_enabled
+                    and (
+                        path == "/v1/workspaces/adopt-pr"
+                        or (
+                            path.startswith("/v1/workspaces/")
+                            and len(path.strip("/").split("/")) == 4
+                            and path.rsplit("/", 1)[-1] in {"guide", "remonitor", "retry"}
+                        )
+                    )
+                )
+                if lifecycle:
+                    assert runtime is not None
+                    await runtime.admission()
+                    scope.setdefault("state", {})["hosted_lifecycle_verified"] = True
+                    safe = True
                 if not safe:
                     raise MaterialDeniedError("HOSTED_RUNTIME_INTEGRATION_REQUIRED", 403)
             if (dedicated or safe) and scope["type"] == "http":

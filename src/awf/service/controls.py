@@ -24,6 +24,9 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     has_terminal_runtime_released_event,
 )
+from awf.hosted_node.lifecycle_operations import control_authority
+from awf.hosted_node.lifecycle_reauthorization import apply_reauthorization, remonitor_payload
+from awf.hosted_node.runtime_schemas import HostedControlAuthorization, HostedReauthorization
 from awf.node.cleanup import (
     WorkspaceCleanupResult,
 )
@@ -396,25 +399,34 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         reason: str | None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
+        hosted_authorization: HostedControlAuthorization | None = None,
+        hosted_reauthorization: HostedReauthorization | None = None,
     ) -> WorkspaceControlResponse:
         """Restart PR monitoring for a workspace that lost its monitor claim."""
-
+        await control_authority(
+            self._session,
+            workspace_id,
+            hosted_authorization,
+            reauthorization=hosted_reauthorization,
+            idempotency_key=idempotency_key,
+        )
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         workspace_for_payload = await self._require_workspace(repo, workspace_id)
-        payload = _operator_operation_payload(
-            reason=reason,
-            reason_code=_OPERATOR_REMONITOR_REASON_CODE,
-            requested_action=OperationType.remonitor.value,
-            extra=_workspace_pr_operation_context(workspace_for_payload),
+        operation_payload, replay_identity = remonitor_payload(
+            workspace_for_payload,
+            reason,
+            hosted_authorization,
+            hosted_reauthorization,
+            expected_version,
         )
-        operation_payload = _operation_payload(payload, expected_version=expected_version)
         prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
             operation_type=OperationType.remonitor,
             payload=operation_payload,
+            idempotency_payload_identity=replay_identity,
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
@@ -430,6 +442,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         current = WorkspaceStatus(workspace.status)
         if current not in _REMONITOR_ELIGIBLE_STATUSES:
             raise WorkspaceRemonitorStateError(workspace)
+        apply_reauthorization(workspace, hosted_reauthorization)
 
         if not workspace.pr_url:
             raise WorkspaceRemonitorMissingPrUrlError(workspace)
@@ -529,19 +542,15 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
-        # Operator remonitor is explicit operator re-engagement: the persisted
-        # HUMAN_WAIT attention episode (set by the monitor's ``NotifyHuman``)
-        # has been superseded by this operator decision. Clear the out-of-band
-        # ``awaiting_human_since`` / ``awaiting_human_reason`` columns now,
-        # mirroring the in-process monitor resume clear, so the row does not
-        # stay stuck with ``attention_required=true`` after the operator has
-        # acted. ``clear_workspace_attention`` is guarded by
-        # ``awaiting_human_since IS NOT NULL`` so it is a DB-level no-op (no row
-        # churn, no spurious ``updated_at`` bump) when there is no episode — safe
-        # to call unconditionally here and on the ``failed`` path.
+        # Explicit remonitor supersedes HUMAN_WAIT, as in-process resume does.
+        # Clear its persisted attention fields so the row no longer needs a human.
+        # The repository's awaiting_human_since guard avoids writes when absent.
         await repo.clear_workspace_attention(workspace_id)
         if state_reset is None and (
-            claims_will_reset or monitor_state_changed or remote_push_branch_recovered
+            claims_will_reset
+            or monitor_state_changed
+            or remote_push_branch_recovered
+            or hosted_reauthorization is not None
         ):
             await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
