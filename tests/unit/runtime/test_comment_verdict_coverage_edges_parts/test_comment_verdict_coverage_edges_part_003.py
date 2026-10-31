@@ -188,6 +188,7 @@ def test_hash_opened_regular_file_into_fstat_errors_fail_closed(
     path = tmp_path / "fstat.bin"
     path.write_bytes(b"data")
     real_fstat = os.fstat
+    target = path.stat()
 
     hasher = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
@@ -199,6 +200,8 @@ def test_hash_opened_regular_file_into_fstat_errors_fail_closed(
             return real_fstat(fd)
 
         monkeypatch.setattr(os, "fstat", _boom)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is False
 
     monkeypatch.setattr(os, "fstat", real_fstat)
@@ -208,6 +211,8 @@ def test_hash_opened_regular_file_into_fstat_errors_fail_closed(
 
     def _fail_after_read(fd: int) -> os.stat_result:
         result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) != (target.st_dev, target.st_ino):
+            return result
         calls["n"] += 1
         if calls["n"] > 1:
             raise OSError(errno.EBADF, "revalidate fstat failed")
@@ -215,7 +220,12 @@ def test_hash_opened_regular_file_into_fstat_errors_fail_closed(
 
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         monkeypatch.setattr(os, "fstat", _fail_after_read)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+        assert calls["n"] == 0
         assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher2, fh) is False
+
+    assert calls["n"] == 2
 
 
 @pytest.mark.unit
@@ -256,9 +266,12 @@ def test_hash_opened_regular_file_into_non_regular_fails_closed(
     path.write_bytes(b"x")
     hasher = hashlib.sha256()
     real_fstat = os.fstat
+    target = path.stat()
 
-    def _dir_mode(fd: int) -> SimpleNamespace:
+    def _dir_mode(fd: int) -> SimpleNamespace | os.stat_result:
         result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) != (target.st_dev, target.st_ino):
+            return result
         return SimpleNamespace(
             st_mode=stat.S_IFDIR | 0o755,
             st_size=result.st_size,
@@ -268,6 +281,8 @@ def test_hash_opened_regular_file_into_non_regular_fails_closed(
 
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         monkeypatch.setattr(os, "fstat", _dir_mode)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert comment_verdict_residue_io._hash_opened_regular_file_into(hasher, fh) is False
 
 

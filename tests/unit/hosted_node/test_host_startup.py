@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from awf.hosted_node import host_startup
+from awf.hosted_node import host_linux, host_startup
 from awf.hosted_node.host_linux import LinuxSnapshot
 from tests.unit.hosted_node.test_host_config import host_config
 
@@ -29,7 +29,12 @@ def test_single_host_lease_is_real_nonblocking_flock(tmp_path, monkeypatch):
             st_nlink=value.st_nlink,
         )
 
-    monkeypatch.setattr(host_startup.os, "fstat", root_owned)
+    # directory() resolves os in host_linux; host_lease() resolves it here.
+    host_os = SimpleNamespace(**(vars(os) | {"fstat": root_owned}))
+    monkeypatch.setattr(host_startup, "os", host_os)
+    monkeypatch.setattr(host_linux, "os", host_os)
+    with (tmp_path / "unrelated").open("w+b") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real(unrelated.fileno())
     with (
         host_startup.host_lease(config, baseline),
         pytest.raises(BlockingIOError),
@@ -68,7 +73,9 @@ async def test_hosted_worker_is_rejected_before_runtime_build(monkeypatch):
         (stat.S_IFSOCK | 0o660, 123),
     ],
 )
-def test_docker_socket_must_be_root_owned_not_redirectable(monkeypatch, mode, uid):
+def test_docker_socket_must_be_root_owned_not_redirectable(tmp_path, monkeypatch, mode, uid):
+    monkeypatch.setattr(host_startup, "os", SimpleNamespace(**vars(os)))
+
     @contextmanager
     def directory(*args, **kwargs):
         yield 1
@@ -77,6 +84,10 @@ def test_docker_socket_must_be_root_owned_not_redirectable(monkeypatch, mode, ui
     monkeypatch.setattr(
         host_startup.os, "stat", lambda *_args, **_kwargs: SimpleNamespace(st_mode=mode, st_uid=uid)
     )
+    path = tmp_path / "unrelated"
+    path.write_bytes(b"socket fake must leave this file alone")
+    with path.open("rb") as unrelated:
+        assert path.stat() == os.fstat(unrelated.fileno())
     if stat.S_ISSOCK(mode) and not mode & 0o002 and uid == 0:
         host_startup.validate_socket(host_config())
     else:
@@ -141,7 +152,12 @@ def test_host_lease_rejects_changed_mount_or_untrusted_file(tmp_path, monkeypatc
             st_nlink=2 if file and cause == "links" else value.st_nlink,
         )
 
-    monkeypatch.setattr(host_startup.os, "fstat", root_owned)
+    # directory() resolves os in host_linux; host_lease() resolves it here.
+    host_os = SimpleNamespace(**(vars(os) | {"fstat": root_owned}))
+    monkeypatch.setattr(host_startup, "os", host_os)
+    monkeypatch.setattr(host_linux, "os", host_os)
+    with (tmp_path / "unrelated").open("w+b") as unrelated:
+        assert os.fstat(unrelated.fileno()) == real(unrelated.fileno())
     changed_mount = cause in ("device", "inode")
     reason = "HOST_LEASE_DEVICE_MISMATCH" if changed_mount else "HOST_LEASE_UNTRUSTED"
     with pytest.raises(ValueError, match=f"^{reason}$"), host_startup.host_lease(config, baseline):

@@ -19,6 +19,8 @@ BOOT = "c89870e2-1c61-49b4-a9a9-2277ad31cb52"
 
 @pytest.fixture
 def synthetic_linux(monkeypatch):
+    # Patching linux.os.fstat directly would also replace pytest's os.fstat.
+    monkeypatch.setattr(linux, "os", SimpleNamespace(**vars(os)))
     config = host_config()
     device = os.makedev(8, 1)
     info = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o700, st_dev=device, st_ino=7)
@@ -82,6 +84,23 @@ def test_linux_device_boot_cgroup_and_operator_first_node(synthetic_linux):
     assert value.boot_id == BOOT and value.workspaces_empty
     assert probe.bootstrap_approved("first-node")
     assert not probe.bootstrap_approved("caller-key")
+
+
+def test_synthetic_linux_preserves_unrelated_filesystem_metadata(synthetic_linux, tmp_path):
+    path = tmp_path / "unrelated"
+    path.write_bytes(b"real metadata")
+    expected = path.stat()
+    with path.open("rb") as stream:
+        actual = os.fstat(stream.fileno())
+        assert (actual.st_size, actual.st_dev, actual.st_ino) == (
+            expected.st_size,
+            expected.st_dev,
+            expected.st_ino,
+        )
+    with os.scandir(tmp_path) as entries:
+        assert [entry.name for entry in entries] == [path.name]
+    probe, _, _, _ = synthetic_linux
+    assert probe.sample().boot_id == BOOT
 
 
 @pytest.mark.parametrize("has_entries", [False, True])
@@ -177,6 +196,7 @@ def test_unknown_linux_identity_or_activity_fails_closed(synthetic_linux, monkey
 
 
 def test_bounded_private_file_rejects_symlink_mode_owner_and_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(linux, "os", SimpleNamespace(**vars(os)))
     path = tmp_path / "receipt.json"
     path.write_text(json.dumps({"known": "metadata"}))
     path.chmod(0o400)
@@ -219,6 +239,7 @@ def test_mountinfo_parser_uses_open_descriptor_mount_id(monkeypatch):
 
 
 def test_trusted_metadata_cannot_have_writable_or_unowned_ancestor(tmp_path, monkeypatch):
+    monkeypatch.setattr(linux, "os", SimpleNamespace(**vars(os)))
     path = tmp_path / "receipt.json"
     path.write_text("{}")
     path.chmod(0o444)
@@ -282,6 +303,7 @@ def test_real_block_device_stat_and_no_bootstrap_approval(monkeypatch):
 
 
 def test_metadata_growth_after_stat_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(linux, "os", SimpleNamespace(**vars(os)))
     path = tmp_path / "receipt.json"
     path.write_bytes(b" " * 8193)
     path.chmod(0o444)

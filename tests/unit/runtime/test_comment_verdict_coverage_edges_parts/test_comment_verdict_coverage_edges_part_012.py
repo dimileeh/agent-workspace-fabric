@@ -160,10 +160,13 @@ def test_hash_regular_file_content_samples_into_oversized_short_read_fails_close
     path = tmp_path / "huge.bin"
     path.write_bytes(b"x")
     real_fstat = os.fstat
+    target = path.stat()
     oversize = comment_verdict_residue_io._WORKTREE_REGULAR_HASH_MAX_FILE_BYTES + 1
 
-    def _oversize(fd: int) -> SimpleNamespace:
+    def _oversize(fd: int) -> SimpleNamespace | os.stat_result:
         result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) != (target.st_dev, target.st_ino):
+            return result
         return SimpleNamespace(
             st_mode=result.st_mode,
             st_size=oversize,
@@ -174,6 +177,8 @@ def test_hash_regular_file_content_samples_into_oversized_short_read_fails_close
     hasher = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         monkeypatch.setattr(os, "fstat", _oversize)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert (
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is False
         )
@@ -214,14 +219,20 @@ def test_hash_regular_file_content_samples_into_fstat_errors_fail_closed(
     path = tmp_path / "fstat.bin"
     path.write_bytes(b"abc")
     real_fstat = os.fstat
+    target = path.stat()
 
     hasher = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
 
         def _boom_once(fd: int) -> os.stat_result:
-            raise OSError("fstat boom")
+            result = real_fstat(fd)
+            if (result.st_dev, result.st_ino) == (target.st_dev, target.st_ino):
+                raise OSError("fstat boom")
+            return result
 
         monkeypatch.setattr(os, "fstat", _boom_once)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert (
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is False
         )
@@ -230,6 +241,9 @@ def test_hash_regular_file_content_samples_into_fstat_errors_fail_closed(
     calls = {"n": 0}
 
     def _boom_after(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) != (target.st_dev, target.st_ino):
+            return result
         calls["n"] += 1
         if calls["n"] == 1:
             return real_fstat(fd)
@@ -238,9 +252,14 @@ def test_hash_regular_file_content_samples_into_fstat_errors_fail_closed(
     hasher2 = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         monkeypatch.setattr(os, "fstat", _boom_after)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
+        assert calls["n"] == 0
         assert (
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher2, fh) is False
         )
+
+    assert calls["n"] == 2
 
 
 @pytest.mark.unit
@@ -445,9 +464,12 @@ def test_hash_regular_file_content_samples_into_non_regular_fails_closed(
     path = tmp_path / "nonreg.bin"
     path.write_bytes(b"x")
     real_fstat = os.fstat
+    target = path.stat()
 
-    def _dir_mode(fd: int) -> SimpleNamespace:
+    def _dir_mode(fd: int) -> SimpleNamespace | os.stat_result:
         result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) != (target.st_dev, target.st_ino):
+            return result
         return SimpleNamespace(
             st_mode=stat.S_IFDIR | 0o755,
             st_size=result.st_size,
@@ -458,13 +480,17 @@ def test_hash_regular_file_content_samples_into_non_regular_fails_closed(
     hasher = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         monkeypatch.setattr(os, "fstat", _dir_mode)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert (
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher, fh) is False
         )
     monkeypatch.setattr(os, "fstat", real_fstat)
 
-    def _neg_size(fd: int) -> SimpleNamespace:
+    def _neg_size(fd: int) -> SimpleNamespace | os.stat_result:
         result = real_fstat(fd)
+        if (result.st_dev, result.st_ino) != (target.st_dev, target.st_ino):
+            return result
         return SimpleNamespace(
             st_mode=result.st_mode,
             st_size=-1,
@@ -475,6 +501,8 @@ def test_hash_regular_file_content_samples_into_non_regular_fails_closed(
     hasher2 = hashlib.sha256()
     with comment_verdict_residue_io._open_worktree_regular_file(path) as fh:
         monkeypatch.setattr(os, "fstat", _neg_size)
+        with (tmp_path / "unrelated").open("w+b") as unrelated:
+            assert os.fstat(unrelated.fileno()) == real_fstat(unrelated.fileno())
         assert (
             comment_verdict_residue_io._hash_regular_file_content_samples_into(hasher2, fh) is False
         )
