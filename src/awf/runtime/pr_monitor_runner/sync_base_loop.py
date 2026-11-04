@@ -273,6 +273,7 @@ async def handle_sync_base_action(
             operation_id=operation.operation_id if operation is not None else None,
             operation_type=OperationType.sync_base.value,
             monitor_log=monitor_log,
+            source_base_sha=push_result.merged_base_sha,
             evidence=push_result.failure_evidence(),
         )
         if push_result.workflow_scope_required:
@@ -344,6 +345,7 @@ async def handle_sync_base_action(
         operation_id=operation.operation_id if operation is not None else None,
         operation_type=OperationType.sync_base.value,
         monitor_log=monitor_log,
+        source_base_sha=push_result.merged_base_sha,
     )
     if push_result.pushed:
         # SyncBase merged ``origin/<base>`` into the workspace branch and

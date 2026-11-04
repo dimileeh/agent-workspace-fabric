@@ -419,6 +419,7 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
@@ -901,6 +902,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git merge --abort
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit
+        cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
         _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push (sync_base)
         cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD
@@ -909,6 +911,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
@@ -1205,6 +1208,7 @@ class TestResolveStaleGuard:
         cmd.queue_result(returncode=0)  # git fetch
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         adapter.queue(stdout="AWF-VERDICT: NEEDS_HUMAN: needs a human")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # settle quiet
         _queue_post_action_recheck(cmd)
@@ -1214,6 +1218,7 @@ class TestResolveStaleGuard:
         cmd.queue_result(returncode=0)  # git fetch
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
         # iter4: externally merged.
         cmd.queue_result(returncode=0)  # git fetch

@@ -287,6 +287,7 @@ async def test_sync_base_uses_validated_push(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # merge --no-edit origin/development
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout=f"{'c' * 40}\n")  # rev-parse HEAD

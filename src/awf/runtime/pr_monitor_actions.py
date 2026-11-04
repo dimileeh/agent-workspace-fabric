@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 
-from awf.runtime.pr_monitor_models import CheckFailure, ReviewComment, ReviewThread
+from awf.runtime.pr_monitor_models import CheckFailure, PRStatus, ReviewComment, ReviewThread
 
 if TYPE_CHECKING:
     from awf.runtime.pr_monitor import OperatorHint
@@ -98,6 +98,7 @@ class WaitForCI:
         "unknown_mergeable_state",
         "awaiting_required_checks",
         "ci_run_in_progress",
+        "pr_head_not_synchronized",
     ] = "pending_checks"
 
 
@@ -116,6 +117,25 @@ class NotifyHuman:
     """
 
     message: str | None = None
+    reason_code: str | None = None
+    """Catalogued reason for the human-wait operation; ``None`` → ``HUMAN_WAIT``."""
+
+
+PR_HEAD_NOT_SYNCHRONIZED_REASON = "PR_HEAD_NOT_SYNCHRONIZED"
+PR_HEAD_SYNC_REMEDY = (
+    "GitHub usually re-synchronizes on a new push, or on closing and reopening the PR"
+)
+
+
+def pr_head_not_synchronized_message(status: PRStatus) -> str:
+    """Explain a forge that accepted a push but never synchronized the PR head."""
+    return (
+        f"{PR_HEAD_NOT_SYNCHRONIZED_REASON}: the PR head branch is at "
+        f"{status.unsynchronized_remote_head_sha}, the commit AWF pushed, but PR "
+        f"#{status.number} still reports head {status.head_sha}. AWF will not close, "
+        f"reopen, or push to the PR to nudge it. {PR_HEAD_SYNC_REMEDY}; if you close "
+        "it, reopen it right away, because AWF stops monitoring a PR it finds closed."
+    )
 
 
 @dataclass(frozen=True)
@@ -178,4 +198,7 @@ __all__ = [
     "Abort",
     "MonitorAction",
     "BOT_REVIEWER_LOGINS",
+    "PR_HEAD_NOT_SYNCHRONIZED_REASON",
+    "PR_HEAD_SYNC_REMEDY",
+    "pr_head_not_synchronized_message",
 ]

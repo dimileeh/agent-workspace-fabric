@@ -745,6 +745,8 @@ def _truncate_blocker_reason(reason: str) -> str:
         # #1018: these list review-thread ids the operator must act on.
         "REVIEW_THREAD_DISPOSITION_UNVERIFIED:",
         "REVIEW_THREAD_AUDIT_UNAVAILABLE:",
+        # #1167: names the branch tip, the PR head and the remedy.
+        "PR_HEAD_NOT_SYNCHRONIZED:",
     )
     limit = 500 if reason.startswith(detailed_prefixes) else 160
     return _truncate_blocker_excerpt(reason, limit=limit)

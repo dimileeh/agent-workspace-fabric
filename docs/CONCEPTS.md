@@ -690,6 +690,25 @@ Rules:
   before.
 - The upper bound is 86400 seconds (parity with the other monitor knobs).
 
+### PR Head Not Synchronized
+
+GitHub can accept a monitor push yet never synchronize the pull request: the
+head branch holds AWF's commit while the PR keeps reporting the old head (and,
+after a sync-base push, `DIRTY`). On a suspicious poll (AWF's last push differs
+from the PR head, or a SyncBase was a no-op), the runner compares the local HEAD
+with `git ls-remote` of the push remote. When the branch tip equals the local
+HEAD but not the PR head:
+
+- AWF waits passively (`WaitForCI` reason `pr_head_not_synchronized`) for a
+  bounded grace window (`MonitorConfig.pr_head_sync_grace_seconds`, default 600).
+- After the window it parks for a human (`NotifyHuman`, reason code
+  `PR_HEAD_NOT_SYNCHRONIZED`, event `monitor.pr_head_not_synchronized`) with the
+  branch tip, the PR head and the remedy: GitHub usually re-synchronizes on a new
+  push, or on closing and reopening the PR. The workspace stays `monitoring_pr`.
+- AWF never closes/reopens the PR or pushes to nudge it, and the stall never
+  counts as SyncBase no-progress (so it cannot become
+  `merge_conflict_not_reproduced`).
+
 ## Local Service Stack
 
 Docker Compose is the default local runtime for the always-on AWF control

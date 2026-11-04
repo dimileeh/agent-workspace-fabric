@@ -938,6 +938,7 @@ class TestDeferredThreadCapture:
         cmd.queue_result(returncode=0)  # iter2 git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean -> merge
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
@@ -1172,6 +1173,7 @@ class TestDeferredThreadCapture:
         cmd.queue_result(returncode=0)  # iter2 git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean -> merge
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # pre-merge recheck: PR state
@@ -1260,6 +1262,7 @@ class TestDeferredThreadCapture:
         cmd.queue_result(returncode=0)  # iter2 git fetch
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t_v2]))  # still open -> block
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
         cmd.queue_result(returncode=0)  # iter3 git fetch
         cmd.queue_result(returncode=0, stdout="0\n")

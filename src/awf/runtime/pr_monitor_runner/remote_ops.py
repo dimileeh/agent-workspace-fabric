@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -45,7 +45,6 @@ from awf.runtime.pr_monitor_runner.constants import (
     _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
-    _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -57,6 +56,13 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
+)
+from awf.runtime.pr_monitor_runner.sync_base_support import (
+    _merged_base_sha_from_rev_parse,
+    _resolve_merged_base_sha,
+)
+from awf.runtime.pr_monitor_runner.sync_base_support import (
+    _refresh_staleness_after_sync_base as _refresh_staleness_after_sync_base,
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseBehindCountError,
@@ -190,6 +196,11 @@ class _GitPushResult:
     paused, or notified (#910). Set only on the non-paused, non-failed moot
     envelope; the monitor loop reads the carried fresh ``PRStatus`` to run the
     same terminal handling ``decide()`` would return on the next poll."""
+    merged_base_sha: str | None = None
+    """Base commit a sync-base merge integrated (#1167): ``MERGE_HEAD`` on a
+    conflict, ``origin/<base>`` right after a clean merge. Audit-only, so it is
+    deliberately absent from ``failure_evidence()``; ``None`` keeps the audit's
+    ``workspace.base_commit`` fallback."""
 
     @property
     def error_message(self: Any) -> str | None:
@@ -967,6 +978,14 @@ async def _run_sync_base(
             stderr="agent runtime ownership repair failed after the sync-base merge commit",
             reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
         )
+    merged_base_sha: str | None = None
+    if rc == 0:
+        merged_base_sha = await _resolve_merged_base_sha(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            ref=f"origin/{base_branch}",
+        )
     if rc != 0:
         status_rc, status_out, status_stderr = await _git("status", "--porcelain")
         conflicting_files = tuple(
@@ -998,13 +1017,20 @@ async def _run_sync_base(
                     "status_returncode": status_rc,
                 },
             )
+        # The mirror's origin/<base> ref is shared across worktrees and can
+        # advance after this merge. MERGE_HEAD is worktree-local and records
+        # the exact commit that produced the conflict being resolved.
+        base_sha_rc, base_sha_stdout, base_sha_stderr = await _git("rev-parse", "MERGE_HEAD")
+        merged_base_sha = _merged_base_sha_from_rev_parse(
+            workspace_id=workspace_id,
+            ref="MERGE_HEAD",
+            returncode=base_sha_rc,
+            stdout=base_sha_stdout,
+            stderr=base_sha_stderr,
+        )
         is_hosted = bool(getattr(getattr(runner._deps, "adapter", None), "is_hosted", False))
         git_preparation: AgentRuntimeGitPreparation | None = None
         if is_hosted:
-            # The mirror's origin/<base> ref is shared across worktrees and can
-            # advance after this merge. MERGE_HEAD is worktree-local and records
-            # the exact commit that produced the conflict being delegated.
-            base_sha_rc, base_sha_stdout, _base_sha_stderr = await _git("rev-parse", "MERGE_HEAD")
             expected_base_sha = base_sha_stdout.strip()
             if base_sha_rc != 0 or re.fullmatch(r"[0-9a-f]{40}", expected_base_sha) is None:
                 return _GitPushResult(
@@ -1334,6 +1360,7 @@ async def _run_sync_base(
             returncode=1,
             stderr=protected_scope_block.message,
             reason_code=protected_scope_block.reason_code,
+            merged_base_sha=merged_base_sha,
         )
     push_result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
@@ -1353,6 +1380,8 @@ async def _run_sync_base(
         operation_id=operation_id,
         operation_type=operation_type,
     )
+    if merged_base_sha is not None:
+        push_result = replace(push_result, merged_base_sha=merged_base_sha)
     if (
         state is None
         or push_result.paused_into_blocked
@@ -1383,104 +1412,8 @@ async def _run_sync_base(
             ),
             reason_code=_SYNC_BASE_PUSHED_HEAD_UNAVAILABLE_REASON,
             details=details,
+            merged_base_sha=merged_base_sha,
         )
 
     cast("MonitorState", state).last_push_sha = pushed_head.lower()
     return push_result
-
-
-async def _refresh_staleness_after_sync_base(
-    runner: PullRequestMonitorRunner,
-    *,
-    workspace_id: str,
-    base_branch: str,
-) -> None:
-    """Refresh candidate stale state after a successful sync-base repair."""
-    from awf.db.repositories import (
-        MergeCandidateRepository,
-        StaleReasonCreate,
-        StaleReasonRepository,
-        sync_candidate_readiness,
-    )
-    from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
-
-    try:
-        async with runner._deps.session_factory() as session:
-            candidate = await MergeCandidateRepository(
-                session
-            ).get_open_for_workspace_with_merge_inputs(workspace_id)
-            if candidate is None:
-                # No tracked candidate — nothing to refresh.
-                return
-            active_reasons = await StaleReasonRepository(session).list_active_for_candidate(
-                candidate.id
-            )
-            resolvable = [
-                r for r in active_reasons if r.reason_code in _SYNC_BASE_RESOLVABLE_STALE_REASONS
-            ]
-            worktree_path = runner._worktrees_root / workspace_id
-            rev_parse = await runner._deps.runner.run(
-                git_worktree_command(worktree_path, "rev-parse", f"origin/{base_branch}")
-            )
-            if rev_parse.returncode != 0 or not rev_parse.stdout.strip():
-                _log.warning(
-                    "monitor.sync_base_staleness_refresh_skipped",
-                    workspace_id=workspace_id,
-                    reason="rev_parse_failed",
-                    stderr=(rev_parse.stderr[:400] if rev_parse.stderr else None),
-                )
-                return
-            new_base_sha = rev_parse.stdout.strip()
-            candidate.base_sha = new_base_sha
-            if not resolvable:
-                # No target-derived rows to clear. Leave any intrinsic
-                # blocking reason (e.g. ``docs_task_scope_violation``) and
-                # the candidate's stale flag untouched — a rebase does not
-                # remediate those — and just persist the advanced base.
-                await session.commit()
-                return
-            # Resolve only the target-derived rows by re-stating every other
-            # active finding: ``replace_active_findings`` keeps rows whose
-            # (reason_code, trigger_type, trigger_ref) key is supplied and
-            # resolves the rest, so the preserved intrinsic rows survive.
-            preserved = [
-                r
-                for r in active_reasons
-                if r.reason_code not in _SYNC_BASE_RESOLVABLE_STALE_REASONS
-            ]
-            await StaleReasonRepository(session).replace_active_findings(
-                workspace_id=candidate.workspace_id,
-                candidate_id=candidate.id,
-                attempt_id=candidate.attempt_id,
-                task_id=candidate.task_id,
-                findings=[
-                    StaleReasonCreate(
-                        reason_code=r.reason_code,
-                        trigger_type=r.trigger_type,
-                        trigger_ref=r.trigger_ref,
-                        explanation=r.explanation,
-                    )
-                    for r in preserved
-                ],
-            )
-            # The candidate's stale_reason column may still hold a reason we
-            # just resolved (or a generic "stale"). Clear it, then let
-            # sync_candidate_readiness reinstate only the intrinsic reasons
-            # (docs scope / validation tier) that genuinely still apply.
-            candidate.stale = False
-            candidate.stale_reason = None
-            sync_candidate_readiness(
-                candidate,
-                workspace=candidate.workspace,
-                attempt=candidate.attempt,
-                sync_validation_staleness=True,
-            )
-            await session.commit()
-    except Exception as exc:  # noqa: BLE001 — best-effort; reconciler will retry
-        _log.warning(
-            "monitor.sync_base_staleness_refresh_failed",
-            workspace_id=workspace_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-            exc_info=True,
-        )

@@ -336,6 +336,7 @@ async def test_execute_sync_base_records_no_progress_noop(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
@@ -386,6 +387,7 @@ async def test_execute_sync_base_failed_push_resets_no_progress_streak(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=1, stderr="push rejected")
