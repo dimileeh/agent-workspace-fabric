@@ -560,6 +560,7 @@ def build_worker_runtime(
             "awaiting_required_checks_grace_seconds": (
                 profile.monitor.awaiting_required_checks_grace_seconds
             ),
+            "pr_head_sync_grace_seconds": profile.monitor.pr_head_sync_grace_seconds,
             "log_store": log_store,
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,

@@ -700,7 +700,8 @@ with `git ls-remote` of the push remote. When the branch tip equals the local
 HEAD but not the PR head:
 
 - AWF waits passively (`WaitForCI` reason `pr_head_not_synchronized`) for a
-  bounded grace window (`MonitorConfig.pr_head_sync_grace_seconds`, default 600).
+  bounded grace window (`monitor.pr_head_sync_grace_seconds`, default 600, upper
+  bound 86400; `0` or any value `<= 0` parks immediately).
 - After the window it parks for a human (`NotifyHuman`, reason code
   `PR_HEAD_NOT_SYNCHRONIZED`, event `monitor.pr_head_not_synchronized`) with the
   branch tip, the PR head and the remedy: GitHub usually re-synchronizes on a new
