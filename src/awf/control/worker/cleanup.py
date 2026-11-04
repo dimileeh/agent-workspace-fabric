@@ -32,6 +32,7 @@ from awf.control.executor.planning_ops import (
     _record_planning_scope_auto_retry_resume_failed_after_runtime_release,
     _resume_blocked_planning_scope_auto_retry_after_runtime_release,
 )
+from awf.control.worker.cancelled_activity import reconcile_cancelled_activity
 from awf.control.worker.cleanup_auth_overlay import (
     _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
     _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
@@ -625,6 +626,7 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
             error=str(exc)[:240],
             exc_info=True,
         )
+    await reconcile_cancelled_activity(self, limit=limit)
     if resume_failure is not None:
         # Only set when there were no release errors, so it is the sole pending failure.
         raise resume_failure
