@@ -553,6 +553,13 @@ class ProfileMonitor(BaseModel):
     the other monitor knobs; there is deliberately no lower bound so the
     documented ``<= 0`` disable escape hatch is reachable from operator
     configuration."""
+    pr_head_sync_grace_seconds: float = Field(default=600.0, le=86400)
+    """Grace window for a forge that accepted a monitor push but has not
+    synchronized the PR head yet (#1167). Within it the monitor waits passively;
+    after it the monitor parks for a human with ``PR_HEAD_NOT_SYNCHRONIZED``. The
+    default (``600.0``) mirrors ``MonitorConfig``. Set ``<= 0`` to park
+    immediately; like ``awaiting_required_checks_grace_seconds`` there is
+    deliberately no lower bound so that escape hatch is reachable."""
 
     @field_validator("non_check_reviewer_logins")
     @classmethod
@@ -1018,6 +1025,9 @@ class WorkspaceProfile(BaseModel):
 _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT: float = ProfileMonitor.model_fields[
     "awaiting_required_checks_grace_seconds"
 ].default
+_MONITOR_PR_HEAD_SYNC_GRACE_SECONDS_DEFAULT: float = ProfileMonitor.model_fields[
+    "pr_head_sync_grace_seconds"
+].default
 
 
 def normalize_inline_profile_snapshot(
@@ -1039,7 +1049,8 @@ def normalize_inline_profile_snapshot(
     added after some inline-profile workspaces were persisted, so their stored
     ``monitor`` sub-dict lacks the key while an otherwise-identical replay now
     dumps the ``600.0`` default. Backfill a missing value there too so legacy
-    inline-profile replays stay idempotent. The ``monitor.auto_merge`` block (the
+    inline-profile replays stay idempotent; ``monitor.pr_head_sync_grace_seconds``
+    (#1167) is backfilled the same way. The ``monitor.auto_merge`` block (the
     unified auto-merge setting) was added the same way, so a legacy ``monitor``
     sub-dict lacks it while a fresh replay now dumps the defaulted block; backfill
     the default dump so pre-``auto_merge`` snapshots stay idempotent instead of
@@ -1059,6 +1070,10 @@ def normalize_inline_profile_snapshot(
         if "awaiting_required_checks_grace_seconds" not in monitor:
             monitor_backfills["awaiting_required_checks_grace_seconds"] = (
                 _MONITOR_AWAITING_REQUIRED_CHECKS_GRACE_SECONDS_DEFAULT
+            )
+        if "pr_head_sync_grace_seconds" not in monitor:
+            monitor_backfills["pr_head_sync_grace_seconds"] = (
+                _MONITOR_PR_HEAD_SYNC_GRACE_SECONDS_DEFAULT
             )
         if "auto_merge" not in monitor:
             # Fresh dump of the current default so retuning the block keeps legacy

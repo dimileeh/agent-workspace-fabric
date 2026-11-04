@@ -61,6 +61,7 @@ from awf.runtime.monitor_state_keys import (
 )
 from awf.runtime.pr_monitor_actions import (
     BOT_REVIEWER_LOGINS,
+    PR_HEAD_NOT_SYNCHRONIZED_REASON,
     Abort,
     AbortReason,
     AddressComments,
@@ -74,6 +75,7 @@ from awf.runtime.pr_monitor_actions import (
     SyncBase,
     WaitForCI,
     WaitForTransientCI,
+    pr_head_not_synchronized_message,
 )
 from awf.runtime.pr_monitor_ci_classification import (
     _CI_CODE_FAILURE_MARKERS as _CI_CODE_FAILURE_MARKERS,
@@ -608,6 +610,13 @@ class MonitorConfig:
     by ``decide`` directly. Set ``<= 0`` to disable the grace (escalate
     immediately, pre-#655 behavior)."""
 
+    pr_head_sync_grace_seconds: float = 600.0
+    """Grace window for a forge that accepted a push but has not synchronized the
+    PR head yet (#1167). Within it ``decide`` waits passively; after it the
+    monitor parks for a human with ``PR_HEAD_NOT_SYNCHRONIZED``. Used by the
+    RUNNER to derive ``PRStatus.pr_head_sync_grace_active``. Set ``<= 0`` to park
+    immediately."""
+
     max_no_progress_sync_base_attempts: int = 3
     """Abort or move to still-actionable review feedback after this many
     consecutive no-op SyncBase attempts for the same PR snapshot. This
@@ -1018,6 +1027,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         Every gate below acts on the workspace's persisted ``branch_base``, and
         ``auto_merge`` was resolved from it; a retargeted PR must not be driven
         (or merged) under the previous base's policy.
+    0c. Forge accepted AWF's push but has not synchronized the PR head
+        (``unsynchronized_remote_head_sha``, #1167) → WaitForCI within the grace,
+        then NotifyHuman(PR_HEAD_NOT_SYNCHRONIZED). Never SyncBase no-progress.
     1.  Base behind / DIRTY → SyncBase (BEFORE addressing comments or
         operator hints so a PR on a fast-moving base doesn't loop
         forever on new bot-review cycles without ever integrating base
@@ -1093,6 +1105,19 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # failure: retargeting the PR back clears the drift on the next poll.
     if status.base_ref_drifted:
         return NotifyHuman(message=_base_ref_drift_human_message(status.base_ref))
+
+    # 0c. The head branch holds AWF's pushed commit but the PR still reports an
+    # older head (#1167). Every gate below would act on that stale snapshot: a
+    # no-op SyncBase would count no-progress and abort as
+    # ``merge_conflict_not_reproduced``. Wait, then park for a human; AWF never
+    # closes/reopens the PR or pushes to nudge it.
+    if status.unsynchronized_remote_head_sha is not None:
+        if status.pr_head_sync_grace_active:
+            return WaitForCI(reason="pr_head_not_synchronized")
+        return NotifyHuman(
+            message=pr_head_not_synchronized_message(status),
+            reason_code=PR_HEAD_NOT_SYNCHRONIZED_REASON,
+        )
 
     # Pre-compute actionable comments so a no-progress DIRTY loop can break
     # back to review repair instead of starving new feedback forever.

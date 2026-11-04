@@ -260,6 +260,7 @@ def test_normalize_inline_profile_snapshot_backfills_missing_monitor_grace() -> 
         "monitor": {
             "require_ci": True,
             "awaiting_required_checks_grace_seconds": 600.0,
+            "pr_head_sync_grace_seconds": 600.0,
             "auto_merge": {"default": False, "by_base_branch": {}},
         },
     }
@@ -276,6 +277,7 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> 
         "forge": "auto",
         "monitor": {
             "awaiting_required_checks_grace_seconds": 120.0,
+            "pr_head_sync_grace_seconds": 600.0,
             "require_ci": True,
             "auto_merge": {"default": True, "by_base_branch": {}},
         },
@@ -286,6 +288,33 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_grace() -> 
     assert normalized == explicit
     assert normalized is not explicit
     assert normalized["monitor"] == explicit["monitor"]
+
+
+@pytest.mark.unit
+def test_normalize_inline_profile_snapshot_backfills_missing_pr_head_sync_grace() -> None:
+    """A pre-#1167 snapshot's ``monitor`` lacks ``pr_head_sync_grace_seconds``;
+    normalization adds the field default so a fresh replay compares equal, and a
+    present value is preserved."""
+    legacy = {
+        "name": "inline",
+        "forge": "auto",
+        "monitor": {
+            "require_ci": True,
+            "awaiting_required_checks_grace_seconds": 600.0,
+            "auto_merge": {"default": False, "by_base_branch": {}},
+        },
+    }
+
+    normalized = normalize_inline_profile_snapshot(legacy)
+
+    assert normalized is not None
+    assert normalized["monitor"]["pr_head_sync_grace_seconds"] == 600.0
+    assert "pr_head_sync_grace_seconds" not in legacy["monitor"]
+
+    explicit = {**legacy, "monitor": {**legacy["monitor"], "pr_head_sync_grace_seconds": 0.0}}
+    explicit_normalized = normalize_inline_profile_snapshot(explicit)
+    assert explicit_normalized is not None
+    assert explicit_normalized["monitor"]["pr_head_sync_grace_seconds"] == 0.0
 
 
 @pytest.mark.unit
@@ -303,6 +332,7 @@ def test_normalize_inline_profile_snapshot_backfills_missing_monitor_auto_merge(
         "monitor": {
             "require_ci": True,
             "awaiting_required_checks_grace_seconds": 600.0,
+            "pr_head_sync_grace_seconds": 600.0,
             "auto_merge": {"default": False, "by_base_branch": {}},
         },
     }
@@ -324,6 +354,7 @@ def test_normalize_inline_profile_snapshot_preserves_present_monitor_auto_merge(
         "monitor": {
             "require_ci": True,
             "awaiting_required_checks_grace_seconds": 600.0,
+            "pr_head_sync_grace_seconds": 600.0,
             "auto_merge": {"default": True, "by_base_branch": {"main": True}},
         },
     }
@@ -399,6 +430,7 @@ def test_normalize_inline_profile_snapshot_backfills_both_forge_and_monitor_grac
         "monitor": {
             "require_ci": True,
             "awaiting_required_checks_grace_seconds": 600.0,
+            "pr_head_sync_grace_seconds": 600.0,
             "auto_merge": {"default": False, "by_base_branch": {}},
         },
     }

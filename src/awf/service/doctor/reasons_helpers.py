@@ -89,6 +89,26 @@ def get_salvage_and_monitor_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("MONITOR_ACTION_MOOT_RECHECK_FAILED"),
         ),
+        "PR_HEAD_NOT_SYNCHRONIZED": reason_text_cls(
+            (
+                "GitHub accepted AWF's push to the PR head branch but has not "
+                "synchronized the pull request, so the PR still reports an older head."
+            ),
+            (
+                "Compare the branch tip and PR head on the "
+                "``monitor.pr_head_not_synchronized`` event. GitHub usually "
+                "re-synchronizes on a new push, or on closing and reopening the PR. "
+                "AWF does neither automatically; it keeps monitoring and resumes once "
+                "the PR reports the pushed head."
+            ),
+            (
+                "A forge-side synchronization stall after an accepted push (often a "
+                "sync-base merge commit): ``git ls-remote`` shows the pushed commit "
+                "while the PR's ``headRefOid`` and merge state stay on the old head."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("PR_HEAD_NOT_SYNCHRONIZED"),
+        ),
         "POST_AGENT_FORMAT_REPAIR_FAILED": reason_text_cls(
             (
                 "AWF detected a repairable post-agent pre-commit failure but the "

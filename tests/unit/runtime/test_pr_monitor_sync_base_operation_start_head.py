@@ -466,6 +466,7 @@ async def test_run_sync_base_threads_compose_context_to_conflict_commit(
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -576,6 +577,7 @@ async def test_run_sync_base_repairs_mirror_hooks_before_conflict_agent_launch(
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -701,6 +703,7 @@ async def test_run_sync_base_fails_closed_when_conflict_prelaunch_mirror_repair_
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -829,6 +832,7 @@ async def test_run_sync_base_repairs_mirror_hooks_after_conflict_agent_cleanup_f
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -964,6 +968,7 @@ async def test_run_sync_base_fails_closed_when_post_agent_mirror_hooks_repair_fa
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -1105,6 +1110,7 @@ async def test_run_sync_base_reraises_superseded_recovery_before_commit_sink(
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -1199,6 +1205,7 @@ async def test_run_sync_base_runs_post_agent_guard_before_provider_retry(
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(
@@ -1312,6 +1319,7 @@ async def test_run_sync_base_reraises_provider_retry_before_commit_sink(
                 CommandResult(returncode=0, stdout="", stderr=""),
                 CommandResult(returncode=1, stdout="", stderr="merge conflict"),
                 CommandResult(returncode=0, stdout="UU src/conflict.py\n", stderr=""),
+                CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD
             ]
 
         async def run(

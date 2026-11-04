@@ -229,6 +229,7 @@ async def test_execute_sync_base_push_failure_records_failed_audit(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
@@ -294,6 +295,7 @@ async def test_execute_sync_base_workflow_scope_push_failure_is_terminal(
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
@@ -372,6 +374,7 @@ async def test_execute_sync_base_workflow_scope_notification_failure_still_termi
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
@@ -441,6 +444,7 @@ async def test_execute_sync_base_workflow_scope_bitbucket_notification_failure_s
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(
@@ -982,6 +986,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         (0, "", ""),
         (1, "", "merge conflict"),
         (0, "UU src/conflict.py\n", ""),
+        (0, f"{'b' * 40}\n", ""),  # MERGE_HEAD (#1167)
         (0, " M src/conflict.py\n", ""),  # status --porcelain (commit_dirty)
         (0, " M src/conflict.py\n", ""),  # status --untracked-files=all (commit_dirty)
         (0, "", ""),
@@ -1059,6 +1064,7 @@ async def test_sync_base_conflict_supply_chain_command_evidence_blocks_before_co
         (0, "", ""),
         (1, "", "merge conflict"),
         (0, "UU src/conflict.py\n", ""),
+        (0, f"{'b' * 40}\n", ""),  # MERGE_HEAD (#1167)
         (0, " M src/conflict.py\n", ""),
         (0, "", ""),
         (1, "", ""),

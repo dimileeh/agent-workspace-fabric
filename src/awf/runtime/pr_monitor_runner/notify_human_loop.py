@@ -285,7 +285,7 @@ async def handle_notify_human_action(
         action="human_wait",
         requested_action="notify_human",
         reason=human_wait_reason,
-        reason_code="HUMAN_WAIT",
+        reason_code=action.reason_code or "HUMAN_WAIT",
         pr_number=pr_number,
         status=status,
         base_branch=base_branch,

@@ -59,6 +59,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _infer_service_work_dir,
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
+from awf.runtime.pr_monitor_runner.pr_head_sync import observe_pr_head_sync
 from awf.runtime.pr_monitor_runner.recovery_payloads import _is_active_pr_monitor_recovery_operation
 from awf.runtime.pr_monitor_runner.thread_disposition import retire_reopened_dispositions
 from awf.runtime.pr_monitor_runner.thread_disposition_ack_check import (
@@ -459,6 +460,18 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                 if grace_state_changed:
                     await self._persist_state(workspace_id, state)
                 status = replace(status, awaiting_required_checks_grace_active=grace_active)
+                # #1167: the forge can accept a push yet never synchronize the PR
+                # head; stamp that evidence so decide() waits/parks instead of
+                # acting on the stale snapshot.
+                status = await observe_pr_head_sync(
+                    self,
+                    workspace_id=workspace_id,
+                    status=status,
+                    state=state,
+                    remote_branch=remote_branch,
+                    remote_push_url=remote_push_url,
+                    monitor_log=monitor_log,
+                )
                 action = decide(status, state, self._config)
                 try:
                     terminal = await self._execute(
