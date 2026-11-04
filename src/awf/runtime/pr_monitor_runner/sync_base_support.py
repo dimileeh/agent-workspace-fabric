@@ -54,20 +54,27 @@ async def _resolve_merged_base_sha(
     *,
     workspace_id: str,
     worktree_path: Path,
-    ref: str,
 ) -> str | None:
-    """Resolve ``ref`` (the clean merge commit's ``HEAD^2``) for the audit."""
+    """Resolve the clean merge commit's ``HEAD^2`` for the audit.
+
+    ``HEAD^2`` is trusted only when ``HEAD^1`` is ``ORIG_HEAD`` (the pre-merge
+    head ``git merge`` always records), i.e. this merge created the commit. An
+    "Already up to date" or fast-forward merge leaves ``HEAD`` on a pre-existing
+    commit whose second parent, if any, is an unrelated side branch.
+    """
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     result = await runner._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", ref),
+        git_worktree_command(worktree_path, "rev-parse", "ORIG_HEAD", "HEAD^1", "HEAD^2"),
         env=git_env_without_object_lookup_overrides(),
     )
+    lines = (result.stdout or "").lower().split()
+    created_merge = result.returncode == 0 and len(lines) == 3 and lines[0] == lines[1]
     return _merged_base_sha_from_rev_parse(
         workspace_id=workspace_id,
-        ref=ref,
+        ref="HEAD^2",
         returncode=result.returncode,
-        stdout=result.stdout,
+        stdout=lines[2] if created_merge else "",
         stderr=result.stderr,
     )
 
