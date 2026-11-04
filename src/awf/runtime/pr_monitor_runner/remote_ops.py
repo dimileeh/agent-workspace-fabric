@@ -198,7 +198,8 @@ class _GitPushResult:
     same terminal handling ``decide()`` would return on the next poll."""
     merged_base_sha: str | None = None
     """Base commit a sync-base merge integrated (#1167): ``MERGE_HEAD`` on a
-    conflict, the merge commit's ``HEAD^2`` after a clean merge. Audit-only, so it is
+    conflict, the merge commit's ``HEAD^2`` after a clean merge, or the new ``HEAD``
+    after a fast-forward. Audit-only, so it is
     deliberately absent from ``failure_evidence()``; ``None`` keeps the audit's
     ``workspace.base_commit`` fallback."""
 
@@ -982,7 +983,8 @@ async def _run_sync_base(
     if rc == 0:
         # The mirror's origin/<base> ref is shared across worktrees and another
         # workspace's fetch can advance it after this merge. The completed
-        # merge commit's second parent is immutable: the base it integrated.
+        # merge commit's second parent (or a fast-forward's new HEAD) is
+        # immutable: the base it integrated.
         merged_base_sha = await _resolve_merged_base_sha(
             runner,
             workspace_id=workspace_id,

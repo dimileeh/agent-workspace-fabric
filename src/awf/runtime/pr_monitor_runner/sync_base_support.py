@@ -56,41 +56,47 @@ async def _resolve_merged_base_sha(
     worktree_path: Path,
     base_branch: str,
 ) -> str | None:
-    """Resolve the clean merge commit's ``HEAD^2`` for the audit.
+    """Resolve the base commit a clean sync-base merge integrated, for the audit.
 
-    ``HEAD^2`` is trusted only when this merge created the commit: ``HEAD^1`` is
-    ``ORIG_HEAD`` (the pre-merge head ``git merge`` always records) and ``HEAD``
-    is not already reachable from ``origin/<base>``. An "Already up to date" or
-    fast-forward merge — even onto a base merge commit whose first parent is
-    ``ORIG_HEAD`` — leaves ``HEAD`` on a pre-existing commit whose second
-    parent, if any, is an unrelated side branch.
+    One ``rev-parse ORIG_HEAD HEAD HEAD^@`` reads the pre-merge head ``git merge``
+    always records, the post-merge head and its parents. When ``HEAD`` moved,
+    ``merge-base --is-ancestor HEAD origin/<base>`` tells the two outcomes apart:
+
+    * exit 0 — a fast-forward: ``HEAD`` is the exact base commit merged, even when
+      the shared ``origin/<base>`` has since advanced past it.
+    * exit 1 — a merge commit this sync created: its ``HEAD^2`` is the base, but
+      only when ``HEAD^1`` is ``ORIG_HEAD``.
+
+    "Already up to date" (``HEAD`` unmoved), any other shape, or a probe error
+    falls back to ``workspace.base_commit``, logged.
     """
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     env = git_env_without_object_lookup_overrides()
     result = await runner._deps.runner.run(
-        git_worktree_command(worktree_path, "rev-parse", "ORIG_HEAD", "HEAD^1", "HEAD^2"),
+        git_worktree_command(worktree_path, "rev-parse", "ORIG_HEAD", "HEAD", "HEAD^@"),
         env=env,
     )
     lines = (result.stdout or "").lower().split()
-    created_merge = result.returncode == 0 and len(lines) == 3 and lines[0] == lines[1]
-    stderr = result.stderr
-    if created_merge:
-        # Exit 1 means "not an ancestor": a new commit. Exit 0 (a fast-forward
-        # onto an existing base commit) or any error falls back, logged.
+    moved = result.returncode == 0 and len(lines) >= 3 and lines[0] != lines[1]
+    ref, sha, stderr = "HEAD^2", "", result.stderr
+    if moved:
         in_base = await runner._deps.runner.run(
             git_worktree_command(
                 worktree_path, "merge-base", "--is-ancestor", "HEAD", f"origin/{base_branch}"
             ),
             env=env,
         )
-        created_merge = in_base.returncode == 1
         stderr = in_base.stderr
+        if in_base.returncode == 0:
+            ref, sha = "HEAD", lines[1]
+        elif in_base.returncode == 1 and len(lines) == 4 and lines[2] == lines[0]:
+            sha = lines[3]
     return _merged_base_sha_from_rev_parse(
         workspace_id=workspace_id,
-        ref="HEAD^2",
+        ref=ref,
         returncode=result.returncode,
-        stdout=lines[2] if created_merge else "",
+        stdout=sha,
         stderr=stderr,
     )
 

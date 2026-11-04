@@ -6,12 +6,11 @@ The sync-base envelope now carries the merged base: ``MERGE_HEAD`` on a conflict
 (worktree-local and exact) and the completed merge commit's ``HEAD^2`` after a
 clean merge — never the shared mirror's mutable ``origin/<base>``, which a
 concurrent workspace's fetch can advance past the commit actually merged.
-``HEAD^2`` is trusted only when ``HEAD^1`` is ``ORIG_HEAD`` (this merge created
-the commit): an "Already up to date" or fast-forward merge leaves ``HEAD`` on a
-pre-existing commit whose second parent is unrelated to the base. A
-fast-forward onto a base merge commit whose first parent is ``ORIG_HEAD`` passes
-that parent check, so the commit must also be new: not already reachable from
-``origin/<base>``.
+``HEAD^2`` is trusted only when ``HEAD^1`` is ``ORIG_HEAD`` and the commit is
+new (not already reachable from ``origin/<base>``). A fast-forward instead
+lands ``HEAD`` on the exact base commit merged, so that ``HEAD`` is recorded —
+never a pre-existing commit's unrelated second parent. "Already up to date"
+leaves ``HEAD`` unmoved and falls back.
 """
 
 from __future__ import annotations
@@ -29,7 +28,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 
 _MERGED_BASE = "b" * 40
 _PRE_MERGE_HEAD = "a" * 40
-_CLEAN_MERGE_REFS = ["rev-parse", "ORIG_HEAD", "HEAD^1", "HEAD^2"]
+_MERGE_COMMIT = "d" * 40
+_CLEAN_MERGE_REFS = ["rev-parse", "ORIG_HEAD", "HEAD", "HEAD^@"]
 _HEAD_IN_BASE_ARGS = ["merge-base", "--is-ancestor", "HEAD", "origin/main"]
 
 
@@ -123,7 +123,7 @@ async def test_clean_merge_reports_merge_commit_second_parent(tmp_path: Path) ->
     cmd = FakeCommandRunner()
     cmd.respond_when(
         _is_clean_merge_rev_parse,
-        stdout=f"{_PRE_MERGE_HEAD}\n{_PRE_MERGE_HEAD}\n{_MERGED_BASE.upper()}\n",
+        stdout=f"{_PRE_MERGE_HEAD}\n{_MERGE_COMMIT}\n{_PRE_MERGE_HEAD}\n{_MERGED_BASE.upper()}\n",
     )
     # The shared tracking ref has already moved past the commit this merge integrated.
     cmd.respond_when(_is_rev_parse("origin/main"), stdout=f"{'c' * 40}\n")
@@ -163,7 +163,7 @@ async def test_conflict_merge_reports_merge_head(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("_ownership_ok")
 async def test_unresolvable_merged_base_falls_back_to_none(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
-    # A fast-forward leaves no second parent; the audit falls back as before #1167.
+    # An unreadable merge result falls back to the audit's pre-#1167 default.
     cmd.respond_when(_is_clean_merge_rev_parse, returncode=128, stderr="bad revision")
 
     with structlog.testing.capture_logs() as captured:
@@ -177,29 +177,64 @@ async def test_unresolvable_merged_base_falls_back_to_none(tmp_path: Path) -> No
 @pytest.mark.unit
 @pytest.mark.usefixtures("_ownership_ok")
 @pytest.mark.parametrize(
-    ("orig_head", "first_parent"),
+    "parents",
     [
-        # "Already up to date": ORIG_HEAD is HEAD itself, an adopted merge commit.
-        ("e" * 40, "f" * 40),
-        # Fast-forward onto an existing merge commit: its first parent is not ORIG_HEAD.
-        (_PRE_MERGE_HEAD, "f" * 40),
+        # Fast-forward onto an ordinary base commit: no second parent at all.
+        ("f" * 40,),
+        # Fast-forward onto a base merge commit whose first parent is ORIG_HEAD.
+        (_PRE_MERGE_HEAD, "9" * 40),
+        # Fast-forward onto a base merge commit with unrelated parents.
+        ("f" * 40, "9" * 40),
+    ],
+)
+async def test_fast_forward_reports_new_head(tmp_path: Path, parents: tuple[str, ...]) -> None:
+    """A fast-forward records the base commit it landed on, not the adoption-time base."""
+    cmd = FakeCommandRunner()
+    cmd.respond_when(
+        _is_clean_merge_rev_parse,
+        stdout="\n".join((_PRE_MERGE_HEAD, _MERGED_BASE.upper(), *parents)) + "\n",
+    )
+    # The shared tracking ref has already moved past the commit fast-forwarded to.
+    cmd.respond_when(_is_rev_parse("origin/main"), stdout=f"{'c' * 40}\n")
+    cmd.respond_when(_is_head_in_base, returncode=0)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await _sync(_runner(tmp_path, cmd))
+
+    assert result.pushed is True
+    assert result.merged_base_sha == _MERGED_BASE
+    assert sum(1 for c in cmd.calls if _is_head_in_base(c.args)) == 1
+    assert not any(r.get("event") == "monitor.sync_base_merged_base_unresolved" for r in captured)
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("_ownership_ok")
+@pytest.mark.parametrize(
+    ("head", "first_parent", "probes"),
+    [
+        # "Already up to date": HEAD is still ORIG_HEAD, an adopted merge commit.
+        (_PRE_MERGE_HEAD, "f" * 40, 0),
+        # A commit outside the base whose first parent is not ORIG_HEAD.
+        (_MERGE_COMMIT, "f" * 40, 1),
     ],
 )
 async def test_merge_without_new_merge_commit_ignores_unrelated_second_parent(
-    tmp_path: Path, orig_head: str, first_parent: str
+    tmp_path: Path, head: str, first_parent: str, probes: int
 ) -> None:
     cmd = FakeCommandRunner()
     side_branch_tip = "9" * 40
     cmd.respond_when(
         _is_clean_merge_rev_parse,
-        stdout=f"{orig_head}\n{first_parent}\n{side_branch_tip}\n",
+        stdout=f"{_PRE_MERGE_HEAD}\n{head}\n{first_parent}\n{side_branch_tip}\n",
     )
+    cmd.respond_when(_is_head_in_base, returncode=1)
 
     with structlog.testing.capture_logs() as captured:
         result = await _sync(_runner(tmp_path, cmd))
 
     assert result.pushed is True
     assert result.merged_base_sha is None
+    assert sum(1 for c in cmd.calls if _is_head_in_base(c.args)) == probes
     unresolved = [
         r for r in captured if r.get("event") == "monitor.sync_base_merged_base_unresolved"
     ]
@@ -210,34 +245,25 @@ async def test_merge_without_new_merge_commit_ignores_unrelated_second_parent(
 
 @pytest.mark.unit
 @pytest.mark.usefixtures("_ownership_ok")
-@pytest.mark.parametrize(
-    ("returncode", "stderr"),
-    [
-        # Fast-forward onto a base merge commit whose first parent is ORIG_HEAD.
-        (0, ""),
-        # Ancestry probe failure: fail closed to the fallback.
-        (128, "fatal: not a valid object name origin/main"),
-    ],
-)
-async def test_fast_forward_onto_merge_with_orig_head_parent_falls_back(
-    tmp_path: Path, returncode: int, stderr: str
-) -> None:
+async def test_ancestry_probe_failure_falls_back(tmp_path: Path) -> None:
+    """A failed ancestry probe fails closed to the fallback instead of guessing."""
     cmd = FakeCommandRunner()
-    side_branch_tip = "9" * 40
     cmd.respond_when(
         _is_clean_merge_rev_parse,
-        stdout=f"{_PRE_MERGE_HEAD}\n{_PRE_MERGE_HEAD}\n{side_branch_tip}\n",
+        stdout=f"{_PRE_MERGE_HEAD}\n{_MERGE_COMMIT}\n{_PRE_MERGE_HEAD}\n{'9' * 40}\n",
     )
-    cmd.respond_when(_is_head_in_base, returncode=returncode, stderr=stderr)
+    cmd.respond_when(
+        _is_head_in_base, returncode=128, stderr="fatal: not a valid object name origin/main"
+    )
 
     with structlog.testing.capture_logs() as captured:
         result = await _sync(_runner(tmp_path, cmd))
 
     assert result.pushed is True
     assert result.merged_base_sha is None
-    assert sum(1 for c in cmd.calls if _is_head_in_base(c.args)) == 1
     unresolved = [
         r for r in captured if r.get("event") == "monitor.sync_base_merged_base_unresolved"
     ]
     assert len(unresolved) == 1
     assert unresolved[0]["ref"] == "HEAD^2"
+    assert "not a valid object name" in unresolved[0]["stderr"]

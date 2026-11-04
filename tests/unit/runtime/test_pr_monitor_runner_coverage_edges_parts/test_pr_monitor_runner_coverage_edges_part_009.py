@@ -285,8 +285,11 @@ async def test_execute_sync_base_records_branch_push_audit(
     cmd.queue_result(returncode=0)  # merge
     merged_base = "d" * 40
     pre_merge_head = "e" * 40
-    # rev-parse ORIG_HEAD HEAD^1 HEAD^2 (#1167): HEAD^1 is ORIG_HEAD, so a new merge commit.
-    cmd.queue_result(returncode=0, stdout=f"{pre_merge_head}\n{pre_merge_head}\n{merged_base}\n")
+    # rev-parse ORIG_HEAD HEAD HEAD^@ (#1167): HEAD^1 is ORIG_HEAD, so a new merge commit.
+    cmd.queue_result(
+        returncode=0,
+        stdout=f"{pre_merge_head}\n{'f' * 40}\n{pre_merge_head}\n{merged_base}\n",
+    )
     cmd.queue_result(returncode=1)  # merge-base --is-ancestor HEAD origin/<base>: a new commit
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
