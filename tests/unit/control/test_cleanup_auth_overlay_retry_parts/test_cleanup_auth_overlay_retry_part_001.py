@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -295,6 +296,8 @@ async def test_release_resources_swallows_deferred_sweep_failure(
     never block port reclaim or perturb the release path."""
     log = _RecordingLog()
     monkeypatch.setattr(worker_cleanup, "_log", log)
+    settle = AsyncMock()
+    monkeypatch.setattr(worker_cleanup, "reconcile_cancelled_activity", settle)
 
     async def _retry(*, limit: int | None) -> None:
         del limit
@@ -304,6 +307,7 @@ async def test_release_resources_swallows_deferred_sweep_failure(
 
     # Must not raise: no candidate release errors, the sweep failure is swallowed.
     await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+    settle.assert_awaited_once_with(worker, limit=4)
 
     assert [event for event, _ in log.warnings] == [
         "worker.terminal_auth_overlay_unmount_retry_scan_failed",
