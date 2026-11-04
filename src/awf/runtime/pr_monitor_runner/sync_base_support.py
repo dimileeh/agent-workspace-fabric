@@ -56,7 +56,7 @@ async def _resolve_merged_base_sha(
     worktree_path: Path,
     ref: str,
 ) -> str | None:
-    """Resolve ``ref`` (``origin/<base>`` right after a clean merge) for the audit."""
+    """Resolve ``ref`` (the clean merge commit's ``HEAD^2``) for the audit."""
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     result = await runner._deps.runner.run(

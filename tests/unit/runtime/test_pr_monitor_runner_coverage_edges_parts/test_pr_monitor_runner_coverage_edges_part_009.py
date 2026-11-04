@@ -284,7 +284,7 @@ async def test_execute_sync_base_records_branch_push_audit(
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
     merged_base = "d" * 40
-    cmd.queue_result(returncode=0, stdout=f"{merged_base}\n")  # rev-parse origin/<base> (#1167)
+    cmd.queue_result(returncode=0, stdout=f"{merged_base}\n")  # rev-parse HEAD^2 (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)  # push

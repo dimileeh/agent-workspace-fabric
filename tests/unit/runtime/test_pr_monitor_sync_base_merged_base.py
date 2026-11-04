@@ -3,7 +3,9 @@
 ``sync_base_push`` audit events used to report ``workspace.base_commit`` — the
 base recorded at adoption — which made a correct live-base merge look stale.
 The sync-base envelope now carries the merged base: ``MERGE_HEAD`` on a conflict
-(worktree-local and exact) and ``origin/<base>`` right after a clean merge.
+(worktree-local and exact) and the completed merge commit's ``HEAD^2`` after a
+clean merge — never the shared mirror's mutable ``origin/<base>``, which a
+concurrent workspace's fetch can advance past the commit actually merged.
 """
 
 from __future__ import annotations
@@ -99,9 +101,12 @@ def _ownership_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.unit
 @pytest.mark.usefixtures("_ownership_ok")
-async def test_clean_merge_reports_origin_base_resolved_at_merge_time(tmp_path: Path) -> None:
+async def test_clean_merge_reports_merge_commit_second_parent(tmp_path: Path) -> None:
+    """A concurrent fetch advancing the shared ``origin/<base>`` cannot skew the audit."""
     cmd = FakeCommandRunner()
-    cmd.respond_when(_is_rev_parse("origin/main"), stdout=f"{_MERGED_BASE}\n")
+    cmd.respond_when(_is_rev_parse("HEAD^2"), stdout=f"{_MERGED_BASE.upper()}\n")
+    # The shared tracking ref has already moved past the commit this merge integrated.
+    cmd.respond_when(_is_rev_parse("origin/main"), stdout=f"{'c' * 40}\n")
 
     result = await _sync(_runner(tmp_path, cmd))
 
@@ -110,10 +115,9 @@ async def test_clean_merge_reports_origin_base_resolved_at_merge_time(tmp_path: 
     merge_index = next(
         i for i, c in enumerate(cmd.calls) if "merge" in c.args and "--no-edit" in c.args
     )
-    rev_parse_index = next(
-        i for i, c in enumerate(cmd.calls) if c.args[-2:] == ["rev-parse", "origin/main"]
-    )
-    assert rev_parse_index > merge_index
+    rev_parses = [(i, c.args[-1]) for i, c in enumerate(cmd.calls) if "rev-parse" in c.args]
+    assert [ref for _i, ref in rev_parses] == ["HEAD^2"]
+    assert rev_parses[0][0] > merge_index
 
 
 @pytest.mark.unit
@@ -137,7 +141,8 @@ async def test_conflict_merge_reports_merge_head(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("_ownership_ok")
 async def test_unresolvable_merged_base_falls_back_to_none(tmp_path: Path) -> None:
     cmd = FakeCommandRunner()
-    cmd.respond_when(_is_rev_parse("origin/main"), returncode=128, stderr="bad ref")
+    # A fast-forward leaves no second parent; the audit falls back as before #1167.
+    cmd.respond_when(_is_rev_parse("HEAD^2"), returncode=128, stderr="bad revision")
 
     with structlog.testing.capture_logs() as captured:
         result = await _sync(_runner(tmp_path, cmd))
