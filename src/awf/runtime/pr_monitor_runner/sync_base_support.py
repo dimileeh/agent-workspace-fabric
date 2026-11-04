@@ -54,28 +54,44 @@ async def _resolve_merged_base_sha(
     *,
     workspace_id: str,
     worktree_path: Path,
+    base_branch: str,
 ) -> str | None:
     """Resolve the clean merge commit's ``HEAD^2`` for the audit.
 
-    ``HEAD^2`` is trusted only when ``HEAD^1`` is ``ORIG_HEAD`` (the pre-merge
-    head ``git merge`` always records), i.e. this merge created the commit. An
-    "Already up to date" or fast-forward merge leaves ``HEAD`` on a pre-existing
-    commit whose second parent, if any, is an unrelated side branch.
+    ``HEAD^2`` is trusted only when this merge created the commit: ``HEAD^1`` is
+    ``ORIG_HEAD`` (the pre-merge head ``git merge`` always records) and ``HEAD``
+    is not already reachable from ``origin/<base>``. An "Already up to date" or
+    fast-forward merge — even onto a base merge commit whose first parent is
+    ``ORIG_HEAD`` — leaves ``HEAD`` on a pre-existing commit whose second
+    parent, if any, is an unrelated side branch.
     """
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
+    env = git_env_without_object_lookup_overrides()
     result = await runner._deps.runner.run(
         git_worktree_command(worktree_path, "rev-parse", "ORIG_HEAD", "HEAD^1", "HEAD^2"),
-        env=git_env_without_object_lookup_overrides(),
+        env=env,
     )
     lines = (result.stdout or "").lower().split()
     created_merge = result.returncode == 0 and len(lines) == 3 and lines[0] == lines[1]
+    stderr = result.stderr
+    if created_merge:
+        # Exit 1 means "not an ancestor": a new commit. Exit 0 (a fast-forward
+        # onto an existing base commit) or any error falls back, logged.
+        in_base = await runner._deps.runner.run(
+            git_worktree_command(
+                worktree_path, "merge-base", "--is-ancestor", "HEAD", f"origin/{base_branch}"
+            ),
+            env=env,
+        )
+        created_merge = in_base.returncode == 1
+        stderr = in_base.stderr
     return _merged_base_sha_from_rev_parse(
         workspace_id=workspace_id,
         ref="HEAD^2",
         returncode=result.returncode,
         stdout=lines[2] if created_merge else "",
-        stderr=result.stderr,
+        stderr=stderr,
     )
 
 

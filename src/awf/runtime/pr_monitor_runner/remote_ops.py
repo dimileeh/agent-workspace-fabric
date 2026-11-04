@@ -987,6 +987,7 @@ async def _run_sync_base(
             runner,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
+            base_branch=base_branch,
         )
     if rc != 0:
         status_rc, status_out, status_stderr = await _git("status", "--porcelain")
