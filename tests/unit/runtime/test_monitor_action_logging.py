@@ -769,6 +769,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
+        # #1167 PR-head sync probe (last push != PR head): local HEAD is the PR head.
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")
         # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")

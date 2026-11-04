@@ -59,6 +59,14 @@ def _observed_stall_tip(state: MonitorState) -> str | None:
     return tips[-1] if tips else None
 
 
+def _accepted_push_tip(state: MonitorState, local_head: str | None) -> str | None:
+    """AWF's last accepted push, when the local HEAD (if known) still matches it."""
+    last_push = (state.last_push_sha or "").lower()
+    if last_push and local_head in (None, last_push):
+        return last_push
+    return None
+
+
 def _is_suspicious(status: PRStatus, state: MonitorState) -> bool:
     """Whether this poll could be a stall, so ordinary polls run no git commands.
 
@@ -123,7 +131,8 @@ async def observe_pr_head_sync(
     head. A per-tip first-seen marker drives the grace window (persisted, because
     ``run()`` reloads state each poll); the first expired observation records one
     ``monitor.pr_head_not_synchronized`` event. Markers clear once the condition
-    no longer holds. Probe failures keep today's behaviour: ``status`` unchanged.
+    no longer holds. A probe failure stamps the stall an earlier poll observed,
+    else AWF's accepted push; with neither, ``status`` is unchanged.
     """
     terminal = status.merged or status.closed or status.base_ref_drifted
     if terminal or not _is_suspicious(status, state):
@@ -154,10 +163,11 @@ async def observe_pr_head_sync(
             await _clear_markers(runner, workspace_id, state)
             return status
     if remote_tip is None:
-        # Fail closed during a stall an earlier poll proved: falling back to the
-        # stale snapshot would run no-op SyncBases whose no-progress count can
-        # still reach ``merge_conflict_not_reproduced`` across transient failures.
-        remote_tip = _observed_stall_tip(state)
+        # Fail closed during a stall an earlier poll proved, or after an accepted
+        # push the PR head does not show: falling back to the stale snapshot
+        # would run no-op SyncBases whose no-progress count can still reach
+        # ``merge_conflict_not_reproduced`` across transient failures.
+        remote_tip = _observed_stall_tip(state) or _accepted_push_tip(state, local_head)
         if remote_tip is None or remote_tip == pr_head:
             return status
 

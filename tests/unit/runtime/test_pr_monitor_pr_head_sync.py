@@ -402,16 +402,68 @@ class TestObservePrHeadSync:
             (_PUSHED_HEAD, 0, _ls_remote_stdout(_PUSHED_HEAD, branch="awf/other")),
         ],
     )
-    async def test_probe_failure_leaves_status_unchanged(
+    async def test_probe_failure_after_an_accepted_push_waits_instead_of_counting_no_progress(
         self,
         tmp_path: Path,
         local_head: str | None,
         ls_remote_rc: int,
         ls_remote_stdout: str,
     ) -> None:
+        # AWF's push was accepted but the PR head differs and the remote tip is
+        # unknown: a stale-snapshot SyncBase would spend the no-progress budget.
         runner = _ProbeRunner(tmp_path, local_head=local_head)
         runner.cmd.queue_result(returncode=ls_remote_rc, stdout=ls_remote_stdout, stderr="boom")
-        state = MonitorState(last_push_sha=_PUSHED_HEAD)
+        status = _dirty_status()
+        state = _exhausted_state(status, last_push_sha=_PUSHED_HEAD)
+
+        with structlog.testing.capture_logs() as captured:
+            result = await _observe(runner, status, state)
+
+        assert result.unsynchronized_remote_head_sha == _PUSHED_HEAD
+        assert result.pr_head_sync_grace_active is True
+        assert runner.events == []
+        assert any(r.get("event") == "monitor.pr_head_sync_probe_failed" for r in captured)
+        assert decide(result, state, MonitorConfig()) == WaitForCI(
+            reason="pr_head_not_synchronized"
+        )
+
+    @pytest.mark.unit
+    async def test_probe_failing_past_grace_after_an_accepted_push_parks_not_aborts(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
+        runner.cmd.respond_when(lambda args: "ls-remote" in args, returncode=128, stderr="boom")
+        status = _dirty_status()
+        state = _exhausted_state(status, last_push_sha=_PUSHED_HEAD)
+        await _observe(runner, status, state)
+
+        runner.now = _NOW + timedelta(seconds=_GRACE + 1)
+        result = await _observe(runner, status, state)
+
+        assert result.unsynchronized_remote_head_sha == _PUSHED_HEAD
+        assert result.pr_head_sync_grace_active is False
+        [event] = runner.events
+        assert event.reason_code == PR_HEAD_NOT_SYNCHRONIZED_REASON
+        action = decide(result, state, MonitorConfig())
+        assert isinstance(action, NotifyHuman)
+        assert action.reason_code == PR_HEAD_NOT_SYNCHRONIZED_REASON
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("local_head", "state_fields"),
+        [
+            # Re-adoption no-op SyncBase with no AWF push recorded.
+            (_PUSHED_HEAD, {"last_push_sha": None, "sync_base_no_progress_count": 1}),
+            # Local HEAD moved past the accepted push: the push is not the tip.
+            (_OTHER_HEAD, {"last_push_sha": _PUSHED_HEAD}),
+        ],
+    )
+    async def test_probe_failure_without_accepted_push_evidence_leaves_status_unchanged(
+        self, tmp_path: Path, local_head: str, state_fields: dict[str, Any]
+    ) -> None:
+        runner = _ProbeRunner(tmp_path, local_head=local_head)
+        runner.cmd.queue_result(returncode=128, stderr="boom")
+        state = MonitorState(**state_fields)
         status = _dirty_status()
 
         with structlog.testing.capture_logs() as captured:
