@@ -1201,6 +1201,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service logs --service worker`
 **Docs Link:** [docs/REASON_CATALOG.md#worker_unhealthy](#worker_unhealthy)
 
+### WORKSPACE_CANCELLED
+**Problem:** An unfinished monitor operation or validation was settled after its workspace was cancelled.
+**Likely Cause:** Cancellation released the runtime and stopped its worker task, but pending or running bookkeeping remained. The worker marks monitor operations cancelled and validations failed only after confirming released runtimes and no active claims.
+**Operator Fix:** No action is required for an intentional cancellation. Inspect the retained logs and validation evidence as needed; this reason does not indicate successful validation or restart the workspace.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_cancelled](#workspace_cancelled)
+
 ### WORKSPACE_CREATE_RATE_LIMITED
 **Problem:** AWF rejected a workspace creation request because the request-admission rate limit was exhausted.
 **Likely Cause:** Too many `POST /v1/workspaces` requests arrived for the same bearer-token or client-host identity within one admission window.
