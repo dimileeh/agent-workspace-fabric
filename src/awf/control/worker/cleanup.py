@@ -626,7 +626,6 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
             error=str(exc)[:240],
             exc_info=True,
         )
-    await reconcile_cancelled_activity(self, limit=limit)
     if resume_failure is not None:
         # Only set when there were no release errors, so it is the sole pending failure.
         raise resume_failure
@@ -637,6 +636,7 @@ async def _release_terminal_runtime_resources(self: Any) -> None:
             "terminal runtime release failed",
             release_errors,
         )
+    await reconcile_cancelled_activity(self, limit=limit)
 
 
 async def _resume_pending_planning_scope_auto_retries_after_terminal_release(
