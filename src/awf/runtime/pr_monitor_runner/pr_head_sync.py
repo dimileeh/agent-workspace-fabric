@@ -45,6 +45,7 @@ def pr_head_sync_parked_key(remote_tip: str) -> str:
 
 
 async def _clear_markers(runner: Any, workspace_id: str, state: MonitorState) -> None:
+    """Drop every reserved PR-head-sync marker, persisting state only if one was removed."""
     keys = [key for key in state.threads_addressed_ids if key.startswith(_KEY_PREFIX)]
     for key in keys:
         state.threads_addressed_ids.pop(key, None)
