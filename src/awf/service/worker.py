@@ -508,6 +508,7 @@ def build_worker_runtime(
         *,
         provider_recovery_default_model: str | None = None,
     ) -> Any:
+        """Build the feature or release PR monitor for one workspace."""
         # Monitor selection is a pure function of the persisted, resolved
         # ``workspace.auto_merge`` flag — task_kind never affects it. The flag is
         # authoritative by design: it is resolved once at provision time from the
