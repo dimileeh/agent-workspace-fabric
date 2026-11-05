@@ -388,6 +388,7 @@ class TestAddressComments:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """An unresolved thread is addressed, pushed, resolved, and the PR then merges."""
         ws_id = await _seed_monitoring_workspace(factory)
 
         # Outer loop iter 1: PR has 1 unresolved thread.

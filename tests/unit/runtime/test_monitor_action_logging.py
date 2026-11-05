@@ -752,6 +752,7 @@ class TestMonitorActionLogging:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The AddressComments action emits a structured monitor action log line."""
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T1", author="cr")
         # Outer iter 1: AddressComments.

@@ -1267,6 +1267,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """SyncBase resolves the task tag once and threads it to the sink."""
     resolve_calls: list[str] = []
     sink_tags: list[object] = []
 

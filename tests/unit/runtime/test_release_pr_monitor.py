@@ -122,6 +122,7 @@ def test_feature_monitor_accepts_post_merge_target_reconciler(tmp_path: Path) ->
 
 @pytest.mark.unit
 def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
+    """The monitor factories plumb the configured knobs into MonitorConfig."""
     cmd = FakeCommandRunner()
     runner = build_release_pr_monitor(
         session_factory=None,  # type: ignore[arg-type]
@@ -187,6 +188,7 @@ def test_factories_awaiting_required_checks_grace_zero_disables(builder, tmp_pat
 @pytest.mark.unit
 @pytest.mark.parametrize("builder", [build_release_pr_monitor, build_feature_pr_monitor])
 def test_factories_pr_head_sync_grace_defaults_and_forwards(builder, tmp_path: Path) -> None:
+    """Both builders default the PR-head sync grace and forward explicit values."""
     # Omitting the kwarg keeps the MonitorConfig default; ``<= 0`` (park
     # immediately) must reach MonitorConfig on both builders (#1167).
     cmd = FakeCommandRunner()

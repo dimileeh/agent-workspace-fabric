@@ -145,6 +145,7 @@ async def test_clean_merge_reports_merge_commit_second_parent(tmp_path: Path) ->
 @pytest.mark.unit
 @pytest.mark.usefixtures("_ownership_ok")
 async def test_conflict_merge_reports_merge_head(tmp_path: Path) -> None:
+    """A conflicted merge reports MERGE_HEAD as the merged base."""
     cmd = FakeCommandRunner()
     cmd.respond_when(_is_rev_parse("MERGE_HEAD"), stdout=f"{_MERGED_BASE.upper()}\n")
     cmd.respond_when(_is_rev_parse("origin/main"), stdout=f"{'c' * 40}\n")
@@ -162,6 +163,7 @@ async def test_conflict_merge_reports_merge_head(tmp_path: Path) -> None:
 @pytest.mark.unit
 @pytest.mark.usefixtures("_ownership_ok")
 async def test_unresolvable_merged_base_falls_back_to_none(tmp_path: Path) -> None:
+    """An unresolvable merged base falls back to None and logs it."""
     cmd = FakeCommandRunner()
     # An unreadable merge result falls back to the audit's pre-#1167 default.
     cmd.respond_when(_is_clean_merge_rev_parse, returncode=128, stderr="bad revision")
@@ -221,6 +223,7 @@ async def test_fast_forward_reports_new_head(tmp_path: Path, parents: tuple[str,
 async def test_merge_without_new_merge_commit_ignores_unrelated_second_parent(
     tmp_path: Path, head: str, first_parent: str, probes: int
 ) -> None:
+    """A merge that creates no new merge commit ignores an unrelated second parent."""
     cmd = FakeCommandRunner()
     side_branch_tip = "9" * 40
     cmd.respond_when(

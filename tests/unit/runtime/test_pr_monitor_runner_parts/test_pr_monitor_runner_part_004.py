@@ -331,6 +331,7 @@ async def test_execute_sync_base_records_no_progress_noop(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A no-op SyncBase push records a no-progress observation."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort
@@ -382,6 +383,7 @@ async def test_execute_sync_base_failed_push_resets_no_progress_streak(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A failed SyncBase push resets the no-progress streak."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort

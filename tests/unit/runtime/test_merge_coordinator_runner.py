@@ -178,6 +178,7 @@ class TestMergeCoordinatorRunner:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
+        """Base drift on the final recheck falls back to SyncBase after releasing the merge lock."""
         ws_id = await seed_monitoring_workspace(factory)
         coordinator = RecordingMergeCoordinator()
 

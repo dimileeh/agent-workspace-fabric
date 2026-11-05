@@ -134,6 +134,7 @@ def test_profile_schema_rejects_awaiting_required_checks_grace_seconds_above_864
 
 @pytest.mark.unit
 def test_profile_monitor_pr_head_sync_grace_defaults_600() -> None:
+    """The profile PR-head sync grace defaults to 600 seconds."""
     # Mirrors the MonitorConfig dataclass default (#1167).
     profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
     assert profile.monitor.pr_head_sync_grace_seconds == 600.0
@@ -141,6 +142,7 @@ def test_profile_monitor_pr_head_sync_grace_defaults_600() -> None:
 
 @pytest.mark.unit
 def test_profile_schema_accepts_pr_head_sync_grace_seconds_including_park_immediately() -> None:
+    """The schema accepts positive, zero, and negative PR-head sync grace values."""
     # The field docstring documents ``<= 0`` as "park immediately", so 0 and
     # negative values must parse alongside a positive window (#1167).
     for value in (120, 0, -1):
@@ -155,6 +157,7 @@ def test_profile_schema_accepts_pr_head_sync_grace_seconds_including_park_immedi
 
 @pytest.mark.unit
 def test_profile_schema_rejects_pr_head_sync_grace_seconds_above_86400() -> None:
+    """The schema rejects a PR-head sync grace above 86400 seconds."""
     # Bounds parity with the existing monitor knobs (upper bound 86400s).
     with pytest.raises(ValidationError):
         WorkspaceProfile.model_validate(

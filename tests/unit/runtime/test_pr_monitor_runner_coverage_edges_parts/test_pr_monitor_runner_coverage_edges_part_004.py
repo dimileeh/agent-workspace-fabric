@@ -224,6 +224,7 @@ async def test_execute_sync_base_push_failure_records_failed_audit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A failed SyncBase push records a failed audit event."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort
@@ -974,6 +975,7 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A SyncBase conflict invokes the agent and pushes its salvaged resolution."""
     cmd = FakeCommandRunner()
     adapter = FakeAdapter()
     adapter.queue(returncode=1, stdout="partial conflict resolution")
@@ -1039,6 +1041,7 @@ async def test_sync_base_conflict_supply_chain_command_evidence_blocks_before_co
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Supply-chain command evidence from conflict resolution blocks before commit."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)

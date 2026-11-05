@@ -98,6 +98,7 @@ class TestPushRejectRecovery:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
+        """A rejected SyncBase push triggers the fetch plus reset --hard recovery."""
         ws_id = await _seed_monitoring_workspace(factory, branch_name="awf/test-branch")
         # Outer iter 1: DIRTY state forces SyncBase; merge creates a
         # local commit; push gets rejected (non-fast-forward); recovery

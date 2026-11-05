@@ -123,6 +123,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """SyncBase blocks committed protected quality-gate edits before pushing."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -383,6 +384,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """SyncBase allows protected quality-gate changes that come from the base."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)

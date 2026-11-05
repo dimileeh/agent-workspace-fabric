@@ -106,6 +106,7 @@ def _exhausted_state(status: PRStatus, **overrides: Any) -> MonitorState:
 
 
 def _pr_head_sync_keys(threads_addressed: dict[str, str]) -> list[str]:
+    """Return the PR-head sync marker keys present in ``threads_addressed``."""
     return [key for key in threads_addressed if key.startswith(_PR_HEAD_SYNC_KEY_PREFIX)]
 
 
@@ -117,6 +118,7 @@ class TestDecidePrHeadNotSynchronized:
     def test_unsynchronized_pr_head_within_grace_waits_instead_of_counting_no_progress(
         self,
     ) -> None:
+        """An unsynchronized PR head within grace waits rather than counting no-progress."""
         status = _dirty_status(
             unsynchronized_remote_head_sha=_PUSHED_HEAD,
             pr_head_sync_grace_active=True,
@@ -127,6 +129,7 @@ class TestDecidePrHeadNotSynchronized:
 
     @pytest.mark.unit
     def test_unsynchronized_pr_head_past_grace_parks_for_human_not_abort(self) -> None:
+        """An unsynchronized PR head past grace parks for a human instead of aborting."""
         status = _dirty_status(unsynchronized_remote_head_sha=_PUSHED_HEAD)
         action = decide(status, _exhausted_state(status), MonitorConfig())
 
@@ -146,6 +149,7 @@ class TestDecidePrHeadNotSynchronized:
     def test_genuinely_unreproducible_conflict_still_aborts_merge_conflict_not_reproduced(
         self,
     ) -> None:
+        """An unstamped, unreproducible conflict still aborts as merge_conflict_not_reproduced."""
         # Merge clean locally, PR head == local HEAD (so the runner stamps
         # nothing), PR still DIRTY after the no-progress budget → same abort as
         # before #1167.
@@ -156,6 +160,7 @@ class TestDecidePrHeadNotSynchronized:
 
     @pytest.mark.unit
     def test_merged_or_closed_pr_outranks_unsynchronized_head(self) -> None:
+        """A merged or closed PR takes precedence over an unsynchronized head."""
         stamped = _dirty_status(unsynchronized_remote_head_sha=_PUSHED_HEAD)
 
         merged = decide(replace(stamped, merged=True), MonitorState(), MonitorConfig())
@@ -166,6 +171,7 @@ class TestDecidePrHeadNotSynchronized:
 
     @pytest.mark.unit
     def test_default_notify_human_carries_no_reason_code(self) -> None:
+        """A default NotifyHuman action carries no reason code."""
         assert NotifyHuman().reason_code is None
 
 
@@ -208,6 +214,7 @@ class _ProbeRunner:
         self.monitor_logs.append(payload)
 
     def ls_remote_calls(self) -> list[list[str]]:
+        """Return the argv of every recorded ``git ls-remote`` call."""
         return [call.args for call in self.cmd.calls if "ls-remote" in call.args]
 
 
@@ -238,6 +245,7 @@ class TestObservePrHeadSync:
     async def test_not_suspicious_runs_no_commands_and_returns_status_unchanged(
         self, tmp_path: Path
     ) -> None:
+        """A non-suspicious status runs no commands and is returned unchanged."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         status = _dirty_status()
 
@@ -252,6 +260,7 @@ class TestObservePrHeadSync:
     async def test_accepted_push_with_stuck_pr_head_stamps_within_grace(
         self, tmp_path: Path
     ) -> None:
+        """An accepted push with a stuck PR head is stamped as within grace."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_PUSHED_HEAD))
         state = MonitorState(last_push_sha=_PUSHED_HEAD)
@@ -271,6 +280,7 @@ class TestObservePrHeadSync:
 
     @pytest.mark.unit
     async def test_ls_remote_targets_the_push_remote_when_set(self, tmp_path: Path) -> None:
+        """The ls-remote probe targets the push remote URL when one is configured."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_PUSHED_HEAD))
 
@@ -288,6 +298,7 @@ class TestObservePrHeadSync:
     async def test_accepted_push_with_pr_head_stuck_past_grace_parks_once(
         self, tmp_path: Path
     ) -> None:
+        """A PR head stuck past grace after an accepted push parks exactly once."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.respond_when(
             lambda args: "ls-remote" in args, stdout=_ls_remote_stdout(_PUSHED_HEAD)
@@ -326,6 +337,7 @@ class TestObservePrHeadSync:
 
     @pytest.mark.unit
     async def test_non_positive_grace_parks_on_first_observation(self, tmp_path: Path) -> None:
+        """A non-positive grace parks on the first stuck observation."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD, grace_seconds=0)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_PUSHED_HEAD))
 
@@ -339,6 +351,7 @@ class TestObservePrHeadSync:
     async def test_pr_head_catching_up_within_grace_clears_markers_and_resumes(
         self, tmp_path: Path
     ) -> None:
+        """A PR head that catches up within grace clears the markers and resumes."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_PUSHED_HEAD))
         state = MonitorState(last_push_sha=_PUSHED_HEAD)
@@ -366,6 +379,7 @@ class TestObservePrHeadSync:
 
     @pytest.mark.unit
     async def test_remote_tip_moved_elsewhere_is_not_a_stall(self, tmp_path: Path) -> None:
+        """A remote tip moved by someone else is not treated as a stall."""
         # Somebody else pushed: the branch tip is neither AWF's HEAD nor the PR head.
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_OTHER_HEAD))
@@ -383,6 +397,7 @@ class TestObservePrHeadSync:
 
     @pytest.mark.unit
     async def test_local_head_equal_to_pr_head_skips_ls_remote(self, tmp_path: Path) -> None:
+        """A local HEAD equal to the PR head skips the ls-remote probe."""
         runner = _ProbeRunner(tmp_path, local_head=_OLD_HEAD.upper())
         status = _dirty_status()
 
@@ -409,6 +424,7 @@ class TestObservePrHeadSync:
         ls_remote_rc: int,
         ls_remote_stdout: str,
     ) -> None:
+        """A probe failure after an accepted push waits rather than counting no-progress."""
         # AWF's push was accepted but the PR head differs and the remote tip is
         # unknown: a stale-snapshot SyncBase would spend the no-progress budget.
         runner = _ProbeRunner(tmp_path, local_head=local_head)
@@ -431,6 +447,7 @@ class TestObservePrHeadSync:
     async def test_probe_failing_past_grace_after_an_accepted_push_parks_not_aborts(
         self, tmp_path: Path
     ) -> None:
+        """A probe failing past grace after an accepted push parks instead of aborting."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.respond_when(lambda args: "ls-remote" in args, returncode=128, stderr="boom")
         status = _dirty_status()
@@ -461,6 +478,7 @@ class TestObservePrHeadSync:
     async def test_probe_failure_without_accepted_push_evidence_leaves_status_unchanged(
         self, tmp_path: Path, local_head: str, state_fields: dict[str, Any]
     ) -> None:
+        """A probe failure without accepted-push evidence leaves the status unchanged."""
         runner = _ProbeRunner(tmp_path, local_head=local_head)
         runner.cmd.queue_result(returncode=128, stderr="boom")
         state = MonitorState(**state_fields)
@@ -479,6 +497,7 @@ class TestObservePrHeadSync:
     async def test_probe_failure_during_an_observed_stall_keeps_the_stall_stamped(
         self, tmp_path: Path, local_head: str | None
     ) -> None:
+        """A probe failure during an observed stall keeps the stall stamped."""
         # A transient probe failure mid-stall must not fall back to SyncBase:
         # each no-op SyncBase would count toward merge_conflict_not_reproduced.
         runner = _ProbeRunner(tmp_path, local_head=local_head)
@@ -504,6 +523,7 @@ class TestObservePrHeadSync:
     async def test_probe_failure_after_the_pr_caught_up_does_not_stamp(
         self, tmp_path: Path
     ) -> None:
+        """A PR that already caught up is not stamped when the probe cannot run."""
         runner = _ProbeRunner(tmp_path, local_head=None)
         caught_up = _dirty_status(head_sha=_PUSHED_HEAD)
         state = MonitorState(
@@ -515,6 +535,7 @@ class TestObservePrHeadSync:
 
     @pytest.mark.unit
     async def test_ls_remote_is_time_bounded(self, tmp_path: Path) -> None:
+        """The ls-remote probe runs with a positive timeout."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_PUSHED_HEAD))
 
@@ -527,6 +548,7 @@ class TestObservePrHeadSync:
     async def test_readoption_after_resync_is_suspicious_without_a_fresh_push(
         self, tmp_path: Path
     ) -> None:
+        """Re-adopting the pushed head after a resync is suspicious without a fresh push."""
         # Adoption 2 of the incident: a non-fast-forward resync moved the
         # worktree to the already-pushed merge commit, then a no-op SyncBase.
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
@@ -549,6 +571,7 @@ class TestObservePrHeadSync:
     async def test_terminal_or_retargeted_pr_skips_probe_and_clears_markers(
         self, tmp_path: Path, terminal: dict[str, bool]
     ) -> None:
+        """A terminal or retargeted PR skips the probe and clears the sync markers."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         state = MonitorState(
             last_push_sha=_PUSHED_HEAD,
@@ -564,6 +587,7 @@ class TestObservePrHeadSync:
 
     @pytest.mark.unit
     async def test_corrupt_first_seen_marker_restarts_the_window(self, tmp_path: Path) -> None:
+        """A corrupt first-seen marker restarts the grace window."""
         runner = _ProbeRunner(tmp_path, local_head=_PUSHED_HEAD)
         runner.cmd.queue_result(stdout=_ls_remote_stdout(_PUSHED_HEAD))
         key = pr_head_sync_first_seen_key(_PUSHED_HEAD)
@@ -580,6 +604,7 @@ class TestObservePrHeadSync:
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory bound to a fresh Postgres test engine."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
 
@@ -589,6 +614,7 @@ async def _seed_stuck_workspace(
     *,
     threads_addressed: dict[str, str],
 ) -> str:
+    """Seed a monitoring workspace whose pushed head never reached the PR head."""
     ws_id = await seed_monitoring_workspace(factory, head_sha=_OLD_HEAD)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get_for_update(ws_id)
@@ -622,6 +648,7 @@ class TestPrHeadSyncRunnerWiring:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """A PR head stuck past grace parks the workspace for a human instead of failing it."""
         status = _dirty_status()
         expired = (datetime.now(UTC) - timedelta(seconds=_GRACE + 100)).timestamp()
         ws_id = await _seed_stuck_workspace(
@@ -638,6 +665,7 @@ class TestPrHeadSyncRunnerWiring:
         parked_rows: list[tuple[str, str | None, str | None]] = []
 
         async def _sleep_and_snapshot(_seconds: float) -> None:
+            """Snapshot the workspace row during the park's poll sleep."""
             # The park's poll sleep: the row must still be live, not failed.
             async with factory() as s:
                 ws = await WorkspaceRepository(s).get(ws_id)
@@ -699,6 +727,7 @@ class TestPrHeadSyncRunnerWiring:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """A PR head stuck within grace waits and persists the first-seen marker."""
         ws_id = await _seed_stuck_workspace(factory, threads_addressed={})
         cmd = _stuck_command_runner(ws_id)
         sleep_fn = RecordedSleep()
@@ -807,6 +836,7 @@ class TestSyncBasePushAuditMergedBase:
     async def test_sync_base_push_audit_carries_the_merged_base_sha(
         self, push_result: _GitPushResult, outcome: str
     ) -> None:
+        """The SyncBase push audit records the merged base SHA as its source base."""
         harness = _SyncBaseLoopHarness(replace(push_result, merged_base_sha=_MERGED_BASE))
 
         await _execute_sync_base(harness)
@@ -817,6 +847,7 @@ class TestSyncBasePushAuditMergedBase:
 
     @pytest.mark.unit
     async def test_unresolved_merged_base_falls_back_to_the_recorded_base(self) -> None:
+        """An unresolved merged base leaves the audit to fall back to the recorded base."""
         harness = _SyncBaseLoopHarness(_GitPushResult(pushed=True, failed=False, returncode=0))
 
         await _execute_sync_base(harness)
@@ -828,6 +859,7 @@ class TestSyncBasePushAuditMergedBase:
 
     @pytest.mark.unit
     def test_merged_base_sha_is_not_failure_evidence(self) -> None:
+        """The merged base SHA is excluded from push failure evidence."""
         result = _GitPushResult(
             pushed=False, failed=True, returncode=1, merged_base_sha=_MERGED_BASE
         )

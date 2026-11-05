@@ -223,6 +223,7 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A SyncBase conflict-cleanup failure terminates the monitor without pushing."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort
@@ -277,6 +278,7 @@ async def test_execute_sync_base_records_branch_push_audit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """SyncBase records a branch push audit event for the pushed head."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     pushed_head = "b" * 40
