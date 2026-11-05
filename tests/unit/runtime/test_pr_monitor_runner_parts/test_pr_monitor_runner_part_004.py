@@ -331,11 +331,13 @@ async def test_execute_sync_base_records_no_progress_noop(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A no-op SyncBase push records a no-progress observation."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
@@ -381,11 +383,13 @@ async def test_execute_sync_base_failed_push_resets_no_progress_streak(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A failed SyncBase push resets the no-progress streak."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=1, stderr="push rejected")

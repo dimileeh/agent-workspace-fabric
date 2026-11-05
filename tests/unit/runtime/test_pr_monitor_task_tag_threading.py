@@ -1267,6 +1267,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """SyncBase resolves the task tag once and threads it to the sink."""
     resolve_calls: list[str] = []
     sink_tags: list[object] = []
 
@@ -1290,6 +1291,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
             CommandResult(returncode=0, stdout="", stderr=""),  # merge --abort
             CommandResult(returncode=1, stdout="", stderr="conflict"),  # merge origin/base
             CommandResult(returncode=0, stdout="UU src/foo.py\n", stderr=""),  # status
+            CommandResult(returncode=0, stdout=f"{'b' * 40}\n", stderr=""),  # MERGE_HEAD (#1167)
         ]
     )
 

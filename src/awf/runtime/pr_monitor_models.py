@@ -319,6 +319,20 @@ class PRStatus:
     escalates. The default ``False`` means "escalate immediately" — so a
     forgotten populate reverts to pre-#655 behavior (a possibly-premature ping),
     never an unsafe merge."""
+    unsynchronized_remote_head_sha: str | None = None
+    """Remote head-branch tip the forge has not synchronized into the PR (#1167).
+
+    Set by the RUNNER (``decide`` stays pure) when ``git ls-remote`` shows the
+    head branch at the commit AWF pushed (the local HEAD) while the PR still
+    reports a different ``head_sha``. Every PR field in this snapshot then
+    describes the stale head. The default ``None`` means "no stall observed", so
+    a forgotten populate reverts to the pre-#1167 behaviour."""
+    pr_head_sync_grace_active: bool = False
+    """Within the bounded grace window for ``unsynchronized_remote_head_sha``.
+
+    Time-derived by the RUNNER per remote tip, like
+    ``awaiting_required_checks_grace_active``. ``True`` → ``decide`` waits
+    passively; ``False`` with a stall stamped → it parks for a human."""
     changed_paths: tuple[str, ...] = ()
     closed: bool = False
     merged: bool = False

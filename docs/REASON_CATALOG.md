@@ -900,6 +900,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_create_forge_not_supported](#pr_create_forge_not_supported)
 
+### PR_HEAD_NOT_SYNCHRONIZED
+**Problem:** GitHub accepted AWF's push to the PR head branch but has not synchronized the pull request, so the PR still reports an older head.
+**Likely Cause:** A forge-side synchronization stall after an accepted push (often a sync-base merge commit): ``git ls-remote`` shows the pushed commit while the PR's ``headRefOid`` and merge state stay on the old head.
+**Operator Fix:** Compare the branch tip and PR head on the ``monitor.pr_head_not_synchronized`` event. GitHub usually re-synchronizes on a new push, or on closing and reopening the PR. AWF does neither automatically; it keeps monitoring and resumes once the PR reports the pushed head.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_head_not_synchronized](#pr_head_not_synchronized)
+
 ### PR_METADATA_FETCH_FAILED
 **Problem:** AWF could not fetch GitHub metadata for the requested PR.
 **Likely Cause:** GitHub auth, network access, rate limits, or repository permissions blocked the metadata query.

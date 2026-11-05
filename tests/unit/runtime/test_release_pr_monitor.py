@@ -122,6 +122,7 @@ def test_feature_monitor_accepts_post_merge_target_reconciler(tmp_path: Path) ->
 
 @pytest.mark.unit
 def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
+    """The monitor factories plumb the configured knobs into MonitorConfig."""
     cmd = FakeCommandRunner()
     runner = build_release_pr_monitor(
         session_factory=None,  # type: ignore[arg-type]
@@ -138,6 +139,7 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         non_check_reviewer_logins=["custom-reviewer"],
         require_ci=False,
         awaiting_required_checks_grace_seconds=250,
+        pr_head_sync_grace_seconds=75,
     )
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7
@@ -147,6 +149,7 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
     assert runner._config.non_check_reviewer_logins == ("custom-reviewer",)
     assert runner._config.require_ci is False
     assert runner._config.awaiting_required_checks_grace_seconds == 250
+    assert runner._config.pr_head_sync_grace_seconds == 75
 
 
 @pytest.mark.unit
@@ -180,6 +183,25 @@ def test_factories_awaiting_required_checks_grace_zero_disables(builder, tmp_pat
         awaiting_required_checks_grace_seconds=0,
     )
     assert runner._config.awaiting_required_checks_grace_seconds == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder", [build_release_pr_monitor, build_feature_pr_monitor])
+def test_factories_pr_head_sync_grace_defaults_and_forwards(builder, tmp_path: Path) -> None:
+    """Both builders default the PR-head sync grace and forward explicit values."""
+    # Omitting the kwarg keeps the MonitorConfig default; ``<= 0`` (park
+    # immediately) must reach MonitorConfig on both builders (#1167).
+    cmd = FakeCommandRunner()
+    common = {
+        "session_factory": None,
+        "runner": cmd,
+        "adapter": _StubAdapter(),
+        "gh": GitHubClient(cmd),
+        "validation": _validation(cmd, tmp_path),
+        "worktrees_root": tmp_path,
+    }
+    assert builder(**common)._config.pr_head_sync_grace_seconds == 600.0
+    assert builder(**common, pr_head_sync_grace_seconds=0)._config.pr_head_sync_grace_seconds == 0
 
 
 @pytest.mark.unit

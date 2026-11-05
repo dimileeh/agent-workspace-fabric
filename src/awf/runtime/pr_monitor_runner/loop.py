@@ -361,6 +361,9 @@ async def _execute(
             reason={
                 "pending_checks": "CI checks are still pending.",
                 "awaiting_required_checks": "Required CI has not started on the new head yet.",
+                "pr_head_not_synchronized": (
+                    "GitHub has not synchronized the PR head with the pushed branch yet."
+                ),
             }.get(action.reason, "GitHub has not reported a stable mergeable state."),
             reason_code="CHECK_WAIT",
             pr_number=pr_number,

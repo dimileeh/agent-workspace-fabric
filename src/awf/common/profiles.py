@@ -212,6 +212,7 @@ _ALLOWLISTED_FIELD_NAMES: set[str] = {
     "port",
     "ports",
     "post_agent",
+    "pr_head_sync_grace_seconds",
     "pr_number",
     "pr_url",
     "pre_agent",

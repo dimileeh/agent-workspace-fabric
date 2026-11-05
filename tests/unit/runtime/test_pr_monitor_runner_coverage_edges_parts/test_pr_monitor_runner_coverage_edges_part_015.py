@@ -123,6 +123,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """SyncBase blocks committed protected quality-gate edits before pushing."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -135,6 +136,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
@@ -248,6 +250,7 @@ async def test_execute_sync_base_protected_violation_pauses_into_blocked_not_ter
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge (clean)
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
@@ -381,6 +384,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """SyncBase allows protected quality-gate changes that come from the base."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -393,6 +397,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff

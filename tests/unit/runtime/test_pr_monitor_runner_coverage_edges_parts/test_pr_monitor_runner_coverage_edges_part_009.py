@@ -223,12 +223,14 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A SyncBase conflict-cleanup failure terminates the monitor without pushing."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=1, stderr="conflict")  # merge
     cmd.queue_result(returncode=0, stdout="UU src/app.py\n")  # status
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # MERGE_HEAD (#1167)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -258,6 +260,7 @@ async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
         ["origin", "+refs/heads/development:refs/remotes/origin/development"],
         ["--no-edit", "origin/development"],
         ["status", "--porcelain"],
+        ["rev-parse", "MERGE_HEAD"],
         # The cleanup handler re-reads PR state before recording the failure
         # (PRRT_kwDOSJAM6s6fvDbL); it is read-only and no push follows it.
         ["-F", "number=42"],
@@ -275,12 +278,21 @@ async def test_execute_sync_base_records_branch_push_audit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """SyncBase records a branch push audit event for the pushed head."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
     pushed_head = "b" * 40
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch
     cmd.queue_result(returncode=0)  # merge
+    merged_base = "d" * 40
+    pre_merge_head = "e" * 40
+    # rev-parse ORIG_HEAD HEAD HEAD^@ (#1167): HEAD^1 is ORIG_HEAD, so a new merge commit.
+    cmd.queue_result(
+        returncode=0,
+        stdout=f"{pre_merge_head}\n{'f' * 40}\n{pre_merge_head}\n{merged_base}\n",
+    )
+    cmd.queue_result(returncode=1)  # merge-base --is-ancestor HEAD origin/<base>: a new commit
     # #910: post-action PR re-check before the push.
     cmd.queue_result(returncode=0, stdout=pr_payload())
     cmd.queue_result(returncode=0)  # push
@@ -333,7 +345,7 @@ async def test_execute_sync_base_records_branch_push_audit(
         "pr_number": 42,
         "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
         "source_head_sha": "abc1234567890def",
-        "source_base_sha": "a" * 40,
+        "source_base_sha": merged_base,  # #1167: the base actually merged
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",
         "branch_name": f"awf/{workspace_id}",

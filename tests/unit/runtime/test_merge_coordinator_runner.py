@@ -178,6 +178,7 @@ class TestMergeCoordinatorRunner:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
+        """Base drift on the final recheck falls back to SyncBase after releasing the merge lock."""
         ws_id = await seed_monitoring_workspace(factory)
         coordinator = RecordingMergeCoordinator()
 
@@ -189,6 +190,7 @@ class TestMergeCoordinatorRunner:
         cmd.queue_result(returncode=0)  # sync-base git merge --abort
         cmd.queue_result(returncode=0)  # sync-base git fetch origin <base>
         cmd.queue_result(returncode=0)  # sync-base git merge --no-edit origin/<base>
+        cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
         # #910: post-action PR re-check before the push.
         cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push

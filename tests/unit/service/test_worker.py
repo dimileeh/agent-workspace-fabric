@@ -387,6 +387,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     ]
     # Default profile omits the #662 knob -> MonitorConfig 600s default.
     assert created["feature_monitor_kwargs"]["awaiting_required_checks_grace_seconds"] == 600
+    assert created["feature_monitor_kwargs"]["pr_head_sync_grace_seconds"] == 600
 
     raw_database_password = "runtime-db-password"
     raw_database_url = f"postgresql+asyncpg://awf:{raw_database_password}@postgres:5432/awf"
@@ -401,6 +402,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             non_check_reviewer_logins=["custom-reviewer"],
             require_ci=False,
             awaiting_required_checks_grace_seconds=250,
+            pr_head_sync_grace_seconds=75,
         ),
     )
     monitor = created["executor_monitor_factory"](
@@ -420,6 +422,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["feature_monitor_kwargs"]["require_ci"] is False
     assert created["feature_monitor_kwargs"]["awaiting_required_checks_grace_seconds"] == 250
+    assert created["feature_monitor_kwargs"]["pr_head_sync_grace_seconds"] == 75
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     expected_runtime_context = created["feature_monitor_kwargs"]["workspace_runtime_context"]
@@ -459,6 +462,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
     assert created["release_monitor_kwargs"]["require_ci"] is False
     assert created["release_monitor_kwargs"]["awaiting_required_checks_grace_seconds"] == 250
+    assert created["release_monitor_kwargs"]["pr_head_sync_grace_seconds"] == 75
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]
@@ -540,7 +544,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     created.pop("release_monitor_kwargs", None)
     disable_profile = WorkspaceProfile(
         name="disable-grace",
-        monitor=ProfileMonitor(awaiting_required_checks_grace_seconds=0),
+        monitor=ProfileMonitor(
+            awaiting_required_checks_grace_seconds=0,
+            pr_head_sync_grace_seconds=0,
+        ),
     )
     created["executor_monitor_factory"](
         object(),
@@ -553,3 +560,4 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         ),
     )
     assert created["feature_monitor_kwargs"]["awaiting_required_checks_grace_seconds"] == 0
+    assert created["feature_monitor_kwargs"]["pr_head_sync_grace_seconds"] == 0

@@ -98,6 +98,7 @@ class TestPushRejectRecovery:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
+        """A rejected SyncBase push triggers the fetch plus reset --hard recovery."""
         ws_id = await _seed_monitoring_workspace(factory, branch_name="awf/test-branch")
         # Outer iter 1: DIRTY state forces SyncBase; merge creates a
         # local commit; push gets rejected (non-fast-forward); recovery
@@ -108,6 +109,7 @@ class TestPushRejectRecovery:
         cmd.queue_result(returncode=0)  # git merge --abort (defense)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit (clean)
+        cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # merged base (#1167)
         # Push rejected. (The monitor now passes the explicit remote_branch
         # into the push command as ``HEAD:refs/heads/awf/test-branch``, so
         # there's no ambiguous ``HEAD`` refspec that could be redirected
@@ -260,6 +262,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/foo.py")  # git merge fails
         cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
+        cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # MERGE_HEAD (#1167)
         adapter.queue(stdout="resolved the merge conflict")
         _queue_post_action_recheck(cmd)
         cmd.queue_result(returncode=0)  # git push
@@ -269,6 +272,7 @@ class TestDirtyConflictResolution:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="CLEAN"))
+        cmd.queue_result(returncode=0, stdout="abc123\n")  # #1167 probe: HEAD == PR head
         cmd.queue_result(returncode=0)  # pre-merge recheck: git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # pre-merge recheck: base-behind
         cmd.queue_result(

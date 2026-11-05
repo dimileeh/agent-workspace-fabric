@@ -752,6 +752,7 @@ class TestMonitorActionLogging:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The AddressComments action emits a structured monitor action log line."""
         ws_id = await seed_monitoring_workspace(factory)
         thread = thread_node(tid="T1", author="cr")
         # Outer iter 1: AddressComments.
@@ -769,6 +770,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
+        # #1167 PR-head sync probe (last push != PR head): local HEAD is the PR head.
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")
         # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
@@ -836,6 +839,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        # #1167 PR-head sync probe (last push != PR head): local HEAD is the PR head.
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")
         adapter.queue(stdout="AWF-VERDICT: FIXED: retry repair after resolve failure")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         # #910: post-action PR re-check before the push.
@@ -848,6 +853,8 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
+        # #1167 PR-head sync probe (last push != PR head): local HEAD is the PR head.
+        cmd.queue_result(returncode=0, stdout="abc1234567890def\n")
         # Always-on pre-merge recheck (including settle == 0).
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
