@@ -375,6 +375,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace create --agent cursor --cursor-auto-mode intelligence`
 **Docs Link:** [Cursor Router](https://cursor.com/docs/cursor-router)
 
+### DATABASE_SCHEMA_AHEAD_OF_CODE
+**Problem:** AWF Core refused to start because the database schema is newer than this Core build.
+**Likely Cause:** A stale or restored image, or a rollback, is running code whose migration graph does not contain the database's alembic_version revision.
+**Operator Fix:** Run the Core build that matches or postdates the database revision, or restore a database backup that matches this build. Do not downgrade the database with this build's migrations.
+**Related Command:** `awf service logs --service api`
+**Docs Link:** [docs/REASON_CATALOG.md#database_schema_ahead_of_code](#database_schema_ahead_of_code)
+
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.

@@ -856,15 +856,21 @@ async def test_run_worker_forever_disposes_engine_on_exit(
         async def dispose(self) -> None:
             calls.append("dispose")
 
+    async def _record_schema_guard(engine: _Engine) -> str:
+        assert isinstance(engine, _Engine)
+        calls.append("schema_guard")
+        return "at_head"
+
     monkeypatch.setattr(
         worker_mod,
         "build_worker_runtime",
         lambda _settings: SimpleNamespace(worker=_Worker(), engine=_Engine()),
     )
+    monkeypatch.setattr(worker_mod, "verify_database_schema_not_ahead", _record_schema_guard)
 
     await worker_mod.run_worker(_settings(tmp_path), once=False)
 
-    assert calls == ["run_forever", "dispose"]
+    assert calls == ["schema_guard", "run_forever", "dispose"]
 
 
 @pytest.mark.unit

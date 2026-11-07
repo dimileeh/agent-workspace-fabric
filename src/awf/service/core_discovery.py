@@ -7,9 +7,10 @@ import subprocess
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from awf import __version__
+from awf.db.schema_head import code_schema_heads, schema_head_label
 from awf.profiles.capabilities import ProfileCapabilities
 from awf.runtime.driver import WORKSPACE_EXECUTION_V1
 
@@ -66,6 +67,12 @@ class CoreDiscoveryResponse(BaseModel):
     git_commit: str
     capabilities: list[str]
     profile_capability_schema: ProfileCapabilitySchema
+    schema_head: str = Field(
+        description=(
+            "Alembic head revision of this Core build's migration graph. Multiple heads "
+            "are sorted ascending and joined with commas."
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,7 @@ class CoreDiscoveryPayload:
     profile_capability_schema: ProfileCapabilitySchema = field(
         default_factory=profile_capability_schema
     )
+    schema_head: str = field(default_factory=lambda: schema_head_label(code_schema_heads()))
 
     def to_response(self) -> CoreDiscoveryResponse:
         """Serialize this payload into the public API response model."""
@@ -91,6 +99,7 @@ class CoreDiscoveryPayload:
             git_commit=self.git_commit,
             capabilities=list(self.capabilities),
             profile_capability_schema=self.profile_capability_schema,
+            schema_head=self.schema_head,
         )
 
 
