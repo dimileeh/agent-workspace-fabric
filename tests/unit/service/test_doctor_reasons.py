@@ -306,3 +306,55 @@ def test_worktree_registration_reasons_are_cataloged(code: str) -> None:
     assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
     catalog = (Path(__file__).parents[3] / "docs" / "REASON_CATALOG.md").read_text()
     assert f"### {code}" in catalog
+
+
+@pytest.mark.unit
+def test_database_schema_ahead_of_code_has_doctor_guidance() -> None:
+    """Verify the startup schema-head refusal maps to operator guidance."""
+    from awf.db.schema_head import DATABASE_SCHEMA_AHEAD_OF_CODE_REASON_CODE
+
+    code = DATABASE_SCHEMA_AHEAD_OF_CODE_REASON_CODE
+    reason = _REASON_TEXT[code]
+
+    assert "newer than this Core build" in reason.message
+    assert "alembic_version" in reason.likely_cause
+    assert "downgrade" in reason.action
+    assert reason.related_command == "awf service logs --service api"
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("code", "message", "related_command"),
+    [
+        (
+            "START_COMPOSE_ASSETS_MISSING",
+            "AWF start could not locate the Compose or runtime assets needed to start local Core.",
+            "awf start --source-checkout .",
+        ),
+        ("START_PORT_CONFLICT", "AWF start found a local port conflict.", "awf start"),
+        (
+            "START_MIGRATION_FAILED",
+            "AWF start could not complete local Core database migrations.",
+            "awf service logs --service api",
+        ),
+        (
+            "START_HEALTH_TIMEOUT",
+            "AWF start timed out waiting for local Core health checks.",
+            "awf service status",
+        ),
+    ],
+)
+def test_core_startup_reasons_keep_their_guidance(
+    code: str, message: str, related_command: str
+) -> None:
+    """Verify Core start reasons resolve unchanged from the core-startup module."""
+    from awf.service.doctor.reasons import _ReasonText
+    from awf.service.doctor.reasons_core_startup import get_core_startup_reasons
+
+    entry = get_core_startup_reasons(_ReasonText)[code]
+
+    assert _REASON_TEXT[code] == entry
+    assert entry.message == message
+    assert entry.related_command == related_command
+    assert entry.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"

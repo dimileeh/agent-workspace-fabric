@@ -584,6 +584,12 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
     monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
 
+    async def _record_schema_guard(eng: _Engine) -> str:
+        created["schema_guard_engine"] = eng
+        return "at_head"
+
+    monkeypatch.setattr(worker_mod, "verify_database_schema_not_ahead", _record_schema_guard)
+
     host_work_dir = (tmp_path / "awf-work").resolve()
     settings = ServiceSettings(
         service_name="awf",
@@ -606,6 +612,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
 
     assert created["db_url"] == settings.database_url
     assert created["session_engine"] is engine
+    assert created["schema_guard_engine"] is engine
     assert created["git_work_dir"] == host_work_dir / "git"
     assert created["git_env"]["HOME"] == str((tmp_path / "host-home").resolve())
     assert created["git_worktree_owner_uid"] == 1000

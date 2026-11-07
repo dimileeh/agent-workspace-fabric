@@ -34,6 +34,7 @@ from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.enums import FailureReason, TaskKind, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.db.schema_head import verify_database_schema_not_ahead
 from awf.db.session import make_engine, make_session_factory
 from awf.hosted_node.runtime_consumers import HostedCommandRunner, WorkspaceConsumers
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -1103,6 +1104,7 @@ async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
 
     runtime = build_worker_runtime(settings)
     try:
+        await verify_database_schema_not_ahead(runtime.engine)
         if once:
             await runtime.worker.run_once()
             await runtime.worker.wait_for_execution_tasks()

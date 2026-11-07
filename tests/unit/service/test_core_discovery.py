@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from awf import __version__
 from awf.api.app import create_app
 from awf.common.config import get_settings
+from awf.db.schema_head import code_schema_heads, schema_head_label
 from awf.runtime.driver import WORKSPACE_EXECUTION_V1, RuntimeDriverConfig
 from awf.service import core_discovery as core_discovery_service
 
@@ -91,6 +92,32 @@ async def test_core_discovery_and_health_do_not_require_database() -> None:
     assert health.status_code == 200
 
 
+@pytest.mark.unit
+async def test_core_discovery_advertises_code_schema_head() -> None:
+    """Verify discovery adds the code's Alembic head without changing other fields."""
+    async with _client_without_database() as client:
+        response = await client.get(DISCOVERY_PATH)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_head"] == schema_head_label(code_schema_heads())
+    assert set(payload) == {
+        "package_name",
+        "package_version",
+        "git_commit",
+        "capabilities",
+        "profile_capability_schema",
+        "schema_head",
+    }
+    assert payload["capabilities"] == [
+        "workspace.execution.v1",
+        "workspace.create.expected_base_sha.v1",
+    ]
+    assert payload["profile_capability_schema"] == (
+        core_discovery_service.profile_capability_schema().model_dump()
+    )
+
+
 async def test_core_discovery_uses_safe_unknown_git_commit_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,6 +186,8 @@ def test_core_discovery_payload_from_state_uses_default_when_cache_missing() -> 
     assert RuntimeDriverConfig().capabilities == (WORKSPACE_EXECUTION_V1,)
     assert payload.profile_capability_schema == core_discovery_service.profile_capability_schema()
     assert payload.to_response().profile_capability_schema == payload.profile_capability_schema
+    assert payload.schema_head == schema_head_label(code_schema_heads())
+    assert payload.to_response().schema_head == payload.schema_head
 
 
 def test_git_rev_parse_head_returns_none_when_source_checkout_has_no_git_dir(

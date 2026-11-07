@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.service.doctor.models import DiagnosticStatus
 from awf.service.doctor.reasons_comment_repair import get_comment_repair_reasons
+from awf.service.doctor.reasons_core_startup import get_core_startup_reasons
 from awf.service.doctor.reasons_helpers import (
     get_claude_overlay_reasons,
     get_salvage_and_monitor_reasons,
@@ -575,46 +576,6 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "The tool install location is not visible to the current shell environment.",
         "awf --version",
         _reason_catalog_link("INSTALLER_PATH_NOT_REACHABLE"),
-    ),
-    "START_COMPOSE_ASSETS_MISSING": _ReasonText(
-        "AWF start could not locate the Compose or runtime assets needed to start local Core.",
-        (
-            "Use a valid package install or pass a verified `--source-checkout` "
-            "path that contains AWF Docker and Compose assets."
-        ),
-        "The selected package/source asset lane does not contain required bootstrap files.",
-        "awf start --source-checkout .",
-        _reason_catalog_link("START_COMPOSE_ASSETS_MISSING"),
-    ),
-    "START_PORT_CONFLICT": _ReasonText(
-        "AWF start found a local port conflict.",
-        (
-            "Stop the process using the reported port or configure a different "
-            "AWF API/console port before retrying start."
-        ),
-        "A local service is already bound to a port needed by AWF Core.",
-        "awf start",
-        _reason_catalog_link("START_PORT_CONFLICT"),
-    ),
-    "START_MIGRATION_FAILED": _ReasonText(
-        "AWF start could not complete local Core database migrations.",
-        (
-            "Inspect migration and Postgres logs, fix the database state, then "
-            "retry `awf start` or use expert service commands for recovery."
-        ),
-        "The local control-plane database rejected or failed a required schema migration.",
-        "awf service logs --service api",
-        _reason_catalog_link("START_MIGRATION_FAILED"),
-    ),
-    "START_HEALTH_TIMEOUT": _ReasonText(
-        "AWF start timed out waiting for local Core health checks.",
-        (
-            "Inspect API, worker, and Postgres logs, fix the failing service, "
-            "then rerun start with an appropriate timeout."
-        ),
-        "One or more local Core services did not become healthy before the start timeout.",
-        "awf service status",
-        _reason_catalog_link("START_HEALTH_TIMEOUT"),
     ),
     "DOCKER_OK": _ReasonText(
         "Docker daemon is reachable.",
@@ -1464,6 +1425,7 @@ _REASON_TEXT.update(get_claude_overlay_reasons(_ReasonText))
 _REASON_TEXT.update(get_runtime_setup_replay_reasons(_ReasonText))
 _REASON_TEXT.update(get_monitor_runtime_restart_reasons(_ReasonText))
 _REASON_TEXT.update(get_worktree_registration_reasons(_ReasonText))
+_REASON_TEXT.update(get_core_startup_reasons(_ReasonText))
 
 
 def _reason_text(
