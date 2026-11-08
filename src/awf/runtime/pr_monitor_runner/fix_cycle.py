@@ -103,6 +103,9 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _sync_needs_human_reason,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
+from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
+    pre_push_infrastructure_park_result,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
@@ -186,6 +189,12 @@ async def _run_fix_cycle(
     # (and will re-route a reviewer reply that landed during settle).
     already_outdated_at_batch_entry = {t.thread_id for t in initial_threads if t.is_outdated}
     independently_addressed_review_ids = {comment.comment_id for comment in reviews}
+    # #1182: once identical infrastructure pre-push failures hit the attempt cap
+    # on this PR head, stay parked for a human. This runs before any git mutation
+    # or agent launch, so no further agent runs until the PR head changes.
+    parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=pr_head_sha)
+    if parked_result is not None:
+        return parked_result
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,
