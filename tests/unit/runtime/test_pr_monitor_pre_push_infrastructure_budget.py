@@ -453,3 +453,37 @@ async def test_infra_park_marker_cleared_when_decide_leaves_address_comments(
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
     assert ws.awaiting_human_since is None
+
+
+@pytest.mark.unit
+async def test_park_event_append_failure_is_retried_on_next_parked_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped best-effort event write is not marked recorded, so it is retried."""
+    appended: list[dict[str, object]] = []
+    outcomes = [False, True]
+
+    async def _append(_runner: object, **kwargs: Any) -> bool:
+        appended.append(dict(kwargs))
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(budget, "_append_disposition_event", _append)
+    state = MonitorState(started_at=0.0)
+    for _ in range(_CAP - 1):
+        budget.record_pre_push_infrastructure_failure(state, _fix_failed(), pr_head_sha=_HEAD)
+
+    first = await budget.bound_pre_push_infrastructure_failure(
+        object(), workspace_id="ws", state=state, push_result=_fix_failed(), pr_head_sha=_HEAD
+    )
+    gate = budget.pre_push_infrastructure_park_result(state, pr_head_sha=_HEAD)
+    assert gate is not None
+    second = await budget.bound_pre_push_infrastructure_failure(
+        object(), workspace_id="ws", state=state, push_result=gate, pr_head_sha=_HEAD
+    )
+    third = await budget.bound_pre_push_infrastructure_failure(
+        object(), workspace_id="ws", state=state, push_result=gate, pr_head_sha=_HEAD
+    )
+
+    assert first.reason_code == second.reason_code == third.reason_code == _PARKED
+    assert len(appended) == 2
+    assert appended[1]["reason_code"] == _PARKED
