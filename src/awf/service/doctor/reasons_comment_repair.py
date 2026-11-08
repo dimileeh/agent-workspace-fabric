@@ -110,6 +110,28 @@ def get_comment_repair_reasons(
             "awf workspace logs <workspace_id>",
             reason_catalog_link("COMMENT_REPAIR_UNPUBLISHED_PROVENANCE_MISSING"),
         ),
+        "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED": reason_text_cls(
+            (
+                "AWF parked PR-comment repair for a human: pre-push validation failed the same "
+                "way on every attempt, with an exit status that points at the validation "
+                "environment rather than the code."
+            ),
+            (
+                "Read the workspace event for the failing command, return code and validation "
+                "run id, and that run's logs. Fix the validation environment (for example git "
+                "ownership or a missing work tree). Then push to the PR, or guide the workspace "
+                "so the monitor retries; a guide or a new PR head lifts the park."
+            ),
+            (
+                "The failing command exited 126 or 128 and above (not executable, invalid "
+                "usage, killed by a signal), such as `git diff` exiting 129 outside a git work "
+                "tree. The fix-pass agent cannot repair that, so after a few identical attempts "
+                "on an unchanged PR head AWF stopped running agents. Unpushed repair commits are "
+                "kept."
+            ),
+            "awf workspace guide <workspace_id> --directive '...'",
+            reason_catalog_link("PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED"),
+        ),
         "REVIEW_THREAD_AUDIT_UNAVAILABLE": reason_text_cls(
             "AWF could not enumerate the PR's review threads to verify thread dispositions.",
             (
