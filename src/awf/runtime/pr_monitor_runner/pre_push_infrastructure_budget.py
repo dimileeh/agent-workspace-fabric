@@ -3,7 +3,7 @@
 The fix-pass agent can repair product failures (lint, tests), but not a validation
 command that failed for an execution-context reason: not executable (126), invalid
 invocation or usage (128+, e.g. ``git diff`` exiting 129 outside a work tree), or
-killed by a signal. Before this budget, such a ``PRE_PUSH_VALIDATION_FIX_FAILED``
+killed from outside by a signal. Before this budget, such a ``PRE_PUSH_VALIDATION_FIX_FAILED``
 re-queued ``AddressComments`` and the next poll re-ran the whole batch with fresh
 agents, forever.
 
@@ -21,13 +21,15 @@ state key, a gate before any item work):
   the failing command, return code and validation run id, and the gate at the top
   of ``_run_fix_cycle`` returns that envelope on later polls without running agents.
 
-Genuine product failures (any other return code) keep today's retry behavior.
+Genuine product failures (any other return code, including a project check that
+crashed on a fault signal such as SIGSEGV) keep today's retry behavior.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import signal
 from typing import Any
 
 from awf.runtime.pr_monitor import MonitorState
@@ -51,6 +53,22 @@ _PARKED_EVENT = "monitor.pre_push_validation_infrastructure_parked"
 _NOT_EXECUTABLE_RETURNCODE = 126
 _RESERVED_RETURNCODE_FLOOR = 128
 
+# Signals a process raises on its own defect (segfault, abort, bus/FP/illegal
+# instruction, trap, bad syscall). A project check dying on one of these is a code
+# failure the repair agent may fix, not proof of a broken validation environment.
+_PROGRAM_FAULT_SIGNALS = frozenset(
+    int(sig)
+    for sig in (
+        signal.SIGSEGV,
+        signal.SIGABRT,
+        signal.SIGBUS,
+        signal.SIGFPE,
+        signal.SIGILL,
+        signal.SIGTRAP,
+        signal.SIGSYS,
+    )
+)
+
 # A fix pass that makes no commit yields ``PRE_PUSH_VALIDATION_FIX_FAILED``; one
 # that commits a guess (or disabled fix passes) re-validates and yields
 # ``PRE_PUSH_VALIDATION_FAILED`` for the same failing command. Both count, and the
@@ -70,6 +88,9 @@ _EVIDENCE_KEYS = (
 def _is_infrastructure_returncode(returncode: object) -> bool:
     """Return whether a validation exit status is a shell execution-context failure."""
     if isinstance(returncode, bool) or not isinstance(returncode, int):
+        return False
+    signal_number = -returncode if returncode < 0 else returncode - _RESERVED_RETURNCODE_FLOOR
+    if signal_number in _PROGRAM_FAULT_SIGNALS:
         return False
     return (
         returncode == _NOT_EXECUTABLE_RETURNCODE

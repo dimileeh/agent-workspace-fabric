@@ -104,9 +104,12 @@ def test_signature_is_set_for_execution_context_failures(returncode: int) -> Non
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("returncode", [1, 2, 5, 127, None, True, "129"])
+@pytest.mark.parametrize(
+    "returncode", [1, 2, 5, 127, 132, 133, 134, 135, 136, 139, 159, -6, -11, None, True, "129"]
+)
 def test_signature_is_none_for_product_failures_and_unknown_codes(returncode: object) -> None:
-    """Genuine lint/test failures, toolchain-missing 127, and missing codes never park."""
+    """Genuine lint/test failures, crashes on a fault signal (SIGSEGV 139 / -11,
+    SIGABRT 134 / -6, ...), toolchain-missing 127, and missing codes never park."""
     assert (
         budget.pre_push_infrastructure_failure_signature(
             _fix_failed(returncode=returncode), pr_head_sha=_HEAD
@@ -401,15 +404,18 @@ async def test_park_keeps_one_attention_episode_across_polls(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("returncode", [1, 139])
 async def test_repeated_genuine_fix_failed_keeps_retrying(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
+    returncode: int,
 ) -> None:
-    """A real product failure (exit 1) keeps today's retry behavior and never parks."""
+    """A real product failure (exit 1, or a project test segfaulting with 139)
+    keeps today's retry behavior and never parks."""
     workspace_id = await seed_monitoring_workspace(factory)
     runner = _runner(factory, tmp_path)
-    body = _CycleBody(_fix_failed(returncode=1, command="pytest -q"))
+    body = _CycleBody(_fix_failed(returncode=returncode, command="pytest -q"))
     mocker.patch.object(runner, "_pre_existing_dirty_repair_worktree_result", body)
     state = MonitorState(started_at=0.0)
 
