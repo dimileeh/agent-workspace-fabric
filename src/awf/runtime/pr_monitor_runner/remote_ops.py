@@ -876,7 +876,11 @@ async def _run_sync_base(
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
+        pre_push_infrastructure_park_result,
+    )
 
     worktree_path = runner._worktrees_root / workspace_id
     operation_start_head, head_result = await runner._repair_operation_start_head_result(
@@ -1025,6 +1029,14 @@ async def _run_sync_base(
                     "status_returncode": status_rc,
                 },
             )
+        # #1182: a conflict needs a resolution agent, which the pre-push
+        # infrastructure park forbids on this PR head. Leave the worktree as it
+        # was and return the park; a clean merge above stays allowed.
+        if isinstance(state, MonitorState) and pr_head_sha is not None:
+            parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=pr_head_sha)
+            if parked_result is not None:
+                await _git("merge", "--abort")
+                return parked_result
         # The mirror's origin/<base> ref is shared across worktrees and can
         # advance after this merge. MERGE_HEAD is worktree-local and records
         # the exact commit that produced the conflict being resolved.

@@ -18,8 +18,10 @@ state key, a gate before any item work):
 * the signature includes the *remote* PR head, which stays fixed while nothing is
   published, so a human push to the PR resets the budget;
 * at the cap the cycle result becomes a ``parked_needs_human`` envelope carrying
-  the failing command, return code and validation run id, and the gate at the top
-  of ``_run_fix_cycle`` returns that envelope on later polls without running agents.
+  the failing command, return code and validation run id, and the gates in
+  ``_run_fix_cycle``, ``_run_ci_fix`` and the conflict path of ``_run_sync_base``
+  return that envelope on later polls without running agents (a clean base merge
+  needs no agent and stays allowed).
 
 Genuine product failures (any other return code, including a project check that
 crashed on a fault signal such as SIGSEGV) keep today's retry behavior.
@@ -194,7 +196,7 @@ def _active_record(state: MonitorState, *, pr_head_sha: str) -> dict[str, Any] |
 
 
 def pre_push_infrastructure_park_active(state: MonitorState, *, pr_head_sha: str) -> bool:
-    """Return whether the comment-repair arm is parked on this PR head."""
+    """Return whether agent-launching repair arms are parked on this PR head."""
     return _active_record(state, pr_head_sha=pr_head_sha) is not None
 
 
@@ -215,7 +217,7 @@ def pre_push_infrastructure_park_result(
         f"Pre-push validation command `{command}` failed with exit {returncode} "
         f"{record['count']} times on PR head {pr_head_sha[:10]}; this looks like a "
         "validation environment failure the repair agent cannot fix, so AWF parked "
-        "comment repair for a human instead of re-running the agent."
+        "agent repair (comments, CI, base conflicts) for a human instead of re-running an agent."
     )
     return _GitPushResult(
         pushed=False,

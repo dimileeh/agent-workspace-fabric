@@ -112,9 +112,9 @@ def get_comment_repair_reasons(
         ),
         "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED": reason_text_cls(
             (
-                "AWF parked PR-comment repair for a human: pre-push validation failed the same "
-                "way on every attempt, with an exit status that points at the validation "
-                "environment rather than the code."
+                "AWF parked agent repair (PR comments, CI fixes, base-conflict resolution) for "
+                "a human: pre-push validation failed the same way on every attempt, with an exit "
+                "status that points at the validation environment rather than the code."
             ),
             (
                 "Read the workspace event for the failing command, return code and validation "

@@ -73,6 +73,7 @@ from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
     _finish_parked_comment_repair_cycle,
+    _finish_parked_repair_cycle,
     _provider_recovery_operation_result_updates,
 )
 from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
@@ -191,12 +192,14 @@ async def _execute(
         state.clear_parked_unpublished_repair()
         parked_unpublished_repair = False
     # A pre-push infrastructure park (#1182) is the same kind of human wait while
-    # ``decide()`` stays on the repair arm. The budget record is NOT dropped when
-    # another action runs: it is only active while it was counted on the current PR
-    # head, so a push to the PR lifts it, but an automatic action that leaves the
-    # head unchanged (e.g. a SyncBase that never pushed) must not re-arm agents.
+    # ``decide()`` stays on an agent-launching arm (comment repair, CI repair, or a
+    # base sync whose conflict would need an agent): each returns the park instead
+    # of launching one. The budget record is NOT dropped when another action runs:
+    # it is only active while it was counted on the current PR head, so a push to
+    # the PR lifts it, but an automatic action that leaves the head unchanged must
+    # not re-arm agents.
     pre_push_infra_parked = isinstance(
-        action, AddressComments
+        action, (AddressComments, ReportCiFailure, SyncBase)
     ) and pre_push_infrastructure_park_active(state, pr_head_sha=status.head_sha)
     # The merge-block attention marker only makes sense while ``decide()`` stays on
     # the ``Merge`` arm (the branch-protection fallback that sets it keeps
@@ -865,6 +868,19 @@ async def _execute(
                 },
             )
             return True
+        if push_result.parked_needs_human:
+            # #1182: the pre-push infrastructure park forbids a CI-repair agent on
+            # this PR head; hold the same human wait as the comment-repair arm.
+            return bool(
+                await _finish_parked_repair_cycle(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                    operation=operation,
+                    push_result=push_result,
+                    extra_result={"failure_count": len(action.failures)},
+                )
+            )
         if push_result.failed:
             reason_code = push_result.reason_code
             outcome = _git_push_failure_outcome(push_result)

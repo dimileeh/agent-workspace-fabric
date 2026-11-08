@@ -32,12 +32,16 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     AddressComments,
     AddressOperatorHint,
+    CheckFailure,
     MonitorState,
     OperatorHint,
+    ReportCiFailure,
     ReviewThread,
+    SyncBase,
     WaitForCI,
 )
 from awf.runtime.pr_monitor_runner import pre_push_infrastructure_budget as budget
+from awf.runtime.pr_monitor_runner import remote_ops
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
@@ -53,6 +57,13 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 from tests.unit.runtime.test_pr_monitor_runner_parts.test_pr_monitor_runner_part_004 import (
     _green_status,
+)
+from tests.unit.runtime.test_pr_monitor_sync_base_merged_base import (
+    _is_clean_merge_rev_parse,
+    _is_head_in_base,
+)
+from tests.unit.runtime.test_pr_monitor_sync_base_merged_base import (
+    _runner as _sync_base_runner,
 )
 
 _PARKED = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON
@@ -591,3 +602,175 @@ async def test_repeated_infra_validation_failed_without_fix_pass_parks_after_cap
     events = await _park_events(factory, workspace_id)
     assert len(events) == 1
     assert events[0].payload["underlying_reason_code"] == _PRE_PUSH_VALIDATION_FAILED
+
+
+async def _park(runner: Any, *, workspace_id: str, state: MonitorState, tmp_path: Path) -> None:
+    """Drive comment repair to the #1182 cap so the park is active on ``_HEAD``."""
+    for _ in range(_CAP):
+        await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+    assert budget.pre_push_infrastructure_park_active(state, pr_head_sha=_HEAD)
+
+
+async def _attention_since(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> datetime | None:
+    """Return the workspace's ``awaiting_human_since`` stamp."""
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.monitoring_pr.value
+    return ws.awaiting_human_since
+
+
+async def _operation_error_codes(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str, operation_type: str
+) -> list[str | None]:
+    """Return the error codes of this workspace's operations of one type."""
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    return [op.error_code for op in operations if op.type == operation_type]
+
+
+@pytest.mark.unit
+async def test_infra_park_blocks_ci_repair_agent_on_the_same_pr_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A CI failure while parked returns the park instead of launching a CI-repair agent.
+
+    ``_pre_existing_dirty_repair_worktree_result`` is also the first call of
+    ``_run_ci_fix``, so the shared body counts any repair cycle that would run.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner(factory, tmp_path)
+    body = _CycleBody(_fix_failed())
+    mocker.patch.object(runner, "_pre_existing_dirty_repair_worktree_result", body)
+    state = MonitorState(started_at=0.0)
+    await _park(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+    parked_since = await _attention_since(factory, workspace_id)
+    assert isinstance(parked_since, datetime)
+    ci_failure = ReportCiFailure(
+        failures=(CheckFailure(name="unit", conclusion="FAILURE", log_excerpt="boom"),)
+    )
+
+    ended = await _poll(
+        runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path, action=ci_failure
+    )
+
+    assert ended is False
+    assert body.calls == _CAP
+    assert runner._deps.adapter.calls == []
+    assert await _operation_error_codes(factory, workspace_id, "ci_repair") == [_PARKED]
+    assert await _attention_since(factory, workspace_id) == parked_since
+    assert len(await _park_events(factory, workspace_id)) == 1
+
+    # A new PR head lifts the park: the CI-repair cycle runs again.
+    await _poll(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        tmp_path=tmp_path,
+        head_sha="b" * 40,
+        action=ci_failure,
+    )
+    assert body.calls == _CAP + 1
+
+
+@pytest.mark.unit
+async def test_infra_park_blocks_sync_base_conflict_agent_on_the_same_pr_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A conflicted base sync while parked aborts the merge and runs no repair agent."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    mocker.patch.object(
+        runner, "_pre_existing_dirty_repair_worktree_result", _CycleBody(_fix_failed())
+    )
+    state = MonitorState(started_at=0.0)
+    await _park(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+    parked_since = await _attention_since(factory, workspace_id)
+    assert isinstance(parked_since, datetime)
+
+    async def _start_head(**_kwargs: object) -> tuple[str, None]:
+        return _HEAD, None
+
+    mocker.patch.object(runner, "_repair_operation_start_head_result", _start_head)
+    mocker.patch.object(runner, "_fetch_base", mocker.AsyncMock(return_value=None))
+    agent = mocker.patch.object(runner, "_run_monitor_agent_with_service_recovery")
+    cmd.calls.clear()
+    cmd.respond_when(
+        lambda args: "merge" in args and "--no-edit" in args,
+        returncode=1,
+        stderr="CONFLICT (content): Merge conflict in src/app.py",
+    )
+    cmd.respond_when(lambda args: "status" in args, stdout="UU src/app.py\n")
+
+    ended = await _poll(
+        runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path, action=SyncBase()
+    )
+
+    assert ended is False
+    agent.assert_not_called()
+    assert runner._deps.adapter.calls == []
+    git_args = [call.args for call in cmd.calls]
+    merge_index = next(i for i, args in enumerate(git_args) if "--no-edit" in args)
+    assert any(args[-2:] == ["merge", "--abort"] for args in git_args[merge_index + 1 :])
+    assert await _operation_error_codes(factory, workspace_id, "sync_base") == [_PARKED]
+    assert await _attention_since(factory, workspace_id) == parked_since
+    assert budget.pre_push_infrastructure_park_active(state, pr_head_sha=_HEAD)
+
+
+@pytest.mark.unit
+async def test_infra_park_still_allows_a_clean_base_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conflict-free base sync needs no agent, so it still merges and pushes."""
+
+    async def _ownership_ok(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(remote_ops, "repair_agent_runtime_ownership", _ownership_ok)
+    state = MonitorState(started_at=0.0)
+    for _ in range(_CAP):
+        budget.record_pre_push_infrastructure_failure(state, _fix_failed(), pr_head_sha=_HEAD)
+    assert budget.pre_push_infrastructure_park_active(state, pr_head_sha=_HEAD)
+    cmd = FakeCommandRunner()
+    cmd.respond_when(
+        _is_clean_merge_rev_parse,
+        stdout=f"{_HEAD}\n{'d' * 40}\n{_HEAD}\n{'b' * 40}\n",
+    )
+    cmd.respond_when(_is_head_in_base, returncode=1)
+
+    sync_runner = _sync_base_runner(tmp_path, cmd)
+
+    async def _pushed_head(_worktree_path: Path) -> str:
+        return "d" * 40
+
+    sync_runner._rev_parse_head = _pushed_head
+    result = await remote_ops._run_sync_base(
+        sync_runner,  # type: ignore[arg-type]
+        workspace_id="ws-sync",
+        state=state,
+        repo=RepoRef(owner="owner", name="repo"),
+        pr_number=614,
+        pr_head_sha=_HEAD,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert result.pushed is True
+    assert result.failed is False
+    assert state.last_push_sha == "d" * 40
+    assert not any(call.args[-2:] == ["merge", "--abort"] for call in cmd.calls[1:])
