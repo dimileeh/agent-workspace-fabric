@@ -29,7 +29,14 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.runtime.pr_monitor import AddressComments, MonitorState, ReviewThread, WaitForCI
+from awf.runtime.pr_monitor import (
+    AddressComments,
+    AddressOperatorHint,
+    MonitorState,
+    OperatorHint,
+    ReviewThread,
+    WaitForCI,
+)
 from awf.runtime.pr_monitor_runner import pre_push_infrastructure_budget as budget
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER,
@@ -490,6 +497,43 @@ async def test_infra_park_survives_other_actions_on_the_same_pr_head(
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
     assert isinstance(ws.awaiting_human_since, datetime)
+
+
+@pytest.mark.unit
+async def test_operator_guide_lifts_the_park_without_a_new_pr_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """An operator guide is explicit re-engagement: it resets the budget even when
+    its cycle pushes nothing, so the next comment-repair poll retries validation."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner(factory, tmp_path)
+    body = _CycleBody(_fix_failed())
+    mocker.patch.object(runner, "_pre_existing_dirty_repair_worktree_result", body)
+    state = MonitorState(started_at=0.0)
+    for _ in range(_CAP + 1):
+        await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+    assert body.calls == _CAP
+
+    async def _hint_cycle_without_push(**kwargs: Any) -> _GitPushResult:
+        kwargs["state"].pending_operator_hint = None
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    mocker.patch.object(runner, "_run_operator_hint_cycle", _hint_cycle_without_push)
+    hint = OperatorHint(reason="validation env fixed", directive="retry", operation_id="op_1")
+    state.pending_operator_hint = hint
+    await _poll(
+        runner,
+        workspace_id=workspace_id,
+        state=state,
+        tmp_path=tmp_path,
+        action=AddressOperatorHint(hint=hint),
+    )
+
+    assert state.pre_push_infra_failure is None
+    await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+    assert body.calls == _CAP + 1
 
 
 @pytest.mark.unit
