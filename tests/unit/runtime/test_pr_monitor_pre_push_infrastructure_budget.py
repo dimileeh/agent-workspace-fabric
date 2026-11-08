@@ -49,6 +49,7 @@ from tests.unit.runtime.test_pr_monitor_runner_parts.test_pr_monitor_runner_part
 )
 
 _PARKED = _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON
+_PRE_PUSH_VALIDATION_FAILED = "PRE_PUSH_VALIDATION_FAILED"
 _CAP = _PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER
 _HEAD = "a" * 40
 
@@ -116,13 +117,31 @@ def test_signature_is_none_for_product_failures_and_unknown_codes(returncode: ob
 
 @pytest.mark.unit
 def test_signature_is_none_for_other_reason_codes_and_successes() -> None:
-    """Only ``PRE_PUSH_VALIDATION_FIX_FAILED`` is budgeted."""
-    other = _fix_failed(reason_code="PRE_PUSH_VALIDATION_FAILED")
+    """Only pre-push validation failures (with or without a fix pass) are budgeted."""
+    other = _fix_failed(reason_code="PRE_PUSH_VALIDATION_ROLLBACK_FAILED")
     ok = _GitPushResult(pushed=True, failed=False, returncode=0)
     assert budget.pre_push_infrastructure_failure_signature(other, pr_head_sha=_HEAD) is None
     assert budget.pre_push_infrastructure_failure_signature(ok, pr_head_sha=_HEAD) is None
     no_details = replace(_fix_failed(), details=None)
     assert budget.pre_push_infrastructure_failure_signature(no_details, pr_head_sha=_HEAD) is None
+
+
+@pytest.mark.unit
+def test_fix_failed_and_validation_failed_share_one_signature() -> None:
+    """A fix pass that commits a guess surfaces the same rc-129 failure as
+    ``PRE_PUSH_VALIDATION_FAILED``; alternating codes must not reset the budget."""
+    state = MonitorState(started_at=0.0)
+    record = budget.record_pre_push_infrastructure_failure
+    after_commit = _fix_failed(reason_code=_PRE_PUSH_VALIDATION_FAILED)
+    assert record(state, _fix_failed(), pr_head_sha=_HEAD) == 1
+    assert record(state, after_commit, pr_head_sha=_HEAD) == 2
+    assert record(state, _fix_failed(), pr_head_sha=_HEAD) == 3
+
+    parked = budget.pre_push_infrastructure_park_result(state, pr_head_sha=_HEAD)
+
+    assert parked is not None
+    assert parked.details is not None
+    assert parked.details["underlying_reason_code"] == _PRE_PUSH_VALIDATION_FIX_FAILED_REASON
 
 
 @pytest.mark.unit
@@ -487,3 +506,26 @@ async def test_park_event_append_failure_is_retried_on_next_parked_poll(
     assert first.reason_code == second.reason_code == third.reason_code == _PARKED
     assert len(appended) == 2
     assert appended[1]["reason_code"] == _PARKED
+
+
+@pytest.mark.unit
+async def test_repeated_infra_validation_failed_without_fix_pass_parks_after_cap(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """With fix passes disabled (or after a committed guess) the same rc-129 failure
+    arrives as ``PRE_PUSH_VALIDATION_FAILED``; it is bounded the same way."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = _runner(factory, tmp_path)
+    body = _CycleBody(_fix_failed(reason_code=_PRE_PUSH_VALIDATION_FAILED))
+    mocker.patch.object(runner, "_pre_existing_dirty_repair_worktree_result", body)
+    state = MonitorState(started_at=0.0)
+
+    for _ in range(_CAP + 2):
+        await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+
+    assert body.calls == _CAP
+    events = await _park_events(factory, workspace_id)
+    assert len(events) == 1
+    assert events[0].payload["underlying_reason_code"] == _PRE_PUSH_VALIDATION_FAILED

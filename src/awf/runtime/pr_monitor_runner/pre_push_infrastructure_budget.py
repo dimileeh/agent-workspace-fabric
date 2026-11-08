@@ -12,7 +12,9 @@ The budget follows the sync-base no-progress pattern (signature + count) and the
 state key, a gate before any item work):
 
 * every comment-repair cycle result is recorded: an infrastructure-signature
-  ``PRE_PUSH_VALIDATION_FIX_FAILED`` counts, anything else ends the episode;
+  pre-push validation failure (``PRE_PUSH_VALIDATION_FIX_FAILED``, or
+  ``PRE_PUSH_VALIDATION_FAILED`` when a fix pass committed a guess or fix passes
+  are disabled) counts, anything else ends the episode;
 * the signature includes the *remote* PR head, which stays fixed while nothing is
   published, so a human push to the PR resets the budget;
 * at the cap the cycle result becomes a ``parked_needs_human`` envelope carrying
@@ -31,6 +33,7 @@ from typing import Any
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER,
+    _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON,
 )
@@ -47,6 +50,14 @@ _PARKED_EVENT = "monitor.pre_push_validation_infrastructure_parked"
 # already-terminal ``PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING``.
 _NOT_EXECUTABLE_RETURNCODE = 126
 _RESERVED_RETURNCODE_FLOOR = 128
+
+# A fix pass that makes no commit yields ``PRE_PUSH_VALIDATION_FIX_FAILED``; one
+# that commits a guess (or disabled fix passes) re-validates and yields
+# ``PRE_PUSH_VALIDATION_FAILED`` for the same failing command. Both count, and the
+# outer code stays out of the signature so alternating cycles share one budget.
+_BUDGETED_REASON_CODES = frozenset(
+    {_PRE_PUSH_VALIDATION_FIX_FAILED_REASON, _PRE_PUSH_VALIDATION_FAILED_REASON}
+)
 
 _EVIDENCE_KEYS = (
     "failing_command",
@@ -73,7 +84,7 @@ def pre_push_infrastructure_failure_signature(
     pr_head_sha: str,
 ) -> str | None:
     """Return the budget signature for an infrastructure fix failure, else ``None``."""
-    if not push_result.failed or push_result.reason_code != _PRE_PUSH_VALIDATION_FIX_FAILED_REASON:
+    if not push_result.failed or push_result.reason_code not in _BUDGETED_REASON_CODES:
         return None
     details = push_result.details or {}
     returncode = details.get("failing_returncode")
@@ -81,7 +92,6 @@ def pre_push_infrastructure_failure_signature(
         return None
     material = json.dumps(
         [
-            push_result.reason_code,
             details.get("validation_reason_code"),
             details.get("failing_command"),
             returncode,
@@ -140,7 +150,10 @@ def record_pre_push_infrastructure_failure(
             "signature": signature,
             "count": count,
             "pr_head_sha": pr_head_sha,
-            "evidence": {key: details[key] for key in _EVIDENCE_KEYS if key in details},
+            "evidence": {
+                **{key: details[key] for key in _EVIDENCE_KEYS if key in details},
+                "underlying_reason_code": push_result.reason_code,
+            },
             "event_recorded": False,
         },
     )
@@ -193,8 +206,8 @@ def pre_push_infrastructure_park_result(
         details={
             "phase": "pre_push_validation",
             "pushed": False,
-            **evidence,
             "underlying_reason_code": _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
+            **evidence,
             "attempts": record["count"],
             "cap": _PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER,
             "infrastructure_signature": record["signature"],
