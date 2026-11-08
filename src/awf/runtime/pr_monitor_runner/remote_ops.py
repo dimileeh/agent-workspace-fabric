@@ -53,6 +53,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON,
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
@@ -315,6 +316,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         return "sync_base_pushed_head_unavailable"
     if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
         return "pre_push_validation_toolchain_missing"
+    if push_result.reason_code == _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON:
+        return "pre_push_validation_infrastructure_parked"
     if push_result.reason_code in {
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
@@ -873,7 +876,11 @@ async def _run_sync_base(
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
+        pre_push_infrastructure_park_result,
+    )
 
     worktree_path = runner._worktrees_root / workspace_id
     operation_start_head, head_result = await runner._repair_operation_start_head_result(
@@ -1022,6 +1029,14 @@ async def _run_sync_base(
                     "status_returncode": status_rc,
                 },
             )
+        # #1182: a conflict needs a resolution agent, which the pre-push
+        # infrastructure park forbids on this PR head. Leave the worktree as it
+        # was and return the park; a clean merge above stays allowed.
+        if isinstance(state, MonitorState) and pr_head_sha is not None:
+            parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=pr_head_sha)
+            if parked_result is not None:
+                await _git("merge", "--abort")
+                return parked_result
         # The mirror's origin/<base> ref is shared across worktrees and can
         # advance after this merge. MERGE_HEAD is worktree-local and records
         # the exact commit that produced the conflict being resolved.

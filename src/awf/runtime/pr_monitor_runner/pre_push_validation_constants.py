@@ -30,3 +30,12 @@ _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON = "PRE_PUSH_DIRTY_FINALIZE_UNOWNED
 # closed with this dedicated reason so the un-inspectable commit is never
 # silently trusted (review thread ``PRRT_kwDOSJAM6s6KhtZJ``).
 _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON = "PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE"
+
+# Repeated ``PRE_PUSH_VALIDATION_FIX_FAILED`` with the same execution-context
+# signature (shell status 126 / >=128, e.g. ``git diff`` outside a work tree) on
+# an unchanged PR head parks the comment-repair arm for a human after this many
+# attempts instead of re-running agents forever (#1182).
+_PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON = (
+    "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED"
+)
+_PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER = 3

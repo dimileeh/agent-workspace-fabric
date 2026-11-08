@@ -77,6 +77,10 @@ async def handle_operator_hint_action(
     finish_if_pr_terminal_after_cleanup_error: _FinishIfPrTerminalAfterCleanupError,
 ) -> bool:
     """Run one operator-hint repair cycle; return True iff the monitor is terminal."""
+    # A guide/remonitor is explicit operator re-engagement, so it lifts a #1182
+    # pre-push infrastructure park even when this cycle pushes nothing (the PR head
+    # is unchanged); automatic actions on the same head keep the budget.
+    state.clear_pre_push_infra_failure()
     operation = await self._begin_monitor_operation(
         workspace_id=workspace_id,
         operation_type=OperationType.comment_repair,

@@ -103,6 +103,34 @@ async def _finish_parked_comment_repair_cycle(
     replays on its idempotency key, and the park marker keeps the event and the
     attention episode from being re-emitted.
     """
+    return await _finish_parked_repair_cycle(
+        self,
+        workspace_id=workspace_id,
+        state=state,
+        operation=operation,
+        push_result=push_result,
+        extra_result={
+            "thread_count": thread_count,
+            "review_comment_count": review_comment_count,
+        },
+    )
+
+
+async def _finish_parked_repair_cycle(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: Any,
+    operation: Any,
+    push_result: Any,
+    extra_result: Mapping[str, object],
+) -> bool:
+    """End any repair arm's cycle that parked for a human, keeping the row non-terminal.
+
+    Shared by comment repair and by the CI-repair / sync-base-conflict arms that
+    honor the #1182 pre-push infrastructure park; see
+    ``_finish_parked_comment_repair_cycle`` for why the wait is not terminal.
+    """
     state.clear_awaiting_workflow_scope()
     state.iter_count += 1
     await self._persist_state(workspace_id, state)
@@ -114,8 +142,7 @@ async def _finish_parked_comment_repair_cycle(
             "status": "failed",
             "outcome": _git_push_failure_outcome(push_result),
             "reason_code": reason_code,
-            "thread_count": thread_count,
-            "review_comment_count": review_comment_count,
+            **extra_result,
             "pushed": False,
             "failure_evidence": push_result.failure_evidence(),
         },
