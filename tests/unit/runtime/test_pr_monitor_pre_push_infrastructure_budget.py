@@ -447,31 +447,43 @@ async def test_infra_park_lifts_when_pr_head_changes(
 
 
 @pytest.mark.unit
-async def test_infra_park_marker_cleared_when_decide_leaves_address_comments(
+async def test_infra_park_survives_other_actions_on_the_same_pr_head(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
-    """Leaving the repair arm ends the episode: marker dropped, attention cleared."""
+    """An automatic non-repair poll (e.g. a SyncBase that did not push) keeps the park.
+
+    Leaving the repair arm retires the attention flag, but the budget stays tied to
+    the unchanged PR head, so the next comment-repair poll must not run agents.
+    """
     workspace_id = await seed_monitoring_workspace(factory)
     runner = _runner(factory, tmp_path)
-    mocker.patch.object(
-        runner, "_pre_existing_dirty_repair_worktree_result", _CycleBody(_fix_failed())
-    )
+    body = _CycleBody(_fix_failed())
+    mocker.patch.object(runner, "_pre_existing_dirty_repair_worktree_result", body)
     state = MonitorState(started_at=0.0)
     for _ in range(_CAP):
         await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
-    assert state.pre_push_infra_failure is not None
+    parked_record = state.pre_push_infra_failure
+    assert parked_record is not None
 
     await _poll(
         runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path, action=WaitForCI()
     )
 
-    assert state.pre_push_infra_failure is None
+    assert state.pre_push_infra_failure == parked_record
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(workspace_id)
     assert ws is not None
     assert ws.awaiting_human_since is None
+
+    await _poll(runner, workspace_id=workspace_id, state=state, tmp_path=tmp_path)
+
+    assert body.calls == _CAP
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None
+    assert isinstance(ws.awaiting_human_since, datetime)
 
 
 @pytest.mark.unit

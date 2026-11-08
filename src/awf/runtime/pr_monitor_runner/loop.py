@@ -190,12 +190,14 @@ async def _execute(
         # marker AND let the resume clear below retire the attention flag.
         state.clear_parked_unpublished_repair()
         parked_unpublished_repair = False
-    # A pre-push infrastructure park (#1182) is the same kind of human wait. It is
-    # only active while it was counted on the current PR head: a push to the PR
-    # lifts it, and the next fix cycle starts a fresh budget.
-    if not isinstance(action, AddressComments):
-        state.clear_pre_push_infra_failure()
-    pre_push_infra_parked = pre_push_infrastructure_park_active(state, pr_head_sha=status.head_sha)
+    # A pre-push infrastructure park (#1182) is the same kind of human wait while
+    # ``decide()`` stays on the repair arm. The budget record is NOT dropped when
+    # another action runs: it is only active while it was counted on the current PR
+    # head, so a push to the PR lifts it, but an automatic action that leaves the
+    # head unchanged (e.g. a SyncBase that never pushed) must not re-arm agents.
+    pre_push_infra_parked = isinstance(
+        action, AddressComments
+    ) and pre_push_infrastructure_park_active(state, pr_head_sha=status.head_sha)
     # The merge-block attention marker only makes sense while ``decide()`` stays on
     # the ``Merge`` arm (the branch-protection fallback that sets it keeps
     # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
