@@ -50,6 +50,9 @@ from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import _attach_provider_recovery_details
 from awf.runtime.pr_monitor_runner.mirror_hooks import mirror_hooks_repair_failure_details
+from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
+    pre_push_infrastructure_park_result,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
@@ -452,6 +455,12 @@ async def _run_ci_fix(
     operation_type: str | None = None,
     monitor_log: WorkspaceLogSink | None = None,
 ) -> _GitPushResult:
+    # #1182: while the pre-push infrastructure park is active on this PR head no
+    # automatic action may launch an agent, so CI repair returns the same park.
+    if state is not None and status is not None:
+        parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=status.head_sha)
+        if parked_result is not None:
+            return parked_result
     worktree_path = self._worktrees_root / workspace_id
     dirty_result = await self._pre_existing_dirty_repair_worktree_result(
         workspace_id=workspace_id,

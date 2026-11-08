@@ -73,7 +73,12 @@ from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
     _finish_parked_comment_repair_cycle,
+    _finish_parked_repair_cycle,
     _provider_recovery_operation_result_updates,
+)
+from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
+    bound_pre_push_infrastructure_failure,
+    pre_push_infrastructure_park_active,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
@@ -186,6 +191,16 @@ async def _execute(
         # marker AND let the resume clear below retire the attention flag.
         state.clear_parked_unpublished_repair()
         parked_unpublished_repair = False
+    # A pre-push infrastructure park (#1182) is the same kind of human wait while
+    # ``decide()`` stays on an agent-launching arm (comment repair, CI repair, or a
+    # base sync whose conflict would need an agent): each returns the park instead
+    # of launching one. The budget record is NOT dropped when another action runs:
+    # it is only active while it was counted on the current PR head, so a push to
+    # the PR lifts it, but an automatic action that leaves the head unchanged must
+    # not re-arm agents.
+    pre_push_infra_parked = isinstance(
+        action, (AddressComments, ReportCiFailure, SyncBase)
+    ) and pre_push_infrastructure_park_active(state, pr_head_sha=status.head_sha)
     # The merge-block attention marker only makes sense while ``decide()`` stays on
     # the ``Merge`` arm (the branch-protection fallback that sets it keeps
     # ``decide()`` returning ``Merge``). The moment ``decide()`` returns any other
@@ -200,6 +215,7 @@ async def _execute(
         not isinstance(action, (NotifyHuman, Merge))
         and not awaiting_workflow_scope
         and not parked_unpublished_repair
+        and not pre_push_infra_parked
     ):
         await self._clear_workspace_attention(workspace_id)
 
@@ -852,6 +868,19 @@ async def _execute(
                 },
             )
             return True
+        if push_result.parked_needs_human:
+            # #1182: the pre-push infrastructure park forbids a CI-repair agent on
+            # this PR head; hold the same human wait as the comment-repair arm.
+            return bool(
+                await _finish_parked_repair_cycle(
+                    self,
+                    workspace_id=workspace_id,
+                    state=state,
+                    operation=operation,
+                    push_result=push_result,
+                    extra_result={"failure_count": len(action.failures)},
+                )
+            )
         if push_result.failed:
             reason_code = push_result.reason_code
             outcome = _git_push_failure_outcome(push_result)
@@ -1075,6 +1104,15 @@ async def _execute(
         pr_terminal_result = await _finish_if_pr_terminal(operation, push_result)
         if pr_terminal_result is not None:
             return pr_terminal_result
+        # #1182: count identical infrastructure pre-push failures; at the cap the
+        # result becomes a needs-human park handled by the branch below.
+        push_result = await bound_pre_push_infrastructure_failure(
+            self,
+            workspace_id=workspace_id,
+            state=state,
+            push_result=push_result,
+            pr_head_sha=status.head_sha,
+        )
         if push_result.paused_into_blocked:
             # A protected-scope violation paused the workspace into ``blocked``
             # for an operator decision (WS-2). The row already left

@@ -1040,6 +1040,28 @@ async def _run_pre_push_validation(
             reason_code=PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
             message="could not capture local HEAD before PR monitor pre-push validation",
         )
+    # Root-side monitor git steps (worktree check, dirty finalize, residue cleanup,
+    # comment-verdict gitfile restores) can leave worktree git metadata root-owned.
+    # The uid-1000 agent container then fails git's ownership check and git-dependent
+    # validation commands run outside a work tree (#1182). Repair agent ownership
+    # here, as the executor does before initial validation, or fail closed.
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="pre_push_validation",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        return _PrePushValidationResult(
+            passed=False,
+            validation_run_id=None,
+            workspace_head_sha=workspace_head_sha,
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            message=(
+                "PR monitor pre-push validation blocked: "
+                "agent runtime ownership repair failed before validation"
+            ),
+        )
 
     validation_run_id = await _start_pre_push_validation_run(
         self,
