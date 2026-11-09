@@ -287,3 +287,52 @@ async def test_retry_planning_scope_clears_existing_feature_pr_identity(
     assert retried.remote_push_branch is None
     assert retried.pr_url is None
     assert retried.pr_number is None
+
+
+@pytest.mark.parametrize("provider_constraint", [None, "ollama", "openai"])
+@pytest.mark.parametrize("target_model", ["openai/gpt-oss", "ollama/new-coder"])
+def test_opencode_planning_model_promotion_recomputes_provider(provider_constraint, target_model):
+    selected = resolve_execution(agent="opencode", model="ollama/original-coder")
+    policy = {"agent_execution": selected.model_dump(), "agent_model": selected.model}
+    if provider_constraint is not None:
+        # For a native OpenCode provider constraint, use a consistent source model.
+        selected = resolve_execution(
+            agent="opencode", model=provider_constraint + "/original-coder"
+        )
+        policy.update(
+            agent_execution=selected.model_dump(),
+            agent_model=selected.model,
+            agent_provider=provider_constraint,
+        )
+    source = SimpleNamespace(
+        id="ws-opencode-promotion", agent="opencode", failure_reason=None, task_policy=policy
+    )
+    context = _PlanningScopeRetryContext(
+        reason_code="AGENT_PLAN_PHASE_SCOPE_VIOLATION",
+        evidence={},
+        evidence_ref={},
+        recovery_strategy="retry_with_fallback_model",
+        salvage_policy="discard",
+        fallback_model={"model": target_model},
+    )
+    provider = target_model.partition("/")[0]
+    if provider_constraint is not None and provider_constraint != provider:
+        with pytest.raises(ValueError, match="AGENT_PROVIDER_UNSUPPORTED"):
+            _retry_task_policy(source, (), planning_scope_context=context)
+    else:
+        promoted, agent = _retry_task_policy(source, (), planning_scope_context=context)
+        execution = execution_from_policy(promoted)
+        assert execution == selected.model_copy(
+            update={"provider": provider, "model": target_model, "model_explicit": True}
+        )
+        adapter = get_adapter(
+            agent,
+            runner=Mock(),
+            defaults=_agent_defaults_for_workspace(
+                SimpleNamespace(agent=agent, task_policy=promoted),
+                DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode],
+            ),
+        )
+        assert adapter.get_provider(None) == provider
+        assert adapter.default_model == target_model
+    assert source.task_policy == policy

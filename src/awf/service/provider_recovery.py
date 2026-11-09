@@ -1134,6 +1134,14 @@ def _install_fixed_recovery_model(
                 allow_unverified=selected.compatibility == "unverified",
             )
         promoted = selected.model_copy(update={"model": target_model, "model_explicit": True})
+        if selected.agent == "opencode":
+            from awf.adapters.opencode import opencode_provider_for_model
+
+            provider = opencode_provider_for_model(target_model)
+            constraint = task_policy.get("agent_provider")
+            if constraint is not None and constraint != provider:
+                raise ValueError("AGENT_PROVIDER_UNSUPPORTED")
+            promoted = promoted.model_copy(update={"provider": provider})
         return promote_execution(
             task_policy,
             {"model": target_model, "agent_execution": promoted.model_dump(mode="json")},
