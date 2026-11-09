@@ -594,6 +594,43 @@ async def test_repeated_guide_after_reopen_with_fresh_reply_fails_closed(
     assert gh.events == []
 
 
+@pytest.mark.unit
+async def test_repeated_guide_after_outdated_retriage_of_fresh_reply_fails_closed(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """Re-triaging fresh feedback ends the retirement even without the poll-boundary clear.
+
+    An outdated thread never reaches ``_drop_stale_review_thread_addressed_state``:
+    its fresh reply re-enters repair and is re-triaged straight into an ordinary
+    ``needs_human`` verdict for the new conversation. A repeated ruling must not
+    read the old tombstone and close that new escalation on the old attempt SHA.
+    """
+    runner, workspace_id, gh, cycle = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked_state(thread)
+    status = _status(thread)
+    _arm(state, _GUIDE)
+    await _guide_poll(runner, workspace_id, state, status)
+    await _next_poll(runner, gh, workspace_id, state, status)
+    assert ("resolve", _THREAD) in gh.events
+    reopened = _thread(body="reopening: this is still broken")
+    _mark_review_thread_addressed(state, reopened, "needs_human")
+    state.mark_addressed(_REASON_KEY, "needs a product decision on the new ask")
+    assert _RETIRED_KEY not in state.threads_addressed_ids
+    gh.events.clear()
+
+    _arm(state, _GUIDE, operation_id="op_guide_1189_retriaged")
+    await _guide_poll(runner, workspace_id, state, _status(reopened))
+
+    assert cycle.calls == []
+    assert state.threads_addressed_ids[_THREAD] == "needs_human"
+    hint = state.pending_operator_hint
+    assert hint is not None
+    assert hint.status == "needs_human"
+    assert "not_preserved_attempt" in (hint.status_reason or "")
+    assert gh.events == []
+
+
 # --- T4: the disposition cannot be applied -> distinct reason, no silent re-raise --
 
 
