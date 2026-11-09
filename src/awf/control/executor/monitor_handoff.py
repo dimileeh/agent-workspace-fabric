@@ -1423,6 +1423,8 @@ async def _build_handoff_pr_monitor(
             action=stale_action,
         ):
             return None
+        if not await _freeze_execution_defaults(self, workspace):
+            return None
         if monitor is None and self._pr_monitor_factory is not None:
             agent: AgentRuntime | str
             try:
