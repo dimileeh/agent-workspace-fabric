@@ -53,6 +53,7 @@ def test_runtime_bounds_inherited_pipe_drain_and_kills_process_group(tmp_path, c
             str(agent),
         ],
         cwd=tmp_path,
+        env={**os.environ, "CODEX_HOME": str(tmp_path / "no-native-auth")},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
