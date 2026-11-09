@@ -116,6 +116,8 @@ branch must resolve to the commit at the initial checkout. It is not
 
 Example `awf_create_workspace` arguments:
 
+`awf_create_workspace` also accepts `provider` and `allow_unverified_model` (default false). Third-party Codex/Claude paths remain admission-disabled, with explicit capability/network rejection. Discovery and diagnostic tools are pending T4–T6. See [the provider foundation](AGENT_MODEL_PROVIDERS.md).
+
 ```json
 {
   "repo_url": "git@github.com:example/app.git",

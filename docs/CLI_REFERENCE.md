@@ -153,6 +153,8 @@ structured `partial` result with reason codes instead of deleting unsafe paths.
 
 Create a workspace:
 
+Creation accepts `--provider` and `--allow-unverified-model`. Third-party Codex/Claude paths remain admission-disabled; these options do not bypass capability or network checks. See [the provider foundation](AGENT_MODEL_PROVIDERS.md).
+
 ```bash
 uv run --python 3.12 --extra dev awf workspace create \
   --repo git@github.com:example/app.git \
