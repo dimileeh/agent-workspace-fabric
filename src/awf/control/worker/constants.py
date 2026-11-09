@@ -43,13 +43,18 @@ _REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
     # the provider cooldown, so it holds the host-port lock too (#612).
     WorkspaceStatus.recovering,
 )
-"""Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock).
+"""Workspace statuses that keep a warm stack (e.g. a host-port lock) on the node.
+
+No longer an admission cap (slot-release): requested admission is bounded by
+broker-owned work-slot leases, which waiting monitors and ``blocked`` /
+``recovering`` workspaces do not hold. Stale recovery still scans this set for
+the legacy null-node scope (``recovery_stale``).
 
 Deliberately excludes ``blocked`` and ``recovering`` from
 ``_ACTIVE_EXECUTION_STATUSES`` and ``_RUNTIME_HEALTH_SCAN_STATUSES`` (above): a
 paused ``blocked`` (operator) or ``recovering`` (auto-retry) workspace must be
 preserve-not-reap, so it stays out of the stale-execution reaping / health-scan
-sets while still holding its admission slot here."""
+sets while still keeping its warm stack."""
 
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 
@@ -412,6 +417,21 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
 """Terminal workspace statuses that indicate runtime resources should be released."""
 
 _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
+
+# Worker-internal work-slot log reason codes (slot-release). Like
+# ``EXECUTION_CLAIM_FENCED`` these are structured-log fields only, not doctor or
+# catalog entries; the operator-facing waiting reason is
+# ``MONITOR_WAITING_FOR_WORK_SLOT`` (``awf.common.work_slot``).
+WORK_SLOT_LEASE_FENCED = "WORK_SLOT_LEASE_FENCED"
+"""A newer holder/epoch superseded this invocation's work-slot lease."""
+WORK_SLOT_STARTUP_CHECK_FAILED = "WORK_SLOT_STARTUP_CHECK_FAILED"
+"""Docker could not be queried at startup: all leases kept, new admission refused."""
+WORK_SLOT_ADOPTED = "WORK_SLOT_ADOPTED"
+"""A restarted worker adopted a lease whose ``awf-exec`` was still in flight."""
+WORK_SLOT_RELEASED_BY_RECONCILER = "WORK_SLOT_RELEASED_BY_RECONCILER"
+"""The startup check or periodic reconciler released a lease whose process is gone."""
+WORK_SLOT_CLEANUP_UNPROVEN_RETAINED = "WORK_SLOT_CLEANUP_UNPROVEN_RETAINED"
+"""A run ended with unproven ``awf-exec`` cleanup; its lease is kept until proven gone."""
 
 EXECUTION_CLAIM_FENCED = "EXECUTION_CLAIM_FENCED"
 """Reason code logged when a stale worker is fenced by the execution-claim epoch (D5).

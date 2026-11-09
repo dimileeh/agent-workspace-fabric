@@ -14,10 +14,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.logging import get_logger
+from awf.common.work_slot import WORK_SLOT_INVOCATION_ENV
 
 DEFAULT_AGENT_WORKDIR: Final[str] = "/workspace"
 """Default in-container working directory for tracked compose-exec commands.
@@ -109,13 +110,24 @@ def build_tracked_compose_exec(
     invocation_id: str | None = None,
     preserve_stdin: bool = False,
     env_passthrough: Sequence[str] = (),
+    work_slot_invocation_id: str | None = None,
 ) -> TrackedComposeExec:
-    """Build a compose-exec argv that tags the in-container command."""
+    """Build a compose-exec argv that tags the in-container command.
+
+    ``work_slot_invocation_id`` additionally exports
+    ``AWF_WORK_SLOT_INVOCATION_ID`` into the exec so every descendant carries the
+    work-slot lease's invocation; a restarted worker probes for it before adopting
+    or releasing that lease (slot-release).
+    """
 
     if not cli_args:
         raise ValueError("cli_args must not be empty")
     invocation_id = invocation_id or _new_invocation_id()
     _validate_invocation_id(invocation_id)
+    env_assignments: tuple[str, ...] = ()
+    if work_slot_invocation_id is not None:
+        _validate_invocation_id(work_slot_invocation_id)
+        env_assignments = (f"{WORK_SLOT_INVOCATION_ENV}={work_slot_invocation_id}",)
     wrapper_script = _tracked_exec_wrapper_script(preserve_stdin=preserve_stdin)
     cleanup_script = _cleanup_script(invocation_id)
     args = [
@@ -125,6 +137,7 @@ def build_tracked_compose_exec(
             service=service,
             workdir=workdir,
             env_passthrough=env_passthrough,
+            env_assignments=env_assignments,
         ),
         "sh",
         "-lc",
@@ -245,6 +258,70 @@ async def cleanup_compose_exec_invocation_after_cancellation(
                 return cleanup_task.result()
 
 
+WorkSlotProbeResult = Literal["present", "absent", "unknown"]
+_WORK_SLOT_PROBE_PRESENT = "awf work-slot probe: present"
+_WORK_SLOT_PROBE_ABSENT = "awf work-slot probe: absent"
+
+
+def build_work_slot_probe_compose_exec(
+    *,
+    compose_project: str,
+    compose_file: Path,
+    invocation_id: str,
+    service: str = "agent",
+    workdir: str = DEFAULT_AGENT_WORKDIR,
+) -> list[str]:
+    """Build a read-only probe for processes tagged with a work-slot invocation."""
+
+    _validate_invocation_id(invocation_id)
+    return [
+        *_compose_exec_prefix(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            service=service,
+            workdir=workdir,
+        ),
+        "sh",
+        "-lc",
+        _work_slot_probe_script(invocation_id),
+        "awf-work-slot-probe",
+        invocation_id,
+    ]
+
+
+async def probe_work_slot_invocation(
+    runner: AsyncCommandRunner,
+    *,
+    compose_project: str,
+    compose_file: Path,
+    invocation_id: str,
+    service: str = "agent",
+) -> WorkSlotProbeResult:
+    """Return whether an ``awf-exec`` for ``invocation_id`` is still in flight.
+
+    ``unknown`` (the exec failed or printed something unexpected) must never be
+    treated as ``absent``: callers keep the lease and fail closed.
+    """
+
+    result = await runner.run(
+        build_work_slot_probe_compose_exec(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            invocation_id=invocation_id,
+            service=service,
+        )
+    )
+    if not result.ok:
+        return "unknown"
+    lines = result.stdout.strip().splitlines()
+    last_line = lines[-1].strip() if lines else ""
+    if last_line == f"{_WORK_SLOT_PROBE_PRESENT} {invocation_id}":
+        return "present"
+    if last_line == f"{_WORK_SLOT_PROBE_ABSENT} {invocation_id}":
+        return "absent"
+    return "unknown"
+
+
 def cleanup_failure_message(exc: ComposeExecCleanupError) -> str:
     """Bounded operator-facing message for cleanup failures."""
 
@@ -258,9 +335,16 @@ def _compose_exec_prefix(
     service: str,
     workdir: str,
     env_passthrough: Sequence[str] = (),
+    env_assignments: Sequence[str] = (),
 ) -> list[str]:
-    """Build the ``docker compose exec`` argv prefix, including optional ``-e`` passthrough."""
+    """Build the ``docker compose exec`` argv prefix, including optional ``-e`` passthrough.
+
+    ``env_assignments`` are pre-validated ``NAME=value`` pairs AWF itself sets
+    (never secrets); ``env_passthrough`` forwards names whose values stay on the
+    host side of ``docker compose exec``.
+    """
     env_args = [arg for name in _unique_env_passthrough(env_passthrough) for arg in ("-e", name)]
+    env_args.extend(arg for assignment in env_assignments for arg in ("-e", assignment))
     return [
         "docker",
         "compose",
@@ -482,6 +566,29 @@ if [ -n "$pids" ]; then
 fi
 rm -rf "$awf_exec_dir" 2>/dev/null || true
 echo "awf cleanup: killed $invocation_id"
+exit 0
+""".strip()
+
+
+def _work_slot_probe_script(invocation_id: str) -> str:
+    """Scan ``/proc`` for the exact work-slot marker; read-only, never kills."""
+    target_marker = f"{WORK_SLOT_INVOCATION_ENV}={invocation_id}"
+    return f"""
+set +e
+invocation_id={invocation_id}
+target_marker='{target_marker}'
+self_pid=$$
+for env in /proc/[0-9]*/environ; do
+  [ -r "$env" ] || continue
+  pid=${{env%/environ}}
+  pid=${{pid##*/}}
+  [ "$pid" = "$self_pid" ] && continue
+  if tr '\\000' '\\n' < "$env" 2>/dev/null | grep -qx "$target_marker"; then
+    echo "{_WORK_SLOT_PROBE_PRESENT} $invocation_id"
+    exit 0
+  fi
+done
+echo "{_WORK_SLOT_PROBE_ABSENT} $invocation_id"
 exit 0
 """.strip()
 
