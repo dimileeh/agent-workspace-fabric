@@ -526,6 +526,50 @@ async def test_fresh_lease_after_reconciled_cleanup_unproven_lease_is_released_i
         assert await lease_rows(session_factory, workspace_id=workspace_id) == []
 
 
+async def test_retry_never_runs_on_a_still_flagged_cleanup_unproven_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The reconciler does not track a scope's unproven lease: it may release it
+    # once the old awf-exec is gone, before a retry on it spawns its own.
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    wakeups = WorkSlotWakeups()
+    scope = _scope(session_factory, workspace_id, wakeups=wakeups)
+
+    async def _retry() -> tuple[str, list[bool]]:
+        async with scope.hold("agent") as handle:
+            rows = await _held(session_factory, workspace_id)
+            return handle.invocation_id, [row.cleanup_unproven for row in rows]
+
+    async with scope:
+        with pytest.raises(ComposeExecCleanupError):
+            async with scope.hold("agent"):
+                _raise_direct()
+        unproven = scope.lease
+        assert unproven is not None
+
+        retry = asyncio.create_task(_retry())
+        await _wait_until(
+            lambda: _phases(session_factory, workspace_id, {WorkSlotLeasePhase.waiting.value})
+        )
+        assert not retry.done()
+        assert scope.lease is None
+        rows = await _held(session_factory, workspace_id)
+        assert [(row.invocation_id, row.cleanup_unproven) for row in rows] == [
+            (unproven.invocation_id, True)
+        ]
+
+        # The reconciler proved no awf-exec remains, released the row and woke waiters.
+        async with session_factory() as session:
+            assert await release_work(session, lease=unproven, now=datetime.now(UTC))
+            await session.commit()
+        wakeups.notify()
+
+        invocation_id, flags = await asyncio.wait_for(retry, timeout=_TIMEOUT)
+        assert invocation_id != unproven.invocation_id
+        assert flags == [False]
+        assert scope.cleanup_unproven is False
+
+
 async def test_detach_parks_the_lease_and_abandon_hands_it_to_the_reconciler(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

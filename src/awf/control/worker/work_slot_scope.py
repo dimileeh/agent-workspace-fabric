@@ -19,7 +19,8 @@ Lifecycle:
   first pure wait (``release_idle()``) or when the task ends (``close()``).
 * A run that ends with ``ComposeExecCleanupError`` anywhere in its exception
   chain keeps the lease with ``cleanup_unproven``; the worker's reconciler
-  releases it only once no tagged ``awf-exec`` remains.
+  releases it only once no tagged ``awf-exec`` remains. A later hold (a recovery
+  retry) leaves it there and waits for a fresh lease under a new invocation.
 """
 
 from __future__ import annotations
@@ -154,6 +155,8 @@ class InvocationWorkSlot:
     async def hold(self, phase: str) -> AsyncIterator[InvocationWorkSlot]:
         """Hold a work slot for one agent/validation run (nested holds are no-ops)."""
         if self._depth == 0:
+            if self._cleanup_unproven:
+                await self._leave_unproven_lease_to_reconciler()
             if await self._still_holding():
                 # A failed idle release keeps the lease but stopped renewing it.
                 self._start_renewal()
@@ -207,6 +210,18 @@ class InvocationWorkSlot:
             return
         self._cancel_renewal()
         await self._retain_cleanup_unproven("abandoned")
+
+    async def _leave_unproven_lease_to_reconciler(self) -> None:
+        """Never run a retry (agent-service recovery) on a cleanup-unproven lease.
+
+        The reconciler does not track that lease and may release it once the old
+        ``awf-exec`` is gone, before the retry spawns its own. The retry instead
+        waits under a fresh invocation; the broker grants it only after the
+        flagged row was reconciled away (one held lease per workspace).
+        """
+        self._lease = None
+        await self._stop_renewal()
+        self._invocation_id = new_work_slot_invocation_id()
 
     async def _still_holding(self) -> bool:
         lease = self._lease
