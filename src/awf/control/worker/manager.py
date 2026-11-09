@@ -514,7 +514,7 @@ class ControlWorker(WorkerDelegatesMixin):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
-                await self._record_heartbeat_safely()
+                await self._keep_draining_worker_alive()
                 continue
             for workspace_id, task in list(self._execution_tasks.items()):
                 if task in done:
@@ -527,7 +527,18 @@ class ControlWorker(WorkerDelegatesMixin):
                 if exc is not None:
                     raise exc
             if self._execution_tasks:
-                await self._record_heartbeat_safely()
+                await self._keep_draining_worker_alive()
+
+    async def _keep_draining_worker_alive(self: Any) -> None:
+        """Heartbeat and reconcile work-slot leases while ``once=True`` tasks drain.
+
+        ``run_once`` never runs again, yet a recovery retry left behind a
+        cleanup-unproven lease is granted only after the reconciler released
+        that row (slot-release). Both passes self-throttle to the heartbeat interval.
+        """
+        await self._record_heartbeat_safely()
+        await self._ensure_work_slot_startup_check()
+        await self._maybe_reconcile_work_slot_leases()
 
     async def run_forever(self: Any) -> None:
         heartbeat_task = asyncio.create_task(

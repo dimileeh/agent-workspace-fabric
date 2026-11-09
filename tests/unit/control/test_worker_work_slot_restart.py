@@ -19,6 +19,7 @@ import structlog.testing
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.control.worker import manager as worker_manager
 from awf.control.worker import work_slots as worker_work_slots
 from awf.control.worker.constants import (
     WORK_SLOT_ADOPTED,
@@ -479,6 +480,48 @@ async def test_draining_monitor_lease_goes_to_the_reconciler_and_never_blocks_ot
         for gate_id in list(executor.gates):
             executor.gate(gate_id).set()
         await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=_TIMEOUT)
+
+
+@pytest.mark.parametrize("startup_checked", [True, False])
+async def test_once_drain_reconciles_so_a_retry_behind_an_unproven_lease_finishes(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    startup_checked: bool,
+) -> None:
+    # A once=True worker never calls run_once again while its tasks drain, so a
+    # recovery retry waiting for its cleanup-unproven row to be reconciled away
+    # would wait forever unless the drain itself keeps reconciling (and first
+    # completes a startup check that run_once could not finish).
+    for module in (worker_manager, worker_work_slots):
+        monkeypatch.setattr(
+            module, "worker_heartbeat_write_interval_seconds", lambda _poll_interval: 0.01
+        )
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    probe = FakeProbe(default="absent")
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), work_slot_probe=probe)
+    if startup_checked:
+        _reconcile_now(worker)
+    unproven = await add_lease(
+        session_factory, workspace_id, holder=worker._worker_id, cleanup_unproven=True
+    )
+    scope = worker._new_invocation_work_slot(workspace_id)  # noqa: SLF001
+
+    async def _retry() -> str:
+        async with scope, scope.hold("agent") as handle:
+            return handle.invocation_id
+
+    retry = asyncio.create_task(_retry())
+    worker._execution_tasks[workspace_id] = retry  # noqa: SLF001
+    try:
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=5.0)
+    finally:
+        retry.cancel()
+        await asyncio.gather(retry, return_exceptions=True)
+
+    assert worker._work_slot_startup_checked is True  # noqa: SLF001
+    assert retry.result() != unproven
+    assert unproven in probe.calls
+    assert await _lease(session_factory, unproven) is None
 
 
 async def _status(session_factory: async_sessionmaker[AsyncSession], workspace_id: str) -> str:
