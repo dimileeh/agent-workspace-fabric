@@ -408,7 +408,11 @@ class AgentAdapter(ABC):
         )
         if self.execution is not None and self.execution.third_party:
             env_passthrough = tuple(
-                name for name in env_passthrough if name == "OPENROUTER_API_KEY"
+                name
+                for name in env_passthrough
+                if self.execution.provider == "openrouter"
+                and self.execution.credential_ref == "env/OPENROUTER_API_KEY"
+                and name == "OPENROUTER_API_KEY"
             )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"

@@ -243,8 +243,9 @@ def test_runtime_cancellation_stops_child_and_removes_only_owned_config(tmp_path
     assert unrelated.read_text() == "keep"
 
 
+@pytest.mark.parametrize("provider", ["openrouter", "ollama"])
 async def test_rendered_stack_suppresses_native_mounts_and_competing_profile_env(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, provider
 ):
     from awf.node.auth_mounts import ServiceAuthMountResolver
     from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
@@ -259,7 +260,7 @@ async def test_rendered_stack_suppresses_native_mounts_and_competing_profile_env
     (home / ".codex" / "auth.json").write_text('{"token":"native-secret"}')
     (home / ".config" / "gh").mkdir(parents=True)
     selected = resolve_execution(
-        agent="codex", provider="openrouter", model="model", allow_unverified=True
+        agent="codex", provider=provider, model="model", allow_unverified=True
     )
     profile = WorkspaceProfile(
         name="provider",
@@ -288,7 +289,10 @@ async def test_rendered_stack_suppresses_native_mounts_and_competing_profile_env
     )
     spec = compose.render_specs[0]
     env = dict(spec.agent_environment)
-    assert env["OPENROUTER_API_KEY"] == "${OPENROUTER_API_KEY}"
+    if provider == "openrouter":
+        assert env["OPENROUTER_API_KEY"] == "${OPENROUTER_API_KEY}"
+    else:
+        assert "OPENROUTER_API_KEY" not in env
     assert env["TOOL_MODE"] == "safe"
     assert "OPENAI_API_KEY" not in env and "CLAUDE_CODE_USE_BEDROCK" not in env
     targets = {mount.target for mount in spec.auth_mounts}
@@ -302,3 +306,98 @@ async def test_rendered_stack_suppresses_native_mounts_and_competing_profile_env
         "developer_instructions": "Keep focused"
     }
     assert profile.runtime.environment["OPENAI_API_KEY"] == "native-secret"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+@pytest.mark.parametrize("source", ["ambient", "profile", "lease", "frozen_alias", "frozen_lease"])
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_stack_materializes_only_frozen_provider_credentials(
+    tmp_path, monkeypatch, provider, source, hosted
+):
+    import yaml
+
+    from awf.node.compose_manager import ComposeManager
+    from awf.node.secret_mounts import LocalSecretLeaseMountResolver
+    from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+    from awf.profiles.models import ProfileRuntime, ProfileSecret, WorkspaceProfile
+    from tests.unit.node.test_stack_launcher_parts._helpers import _layout, _RecordingCompose
+
+    environment = {"TOOL_MODE": "safe"}
+    secrets = [
+        ProfileSecret(name="tool", kind="env", provider="env", ref="TOOL_TOKEN", target="GH_TOKEN")
+    ]
+    if source in {"profile", "frozen_alias"}:
+        environment["OPENROUTER_API_KEY"] = "${OTHER_ROUTER_KEY}"
+    if source in {"lease", "frozen_lease"}:
+        secrets.append(
+            ProfileSecret(
+                name="router",
+                kind="env",
+                provider="env",
+                ref="env/LEASE_ROUTER_KEY",
+                target="OPENROUTER_API_KEY",
+            )
+        )
+    profile = WorkspaceProfile(
+        name="selected-provider", runtime=ProfileRuntime(environment=environment), secrets=secrets
+    )
+    selected_profile = profile.model_dump()
+    if source == "frozen_alias":
+        selected_profile["runtime"]["environment"]["OPENROUTER_API_KEY"] = "${FROZEN_ROUTER_KEY}"
+    if source == "frozen_lease":
+        selected_profile["secrets"][-1]["ref"] = "env/FROZEN_ROUTER_KEY"
+    selected = resolve_execution(
+        agent="codex",
+        provider=provider,
+        model="coder",
+        allow_unverified=True,
+        profile=selected_profile,
+    )
+    for name in (
+        "OPENROUTER_API_KEY",
+        "OTHER_ROUTER_KEY",
+        "LEASE_ROUTER_KEY",
+        "FROZEN_ROUTER_KEY",
+        "TOOL_TOKEN",
+    ):
+        monkeypatch.setenv(name, "fake-" + name)
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,
+        agent_runtime_image="pinned",
+        secret_lease_resolver=LocalSecretLeaseMountResolver(host_home=tmp_path, work_dir=tmp_path),
+    )
+    request = WorkspaceStackLaunchRequest(
+        workspace_id="ws", layout=_layout(), profile=profile, execution=selected
+    )
+    if hosted:
+        paths = await launcher.render(request)
+        spec = compose.render_specs[0]
+    else:
+        paths = await launcher.launch(request)
+        spec = compose.specs[0]
+    assert paths is not None
+    env = dict(spec.agent_environment)
+    assert "GH_TOKEN" in env and env["TOOL_MODE"] == "safe"
+    metadata = paths.secret_lease_mount_metadata
+    if provider == "ollama":
+        assert "OPENROUTER_API_KEY" not in env
+        assert "OPENROUTER_API_KEY" not in metadata.get("targets", [])
+    else:
+        source_name = selected.credential_ref.removeprefix("env/")
+        assert source_name in env["OPENROUTER_API_KEY"]
+        if source in {"frozen_alias", "frozen_lease"}:
+            assert "OTHER_ROUTER_KEY" not in str(env)
+            assert "LEASE_ROUTER_KEY" not in str(env)
+    renderer = ComposeManager(
+        work_dir=tmp_path,
+        template_path=Path("docker/compose/workspace.base.yml.j2"),
+    )
+    rendered = renderer.render(spec).compose_file
+    content = rendered.read_text()
+    container = yaml.safe_load(content)["services"]["agent"]
+    assert ("OPENROUTER_API_KEY" in container["environment"]) == (provider == "openrouter")
+    assert not spec.auth_mounts or all(
+        "openrouter" not in mount.target.lower() for mount in spec.auth_mounts
+    )
+    assert "fake-" not in content

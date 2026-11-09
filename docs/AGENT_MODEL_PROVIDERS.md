@@ -73,9 +73,12 @@ references, never credential values. Secret rotation behind the same reference
 does not alter connection identity.
 
 Local stacks suppress native auth mounts and competing model-service env,
-including Claude backend toggles and role-model variables. The declared auth
-resolver copies only allowed instruction/tool configuration into a workspace
-owned, read-only source file under the existing `auth/<workspace>` cleanup
+including Claude backend toggles and role-model variables. Ollama stacks omit
+OpenRouter credentials from ambient auth, profile env and declared leases before
+rendering the container environment. OpenRouter materialization and execution
+passthrough use the frozen credential reference; separate tool auth is retained.
+The declared auth resolver copies only allowed instruction/tool configuration
+into a workspace owned, read-only source file under the existing `auth/<workspace>` cleanup
 root. Source auth/config is unchanged. A standalone stdlib runner in the pinned
 agent image creates a distinct temporary config for each invocation, injects
 only the selected model credential, and removes that config after completion,
@@ -116,8 +119,12 @@ batched candidate queries. Concurrent failure increments serialize per scope.
 Same-choice retry retains the entire selected snapshot. Explicit fallback
 promotes the target's entire snapshot for both a new attempt and an in-place
 monitor repair, clearing incompatible effort and Cursor Auto selection. An
-uncontracted third-party fallback is rejected. Cross-choice native fallback is
-never inferred for a third-party selection. Disabling admission blocks new
+approved planning-scope model fallback also updates the frozen selection used by
+executor helpers and adapter reconstruction, preserving provider, endpoint,
+credential reference and native effort. Third-party promotions still require
+enabled admission and a compatible model. An uncontracted third-party fallback
+is rejected. Cross-choice native fallback is never inferred for a third-party
+selection. Disabling admission blocks new
 third-party fallback promotions as well as creation; already selected work
 retains its identity while draining or parked.
 

@@ -240,18 +240,35 @@ class ComposeStackLauncher:
         if third_party:
             from awf.adapters.provider_config import competing_provider_env
 
+            selected_credential = (
+                selected.credential_ref
+                if selected is not None and selected.provider == "openrouter"
+                else None
+            )
             profile = profile.model_copy(deep=True)
             profile.runtime.environment = {
                 k: v
                 for k, v in profile.runtime.environment.items()
-                if not competing_provider_env(k) or k == "OPENROUTER_API_KEY"
+                if not competing_provider_env(k)
             }
+            if selected_credential is not None:
+                # Resolve only the frozen reference, even if a copied profile
+                # or ambient conventional key now points at another connection.
+                source_name = selected_credential.removeprefix("env/")
+                profile.runtime.environment["OPENROUTER_API_KEY"] = f"${{{source_name}}}"
             profile.secrets = [
                 secret
                 for secret in profile.secrets
                 if (
                     not competing_provider_env(secret.target)
-                    or secret.target == "OPENROUTER_API_KEY"
+                    or (
+                        selected_credential is not None
+                        and secret.target == "OPENROUTER_API_KEY"
+                        and secret.kind == "env"
+                        and (secret.provider or "").strip().lower() == "env"
+                        and "env/" + (secret.ref or "").strip().removeprefix("env/")
+                        == selected_credential
+                    )
                 )
                 and not any(
                     p in secret.target for p in ("/.codex", "/.claude", "/.ollama", "/opencode")
@@ -395,7 +412,8 @@ class ComposeStackLauncher:
             agent_environment = tuple(
                 (k, v)
                 for k, v in agent_environment
-                if not competing_provider_env(k) or k == "OPENROUTER_API_KEY"
+                if not competing_provider_env(k)
+                or (selected_credential is not None and k == "OPENROUTER_API_KEY")
             )
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(

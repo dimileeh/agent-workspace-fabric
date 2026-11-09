@@ -1106,7 +1106,7 @@ def _install_fixed_recovery_model(
     task_policy: Mapping[str, Any],
     target_model: str,
 ) -> dict[str, Any]:
-    """Install a fixed recovery model and clear Cursor Auto mode if present.
+    """Install a fixed model in both legacy policy and the frozen selection.
 
     Admission treats ``cursor_auto_mode`` and a fixed ``agent_model`` as mutually
     exclusive. Provider recovery historically copied Auto mode while writing the
@@ -1114,6 +1114,28 @@ def _install_fixed_recovery_model(
     silently ignored the selected recovery target.
     """
 
+    selected = execution_from_policy(task_policy)
+    if selected is not None:
+        if selected.third_party:
+            from awf.common.agent_execution import resolve_execution
+            from awf.common.config import get_settings
+
+            if not get_settings().third_party_agent_providers_enabled:
+                raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
+            # Approval changes the model only; validate that choice without
+            # re-resolving the frozen endpoint, credential or network identity.
+            resolve_execution(
+                agent=selected.agent,
+                provider=selected.provider,
+                model=target_model,
+                effort=selected.effort,
+                allow_unverified=selected.compatibility == "unverified",
+            )
+        promoted = selected.model_copy(update={"model": target_model, "model_explicit": True})
+        return promote_execution(
+            task_policy,
+            {"model": target_model, "agent_execution": promoted.model_dump(mode="json")},
+        )
     updated = {**dict(task_policy), "agent_model": target_model}
     updated.pop(CURSOR_AUTO_MODE_POLICY_KEY, None)
     return updated

@@ -133,25 +133,32 @@ async def build_hosted_exec_request(
     if adapter.execution is not None and adapter.execution.third_party:
         from awf.adapters.provider_config import competing_provider_env
 
-        selected_names = (
-            {"OPENROUTER_API_KEY"} if adapter.execution.provider == "openrouter" else set()
+        credential_ref = (
+            adapter.execution.credential_ref if adapter.execution.provider == "openrouter" else None
         )
         env_passthrough_names = tuple(
-            n for n in env_passthrough_names if not competing_provider_env(n) or n in selected_names
+            n for n in env_passthrough_names if not competing_provider_env(n)
         )
         env_passthrough_aliases = tuple(
-            (t, s)
-            for t, s in env_passthrough_aliases
-            if not competing_provider_env(t) or t in selected_names
+            (t, s) for t, s in env_passthrough_aliases if not competing_provider_env(t)
         )
+        if credential_ref is not None and compose_env is not None:
+            source_name = credential_ref.removeprefix("env/")
+            if source_name == "OPENROUTER_API_KEY":
+                env_passthrough_names += (source_name,)
+            else:
+                env_passthrough_aliases += (("OPENROUTER_API_KEY", source_name),)
         profile_env = tuple((n, v) for n, v in profile_env if not competing_provider_env(n))
         if profile is not None:
             profile = profile.model_copy(deep=True)
             profile.runtime.environment = {
                 k: v
                 for k, v in profile.runtime.environment.items()
-                if not competing_provider_env(k) or k in selected_names
+                if not competing_provider_env(k)
             }
+            if credential_ref is not None:
+                source_name = credential_ref.removeprefix("env/")
+                profile.runtime.environment["OPENROUTER_API_KEY"] = f"${{{source_name}}}"
         file_auth_mount_targets = tuple(
             t
             for t in file_auth_mount_targets

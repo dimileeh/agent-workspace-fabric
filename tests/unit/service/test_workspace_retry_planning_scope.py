@@ -4,18 +4,22 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.defaults import AgentDefaults
+from awf.adapters import registry  # noqa: F401
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, AgentDefaults
+from awf.adapters.registry_api import get_adapter
+from awf.common.agent_execution import execution_from_policy, resolve_execution
 from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
 )
-from awf.db.enums import AgentRuntime
+from awf.db.enums import AgentRuntime, CursorAutoMode
 from awf.db.models import Operation, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -80,11 +84,22 @@ def test_retry_task_policy_planning_scope_fallback_clears_cursor_auto_mode() -> 
     )
 
 
+@pytest.mark.parametrize("agent", ["codex", "claude_code", "cursor"])
 async def test_retry_planning_scope_violation_applies_only_approved_fallback_model(
     factory: async_sessionmaker[AsyncSession],
+    agent: str,
 ) -> None:
     service = WorkspaceService(factory)
-    first = await service.create(_request())
+    request = _request()
+    request.task.agent = AgentRuntime(agent)
+    if agent == "cursor":
+        request.task.cursor_auto_mode = CursorAutoMode.intelligence
+    first = await service.create(request)
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(first.id)
+        assert source is not None
+        original = execution_from_policy(source.task_policy)
+    assert original is not None
     await _mark_planning_scope_failed(
         factory,
         first.id,
@@ -115,12 +130,93 @@ async def test_retry_planning_scope_violation_applies_only_approved_fallback_mod
 
     assert retried is not None
     assert retried.task_policy["agent_model"] == "gpt-5.5"
+    promoted = execution_from_policy(retried.task_policy)
+    assert promoted == original.model_copy(update={"model": "gpt-5.5", "model_explicit": True})
+    assert retried.task_policy["agent_provider"] == original.provider
+    assert CURSOR_AUTO_MODE_POLICY_KEY not in retried.task_policy
+    assert _agent_run_model_for_workspace(retried) == "gpt-5.5"
+    adapter = get_adapter(
+        agent,
+        runner=Mock(),
+        defaults=_agent_defaults_for_workspace(
+            retried, DEFAULT_AGENT_DEFAULTS[AgentRuntime(agent)]
+        ),
+    )
+    assert adapter.execution == promoted
+    assert adapter.default_model == "gpt-5.5"
+    assert adapter.get_provider(None) == original.provider
+    assert "gpt-5.5" in adapter._cli_args(model=None)
+    assert adapter._default_effort == original.effort
     assert operations[0].payload["fallback_model"] == {
         "model": "gpt-5.5",
         "source": "task_policy.planning_scope_recovery.approved_fallback_model",
     }
     assert operations[0].result["fallback_model"]["model"] == "gpt-5.5"
     assert retry_created[0].payload["fallback_model"]["model"] == "gpt-5.5"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("model", ["approved-coder", "embed-only"])
+def test_planning_scope_fallback_preserves_frozen_connection(provider, enabled, model, monkeypatch):
+    monkeypatch.setattr(
+        "awf.common.config.get_settings",
+        lambda: SimpleNamespace(third_party_agent_providers_enabled=enabled),
+    )
+    selected = resolve_execution(
+        agent="codex",
+        provider=provider,
+        model="original-coder",
+        allow_unverified=True,
+        profile={
+            "services": [{"name": "daemon"}],
+            "runtime": {
+                "environment": {
+                    "AWF_OLLAMA_BASE_URL": "http://daemon:11434",
+                    "OPENROUTER_API_KEY": "${SELECTED_ROUTER_KEY}",
+                }
+            },
+        },
+    )
+    source = SimpleNamespace(
+        id="ws-planning-selected",
+        agent="codex",
+        failure_reason=None,
+        task_policy={"agent_execution": selected.model_dump(), "agent_model": selected.model},
+    )
+    context = _PlanningScopeRetryContext(
+        reason_code="AGENT_PLAN_PHASE_SCOPE_VIOLATION",
+        evidence={},
+        evidence_ref={},
+        recovery_strategy="retry_with_fallback_model",
+        salvage_policy="discard",
+        fallback_model={"model": model},
+    )
+    if not enabled:
+        with pytest.raises(ValueError, match="THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED"):
+            _retry_task_policy(source, (), planning_scope_context=context)
+        return
+    if model == "embed-only":
+        with pytest.raises(ValueError, match="AGENT_PROVIDER_MODEL_INCOMPATIBLE"):
+            _retry_task_policy(source, (), planning_scope_context=context)
+        return
+    policy, agent = _retry_task_policy(source, (), planning_scope_context=context)
+    promoted = execution_from_policy(policy)
+    assert promoted == selected.model_copy(
+        update={"model": "approved-coder", "model_explicit": True}
+    )
+    workspace = SimpleNamespace(agent=agent, task_policy=policy)
+    adapter = get_adapter(
+        agent,
+        runner=Mock(),
+        defaults=_agent_defaults_for_workspace(
+            workspace, DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex]
+        ),
+    )
+    assert adapter.get_provider(None) == provider
+    assert adapter.default_model == _agent_run_model_for_workspace(workspace) == "approved-coder"
+    assert adapter._default_effort is None
+    assert source.task_policy["agent_execution"] == selected.model_dump()
 
 
 async def test_retry_planning_scope_preserves_promoted_fallback_model(
