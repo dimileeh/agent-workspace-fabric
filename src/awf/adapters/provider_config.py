@@ -9,18 +9,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, BinaryIO, TextIO, cast
+from typing import Any, TextIO
 
 EXECUTION_CONTRACT_VERSION = 1
 RUNTIME_CONFIG_PATH = "/opt/awf/provider_config.py"
@@ -298,32 +299,63 @@ def run_cli_redacted(cli: list[str], env: Mapping[str, str]) -> int:
         if k in {"AWF_SELECTED_PROVIDER_KEY", "ANTHROPIC_AUTH_TOKEN"} and v and v != "ollama"
     )
 
-    def pump(source: BinaryIO, target: TextIO) -> None:
-        for line in iter(source.readline, b""):
-            text = line.decode("utf-8", errors="replace")
-            for secret in secrets:
-                text = text.replace(secret, "<redacted>")
-            target.write(text)
-            target.flush()
+    def emit(data: bytes, target: TextIO) -> None:
+        text = data.decode("utf-8", errors="replace")
+        for secret in secrets:
+            text = text.replace(secret, "<redacted>")
+        target.write(text)
+        target.flush()
 
-    process = subprocess.Popen(cli, env=dict(env), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    pool = ThreadPoolExecutor(max_workers=2)
+    process = subprocess.Popen(
+        cli,
+        env=dict(env),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    pending: dict[int, bytes] = {}
     try:
-        out = pool.submit(pump, cast(BinaryIO, process.stdout), sys.stdout)
-        err = pool.submit(pump, cast(BinaryIO, process.stderr), sys.stderr)
-        result = process.wait()
-        out.result()
-        err.result()
-        return result
+        with selectors.DefaultSelector() as selector:
+            for source, target in ((process.stdout, sys.stdout), (process.stderr, sys.stderr)):
+                assert source is not None
+                selector.register(source, selectors.EVENT_READ, target)
+                pending[source.fileno()] = b""
+            drain_deadline = None
+            while selector.get_map():
+                if process.poll() is not None:
+                    if drain_deadline is None:
+                        drain_deadline = time.monotonic() + 1
+                    if time.monotonic() >= drain_deadline:
+                        break
+                for key, _events in selector.select(timeout=0.1):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        emit(pending.pop(key.fd), key.data)
+                        selector.unregister(key.fileobj)
+                        continue
+                    lines = (pending[key.fd] + chunk).split(b"\n")
+                    pending[key.fd] = lines.pop()
+                    for line in lines:
+                        emit(line + b"\n", key.data)
+            for key in selector.get_map().values():
+                emit(pending[key.fd], key.data)
+        return process.wait()
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        pool.shutdown(wait=True)
+        # The leader may already have exited while background tools own its pipes.
+        # Kill the whole session's process group, including TERM-resistant tools.
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=1)
+            assert process.stdout is not None and process.stderr is not None
+            process.stdout.close()
+            process.stderr.close()
 
 
 if __name__ == "__main__":  # pragma: no cover - standalone image entrypoint
