@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from awf.common import compose_exec
-from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.common.compose_exec import (
     build_tracked_compose_exec,
     build_work_slot_probe_compose_exec,
@@ -138,12 +138,36 @@ async def test_probe_hung_exec_times_out_as_unknown() -> None:
     assert runner.calls[0].timeout_seconds == 0.01
 
 
-async def test_probe_script_detects_a_live_tagged_process_and_its_absence() -> None:
+async def _run_probe_over_pids(
+    tmp_path: Path, invocation_id: str, pids: list[int]
+) -> CommandResult:
+    """Run the real probe over a ``/proc`` view of only ``pids`` plus the probe itself.
+
+    A host ``/proc`` can hold unrelated same-uid processes whose environ is
+    unreadable (a CI runner's non-dumpable session helper); the probe rightly
+    fails closed on those, so a walk over the whole host cannot prove present or
+    absent. Each entry links to the real ``/proc/<pid>``, so reads stay real.
+    """
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir(exist_ok=True)
+    for pid in pids:
+        (proc_root / str(pid)).symlink_to(f"/proc/{pid}")
+    script = compose_exec._work_slot_probe_script(invocation_id).replace(  # noqa: SLF001
+        "/proc/", f"{proc_root}/"
+    )
+    # ``exec`` keeps the pid, so the probe's ``$$`` is the entry linked here.
+    wrapper = 'ln -s "/proc/$$" "$1/$$" && exec sh -c "$2" awf-work-slot-probe "$3"'
+    return await AsyncioSubprocessRunner().run(
+        ["sh", "-c", wrapper, "awf-work-slot-probe-view", str(proc_root), script, invocation_id]
+    )
+
+
+async def test_probe_script_detects_a_live_tagged_process_and_its_absence(
+    tmp_path: Path,
+) -> None:
     # Run the real probe scan against a real local process tagged the same way
     # ``-e AWF_WORK_SLOT_INVOCATION_ID=...`` tags an ``awf-exec`` descendant.
     invocation_id = f"wsl_probe_{os.getpid()}"
-    script = compose_exec._work_slot_probe_script(invocation_id)  # noqa: SLF001
-    runner = AsyncioSubprocessRunner()
     env = {**os.environ, WORK_SLOT_INVOCATION_ENV: invocation_id}
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -152,11 +176,12 @@ async def test_probe_script_detects_a_live_tagged_process_and_its_absence() -> N
         env=env,
     )
     try:
-        present = await runner.run(["sh", "-c", script, "awf-work-slot-probe", invocation_id])
+        present = await _run_probe_over_pids(tmp_path, invocation_id, [process.pid])
     finally:
         process.kill()
         await process.wait()
-    absent = await runner.run(["sh", "-c", script, "awf-work-slot-probe", invocation_id])
+    # The reaped process's entry now dangles, as a gone pid does in a real walk.
+    absent = await _run_probe_over_pids(tmp_path, invocation_id, [])
 
     assert present.returncode == 0
     assert present.stdout.strip() == f"awf work-slot probe: present {invocation_id}"
@@ -176,11 +201,12 @@ time.sleep(30)
     not sys.platform.startswith("linux") or os.geteuid() == 0,
     reason="needs Linux /proc and a non-root probe user",
 )
-async def test_probe_script_is_unknown_when_a_same_uid_environ_is_unreadable() -> None:
+async def test_probe_script_is_unknown_when_a_same_uid_environ_is_unreadable(
+    tmp_path: Path,
+) -> None:
     # A non-dumpable tagged process hides its environ even from its own uid; the
     # scan cannot prove it gone, so it must not report ``absent``.
     invocation_id = f"wsl_unreadable_{os.getpid()}"
-    script = compose_exec._work_slot_probe_script(invocation_id)  # noqa: SLF001
     env = {**os.environ, WORK_SLOT_INVOCATION_ENV: invocation_id}
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -192,15 +218,16 @@ async def test_probe_script_is_unknown_when_a_same_uid_environ_is_unreadable() -
     try:
         assert process.stdout is not None
         assert (await process.stdout.readline()).strip() == b"ready"
-        result = await AsyncioSubprocessRunner().run(
-            ["sh", "-c", script, "awf-work-slot-probe", invocation_id]
-        )
+        result = await _run_probe_over_pids(tmp_path, invocation_id, [process.pid])
     finally:
         process.kill()
         await process.wait()
 
     assert result.returncode != 0
-    assert result.stdout.strip().startswith(f"awf work-slot probe: unknown {invocation_id}")
+    assert result.stdout.strip() == (
+        f"awf work-slot probe: unknown {invocation_id}: "
+        f"cannot read environ of live pid {process.pid}"
+    )
 
 
 async def test_probe_script_is_unknown_when_the_proc_walk_cannot_see_itself(
