@@ -63,16 +63,31 @@ async def test_active_websocket_rechecks_durable_owner(hosted):
         },
         path="/test-protected-stream",
     )
-    assert (await asyncio.wait_for(outgoing.get(), 2))["type"] == "websocket.accept"
-    await entered.wait()
+    # Accept is fenced by two durable owner reads, each opening a fresh
+    # PostgreSQL connection under the NullPool test engine, so a fixed frame
+    # deadline races the harness connect budget on loaded shards. Wait for the
+    # handler to pass the fence, or for the request to end first and surface
+    # its own outcome; pytest-timeout bounds a genuine hang.
+    accepted = asyncio.create_task(entered.wait())
+    await asyncio.wait({task, accepted}, return_when=asyncio.FIRST_COMPLETED)
+    if task.done():
+        accepted.cancel()
+        task.result()
+    assert outgoing.get_nowait()["type"] == "websocket.accept"
     successor = await Receiver.start(receiver.config, receiver.factory)
     try:
         proceed.set()
-        response = await asyncio.wait_for(outgoing.get(), 2)
-        assert response["type"] == "websocket.close"
+        # Released, the request is finite: its next send rechecks the durable
+        # owner and closes. Join it before inspecting frames.
         await task
     finally:
         await successor.close()
+    assert outgoing.get_nowait() == {
+        "type": "websocket.close",
+        "code": 1008,
+        "reason": "IDENTITY_UNAVAILABLE",
+    }
+    assert outgoing.empty()
 
 
 async def test_existing_websocket_with_valid_identity(hosted):
