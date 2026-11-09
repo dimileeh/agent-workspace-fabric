@@ -110,6 +110,8 @@ ARG GITHUB_RELEASE_CURL_OPTS="--fail --show-error --silent --location --retry 10
 # The pinned .deb is fetched from the GitHub release first. If that fails after
 # the retries above, the SAME pinned asset is fetched from the official GitHub
 # CLI package pool (cli.github.com/packages), which serves a byte-identical file.
+# The pool names its files without the release asset's ``linux_`` infix
+# (gh_<version>_<dpkg arch>.deb), so the fallback builds its own file name.
 # The pool is fetched directly instead of through the apt index because that
 # index only lists the newest gh, and its signing key rotates, so a version- or
 # fingerprint-pinned apt install would break. Both sources go through the one
@@ -131,7 +133,8 @@ RUN set -eux; \
       exit 1; \
     fi; \
     gh_primary_url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
-    gh_fallback_url="https://cli.github.com/packages/pool/main/g/gh/${gh_asset}"; \
+    gh_pool_file="gh_${GH_VERSION}_${gh_arch}.deb"; \
+    gh_fallback_url="https://cli.github.com/packages/pool/main/g/gh/${gh_pool_file}"; \
     gh_deb="/tmp/${gh_asset}"; \
     trap 'rm -f "$gh_deb"' EXIT; \
     if ! curl ${GITHUB_RELEASE_CURL_OPTS} -o "$gh_deb" "$gh_primary_url"; then \

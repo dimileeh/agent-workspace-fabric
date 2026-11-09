@@ -112,11 +112,16 @@ def test_agent_runtime_github_cli_falls_back_to_pinned_official_apt_pool() -> No
     primary = (
         'gh_primary_url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"'
     )
-    fallback = 'gh_fallback_url="https://cli.github.com/packages/pool/main/g/gh/${gh_asset}"'
+    fallback = 'gh_fallback_url="https://cli.github.com/packages/pool/main/g/gh/${gh_pool_file}"'
     assert primary in block
     assert fallback in block
-    # Same pinned asset name (and therefore the same GH_VERSION) on both sources.
+    # Same pinned GH_VERSION and dpkg arch on both sources, but the pool names its
+    # files without the release asset's ``linux_`` infix (the bare asset name 404s).
     assert 'gh_asset="gh_${GH_VERSION}_linux_${gh_arch}.deb"' in block
+    assert 'gh_pool_file="gh_${GH_VERSION}_${gh_arch}.deb"' in block
+    assert 'gh_arch="$(dpkg --print-architecture)"' in block
+    assert "pool/main/g/gh/${gh_asset}" not in block
+    assert "linux_" not in block.split('gh_pool_file="', 1)[1].split('"', 1)[0]
 
     primary_download = block.index('"$gh_primary_url"; then')
     fallback_download = block.index('"$gh_fallback_url"; then')
