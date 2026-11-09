@@ -57,6 +57,7 @@ from awf.runtime.monitor_state_keys import (
     _merge_method_blocked_key,
     _operator_decision_key,
     _outdated_resolve_requeued_key,
+    _preserved_attempt_retired_key,
     _retired_operator_decision_key,
 )
 from awf.runtime.pr_monitor_actions import (
@@ -690,8 +691,12 @@ def _mark_review_thread_addressed(
         # retire-for-good on the poll boundary, but a fix-cycle settle pass
         # re-addresses a thread on fresh feedback without it — so drop the stale
         # sidecar here too, or a rollback of THIS verdict would restore the
-        # previous body's ruling into the repair prompt.
+        # previous body's ruling into the repair prompt. The same holds for an
+        # operator's preserved-attempt retirement (#1189), which outdated-only
+        # re-triage never reaches that clear for: a repeated ruling must not read
+        # its tombstone and close this new conversation on the old attempt.
         state.threads_addressed_ids.pop(_retired_operator_decision_key(thread.thread_id), None)
+        state.threads_addressed_ids.pop(_preserved_attempt_retired_key(thread.thread_id), None)
     if verdict != "agent_failed":
         # The operator ruling that un-parked this thread (issue #939) has now
         # been answered by a real verdict, so retire it. ``agent_failed`` is not

@@ -417,4 +417,41 @@ def get_comment_repair_reasons(
             "awf workspace guide <workspace_id> --directive '<thread id>: ...'",
             reason_catalog_link("THREAD_DISPOSITION_UNREAD_FEEDBACK"),
         ),
+        "OPERATOR_PRESERVED_ATTEMPT_RETIRED": reason_text_cls(
+            (
+                "An operator guide rejected a preserved correction attempt, so AWF retired it as "
+                "the review thread's evidence and will reply on and resolve the outdated thread."
+            ),
+            (
+                "No action is required. The next poll posts AWF's disposition reply in the thread "
+                "and resolves it. The guide's other instructions were not run; send a follow-up "
+                "guide for them."
+            ),
+            (
+                "The thread was parked needs_human because a correction attempt AWF could not "
+                "accept was preserved for human review. The guide said to reject that attempt and "
+                "resolve the thread as obsolete. The preserved commit stays in the branch history."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("OPERATOR_PRESERVED_ATTEMPT_RETIRED"),
+        ),
+        "OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED": reason_text_cls(
+            (
+                "An operator guide asked AWF to reject a preserved correction attempt and resolve "
+                "its thread, but AWF could not apply it, so the review thread stays parked."
+            ),
+            (
+                "Read the detail in the notice or audit event. Then guide again, naming the outdated "
+                "review thread id and the preserved attempt SHA from the park reason. If the thread "
+                "is still active or gained new replies, guide without the reject wording so the "
+                "agent re-triages it."
+            ),
+            (
+                "The ruling matched no parked preserved attempt, matched more than one, named a SHA "
+                "that is not the thread's preserved attempt, or named a thread that is active, "
+                "already closed, or has new replies since it was parked. AWF does not guess."
+            ),
+            "awf workspace events <workspace_id>",
+            reason_catalog_link("OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED"),
+        ),
     }
