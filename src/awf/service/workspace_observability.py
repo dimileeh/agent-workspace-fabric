@@ -778,7 +778,10 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
         return None
     from awf.common.agent_execution import execution_from_policy
 
-    selection = execution_from_policy(getattr(workspace, "task_policy", None))
+    try:
+        selection = execution_from_policy(getattr(workspace, "task_policy", None))
+    except ValueError:
+        return None
     if (
         selection is not None
         and selection.third_party
@@ -847,11 +850,25 @@ def compute_cost_estimate(
 
 
 def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:
-    identity = effective_agent_identity_for_workspace(workspace)
-    cursor_auto_mode = cursor_auto_mode_from_task_policy(workspace.task_policy)
     from awf.common.agent_execution import execution_from_policy, provider_for_agent_model
 
-    selection = execution_from_policy(workspace.task_policy)
+    try:
+        selection = execution_from_policy(workspace.task_policy)
+    except ValueError:
+        # Report an explicit contract error, without echoing untrusted snapshot
+        # data or inventing a native identity for this row.
+        return {
+            "agent_provider": None,
+            "agent_execution": {"reason_code": "EXECUTION_CONTRACT_UNSUPPORTED"},
+            "agent_connection_scope": None,
+            "agent_model": None,
+            "agent_effort": None,
+            "cursor_auto_mode": None,
+            "agent_model_source": "unavailable",
+            "agent_effort_source": "unavailable",
+        }
+    identity = effective_agent_identity_for_workspace(workspace)
+    cursor_auto_mode = cursor_auto_mode_from_task_policy(workspace.task_policy)
     return {
         "agent_provider": selection.provider
         if selection

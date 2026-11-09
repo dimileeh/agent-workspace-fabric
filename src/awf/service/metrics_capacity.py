@@ -407,7 +407,11 @@ async def _provider_recovery_eligible_capacity_queue_candidates(
         not_before = provider_cooldown_not_before(workspace.task_policy)
         if not_before is not None and not_before > scoring_at:
             continue
-        key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        try:
+            key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        except ValueError:
+            # The scheduler rejects this row; capacity must exclude it as well.
+            continue
         if key is not None:
             circuit_candidate_pairs[workspace.id] = key
         cooldown_eligible.append(candidate)

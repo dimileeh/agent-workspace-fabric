@@ -44,7 +44,7 @@ from awf.control.worker.scheduling import (
     _scheduler_candidate_fetch_limit,
 )
 from awf.control.worker.types import _SchedulerCandidateFilterResult
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import (
     TaskAttempt,
     Workspace,
@@ -287,7 +287,27 @@ async def _filter_provider_recovery_suppressed_with_result(
                     suppression_detail={"not_before": not_before.isoformat()},
                 )
             continue
-        key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        try:
+            key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        except ValueError:
+            reason = "EXECUTION_CONTRACT_UNSUPPORTED"
+            message = "The persisted agent execution contract is invalid or unsupported."
+            rejected = await WorkspaceRepository(session).transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus(workspace.status),
+                to=WorkspaceStatus.failed,
+                reason_code=reason,
+                payload={
+                    "reason_code": reason,
+                    "message": message,
+                    "failure_reason": FailureReason.infrastructure_failure.value,
+                },
+                extra_conditions=(Workspace.version == workspace.version,),
+            )
+            if rejected is not None:
+                rejected.failure_reason = FailureReason.infrastructure_failure.value
+                rejected.failure_message = message
+            continue
         if key is None:
             allowed.add(workspace_id)
             continue
