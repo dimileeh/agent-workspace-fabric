@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -91,3 +92,94 @@ def test_runtime_bounds_inherited_pipe_drain_and_kills_process_group(tmp_path, c
         if wrapper.poll() is None:
             wrapper.kill()
         wrapper.communicate(timeout=3)
+
+
+def test_inherited_pipes_flush_redacted_partial_output_before_group_cleanup(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    secret = "synthetic-provider-credential"
+    descendant = (
+        "import os,pathlib,signal,time; "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        "pathlib.Path('writer.pid').write_text(str(os.getpid())); time.sleep(60)"
+    )
+    leader = (
+        "import os,pathlib,subprocess,sys,time\n"
+        "pathlib.Path('leader.pid').write_text(str(os.getpid()))\n"
+        f"subprocess.Popen([sys.executable,'-c',{descendant!r}])\n"
+        "while not pathlib.Path('writer.pid').exists(): time.sleep(.01)\n"
+        "sys.stdout.write('out: '+os.environ['AWF_SELECTED_PROVIDER_KEY'])\n"
+        "sys.stderr.write('err: '+os.environ['AWF_SELECTED_PROVIDER_KEY'])\n"
+        "sys.stdout.flush(); sys.stderr.flush()\n"
+        "raise SystemExit(23)\n"
+    )
+    try:
+        result = runtime.run_cli_redacted(
+            [sys.executable, "-c", leader], {"AWF_SELECTED_PROVIDER_KEY": secret}
+        )
+        assert result == 23
+        captured = capsys.readouterr()
+        assert captured.out == "out: <redacted>"
+        assert captured.err == "err: <redacted>"
+        for name in ("leader.pid", "writer.pid"):
+            stat = Path("/proc") / (tmp_path / name).read_text() / "stat"
+            # SIGKILL delivery to a descendant is asynchronous to the leader's wait.
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    if stat.read_text().split()[2] == "Z":
+                        break
+                except FileNotFoundError:
+                    break
+                assert time.monotonic() < deadline, "provider process survived group cleanup"
+                time.sleep(0.01)
+    finally:
+        for name in ("leader.pid", "writer.pid"):
+            pid = tmp_path / name
+            if pid.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pid.read_text()), signal.SIGKILL)
+
+
+def test_output_failure_kills_term_resistant_cli_and_closes_pipes(tmp_path, monkeypatch):
+    started = []
+    popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        started.append(process)
+        return process
+
+    ready = tmp_path / "ready"
+    cli = (
+        "import pathlib,signal,time; "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        f"pathlib.Path({str(ready)!r}).touch(); time.sleep(60)"
+    )
+
+    def interrupted_select(_selector, timeout):
+        deadline = time.monotonic() + 3
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "CLI did not install its TERM handler"
+        raise OSError("output stream interrupted")
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", launch)
+    monkeypatch.setattr(runtime.selectors.DefaultSelector, "select", interrupted_select)
+    try:
+        with pytest.raises(OSError, match="^output stream interrupted$"):
+            runtime.run_cli_redacted([sys.executable, "-c", cli], {})
+        assert len(started) == 1
+        process = started[0]
+        assert process.returncode == -signal.SIGKILL
+        assert process.stdout.closed and process.stderr.closed
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process.pid, 0)
+    finally:
+        for process in started:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
+            process.stdout.close()
+            process.stderr.close()

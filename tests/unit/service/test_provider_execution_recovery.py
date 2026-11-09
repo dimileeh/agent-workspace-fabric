@@ -1,5 +1,6 @@
 """A fallback promotes its complete connection, never source credentials/effort."""
 
+from copy import deepcopy
 from datetime import UTC, datetime
 
 import pytest
@@ -388,3 +389,133 @@ def test_disabled_third_party_admission_preserves_native_retired_agent_fallback(
     assert promoted["provider_recovery"]["fallbacks"] == [None]
     assert promoted.get("agent_effort") == target.effort
     assert "cursor_auto_mode" not in promoted
+
+
+@pytest.mark.parametrize(
+    "source_provider,target_provider", [("openai", "ollama"), ("ollama", "openai")]
+)
+def test_legacy_fallback_cannot_cross_third_party_contract_boundary(
+    source_provider, target_provider
+):
+    source = resolve_execution(
+        agent="codex", provider=source_provider, model="source-model", allow_unverified=True
+    )
+    fallback = {"agent": "codex", "provider": target_provider, "model": "target-model"}
+    policy = {
+        "agent_execution": source.model_dump(),
+        "agent_model": source.model,
+        "provider_recovery": {"max_same_provider_retries": 0, "fallbacks": [fallback]},
+    }
+    original = deepcopy(policy)
+    decision = decide_provider_recovery(
+        {"retryable": True, "reason_code": "AGENT_PROVIDER_RATE_LIMITED"},
+        task_policy=policy,
+        current_agent="codex",
+        current_model=source.model,
+        now=datetime.now(UTC),
+    )
+    assert decision.action == "fallback" and decision.target_provider == target_provider
+    with pytest.raises(ValueError, match="^EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED$"):
+        install_recovery_selection(policy, decision)
+    assert policy == original
+
+
+def test_promotion_skips_consumed_fallback_without_rebinding_its_connection():
+    target = resolve_execution(agent="claude_code", model="claude-test")
+    policy = {
+        "agent_execution": resolve_execution(agent="codex").model_dump(),
+        "provider_recovery": {
+            "max_same_provider_retries": 0,
+            "fallbacks": [
+                None,
+                {
+                    "agent": target.agent,
+                    "provider": target.provider,
+                    "model": target.model,
+                    "agent_execution": target.model_dump(),
+                },
+            ],
+        },
+    }
+    original = deepcopy(policy)
+    decision = decide_provider_recovery(
+        {"retryable": True},
+        task_policy=policy,
+        current_agent="codex",
+        current_model="native",
+        now=datetime.now(UTC),
+    )
+    assert decision.action == "fallback" and decision.fallback_attempt_number == 2
+    assert execution_from_policy(install_recovery_selection(policy, decision)) == target
+    assert policy == original
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        {"fallbacks": []},
+        {"fallbacks": [None]},
+        {"fallbacks": [{"agent": "codex", "model": "gpt-test"}], "max_fallback_attempts": 0},
+    ],
+)
+def test_unavailable_fallbacks_do_not_advertise_launchability(recovery):
+    from awf.service.provider_recovery import has_approved_launchable_fallback
+
+    assert has_approved_launchable_fallback({"provider_recovery": recovery}) is False
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+async def test_recovery_records_frozen_provider_and_scoped_circuit_despite_stale_failure_metadata(
+    provider,
+):
+    from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
+    from awf.service.provider_recovery import create_provider_recovery_attempt_row
+    from tests.postgres import postgres_test_session
+
+    selected = resolve_execution(
+        agent="codex",
+        provider=provider,
+        model="selected-coder",
+        allow_unverified=True,
+        profile={
+            "runtime": {"environment": {"OLLAMA_HOST": "http://daemon:11434"}},
+            "services": {"daemon": {}},
+        },
+    )
+    async with postgres_test_session() as session:
+        repo = WorkspaceRepository(session)
+        row = await repo.create(
+            repo_url="https://example.com/repo",
+            branch_base="development",
+            task_title="task",
+            task_prompt="fix",
+            test_commands=[],
+            agent="codex",
+            task_policy={"agent_execution": selected.model_dump(), "agent_model": selected.model},
+        )
+        await session.flush()
+        result = await create_provider_recovery_attempt_row(
+            session,
+            row.id,
+            metadata={
+                "retryable": True,
+                "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                "failure_fingerprint": "scoped-failure",
+                "provider": "openai",
+                "model": "stale-native-model",
+            },
+        )
+        assert result.action == "retry"
+        assert result.provider_recovery["provider"] == selected.provider
+        assert result.provider_recovery["model"] == selected.model
+        retried = await repo.get(result.new_workspace_id)
+        assert execution_from_policy(retried.task_policy) == selected
+        scope = selected.connection_scope(row.id)
+        assert result.provider_recovery["connection_scope"] == scope
+        circuits = ProviderModelCircuitBreakerRepository(session)
+        recorded = await circuits.get(
+            provider=provider, model=selected.model, connection_scope=scope
+        )
+        assert recorded is not None and recorded.failure_count == 1
+        assert recorded.last_workspace_id == row.id
+        assert await circuits.get(provider="openai", model="stale-native-model") is None

@@ -554,3 +554,107 @@ def test_standalone_runtime_refuses_unsafe_or_unready_execution(
         assert captured.err == "PROVIDER_MODEL_UNAVAILABLE\n"
         probe.assert_called_once_with(selected.model_dump(), runtime.os.environ)
     assert not (tmp_path / "runtime-home" / ".awf").exists()
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude_code"])
+def test_standalone_runtime_prefers_sanitized_mount_over_native_configuration(
+    tmp_path, monkeypatch, agent
+):
+    import sys
+    from unittest.mock import Mock
+
+    import awf.adapters.provider_config as runtime
+
+    selected = resolve_execution(
+        agent=agent, provider="ollama", model="coder", allow_unverified=True
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    native = tmp_path / "native"
+    native.mkdir()
+    monkeypatch.setenv("CODEX_HOME" if agent == "codex" else "CLAUDE_CONFIG_DIR", str(native))
+    source = native / ("config.toml" if agent == "codex" else "settings.json")
+    original = (
+        'instructions="native instructions"\nmodel="native"\n'
+        if agent == "codex"
+        else '{"language":"native language","apiKeyHelper":"native-auth"}'
+    )
+    source.write_text(original)
+    safe_source = tmp_path / "sanitized.json"
+    safe_config = {"instructions": "mounted instructions", "language": "mounted language"}
+    safe_source.write_text(json.dumps(safe_config))
+    # Redirect only the image-owned mount; all configuration files are real.
+    monkeypatch.setattr(
+        runtime,
+        "Path",
+        Mock(
+            wraps=Path,
+            side_effect=lambda *parts: (
+                safe_source
+                if parts == ("/opt/awf/selected-provider-source.json",)
+                else Path(*parts)
+            ),
+        ),
+    )
+    monkeypatch.setattr(runtime, "probe_connection", Mock(return_value={"ok": True}))
+    monkeypatch.setattr(runtime.signal, "signal", Mock())
+    directories = []
+
+    def launch(cli, env):
+        directory = Path(env["CODEX_HOME" if agent == "codex" else "CLAUDE_CONFIG_DIR"])
+        directories.append(directory)
+        content = next(directory.iterdir()).read_text()
+        config = tomllib.loads(content) if agent == "codex" else json.loads(content)
+        key = "instructions" if agent == "codex" else "language"
+        assert config[key] == safe_config[key]
+        assert config["model"] == "coder"
+        assert "native" not in content
+        assert cli[-1] == "-"
+        return 23
+
+    monkeypatch.setattr(runtime, "run_cli_redacted", launch)
+    monkeypatch.setattr(
+        sys, "argv", ["provider_config.py", json.dumps(selected.model_dump()), "agent", "exec", "-"]
+    )
+    assert runtime.main() == 23
+    assert len(directories) == 1 and not directories[0].exists()
+    assert source.read_text() == original
+    assert json.loads(safe_source.read_text()) == safe_config
+
+
+def test_standalone_runtime_cancellation_removes_isolated_configuration(tmp_path, monkeypatch):
+    import signal
+    import sys
+    from unittest.mock import Mock
+
+    import awf.adapters.provider_config as runtime
+
+    selected = resolve_execution(
+        agent="claude_code", provider="ollama", model="coder", allow_unverified=True
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-native-config"))
+    monkeypatch.setattr(runtime, "probe_connection", Mock(return_value={"ok": True}))
+    register = Mock()
+    monkeypatch.setattr(runtime.signal, "signal", register)
+    directories = []
+
+    def cancel(_cli, env):
+        directory = Path(env["CLAUDE_CONFIG_DIR"])
+        directories.append(directory)
+        assert (directory / "settings.json").is_file()
+        register.assert_called_once()
+        signum, handler = register.call_args.args
+        assert signum == signal.SIGTERM
+        handler(signum, None)
+
+    monkeypatch.setattr(runtime, "run_cli_redacted", cancel)
+    monkeypatch.setattr(
+        sys, "argv", ["provider_config.py", json.dumps(selected.model_dump()), "agent", "-"]
+    )
+    with pytest.raises(SystemExit) as failure:
+        runtime.main()
+    assert failure.value.code == 143
+    assert len(directories) == 1 and not directories[0].exists()
+    assert list((tmp_path / "home" / ".awf" / "provider-config").iterdir()) == []

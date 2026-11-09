@@ -74,6 +74,68 @@ def test_errors_preserve_reason_without_response_or_credential_values(monkeypatc
     assert "secret" not in str(result)
 
 
+@pytest.mark.parametrize("agent", ["codex", "claude_code"])
+@pytest.mark.parametrize("mounted", [False, True])
+def test_openrouter_probe_uses_selected_alias_and_closes_response(monkeypatch, agent, mounted):
+    selected = resolve_execution(
+        agent=agent,
+        provider="openrouter",
+        model="chosen/model",
+        allow_unverified=True,
+        profile={"runtime": {"environment": {"OPENROUTER_API_KEY": "${SELECTED_KEY}"}}},
+    )
+    response = io.BytesIO(b'{"data":[{"id":"chosen/model"}]}')
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr("urllib.request.build_opener", lambda *_args: opener)
+    environ = {"SELECTED_KEY": "alias-credential", "OPENAI_API_KEY": "native-credential"}
+    if mounted:
+        environ["OPENROUTER_API_KEY"] = "mounted-credential"
+    result = probe_connection(selected.model_dump(), environ)
+    assert result["ok"] is True
+    assert result["evidence"] == "runtime_network_readiness_only"
+    request = opener.open.call_args.args[0]
+    assert request.full_url == "https://openrouter.ai/api/v1/models"
+    assert request.get_header("Authorization") == "Bearer " + (
+        "mounted-credential" if mounted else "alias-credential"
+    )
+    assert opener.open.call_args.kwargs["timeout"] == 10
+    assert response.closed
+    assert "credential" not in str(result)
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude_code"])
+def test_missing_selected_probe_credential_fails_before_network(monkeypatch, agent):
+    selected = resolve_execution(
+        agent=agent, provider="openrouter", model="chosen/model", allow_unverified=True
+    )
+    opener = Mock()
+    monkeypatch.setattr("urllib.request.build_opener", opener)
+    with pytest.raises(ValueError, match="^PROVIDER_CREDENTIAL_MISSING$"):
+        probe_connection(selected.model_dump(), {"OPENAI_API_KEY": "unrelated-native-secret"})
+    opener.assert_not_called()
+
+
+def test_probe_read_timeout_closes_response_and_redacts_error(monkeypatch):
+    class Response(io.BytesIO):
+        def read(self, size):
+            assert size == 2_000_001
+            raise TimeoutError("synthetic-credential-in-response")
+
+    response = Response()
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr("urllib.request.build_opener", lambda *_args: opener)
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="coder", allow_unverified=True
+    )
+    assert probe_connection(selected.model_dump(), {}) == {
+        "ok": False,
+        "reason_code": "PROVIDER_ENDPOINT_UNREACHABLE",
+    }
+    assert response.closed
+
+
 def test_foundation_admission_cannot_claim_runtime_network_success_or_override():
     selected = resolve_execution(
         agent="codex", provider="ollama", model="coder", allow_unverified=True
