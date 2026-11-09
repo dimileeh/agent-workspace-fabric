@@ -537,6 +537,49 @@ async def test_new_work_capacity_reserves_leaseless_ready_rows(
         )
 
 
+async def test_new_work_capacity_skips_unsatisfiable_leaseless_ready_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression (PR #1194 review): A's 7 GB peak never fits beside the 3 GB of
+    # steady footprints under an 8 GB limit, so READY dispatch refuses it forever.
+    # It must not hold back a slot from feasible requested work; C still does.
+    configured = WorkerConfig(max_concurrent_executions=2, local_capacity_memory_gb=8.0)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        steady=2.0,
+        peak=6.0,
+        reservation_phase=ResourceReservationPhase.steady.value,
+    )
+    for steady, peak in ((2.0, 7.0), (1.0, 2.0)):
+        await _workspace(
+            session_factory,
+            status=WorkspaceStatus.ready,
+            steady=steady,
+            peak=peak,
+            reservation_phase=ResourceReservationPhase.steady.value,
+        )
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        assert (
+            await new_work_capacity(
+                session, config=configured, now=now, reserve_leaseless_ready=True
+            )
+            == 1
+        )
+        # Without limits nothing is unsatisfiable: both READY rows keep a slot.
+        assert (
+            await new_work_capacity(
+                session,
+                config=WorkerConfig(max_concurrent_executions=2),
+                now=now,
+                reserve_leaseless_ready=True,
+            )
+            == 0
+        )
+
+
 async def test_new_admission_refused_when_slots_full(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

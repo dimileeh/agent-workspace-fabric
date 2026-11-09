@@ -252,8 +252,8 @@ class WorkSlotLeaseRepository:
         )
         return int(await self._session.scalar(stmt) or 0)
 
-    async def count_leaseless_ready(self, *, node_id: str | None) -> int:
-        """Count ``ready`` workspaces on the node that hold no work-slot lease.
+    async def list_leaseless_ready_ids(self, *, node_id: str | None) -> list[str]:
+        """Return ``ready`` workspaces on the node that hold no work-slot lease.
 
         Requested admission reserves capacity for them so already-provisioned work
         is not starved by new admissions.
@@ -261,17 +261,13 @@ class WorkSlotLeaseRepository:
         held_workspace_ids = select(WorkSlotLease.workspace_id).where(
             WorkSlotLease.phase.in_(IN_USE_WORK_SLOT_LEASE_PHASES)
         )
-        stmt = (
-            select(func.count())
-            .select_from(Workspace)
-            .where(
-                Workspace.status == WorkspaceStatus.ready.value,
-                Workspace.id.not_in(held_workspace_ids),
-            )
+        stmt = select(Workspace.id).where(
+            Workspace.status == WorkspaceStatus.ready.value,
+            Workspace.id.not_in(held_workspace_ids),
         )
         if node_id is not None:
             stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
-        return int(await self._session.scalar(stmt) or 0)
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def update_fenced(
         self,

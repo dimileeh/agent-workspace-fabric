@@ -547,7 +547,9 @@ async def new_work_capacity(
     """Free slots new work may take: zero while any live reacquire waiter queues.
 
     ``reserve_leaseless_ready`` (requested admission) further holds back one slot
-    per lease-less ``ready`` row so already-provisioned work is not starved.
+    per lease-less ``ready`` row so already-provisioned work is not starved. A row
+    whose peak can never fit beside the steady footprints holds none: READY
+    dispatch refuses it, so its slot would only block feasible requests.
     """
     limit = work_slot_limit(config)
     if limit <= 0:
@@ -558,7 +560,12 @@ async def new_work_capacity(
         return 0
     free = limit - await repo.count_in_use(node_id=node_id)
     if reserve_leaseless_ready and free > 0:
-        free -= await repo.count_leaseless_ready(node_id=node_id)
+        for workspace_id in await repo.list_leaseless_ready_ids(node_id=node_id):
+            blockers = await _reacquire_peak_blockers(
+                session, workspace_id=workspace_id, config=config
+            )
+            if not any(blocker.unsatisfiable for blocker in blockers):
+                free -= 1
     return max(0, free)
 
 
