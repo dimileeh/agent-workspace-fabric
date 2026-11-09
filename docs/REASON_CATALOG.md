@@ -774,6 +774,20 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#open_pr_resolver_forge_not_supported](#open_pr_resolver_forge_not_supported)
 
+### OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED
+**Problem:** An operator guide asked AWF to reject a preserved correction attempt and resolve its thread, but AWF could not apply it, so the review thread stays parked.
+**Likely Cause:** The ruling matched no parked preserved attempt, matched more than one, named a SHA that is not the thread's preserved attempt, or named a thread that is active, already closed, or has new replies since it was parked. AWF does not guess.
+**Operator Fix:** Read the detail in the notice or audit event. Then guide again, naming the outdated review thread id and the preserved attempt SHA from the park reason. If the thread is still active or gained new replies, guide without the reject wording so the agent re-triages it.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_preserved_attempt_disposition_unapplied](#operator_preserved_attempt_disposition_unapplied)
+
+### OPERATOR_PRESERVED_ATTEMPT_RETIRED
+**Problem:** An operator guide rejected a preserved correction attempt, so AWF retired it as the review thread's evidence and will reply on and resolve the outdated thread.
+**Likely Cause:** The thread was parked needs_human because a correction attempt AWF could not accept was preserved for human review. The guide said to reject that attempt and resolve the thread as obsolete. The preserved commit stays in the branch history.
+**Operator Fix:** No action is required. The next poll posts AWF's disposition reply in the thread and resolves it. The guide's other instructions were not run; send a follow-up guide for them.
+**Related Command:** `awf workspace events <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#operator_preserved_attempt_retired](#operator_preserved_attempt_retired)
+
 ### ORPHAN_RESOURCES_PRESENT
 **Problem:** Orphan AWF Docker resources were detected.
 **Likely Cause:** Networks or volumes left behind by deleted workspaces.
