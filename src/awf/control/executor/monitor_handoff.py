@@ -168,6 +168,13 @@ async def _refresh_selected_agent_material(
     selected = execution_from_policy(ws.task_policy)
     if selected is None:
         return True
+    if (
+        not selected.third_party
+        and pr_adoption_is_hosted(ws.task_policy)
+        and not compose_file.is_file()
+    ):
+        # Native hosted auth belongs to the runtime executor; no Compose is needed.
+        return True
     try:
         roots = self._trusted_git_roots_for_workspace(workspace_id=ws.id, repo_url=ws.repo_url)
         if self._stack_launcher is None or roots is None or profile is None:

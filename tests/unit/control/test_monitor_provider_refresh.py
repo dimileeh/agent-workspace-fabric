@@ -119,3 +119,66 @@ async def test_monitor_refreshes_selected_material_before_recreate(
         executor._restart_compose_runtime_for_monitor_resume.assert_not_awaited()
     else:
         executor._restart_compose_runtime_for_monitor_resume.assert_awaited_once()
+
+
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+async def test_hosted_no_compose_resume_preserves_native_and_rejects_third_party(
+    factory, tmp_path, provider
+):
+    from awf.node.compose_manager import ComposeManager
+    from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monitor_recovery_hosted_seam import (
+        _TEMPLATE,
+        _RecordingCompose,
+        _RecordingExecutor,
+        _RecordingMonitor,
+    )
+    from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monitor_recovery_hosted_seam import (
+        _make_executor as make_hosted_executor,
+    )
+    from tests.unit.control.test_executor_monitor_recovery_parts.test_executor_monitor_recovery_hosted_seam import (
+        _seed_monitoring_pr as seed_hosted,
+    )
+
+    selected = resolve_execution(
+        agent="codex", provider=provider, model="coder", allow_unverified=True
+    )
+    workspace_id = await seed_hosted(
+        factory,
+        task_policy={
+            "agent_execution": selected.model_dump(),
+            "pr_adoption": {"execution": {"mode": "hosted"}},
+        },
+        compose_project_name=None,
+        compose_file_path=None,
+    )
+    monitor = _RecordingMonitor()
+    adapters = []
+
+    def monitor_factory(adapter, _profile, _workspace, **_kwargs):
+        adapters.append(adapter)
+        return monitor
+
+    executor = make_hosted_executor(
+        fake=FakeCommandRunner(),
+        factory=factory,
+        tmp_path=tmp_path,
+        compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+        pr_monitor_factory=monitor_factory,
+        agent_runtime_executor=_RecordingExecutor(),
+    )
+    compose = _RecordingCompose()
+    executor._compose = compose
+    await executor.resume_pr_monitor(workspace_id)
+    assert compose.ensure_project_up_calls == []
+    async with factory() as session:
+        row = await WorkspaceRepository(session).get(workspace_id)
+        if provider == "openai":
+            assert len(monitor.run_calls) == 1
+            assert adapters[0].execution == selected
+            assert row.status == "monitoring_pr"
+        else:
+            assert monitor.run_calls == []
+            assert adapters == []
+            assert row.status == "failed"
+            events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+            assert any(e.reason_code == "EXECUTION_CONFIGURATION_REFRESH_FAILED" for e in events)
