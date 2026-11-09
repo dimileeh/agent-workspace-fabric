@@ -11,6 +11,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.agent_execution import EXECUTION_CONTRACT_VERSION, CircuitKey
 from awf.common.audit import redact_audit_value
 from awf.common.ids import (
     new_egress_audit_record_id,
@@ -133,9 +134,11 @@ class WorkerHeartbeatRepository:
         started_at: datetime,
         last_heartbeat_at: datetime,
         poll_interval_seconds: float,
+        execution_contract_version: int = 0,
     ) -> WorkerHeartbeat:
         now = datetime.now(UTC)
         heartbeat_values: dict[str, Any] = {
+            "execution_contract_version": execution_contract_version,
             "worker_id": worker_id,
             "node_id": node_id,
             "started_at": started_at,
@@ -159,6 +162,7 @@ class WorkerHeartbeatRepository:
             node_id=node_id,
             last_heartbeat_at=last_heartbeat_at,
             poll_interval_seconds=poll_interval_seconds,
+            execution_contract_version=execution_contract_version,
             updated_at=now,
         )
         if heartbeat is not None:
@@ -179,6 +183,7 @@ class WorkerHeartbeatRepository:
                 node_id=node_id,
                 last_heartbeat_at=last_heartbeat_at,
                 poll_interval_seconds=poll_interval_seconds,
+                execution_contract_version=execution_contract_version,
                 updated_at=now,
             )
             if heartbeat is not None:
@@ -197,6 +202,7 @@ class WorkerHeartbeatRepository:
         node_id: str,
         last_heartbeat_at: datetime,
         poll_interval_seconds: float,
+        execution_contract_version: int = 0,
         updated_at: datetime,
     ) -> WorkerHeartbeat | None:
         stmt = (
@@ -209,6 +215,7 @@ class WorkerHeartbeatRepository:
                 node_id=node_id,
                 last_heartbeat_at=last_heartbeat_at,
                 poll_interval_seconds=poll_interval_seconds,
+                execution_contract_version=execution_contract_version,
                 updated_at=updated_at,
             )
         )
@@ -262,6 +269,20 @@ class WorkerHeartbeatRepository:
             return 0
         return int(rowcount)
 
+    async def supports_execution_contract(self, *, now: datetime) -> bool:
+        """Every live queue consumer must understand the expanded contract."""
+        heartbeats = (await self._session.execute(select(WorkerHeartbeat))).scalars().all()
+        live = [
+            h
+            for h in heartbeats
+            if worker_heartbeat_is_fresh(
+                h.last_heartbeat_at, now=now, poll_interval_seconds=h.poll_interval_seconds
+            )
+        ]
+        return bool(live) and all(
+            h.execution_contract_version == EXECUTION_CONTRACT_VERSION for h in live
+        )
+
 
 class ProviderModelCircuitBreakerRepository:
     """CRUD helpers for provider/model circuit breaker cooldown state."""
@@ -275,10 +296,12 @@ class ProviderModelCircuitBreakerRepository:
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
     ) -> ProviderModelCircuitBreaker | None:
         stmt = select(ProviderModelCircuitBreaker).where(
             ProviderModelCircuitBreaker.provider == provider,
             ProviderModelCircuitBreaker.model == model,
+            ProviderModelCircuitBreaker.connection_scope == connection_scope,
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
@@ -287,6 +310,7 @@ class ProviderModelCircuitBreakerRepository:
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
         reason_code: str,
         failure_fingerprint: str,
         workspace_id: str | None,
@@ -297,12 +321,30 @@ class ProviderModelCircuitBreakerRepository:
     ) -> ProviderModelCircuitBreaker:
         normalized_provider = provider.strip()
         normalized_model = model.strip()
-        breaker = await self.get(provider=normalized_provider, model=normalized_model)
+        breaker = await self.get(
+            provider=normalized_provider, model=normalized_model, connection_scope=connection_scope
+        )
         if breaker is None:
             breaker = await self._create_or_get_missing(
                 provider=normalized_provider,
                 model=normalized_model,
+                connection_scope=connection_scope,
             )
+
+        # Serialize increments after INSERT-if-absent; refresh an already loaded
+        # identity-map row after acquiring the lock so concurrent failures count.
+        breaker = (
+            await self._session.execute(
+                select(ProviderModelCircuitBreaker)
+                .where(
+                    ProviderModelCircuitBreaker.provider == normalized_provider,
+                    ProviderModelCircuitBreaker.model == normalized_model,
+                    ProviderModelCircuitBreaker.connection_scope == connection_scope,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
 
         if _circuit_breaker_expired(breaker, now):
             breaker.state = "closed"
@@ -327,6 +369,7 @@ class ProviderModelCircuitBreakerRepository:
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
     ) -> ProviderModelCircuitBreaker:
         stmt = _provider_model_circuit_breaker_insert_if_absent_stmt(self._dialect_name)
         if stmt is not None:
@@ -335,11 +378,14 @@ class ProviderModelCircuitBreakerRepository:
                     id=new_provider_model_circuit_breaker_id(),
                     provider=provider,
                     model=model,
+                    connection_scope=connection_scope,
                     state="closed",
                     failure_count=0,
                 )
             )
-            breaker = await self.get(provider=provider, model=model)
+            breaker = await self.get(
+                provider=provider, model=model, connection_scope=connection_scope
+            )
             if breaker is None:
                 raise RuntimeError("provider/model circuit breaker insert did not return a row")
             return breaker
@@ -348,6 +394,7 @@ class ProviderModelCircuitBreakerRepository:
             id=new_provider_model_circuit_breaker_id(),
             provider=provider,
             model=model,
+            connection_scope=connection_scope,
             state="closed",
             failure_count=0,
         )
@@ -359,9 +406,10 @@ class ProviderModelCircuitBreakerRepository:
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
         now: datetime,
     ) -> bool:
-        breaker = await self.get(provider=provider, model=model)
+        breaker = await self.get(provider=provider, model=model, connection_scope=connection_scope)
         if breaker is None:
             return False
         if _circuit_breaker_expired(breaker, now):
@@ -378,9 +426,10 @@ class ProviderModelCircuitBreakerRepository:
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
         now: datetime,
     ) -> ProviderModelCircuitBreaker | None:
-        breaker = await self.get(provider=provider, model=model)
+        breaker = await self.get(provider=provider, model=model, connection_scope=connection_scope)
         if breaker is None:
             return None
         if _circuit_breaker_expired(breaker, now):
@@ -395,13 +444,15 @@ class ProviderModelCircuitBreakerRepository:
     async def open_breakers_for_pairs(
         self,
         *,
-        pairs: Iterable[tuple[str, str]],
+        pairs: Iterable[CircuitKey],
         now: datetime,
-    ) -> dict[tuple[str, str], ProviderModelCircuitBreaker]:
-        normalized_pairs = {
-            (provider.strip(), model.strip())
-            for provider, model in pairs
-            if provider.strip() and model.strip()
+    ) -> dict[CircuitKey, ProviderModelCircuitBreaker]:
+        normalized_pairs: set[CircuitKey] = {
+            (pair[0].strip(), pair[1].strip(), pair[2].strip())
+            if len(pair) == 3
+            else (pair[0].strip(), pair[1].strip())
+            for pair in pairs
+            if pair[0].strip() and pair[1].strip()
         }
         if not normalized_pairs:
             return {}
@@ -409,10 +460,12 @@ class ProviderModelCircuitBreakerRepository:
         pair_filter = or_(
             *(
                 and_(
-                    ProviderModelCircuitBreaker.provider == provider,
-                    ProviderModelCircuitBreaker.model == model,
+                    ProviderModelCircuitBreaker.provider == pair[0],
+                    ProviderModelCircuitBreaker.model == pair[1],
+                    ProviderModelCircuitBreaker.connection_scope
+                    == (pair[2] if len(pair) == 3 else "legacy"),
                 )
-                for provider, model in sorted(normalized_pairs)
+                for pair in sorted(normalized_pairs)
             )
         )
         stmt = select(ProviderModelCircuitBreaker).where(
@@ -420,7 +473,7 @@ class ProviderModelCircuitBreakerRepository:
             pair_filter,
         )
         breakers = list((await self._session.execute(stmt)).scalars())
-        open_breakers: dict[tuple[str, str], ProviderModelCircuitBreaker] = {}
+        open_breakers: dict[CircuitKey, ProviderModelCircuitBreaker] = {}
         for breaker in breakers:
             if _circuit_breaker_expired(breaker, now):
                 breaker.state = "closed"
@@ -428,7 +481,14 @@ class ProviderModelCircuitBreakerRepository:
                 breaker.opened_at = None
                 breaker.cooldown_until = None
                 continue
-            open_breakers[(breaker.provider, breaker.model)] = breaker
+            for key in (
+                (breaker.provider, breaker.model),
+                (breaker.provider, breaker.model, breaker.connection_scope),
+            ):
+                if key in normalized_pairs and (
+                    len(key) == 3 or breaker.connection_scope == "legacy"
+                ):
+                    open_breakers[key] = breaker
         await self._session.flush()
         return open_breakers
 

@@ -23,6 +23,7 @@ from typing import Any, Final, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.agent_execution import execution_from_policy
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
@@ -484,6 +485,7 @@ class Provisioner(
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        execution=execution_from_policy(ws.task_policy),
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
@@ -759,6 +761,7 @@ class Provisioner(
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        execution=execution_from_policy(ws.task_policy),
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,

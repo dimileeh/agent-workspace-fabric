@@ -12,9 +12,9 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import expression
 
+from awf.common.agent_execution import CircuitKey, circuit_key
 from awf.common.config import Settings
 from awf.common.work_slot import MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE
-from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ResourceReservation, Workspace
 from awf.db.repositories import (
@@ -48,7 +48,6 @@ from awf.service.metrics_types import (
 from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
-    provider_for_agent_model,
 )
 from awf.service.resource_capacity import (
     LOCAL_CAPACITY_CONSTRAINTS,
@@ -402,16 +401,15 @@ async def _provider_recovery_eligible_capacity_queue_candidates(
         return []
 
     cooldown_eligible: list[_CapacityQueueCandidate] = []
-    circuit_candidate_pairs: dict[str, tuple[str, str]] = {}
+    circuit_candidate_pairs: dict[str, CircuitKey] = {}
     for candidate in candidates:
         workspace = candidate.workspace
         not_before = provider_cooldown_not_before(workspace.task_policy)
         if not_before is not None and not_before > scoring_at:
             continue
-        model = agent_model_from_task_policy(workspace.task_policy)
-        provider = provider_for_agent_model(workspace.agent, model)
-        if provider is not None and model is not None:
-            circuit_candidate_pairs[workspace.id] = (provider, model)
+        key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        if key is not None:
+            circuit_candidate_pairs[workspace.id] = key
         cooldown_eligible.append(candidate)
 
     if not circuit_candidate_pairs:

@@ -6,6 +6,8 @@ import asyncio
 import os
 import re
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import ValidationError
@@ -168,6 +170,37 @@ async def create_workspace_row(
             resolved_profile = _resolved
     requested_profile = cast(dict[str, Any] | None, requested_profile)
     resolved_profile = cast(dict[str, Any] | None, resolved_profile)
+    try:
+        base_task_policy = freeze_execution_policy(
+            payload,
+            profile=resolved_profile,
+            enabled=resolved_settings.third_party_agent_providers_enabled,
+            environ=provider_environ if provider_environ is not None else os.environ,
+        )
+        from awf.common.agent_execution import execution_from_policy
+
+        selections = [execution_from_policy(base_task_policy)]
+        selections.extend(
+            execution_from_policy(t)
+            for t in base_task_policy.get("provider_recovery", {}).get("fallbacks", [])
+        )
+        if any(selected is not None and selected.third_party for selected in selections):
+            from awf.db.repositories import WorkerHeartbeatRepository
+
+            if not await WorkerHeartbeatRepository(session).supports_execution_contract(
+                now=datetime.now(UTC)
+            ):
+                raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
+    except ValueError as error:
+        from awf.service.workspaces import WorkspaceProviderReadinessBlockedError
+
+        raise WorkspaceProviderReadinessBlockedError(
+            {
+                "blocks_launch": True,
+                "reason_code": str(error),
+                "override_used": False,
+            }
+        ) from None
     # Overlay the resolved profile's Ollama base URL onto the readiness environ so
     # create-time admission probes the same daemon the executor's pre-agent step
     # targets (which derives its URLs from the same profile env). Without this, an
@@ -415,6 +448,9 @@ def workspace_create_payload_matches(
         == _requested_task_provider_recovery_policy(payload)
         and _stored_companions(existing) == _requested_companions(payload)
         and _stored_task_agent_effort(existing) == payload.task.effort
+        and _stored_task_policy(existing).get("agent_provider") == payload.task.provider
+        and bool(_stored_task_policy(existing).get("allow_unverified_model", False))
+        == payload.preflight.allow_unverified_model
         and _stored_task_scheduler_policy(existing) == _requested_task_scheduler_policy(payload)
         and _stored_auto_merge_matches(existing, payload)
         and _release_sync_source_branch_matches(existing, payload)
@@ -823,7 +859,13 @@ def _stored_task_provider_recovery_policy(
 ) -> dict[str, object] | None:
     """Return the provider recovery policy dict stored in the workspace's task policy."""
     provider_recovery = _stored_task_policy(existing).get("provider_recovery")
-    return provider_recovery if isinstance(provider_recovery, dict) else None
+    if not isinstance(provider_recovery, dict):
+        return None
+    result = deepcopy(provider_recovery)
+    for target in result.get("fallbacks", []):
+        if isinstance(target, dict):
+            target.pop("agent_execution", None)
+    return result
 
 
 def _requested_companions(payload: WorkspaceCreateRequest) -> list[dict[str, object]]:
@@ -1486,3 +1528,57 @@ def profile_with_requested_tier(
             "validation": profile.validation.model_copy(update={"requested_tier": effective_tier})
         }
     )
+
+
+def freeze_execution_policy(
+    payload: WorkspaceCreateRequest,
+    *,
+    profile: Mapping[str, Any] | None,
+    enabled: bool,
+    environ: Mapping[str, str],
+) -> dict[str, Any]:
+    """Freeze the primary and every declared fallback using one resolved profile."""
+    from awf.common.agent_execution import resolve_execution
+
+    policy = workspace_create_task_policy_snapshot(payload)
+    from awf.common.workspace_policy import cursor_auto_model_selector
+
+    selected_model = (
+        cursor_auto_model_selector(payload.task.cursor_auto_mode)
+        if payload.task.cursor_auto_mode is not None
+        else payload.task.model
+    )
+    targets = [
+        (payload.task.agent.value, payload.task.provider, selected_model, payload.task.effort)
+    ]
+    if payload.task.provider_recovery:
+        targets.extend(
+            (str(t.agent), t.provider, t.model, None)
+            for t in payload.task.provider_recovery.fallbacks
+        )
+    snapshots = []
+    for agent, provider, model, effort in targets:
+        native = {"codex": "openai", "claude_code": "anthropic"}.get(agent)
+        if native and provider is not None and provider != native and not enabled:
+            raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
+        snapshots.append(
+            resolve_execution(
+                agent=agent,
+                provider=provider,
+                model=model,
+                effort=effort,
+                allow_unverified=payload.preflight.allow_unverified_model,
+                profile=profile,
+                environ=environ,
+            )
+        )
+    policy["agent_execution"] = snapshots[0].model_dump(mode="json")
+    if payload.task.provider is not None:
+        policy["agent_provider"] = payload.task.provider
+    if payload.preflight.allow_unverified_model:
+        policy["allow_unverified_model"] = True
+    for target, snapshot in zip(
+        policy.get("provider_recovery", {}).get("fallbacks", []), snapshots[1:], strict=True
+    ):
+        target["agent_execution"] = snapshot.model_dump(mode="json")
+    return policy

@@ -83,6 +83,9 @@ def _task_from_attempt(
         task_class=attempt.task_class,
         owned_paths=list(attempt.owned_paths),
         agent=parse_agent_runtime(attempt.agent),
+        agent_provider=observability["agent_provider"],
+        agent_execution=observability["agent_execution"],
+        agent_connection_scope=observability["agent_connection_scope"],
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         cursor_auto_mode=observability["cursor_auto_mode"],
@@ -99,7 +102,10 @@ def _task_from_attempt(
 
 
 def _attempt_response(attempt: TaskAttempt) -> TaskAttemptResponse:
+    from awf.service.workspace_observability import agent_identity_payload
+
     workspace = attempt.workspace
+    identity = agent_identity_payload(workspace)
     candidate = attempt.merge_candidate
     return TaskAttemptResponse(
         attempt_id=attempt.id,
@@ -113,6 +119,11 @@ def _attempt_response(attempt: TaskAttempt) -> TaskAttemptResponse:
         candidate_id=candidate.id if candidate is not None else None,
         candidate_status=candidate.status if candidate is not None else None,
         readiness=_readiness_from_candidate(candidate),
+        agent_provider=identity["agent_provider"],
+        agent_execution=identity["agent_execution"],
+        agent_connection_scope=identity["agent_connection_scope"],
+        agent_model=identity["agent_model"],
+        agent_effort=identity["agent_effort"],
         agent=parse_agent_runtime(attempt.agent),
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
@@ -143,6 +154,9 @@ def _task_from_workspace(row: Workspace) -> TaskResponse:
         task_class=row.task_class,
         owned_paths=list(row.owned_paths),
         agent=parse_agent_runtime(row.agent),
+        agent_provider=observability["agent_provider"],
+        agent_execution=observability["agent_execution"],
+        agent_connection_scope=observability["agent_connection_scope"],
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         cursor_auto_mode=observability["cursor_auto_mode"],

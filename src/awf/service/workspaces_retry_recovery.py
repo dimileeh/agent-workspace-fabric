@@ -93,7 +93,16 @@ def _prune_and_migrate_retired_agent(
         if fallback_target is not None:
             promoted_index = target_index
             target_agent = fallback_target.agent
-            policy["agent_model"] = fallback_target.model
+            from awf.common.agent_execution import promote_execution
+            from awf.common.config import get_settings
+
+            if (
+                fallback_target.execution is not None
+                and fallback_target.execution.third_party
+                and not get_settings().third_party_agent_providers_enabled
+            ):
+                raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
+            policy = promote_execution(policy, fallback_target.to_payload())
 
             raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
             state_dict = dict(raw_state) if isinstance(raw_state, Mapping) else {}

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from awf.common.agent_execution import ExecutionSelection
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -120,6 +121,7 @@ class AgentRuntimeExecRequest:
     log_source: str
     model: str | None
     effort: str | None
+    execution: ExecutionSelection | None = None
     env_passthrough_names: tuple[str, ...] = ()
     env_passthrough_aliases: tuple[tuple[str, str], ...] = ()
     file_auth_mount_targets: tuple[str, ...] = ()

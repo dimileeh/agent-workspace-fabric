@@ -905,3 +905,37 @@ def test_guide_body_includes_blocked_resume_fields_when_set(
     assert body["grants"] == ["pyproject.toml", "src/awf"]
     assert body["approve_policy_downgrade"] is True
     assert body["operator"] == "op@example.com"
+
+
+def test_workspace_create_forwards_separate_provider_and_experimental_flag(monkeypatch):
+    captured = {}
+
+    def call(_method, _path, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(409, json={"error_code": "PROVIDER_READINESS_PRECHECK_FAILED"})
+
+    monkeypatch.setattr(workspace_commands, "_call", call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        workspace_commands.workspace_app,
+        [
+            "create",
+            "--repo",
+            "https://github.com/example/project",
+            "--title",
+            "task",
+            "--prompt",
+            "fix",
+            "--provider",
+            "ollama",
+            "--model",
+            "coder",
+            "--allow-unverified-model",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["task"]["provider"] == "ollama"
+    assert captured["json"]["task"]["model"] == "coder"
+    assert captured["json"]["preflight"]["allow_unverified_model"] is True

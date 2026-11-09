@@ -84,6 +84,7 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         *_XAI_ENV_KEYS,
         *_DOCKER_AUTH_ENV_KEYS,
         *_LEGACY_SECRET_ENV_KEYS,
+        "OPENROUTER_API_KEY",
         "GOOGLE_APPLICATION_CREDENTIALS_JSON",
     )
 )
@@ -337,6 +338,26 @@ def selected_provider_readiness_preflight(
     and providers with stale/non-portable file auth get a cheap non-prompt probe.
     """
 
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(task_policy)
+    if selection is not None and selection.third_party:
+        # Admission cannot certify an agent/sidecar network before provisioning.
+        # No host-only success or readiness override can authorize that claim.
+        return _launch_preflight_payload(
+            agent=selection.agent,
+            provider=selection.provider,
+            model=selection.model,
+            model_source="task_policy",
+            provider_result=None,
+            probe={"status": "unsupported"},
+            reason_code="EXECUTION_NETWORK_PROBE_UNSUPPORTED",
+            message="Selected connection requires actual agent-network verification; foundation admission remains blocked.",
+            override=False,
+            override_reason=None,
+            checked_at=checked_at or datetime.now(UTC),
+            secrets=frozenset(),
+        )
     env = os.environ if environ is None else environ
     secrets = _secret_values(settings, env)
     host_home = Path(settings.host_home or "~").expanduser()

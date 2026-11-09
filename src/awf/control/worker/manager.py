@@ -90,6 +90,8 @@ _WORKER_HEARTBEAT_PRUNE_INTERVAL_SECONDS = 60 * 60
 class ControlWorker(WorkerDelegatesMixin):
     """Reads pending work from the DB and dispatches it to runtime handlers."""
 
+    execution_contract_version = 1
+
     def __init__(
         self: Any,
         *,
@@ -634,6 +636,7 @@ class ControlWorker(WorkerDelegatesMixin):
                 node_id=effective_worker_config_node_id(self._config),
                 started_at=self._worker_started_at,
                 last_heartbeat_at=now,
+                execution_contract_version=self.execution_contract_version,
                 poll_interval_seconds=self._config.poll_interval_seconds,
             )
 

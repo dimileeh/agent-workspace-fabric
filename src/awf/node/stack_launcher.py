@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from awf.common.agent_execution import ExecutionSelection
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_images import CompanionImageBuilder
@@ -80,6 +81,7 @@ class WorkspaceStackLaunchRequest:
     workspace_id: str
     layout: WorktreeLayout
     profile: WorkspaceProfile
+    execution: ExecutionSelection | None = None
     companions: tuple[MaterializedCompanionService, ...] = ()
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
@@ -233,6 +235,28 @@ class ComposeStackLauncher:
         """Build the rendered stack spec shared by launch and render-only paths."""
         layout = request.layout
         profile = request.profile
+        selected = request.execution
+        third_party = selected is not None and selected.third_party
+        if third_party:
+            from awf.adapters.provider_config import competing_provider_env
+
+            profile = profile.model_copy(deep=True)
+            profile.runtime.environment = {
+                k: v
+                for k, v in profile.runtime.environment.items()
+                if not competing_provider_env(k) or k == "OPENROUTER_API_KEY"
+            }
+            profile.secrets = [
+                secret
+                for secret in profile.secrets
+                if (
+                    not competing_provider_env(secret.target)
+                    or secret.target == "OPENROUTER_API_KEY"
+                )
+                and not any(
+                    p in secret.target for p in ("/.codex", "/.claude", "/.ollama", "/opencode")
+                )
+            ]
         reservation_limits = (
             await self._resource_limits(request.workspace_id)
             if self._resource_limits is not None
@@ -275,6 +299,20 @@ class ComposeStackLauncher:
             if secret_lease_resolution is not None
             else frozenset()
         )
+        if third_party:
+            satisfied_targets = satisfied_targets | frozenset(
+                {
+                    "/home/agent/.codex",
+                    "/home/agent/.claude",
+                    "/home/agent/.claude.json",
+                    "/home/agent/.ollama",
+                    "/home/agent/.config/opencode",
+                    "/home/agent/.grok",
+                }
+            )
+            satisfied_providers = satisfied_providers | frozenset(
+                {"codex", "claude_code", "opencode", "ollama", "cursor", "antigravity", "grok"}
+            )
         suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
@@ -291,6 +329,15 @@ class ComposeStackLauncher:
             )
             auth_mounts.extend(
                 mount for mount in legacy_mounts if mount.target not in suppressed_legacy_targets
+            )
+        if selected is not None and selected.third_party and self._auth_mount_resolver is not None:
+            prepare = getattr(self._auth_mount_resolver, "resolve_execution_config", None)
+            if not callable(prepare):
+                raise ValueError("EXECUTION_CONFIGURATION_ISOLATION_UNSUPPORTED")
+            auth_mounts.append(
+                await asyncio.to_thread(
+                    prepare, workspace_id=request.workspace_id, agent=selected.agent
+                )
             )
         services = await asyncio.to_thread(
             profile_services,
@@ -344,6 +391,12 @@ class ComposeStackLauncher:
             agent_environment,
             host_env={} if self._protected_profile_mounts is not None else None,
         )
+        if third_party:
+            agent_environment = tuple(
+                (k, v)
+                for k, v in agent_environment
+                if not competing_provider_env(k) or k == "OPENROUTER_API_KEY"
+            )
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
                 auth_mounts,

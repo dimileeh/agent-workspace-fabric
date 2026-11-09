@@ -374,6 +374,7 @@ async def summarize_resource_saturation_for_session(
     )
     provider_circuit_breakers = [
         ProviderCircuitBreakerSummary(
+            connection_scope=breaker.connection_scope,
             provider=breaker.provider,
             model=breaker.model,
             state=breaker.state,

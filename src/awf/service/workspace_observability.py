@@ -343,6 +343,9 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         task_class=ws.task_class,
         owned_paths=list(ws.owned_paths),
         agent=parse_agent_runtime(ws.agent),
+        agent_provider=observability["agent_provider"],
+        agent_execution=observability["agent_execution"],
+        agent_connection_scope=observability["agent_connection_scope"],
         agent_model=observability["agent_model"],
         agent_effort=observability["agent_effort"],
         cursor_auto_mode=observability["cursor_auto_mode"],
@@ -412,6 +415,18 @@ def effective_agent_identity(
     agent: AgentRuntime | str,
     task_policy: Mapping[str, object] | None,
 ) -> AgentIdentity:
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(task_policy)
+    if selection is not None:
+        return AgentIdentity(
+            model=selection.model,
+            effort=selection.effort,
+            model_source="task_policy" if selection.model_explicit else "default",
+            effort_source=("task_policy" if selection.effort_explicit else "default")
+            if selection.effort is not None
+            else "unavailable",
+        )
     runtime = _coerce_agent_runtime(agent)
     # Live projections use current defaults; historical fills retired runtimes
     # (e.g. gemini) and must not override live Cursor's no-effort Auto default.
@@ -761,6 +776,15 @@ def workspace_pricing_metadata(workspace: Workspace) -> PricingMetadata | None:
     inner = pricing_stanza.get("pricing")
     if not isinstance(inner, dict):
         return None
+    from awf.common.agent_execution import execution_from_policy
+
+    selection = execution_from_policy(getattr(workspace, "task_policy", None))
+    if (
+        selection is not None
+        and selection.third_party
+        and (inner.get("provider"), inner.get("model")) != (selection.provider, selection.model)
+    ):
+        return None
     try:
         return PricingMetadata.model_validate(inner)
     except Exception:
@@ -825,7 +849,15 @@ def compute_cost_estimate(
 def agent_identity_payload(workspace: Workspace) -> AgentIdentityPayload:
     identity = effective_agent_identity_for_workspace(workspace)
     cursor_auto_mode = cursor_auto_mode_from_task_policy(workspace.task_policy)
+    from awf.common.agent_execution import execution_from_policy, provider_for_agent_model
+
+    selection = execution_from_policy(workspace.task_policy)
     return {
+        "agent_provider": selection.provider
+        if selection
+        else provider_for_agent_model(workspace.agent, identity.model),
+        "agent_execution": selection.model_dump(mode="json") if selection else None,
+        "agent_connection_scope": selection.connection_scope(workspace.id) if selection else None,
         "agent_model": identity.model,
         "agent_effort": identity.effort,
         "cursor_auto_mode": cursor_auto_mode.value if cursor_auto_mode is not None else None,

@@ -606,7 +606,12 @@ class ProviderModelCircuitBreaker(Base):
 
     __tablename__ = "provider_model_circuit_breakers"
     __table_args__ = (
-        UniqueConstraint("provider", "model", name="uq_provider_model_circuit_breakers_pair"),
+        UniqueConstraint(
+            "provider",
+            "model",
+            "connection_scope",
+            name="uq_provider_model_circuit_breakers_connection",
+        ),
         Index("ix_provider_model_circuit_breakers_state", "state", "cooldown_until"),
         Index("ix_provider_model_circuit_breakers_provider_model", "provider", "model"),
     )
@@ -614,6 +619,9 @@ class ProviderModelCircuitBreaker(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     provider: Mapped[str] = mapped_column(String(128), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
+    connection_scope: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="legacy", server_default="legacy"
+    )
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="closed")
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1415,6 +1423,9 @@ class WorkerHeartbeat(Base):
 
     worker_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     node_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    execution_contract_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     poll_interval_seconds: Mapped[float] = mapped_column(Float, nullable=False)

@@ -78,12 +78,14 @@ class ClaudeCodeAdapter(AgentAdapter):
         passthrough helpers add those names separately, preserving local
         Compose parity without resolving unrelated ambient credentials.
         """
+        if self.execution is not None and self.execution.third_party:
+            return ("OPENROUTER_API_KEY",) if self.execution.provider == "openrouter" else ()
         return tuple(name for name in AGENT_AUTH_ENV_VARS if name in _CLAUDE_CODE_AUTH_ENV_NAMES)
 
     def get_provider(self, model: str | None) -> str:
         """Return the provider family used for Claude Code runs."""
         del model
-        return "anthropic"
+        return self.execution.provider if self.execution else "anthropic"
 
     def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["claude", "--dangerously-skip-permissions"]

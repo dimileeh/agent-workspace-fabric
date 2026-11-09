@@ -277,6 +277,7 @@ class ProviderCircuitBreakerSummary:
     cooldown_until: datetime | None
     last_reason_code: str | None
     last_workspace_id: str | None
+    connection_scope: str = "legacy"
 
 
 @dataclass(frozen=True)

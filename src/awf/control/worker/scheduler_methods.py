@@ -18,9 +18,7 @@ from typing import Any, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.common.workspace_policy import (
-    agent_model_from_task_policy,
-)
+from awf.common.agent_execution import CircuitKey, circuit_key
 from awf.control.worker.constants import (
     _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
     PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
@@ -59,7 +57,6 @@ from awf.db.repositories import (
 from awf.db.resilience import run_db_operation_with_retry
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
-    provider_for_agent_model,
 )
 from awf.service.scheduler import SchedulerOrderCursor
 
@@ -263,7 +260,7 @@ async def _filter_provider_recovery_suppressed_with_result(
     now = datetime.now(UTC)
     breaker_repo = ProviderModelCircuitBreakerRepository(session)
     allowed: set[str] = set()
-    circuit_candidates: dict[str, tuple[str, str]] = {}
+    circuit_candidates: dict[str, CircuitKey] = {}
     circuit_decision_workspace_ids: set[str] = set()
     provider_suppression_resume_expires_at: datetime | None = None
     for index, workspace_id in enumerate(workspace_ids):
@@ -290,12 +287,11 @@ async def _filter_provider_recovery_suppressed_with_result(
                     suppression_detail={"not_before": not_before.isoformat()},
                 )
             continue
-        model = agent_model_from_task_policy(workspace.task_policy)
-        provider = provider_for_agent_model(workspace.agent, model)
-        if provider is None or model is None:
+        key = circuit_key(workspace.agent, workspace.task_policy, workspace_id=workspace.id)
+        if key is None:
             allowed.add(workspace_id)
             continue
-        circuit_candidates[workspace_id] = (provider, model)
+        circuit_candidates[workspace_id] = key
         if record_suppression_decision:
             circuit_decision_workspace_ids.add(workspace_id)
 

@@ -344,6 +344,7 @@ class Settings(BaseSettings):
 
     # Docker
     docker_host: str = Field(default="unix:///var/run/docker.sock")
+    third_party_agent_providers_enabled: bool = False
     agent_runtime_image: str = Field(default="awf-agent-runtime:latest")
     companion_image_cache_enabled: bool = Field(
         default=True,

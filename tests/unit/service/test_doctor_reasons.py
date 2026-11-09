@@ -358,3 +358,20 @@ def test_core_startup_reasons_keep_their_guidance(
     assert entry.message == message
     assert entry.related_command == related_command
     assert entry.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+def test_provider_foundation_contract_rejections_have_rollout_guidance():
+    from awf.service.doctor.reasons import reason_text_for_code
+
+    for code in [
+        "THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED",
+        "EXECUTION_CONTRACT_UNSUPPORTED",
+        "EXECUTION_WORKER_CONTRACT_UNSUPPORTED",
+        "EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED",
+        "EXECUTION_NETWORK_PROBE_UNSUPPORTED",
+        "EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED",
+    ]:
+        reason = reason_text_for_code(code)
+        assert reason is not None
+        assert "compatible" in reason.action.lower()
+        assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"

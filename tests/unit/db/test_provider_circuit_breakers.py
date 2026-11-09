@@ -91,12 +91,13 @@ async def test_record_failure_reuses_row_after_stale_create_miss(
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
     ):
         nonlocal calls
         calls += 1
         if calls == 1:
             return None
-        return await original_get(provider=provider, model=model)
+        return await original_get(provider=provider, model=model, connection_scope=connection_scope)
 
     monkeypatch.setattr(repo, "get", stale_first_get)
 
@@ -129,6 +130,7 @@ async def test_record_failure_errors_when_created_breaker_cannot_be_reloaded(
         *,
         provider: str,
         model: str,
+        connection_scope: str = "legacy",
     ):
         return None
 

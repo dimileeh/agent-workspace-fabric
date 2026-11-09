@@ -111,6 +111,8 @@ def workspace_create(
         help="Full 40-hex commit the base branch must match at initial checkout.",
     ),
     agent: str = typer.Option("codex", "--agent"),
+    provider: str | None = typer.Option(None, "--provider"),
+    allow_unverified_model: bool = typer.Option(False, "--allow-unverified-model"),
     model: str | None = typer.Option(None, "--model"),
     effort: str | None = typer.Option(
         None,
@@ -238,6 +240,11 @@ def workspace_create(
         "companions": [],
     }
 
+    provider = _option_default(provider)
+    if provider is not None:
+        body["task"]["provider"] = provider
+    if _option_default(allow_unverified_model):
+        body["preflight"]["allow_unverified_model"] = True
     if model is not None:
         body["task"]["model"] = model
     if effort is not None:

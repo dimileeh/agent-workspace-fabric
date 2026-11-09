@@ -71,3 +71,17 @@ async def test_mcp_create_persists_expected_base_sha_and_omits_it_when_absent(
 
     assert (await _policy(factory, pinned_payload))["expected_base_sha"] == _SHA
     assert "expected_base_sha" not in await _policy(factory, omitted_payload)
+
+
+async def test_mcp_provider_selection_reports_disabled_admission(factory):
+    mcp = build_mcp_server(service=WorkspaceService(factory))
+    result = await mcp.call_tool(
+        "awf_create_workspace",
+        {**_args(pin=None), "provider": "ollama", "model": "coder", "allow_unverified_model": True},
+    )
+    payload = result.structuredContent if isinstance(result, CallToolResult) else result[1]
+    assert payload["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+    assert (
+        payload["detail"]["provider_readiness_preflight"]["reason_code"]
+        == "THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED"
+    )

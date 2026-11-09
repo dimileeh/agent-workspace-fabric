@@ -43,6 +43,7 @@ from awf.adapters.runtime_executor import (
 )
 from awf.adapters.usage import UsageSampleContext, UsageSampler
 from awf.adapters.worktree_activity import make_worktree_activity_probe
+from awf.common.agent_execution import ExecutionSelection
 from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
@@ -164,6 +165,7 @@ class AgentDefaults:
 
     model: str
     effort: str | None = None
+    execution: ExecutionSelection | None = None
 
 
 class AgentAdapter(ABC):
@@ -181,12 +183,14 @@ class AgentAdapter(ABC):
         usage_sampler: UsageSampler | None = None,
         runtime_executor: AgentRuntimeExecutor | None = None,
         trusted_git_roots: tuple[Path, Path] | None = None,
+        execution: ExecutionSelection | None = None,
     ) -> None:
         """Initialize the adapter runtime dependencies and timeout policy."""
         if agent_wall_timeout_seconds <= 0:
             raise ValueError("agent_wall_timeout_seconds must be positive")
         if agent_idle_timeout_seconds <= 0:
             raise ValueError("agent_idle_timeout_seconds must be positive")
+        self.execution = execution
         self._runner = runner
         self._default_model = default_model
         self._default_effort = default_effort
@@ -359,6 +363,30 @@ class AgentAdapter(ABC):
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
         cli_args = self._cli_args(model=model)
+        if self.execution is not None and self.execution.third_party:
+            if (
+                self._runtime_executor is not None
+                and getattr(self._runtime_executor, "execution_contract_version", None) != 1
+            ):
+                raise ValueError("EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED")
+            from awf.adapters.provider_config import RUNTIME_CONFIG_PATH
+
+            # An old/custom runtime must fail before the coding CLI starts.
+            bootstrap = (
+                "import pathlib,runpy,sys; p=pathlib.Path(sys.argv[1]); "
+                "p.is_file() or sys.exit('EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED'); "
+                "sys.argv=sys.argv[1:]; runpy.run_path(str(p),run_name='__main__')"
+            )
+            import json
+
+            cli_args = [
+                "python",
+                "-c",
+                bootstrap,
+                RUNTIME_CONFIG_PATH,
+                json.dumps(self.execution.model_dump(mode="json")),
+                *cli_args,
+            ]
         if self._runtime_executor is not None:
             return await self._run_hosted(
                 compose_project=compose_project,
@@ -378,6 +406,10 @@ class AgentAdapter(ABC):
         env_passthrough = await asyncio.to_thread(
             agent_exec_env_passthrough, compose_file=compose_file
         )
+        if self.execution is not None and self.execution.third_party:
+            env_passthrough = tuple(
+                name for name in env_passthrough if name == "OPENROUTER_API_KEY"
+            )
         sampler_ctx: UsageSampleContext | None = None
         final_status = "failed"
         masked_reason_code: str | None = None
@@ -399,6 +431,8 @@ class AgentAdapter(ABC):
                 compose_project=compose_project,
                 workspace_id=workspace_id,
                 model=selected_model,
+                provider=self.get_provider(selected_model),
+                execution=self.execution.model_dump(mode="json") if self.execution else None,
                 effort=self._default_effort,
                 wall_timeout_seconds=self._agent_wall_timeout_seconds,
                 idle_timeout_seconds=self._agent_idle_timeout_seconds,
@@ -465,7 +499,11 @@ class AgentAdapter(ABC):
         compose_file: Path,
         workspace_id: str | None,
     ) -> UsageSampleContext | None:
-        if self._usage_sampler is None or workspace_id is None:
+        if (
+            self._usage_sampler is None
+            or workspace_id is None
+            or (self.execution is not None and self.execution.third_party)
+        ):
             return None
         try:
             return await self._usage_sampler.start(
@@ -1220,6 +1258,23 @@ class AgentAdapter(ABC):
                     workspace_id=workspace_id,
                     compose_project=compose_project,
                     pending_timeout_cleanup=pending_timeout_cleanup,
+                )
+
+        if not result.ok and self.execution is not None and self.execution.third_party:
+            from awf.adapters.provider_config import runtime_failure_reason
+
+            contract_reason = runtime_failure_reason(result.stderr)
+            if contract_reason is not None:
+                raise AgentRunError(
+                    agent=self.name,
+                    result=result,
+                    reason_code=contract_reason,
+                    details={
+                        "provider": self.execution.provider,
+                        "model": self.execution.model,
+                        "execution": self.execution.model_dump(mode="json"),
+                        "retryable": False,
+                    },
                 )
 
         if not result.ok:

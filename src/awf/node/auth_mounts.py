@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import shutil
+import tomllib
 from collections.abc import Collection, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -190,6 +192,33 @@ class ServiceAuthMountResolver:
             workspace_owner_uid=self.workspace_owner_uid,
             workspace_owner_gid=self.workspace_owner_gid,
             overlay_mounter=self.overlay_mounter,
+        )
+
+    def resolve_execution_config(self, *, workspace_id: str, agent: str) -> AuthMount:
+        """Read only configuration through the existing declared auth boundary.
+
+        Never copy native auth files into a third-party workspace. The normal
+        workspace auth cleanup owns this sanitized, workspace-specific file.
+        """
+        from awf.adapters.provider_config import safe_provider_config
+
+        source = self.host_home / (
+            ".codex/config.toml" if agent == "codex" else ".claude/settings.json"
+        )
+        config = {}
+        if source.is_file():
+            raw = (
+                tomllib.loads(source.read_text())
+                if agent == "codex"
+                else json.loads(source.read_text())
+            )
+            config = safe_provider_config(agent, raw)
+        target = self.work_dir / "auth" / workspace_id / "selected-provider-source.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(config))
+        target.chmod(0o644)
+        return AuthMount(
+            source=str(target), target="/opt/awf/selected-provider-source.json", mode="ro"
         )
 
 

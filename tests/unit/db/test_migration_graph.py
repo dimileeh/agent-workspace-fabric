@@ -125,7 +125,10 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_WORK_SLOT_LEASES_REVISION]
+    assert script.get_heads() == ["85ce3f9b2a61"]
+    provider_connections = script.get_revision("85ce3f9b2a61")
+    assert provider_connections is not None
+    assert provider_connections.down_revision == _WORK_SLOT_LEASES_REVISION
     work_slot_leases = script.get_revision(_WORK_SLOT_LEASES_REVISION)
     assert work_slot_leases is not None
     assert work_slot_leases.down_revision == _BARRIER_IDLE_CLEAR_ONLY_REVISION
@@ -133,7 +136,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     assert clear_only is not None
     assert clear_only.down_revision == _RESTORE_RECONCILIATION_REVISION
     # Checkpoint cut and restore require the database to sit at exactly this head.
-    assert CHECKPOINT_SCHEMA_REVISION == _WORK_SLOT_LEASES_REVISION
+    assert CHECKPOINT_SCHEMA_REVISION == "85ce3f9b2a61"
     restored_head = script.get_revision(_RESTORE_RECONCILIATION_REVISION)
     assert restored_head is not None
     assert restored_head.down_revision == _CHECKPOINT_REVISION
