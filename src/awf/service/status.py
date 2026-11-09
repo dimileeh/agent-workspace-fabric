@@ -58,6 +58,7 @@ from awf.service.profile_metadata import (
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
 from awf.service.provider_readiness import collect_agent_readiness
+from awf.service.status_work_slots import WorkSlotSummaryLookup, collect_work_slot_status
 from awf.service.worker_heartbeat import (
     WORKER_HEARTBEAT_FRESH_REASON,
     WORKER_HEARTBEAT_MISSING_REASON,
@@ -243,6 +244,7 @@ async def collect_service_status(
     provider_http_get: ProviderHttpGet | None = None,
     egress_audit_summary_lookup: EgressAuditSummaryLookup | None = None,
     worker_reaper_check: WorkerReaperCheck | None = None,
+    work_slot_summary_lookup: WorkSlotSummaryLookup | None = None,
 ) -> dict[str, object]:
     """Collect service dependency status without requiring Docker in tests."""
 
@@ -312,6 +314,10 @@ async def collect_service_status(
         egress_audit_check = await collect_egress_audit_status(
             settings.database_url,
             summary_lookup=egress_audit_summary_lookup,
+        )
+        work_slots_check = await collect_work_slot_status(
+            settings,
+            summary_lookup=work_slot_summary_lookup,
         )
     finally:
         for pending in (workspace_lookup_task, provider_task):
@@ -384,6 +390,7 @@ async def collect_service_status(
         "orphan_resources": orphan_resources_check,
         "orphan_workspaces": orphan_workspaces_check,
         "workspace_cleanup": workspace_cleanup_check,
+        "work_slots": work_slots_check,
     }
     overall_ok = (
         all(bool(check["ok"]) for check in checks.values()) and agent_readiness["status"] == "ok"

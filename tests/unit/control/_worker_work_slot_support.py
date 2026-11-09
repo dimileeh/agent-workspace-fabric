@@ -222,6 +222,12 @@ async def create_in_status(
             WorkspaceStatus.running,
             WorkspaceStatus.blocked,
         ],
+        WorkspaceStatus.recovering: [
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.recovering,
+        ],
     }[status]
     async with session_factory() as session:
         repo = WorkspaceRepository(session)

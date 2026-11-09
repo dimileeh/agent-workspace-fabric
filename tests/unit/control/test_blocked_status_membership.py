@@ -4,7 +4,10 @@ A ``blocked`` workspace is paused awaiting an operator decision after a pre-PR
 protected quality-gate violation. It keeps its worktree, warm stack, and
 execution claim, so it must:
 
-- count as execution-in-use / allocated / admission-slot-holding (keep-warm),
+- keep its warm stack (warm-stack execution / allocated / warm-stack admission
+  status sets), yet hold NO work slot: work slots are broker-owned leases taken
+  only while provisioning, an agent run or a validation run is in flight
+  (slot-release), so an idle pause never starves new work,
 - be GC-protected (never reaped),
 - be present in the per-status saturation counts,
 
@@ -18,15 +21,20 @@ while it must NOT:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from awf.control.worker import WorkerConfig
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_STATUSES,
     _REQUESTED_ADMISSION_SLOT_STATUSES,
     _RUNTIME_HEALTH_SCAN_STATUSES,
 )
+from awf.control.worker.resource_broker import new_work_capacity
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories.base import ALLOCATED_RESOURCE_RESERVATION_STATUSES
+from awf.db.session import make_session_factory
 from awf.service.gc_classify import (
     PROTECTED_WORKSPACE_GC_STATUSES,
     TERMINAL_WORKSPACE_GC_STATUSES,
@@ -41,22 +49,24 @@ from awf.service.orphan_resources import (
 from awf.service.orphan_resources import (
     KNOWN_WORKSPACE_STATUSES as ORPHAN_KNOWN_WORKSPACE_STATUSES,
 )
+from tests.postgres import postgres_test_engine
+from tests.unit.control._worker_work_slot_support import create_in_status
 
 _BLOCKED = WorkspaceStatus.blocked
 
 
 @pytest.mark.unit
 class TestBlockedKeepWarmMembership:
-    """A blocked workspace holds its slot/reservation while paused."""
+    """A blocked workspace keeps its reservation and warm stack while paused."""
 
-    def test_in_execution_in_use(self) -> None:
+    def test_in_warm_stack_execution_statuses(self) -> None:
         assert _BLOCKED.value in EXECUTION_IN_USE_STATUSES
         assert _BLOCKED.value in CAPACITY_EXECUTION_IN_USE_STATUSES
 
     def test_in_allocated_reservation_statuses(self) -> None:
         assert _BLOCKED.value in ALLOCATED_RESOURCE_RESERVATION_STATUSES
 
-    def test_in_admission_slot_statuses(self) -> None:
+    def test_in_warm_stack_admission_statuses(self) -> None:
         assert _BLOCKED in _REQUESTED_ADMISSION_SLOT_STATUSES
 
     def test_in_protected_gc_statuses(self) -> None:
@@ -117,3 +127,20 @@ class TestBlockedRunningKpiSeparation:
             WorkspaceStatus.pushing.value,
         }
         assert _BLOCKED.value not in running_kpi_set
+
+
+@pytest.mark.unit
+async def test_blocked_workspace_holds_no_work_slot() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        await create_in_status(factory, _BLOCKED, "paused")
+        async with factory() as session:
+            capacity = await new_work_capacity(
+                session,
+                config=WorkerConfig(max_concurrent_executions=1),
+                now=datetime.now(UTC),
+                reserve_leaseless_ready=True,
+            )
+
+    # The paused row keeps its warm stack but leaves the only slot free.
+    assert capacity == 1

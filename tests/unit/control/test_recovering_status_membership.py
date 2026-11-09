@@ -11,7 +11,10 @@ status set that already contains ``blocked``, and is absent from every set
 ``blocked`` is deliberately absent from (stuck-detection / terminal /
 preserve-not-reap scans). It must:
 
-- count as execution-in-use / allocated / admission-slot-holding (keep-warm),
+- keep its warm stack (warm-stack execution / allocated / warm-stack admission
+  status sets), yet hold NO work slot: work slots are broker-owned leases taken
+  only while provisioning, an agent run or a validation run is in flight
+  (slot-release), so an idle pause never starves new work,
 - be GC-protected and orphan-active (never reaped — the warm stack is the point),
 - hold its owned paths + host ports (overlap/port-conflict),
 - surface in the advisory overlap graph as a "running" node,
@@ -28,19 +31,24 @@ while it must NOT:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from awf.control.worker import WorkerConfig
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_STATUSES,
     _REQUESTED_ADMISSION_SLOT_STATUSES,
     _RUNTIME_HEALTH_SCAN_STATUSES,
 )
+from awf.control.worker.resource_broker import new_work_capacity
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories.base import (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
     ALLOCATED_RESOURCE_RESERVATION_STATUSES,
     HOST_PORT_CONFLICT_STATUSES,
 )
+from awf.db.session import make_session_factory
 from awf.service.gc_classify import (
     PROTECTED_WORKSPACE_GC_STATUSES,
     TERMINAL_WORKSPACE_GC_STATUSES,
@@ -63,22 +71,24 @@ from awf.service.overlap_graph import (
     RUNNING_WORKSPACE_STATUSES,
     _queue_state_for_status,
 )
+from tests.postgres import postgres_test_engine
+from tests.unit.control._worker_work_slot_support import create_in_status
 
 _RECOVERING = WorkspaceStatus.recovering
 
 
 @pytest.mark.unit
 class TestRecoveringKeepWarmMembership:
-    """A recovering workspace holds its slot/reservation/stack while paused."""
+    """A recovering workspace keeps its reservation and warm stack while paused."""
 
-    def test_in_execution_in_use(self) -> None:
+    def test_in_warm_stack_execution_statuses(self) -> None:
         assert _RECOVERING.value in EXECUTION_IN_USE_STATUSES
         assert _RECOVERING.value in CAPACITY_EXECUTION_IN_USE_STATUSES
 
     def test_in_allocated_reservation_statuses(self) -> None:
         assert _RECOVERING.value in ALLOCATED_RESOURCE_RESERVATION_STATUSES
 
-    def test_in_admission_slot_statuses(self) -> None:
+    def test_in_warm_stack_admission_statuses(self) -> None:
         assert _RECOVERING in _REQUESTED_ADMISSION_SLOT_STATUSES
 
     def test_in_protected_gc_statuses(self) -> None:
@@ -158,3 +168,20 @@ class TestRecoveringRunningKpiSeparation:
             WorkspaceStatus.pushing.value,
         }
         assert _RECOVERING.value not in running_kpi_set
+
+
+@pytest.mark.unit
+async def test_recovering_workspace_holds_no_work_slot() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        await create_in_status(factory, _RECOVERING, "paused")
+        async with factory() as session:
+            capacity = await new_work_capacity(
+                session,
+                config=WorkerConfig(max_concurrent_executions=1),
+                now=datetime.now(UTC),
+                reserve_leaseless_ready=True,
+            )
+
+    # The paused row keeps its warm stack but leaves the only slot free.
+    assert capacity == 1

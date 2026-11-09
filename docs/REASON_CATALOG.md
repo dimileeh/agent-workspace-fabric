@@ -725,6 +725,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#monitor_runtime_restart_exhausted](#monitor_runtime_restart_exhausted)
 
+### MONITOR_WAITING_FOR_WORK_SLOT
+**Problem:** A workspace is queued for a work slot before running an agent or validation (PR monitor action, blocked/recovering/paused resume).
+**Likely Cause:** Every work slot (`AWF_WORKER_MAX_CONCURRENT_EXECUTIONS`) is held by provisioning, an agent run or a validation run; or a held lease whose `awf-exec` cleanup was never proven is waiting for the reconciler; or the configured local capacity cannot fit the workspace's peak reservation.
+**Operator Fix:** No action is needed for a short wait: queued work is granted the next free slot in strict FIFO order, ahead of new requests. For a sustained wait, inspect `checks.work_slots` in `awf service status` for the slot holders, then raise `AWF_WORKER_MAX_CONCURRENT_EXECUTIONS` if the host has room, or cancel stuck work. An `unsatisfiable` waiter needs a larger `AWF_LOCAL_CAPACITY_*` limit or a smaller workspace resource reservation.
+**Related Command:** `awf service status --format json`
+**Docs Link:** [docs/REASON_CATALOG.md#monitor_waiting_for_work_slot](#monitor_waiting_for_work_slot)
+
 ### NETWORK_POSTURE_OPEN_ACTIVE
 **Problem:** One or more active workspaces have unrestricted internet access.
 **Likely Cause:** Workspaces were started with --network=open.

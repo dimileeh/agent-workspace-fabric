@@ -802,9 +802,12 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
     assert summary.concurrency.provision.in_use == 1
     assert summary.concurrency.provision.queued == 1
     assert summary.concurrency.provision.available == 1
-    assert summary.concurrency.execution.in_use == 4
+    # The execution lane counts work-slot leases, not active rows (slot-release):
+    # none of these seeded rows holds a lease.
+    assert summary.concurrency.execution.in_use == 0
     assert summary.concurrency.execution.queued == 1
-    assert summary.concurrency.execution.available == 0
+    assert summary.concurrency.execution.available == 4
+    assert summary.work_slots.in_use == 0
     assert summary.disk.reason == "SUFFICIENT_DISK"
     assert summary.admission.ok is True
 
