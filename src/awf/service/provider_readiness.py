@@ -339,15 +339,19 @@ def selected_provider_readiness_preflight(
     """
 
     from awf.common.agent_execution import execution_from_policy
+    from awf.common.workspace_policy import agent_model_from_task_policy
 
     selection = execution_from_policy(task_policy)
-    if selection is not None and selection.third_party:
+    pending = bool(task_policy and task_policy.get("agent_execution_profile_pending"))
+    if pending or (selection is not None and selection.third_party):
         # Admission cannot certify an agent/sidecar network before provisioning.
         # No host-only success or readiness override can authorize that claim.
         return _launch_preflight_payload(
-            agent=selection.agent,
-            provider=selection.provider,
-            model=selection.model,
+            agent=selection.agent if selection else str(agent),
+            provider=selection.provider
+            if selection
+            else str((task_policy or {}).get("agent_provider")),
+            model=selection.model if selection else agent_model_from_task_policy(task_policy),
             model_source="task_policy",
             provider_result=None,
             probe={"status": "unsupported"},

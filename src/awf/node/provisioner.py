@@ -16,14 +16,16 @@ re-raised so the caller can log/alert.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.agent_execution import execution_from_policy
+from awf.common.agent_execution import bind_execution_profile, execution_from_policy
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
@@ -444,6 +446,30 @@ class Provisioner(
             resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
                 resolved_profile_dict, profile
             )
+            if (ws.task_policy or {}).get("agent_execution_profile_pending"):
+                # Persist before rendering, so retries use the same connection.
+                async with self._session_factory() as session:
+                    persisted = await session.scalar(
+                        select(Workspace).where(Workspace.id == workspace_id).with_for_update()
+                    )
+                    if (
+                        persisted is None
+                        or persisted.status != WorkspaceStatus.provisioning.value
+                        or (
+                            execution_claim_epoch is not None
+                            and persisted.execution_claim_epoch != execution_claim_epoch
+                        )
+                    ):
+                        return
+                    persisted.task_policy = bind_execution_profile(
+                        persisted.task_policy,
+                        agent=persisted.agent,
+                        profile=profile.model_dump(mode="json", by_alias=True),
+                        environ=os.environ,
+                    )
+                    await WorkspaceRepository(session).advance_workspace_version(persisted)
+                    await session.commit()
+                    ws.task_policy = persisted.task_policy
             # Adoption may defer Cursor Router preflight until this checkout
             # profile is known (``profile_ref=auto`` + repo-local CURSOR_API_KEY).
             if await self._run_deferred_cursor_auto_router_preflight(

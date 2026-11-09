@@ -47,7 +47,7 @@ def test_native_snapshot_and_fallback_provider_are_frozen():
     with pytest.raises(ValueError, match="ADMISSION_DISABLED"):
         freeze_execution_policy(payload, profile=None, enabled=False, environ={})
     payload.preflight.allow_unverified_model = True
-    policy = freeze_execution_policy(payload, profile=None, enabled=True, environ={})
+    policy = freeze_execution_policy(payload, profile={}, enabled=True, environ={})
     assert execution_from_policy(policy).effort == "xhigh"
     fallback = policy["provider_recovery"]["fallbacks"][0]
     assert execution_from_policy(fallback).provider == "ollama"
@@ -57,7 +57,7 @@ def test_native_snapshot_and_fallback_provider_are_frozen():
 def test_executor_helpers_never_fill_native_effort_for_frozen_selection():
     payload = request(provider="ollama", model="qwen3-coder")
     payload.preflight.allow_unverified_model = True
-    policy = freeze_execution_policy(payload, profile=None, enabled=True, environ={})
+    policy = freeze_execution_policy(payload, profile={}, enabled=True, environ={})
     ws = SimpleNamespace(agent="codex", task_policy=policy)
     defaults = _agent_defaults_for_workspace(ws, DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex])
     assert defaults.effort is None
@@ -73,7 +73,7 @@ def test_third_party_unknown_pricing_cannot_inherit_native_price():
 
     payload = request(provider="ollama", model="coder")
     payload.preflight.allow_unverified_model = True
-    policy = freeze_execution_policy(payload, profile=None, enabled=True, environ={})
+    policy = freeze_execution_policy(payload, profile={}, enabled=True, environ={})
     pricing = {
         "provider": "openai",
         "model": "gpt-native",
@@ -98,7 +98,7 @@ def test_task_and_attempt_projections_preserve_selected_provider_without_native_
 
     payload = request(provider="ollama", model="coder")
     payload.preflight.allow_unverified_model = True
-    policy = freeze_execution_policy(payload, profile=None, enabled=True, environ={})
+    policy = freeze_execution_policy(payload, profile={}, enabled=True, environ={})
     now = datetime.now(UTC)
     ws = Workspace(
         id="ws_selection",
@@ -135,3 +135,27 @@ def test_task_and_attempt_projections_preserve_selected_provider_without_native_
     assert response.agent_provider == "ollama"
     assert response.agent_execution == policy["agent_execution"]
     assert response.agent_effort is None
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+def test_auto_profile_connections_are_not_frozen_from_service_defaults(provider):
+    payload = request(
+        provider=provider,
+        model="coder",
+        provider_recovery={
+            "fallbacks": [
+                {"agent": "claude_code", "provider": "ollama", "model": "fallback"},
+                {"agent": "codex", "provider": "openrouter", "model": "router/fallback"},
+            ]
+        },
+    )
+    payload.preflight.allow_unverified_model = True
+    policy = freeze_execution_policy(
+        payload,
+        profile=None,
+        enabled=True,
+        environ={"OLLAMA_HOST": "http://service-default:11434"},
+    )
+    assert "agent_execution" not in policy
+    assert policy["agent_execution_profile_pending"] is True
+    assert all("agent_execution" not in t for t in policy["provider_recovery"]["fallbacks"])

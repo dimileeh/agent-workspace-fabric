@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -338,4 +339,34 @@ def promote_execution(policy: Mapping[str, Any], target: Mapping[str, Any]) -> d
         updated["agent_provider"] = selected.provider
         if selected.effort is not None:
             updated["agent_effort"] = selected.effort
+    return updated
+
+
+def bind_execution_profile(
+    policy: Mapping[str, Any],
+    *,
+    agent: str,
+    profile: Mapping[str, Any],
+    environ: Mapping[str, str],
+) -> dict[str, Any]:
+    """Bind deferred connections once the repository profile is authoritative."""
+    updated = deepcopy(dict(policy))
+    if not updated.pop("agent_execution_profile_pending", False):
+        return updated
+    targets = [updated, *updated.get("provider_recovery", {}).get("fallbacks", [])]
+    for target in targets:
+        if EXECUTION_POLICY_KEY in target:
+            execution_from_policy(target)
+            continue
+        primary = target is updated
+        selected = resolve_execution(
+            agent=agent if primary else target["agent"],
+            provider=target.get("agent_provider" if primary else "provider"),
+            model=target.get("agent_model" if primary else "model"),
+            effort=target.get("agent_effort") if primary else None,
+            allow_unverified=bool(updated.get("allow_unverified_model")),
+            profile=profile,
+            environ=environ,
+        )
+        target[EXECUTION_POLICY_KEY] = selected.model_dump(mode="json")
     return updated

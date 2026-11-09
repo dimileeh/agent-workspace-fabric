@@ -184,7 +184,9 @@ async def create_workspace_row(
             execution_from_policy(t)
             for t in base_task_policy.get("provider_recovery", {}).get("fallbacks", [])
         )
-        if any(selected is not None and selected.third_party for selected in selections):
+        if base_task_policy.get("agent_execution_profile_pending") or any(
+            selected is not None and selected.third_party for selected in selections
+        ):
             from awf.db.repositories import WorkerHeartbeatRepository
 
             if not await WorkerHeartbeatRepository(session).supports_execution_contract(
@@ -1569,10 +1571,13 @@ def freeze_execution_policy(
                 effort=effort,
                 allow_unverified=payload.preflight.allow_unverified_model,
                 profile=profile,
-                environ=environ,
+                environ=environ if profile is not None else {},
             )
         )
-    policy["agent_execution"] = snapshots[0].model_dump(mode="json")
+    if profile is None and any(s.third_party for s in snapshots):
+        policy["agent_execution_profile_pending"] = True
+    if profile is not None or not snapshots[0].third_party:
+        policy["agent_execution"] = snapshots[0].model_dump(mode="json")
     if payload.task.provider is not None:
         policy["agent_provider"] = payload.task.provider
     if payload.preflight.allow_unverified_model:
@@ -1580,5 +1585,6 @@ def freeze_execution_policy(
     for target, snapshot in zip(
         policy.get("provider_recovery", {}).get("fallbacks", []), snapshots[1:], strict=True
     ):
-        target["agent_execution"] = snapshot.model_dump(mode="json")
+        if profile is not None or not snapshot.third_party:
+            target["agent_execution"] = snapshot.model_dump(mode="json")
     return policy
