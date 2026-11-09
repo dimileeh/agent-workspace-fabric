@@ -80,9 +80,9 @@ def normalize_endpoint(raw: str) -> str:
             or any(c.isspace() or ord(c) < 32 for c in raw)
         ):
             raise ValueError
-        host = host.lower()
-        if host in {"localhost", "127.0.0.1", "0.0.0.0", "::", "::1"}:
-            host = "host.docker.internal"
+        from awf.service.provider_readiness_helpers import _normalize_host_local_host
+
+        host = _normalize_host_local_host(host.lower())
         authority = f"[{host}]" if ":" in host else host
         if port is None:
             port = 11434

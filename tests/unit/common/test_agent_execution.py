@@ -212,3 +212,24 @@ def test_required_profile_credential_placeholder_remains_a_reference():
         },
     )
     assert selected.credential_ref == "env/ROUTER_TOKEN"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.2",
+        "127.255.255.254",
+        "[0:0:0:0:0:0:0:1]",
+        "[::ffff:127.0.0.2]",
+        "[0:0:0:0:0:0:0:0]",
+    ],
+)
+def test_selected_endpoint_reuses_host_local_normalization(host):
+    selected = resolve_execution(
+        agent="codex",
+        provider="ollama",
+        model="coder",
+        allow_unverified=True,
+        environ={"OLLAMA_HOST": f"http://{host}:12345/prefix/v1"},
+    )
+    assert selected.endpoint == "http://host.docker.internal:12345/prefix"
