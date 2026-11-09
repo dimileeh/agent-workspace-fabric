@@ -54,7 +54,7 @@ from awf.control.worker.resource_broker import (
     transfer_work,
     work_slot_snapshot,
 )
-from awf.control.worker.work_slot_scope import InvocationWorkSlot
+from awf.control.worker.work_slot_scope import InvocationWorkSlot, _run_shielded
 from awf.db.enums import WorkSlotLeasePhase, WorkspaceStatus
 from awf.db.models import WorkSlotLease
 from awf.db.repositories import (
@@ -183,21 +183,35 @@ async def _finish_provision_work_slot(
     workspace_id: str,
     scope: InvocationWorkSlot | None,
 ) -> None:
-    """Park the claim lease when provisioning ended ``ready``; release it otherwise."""
+    """Park the claim lease when provisioning ended ``ready``; release it otherwise.
+
+    Runs in the provisioning task's ``finally``, often while a shutdown cancel is
+    already propagating. Shielded so a second cancellation landing on the status
+    read cannot skip ``close()``/``detach()`` (the lease would stay held with its
+    renewal leaked); that cancellation is re-raised once the scope is settled.
+    """
     if scope is None:
         return
     try:
-        try:
-            statuses = await self._load_workspace_statuses([workspace_id])
-        except _DB_ERRORS as exc:
-            _log_work_slot_db_failure("worker.work_slot_provision_status_failed", workspace_id, exc)
-            statuses = {}
-        if statuses.get(workspace_id) == WorkspaceStatus.ready.value:
-            scope.detach()
-        else:
-            await scope.close()
+        await _run_shielded(_park_or_close_provision_work_slot(self, workspace_id, scope))
     finally:
         self._forget_work_slot_scope(workspace_id, scope)
+
+
+async def _park_or_close_provision_work_slot(
+    self: Any,
+    workspace_id: str,
+    scope: InvocationWorkSlot,
+) -> None:
+    try:
+        statuses = await self._load_workspace_statuses([workspace_id])
+    except _DB_ERRORS as exc:
+        _log_work_slot_db_failure("worker.work_slot_provision_status_failed", workspace_id, exc)
+        statuses = {}
+    if statuses.get(workspace_id) == WorkspaceStatus.ready.value:
+        scope.detach()
+    else:
+        await scope.close()
 
 
 # --- Admission -------------------------------------------------------------------

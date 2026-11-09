@@ -675,20 +675,25 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
         # the heartbeat-fence path above.
         _log.exception("worker.provision_claim_setup_failed", workspace_id=workspace_id)
     finally:
-        # A row that ended ``ready`` keeps (parks) the claim lease for READY
-        # dispatch to continue on; every other exit releases it.
-        await self._finish_provision_work_slot(workspace_id, work_slot)
-        # Release CAS on the stored epoch so a release issued after a newer
-        # claimant reclaimed the row cannot clobber it (D6). This finally runs
-        # while an external cancel may already be propagating; shield the release
-        # and the epoch pop so a second cancellation (worker shutdown) landing
-        # mid-write cannot skip them and leak the DB lease or the epoch entry.
-        await self._release_execution_claim_after_cancellation(workspace_id)
-        # Promptly release the terminal runtime when provisioning ended terminal
-        # (provision failure → ``failed``), reclaiming the compose stack + per-ws
-        # auth overlay immediately rather than on the ~1h interval (#583, #584). A
-        # no-op for non-terminal exits and idempotent against the periodic backstop.
-        await self._release_terminal_runtime_promptly(workspace_id)
+        try:
+            # A row that ended ``ready`` keeps (parks) the claim lease for READY
+            # dispatch to continue on; every other exit releases it. Shielded: a
+            # second cancellation is re-raised only once the scope is settled.
+            await self._finish_provision_work_slot(workspace_id, work_slot)
+        finally:
+            # Release CAS on the stored epoch so a release issued after a newer
+            # claimant reclaimed the row cannot clobber it (D6). This finally runs
+            # while an external cancel may already be propagating; shield the
+            # release and the epoch pop so a second cancellation (worker shutdown)
+            # landing mid-write cannot skip them and leak the DB lease or the
+            # epoch entry.
+            await self._release_execution_claim_after_cancellation(workspace_id)
+            # Promptly release the terminal runtime when provisioning ended
+            # terminal (provision failure → ``failed``), reclaiming the compose
+            # stack + per-ws auth overlay immediately rather than on the ~1h
+            # interval (#583, #584). A no-op for non-terminal exits and idempotent
+            # against the periodic backstop.
+            await self._release_terminal_runtime_promptly(workspace_id)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:

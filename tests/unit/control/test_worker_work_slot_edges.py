@@ -16,7 +16,7 @@ from awf.control.worker import WorkerConfig
 from awf.control.worker import work_slots as worker_work_slots
 from awf.control.worker.resource_broker import WorkSlotAcquireOutcome, acquire_work
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkerHeartbeatRepository
+from awf.db.repositories import WorkerHeartbeatRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 from tests.unit.control._work_slot_support import create_slot_workspace
@@ -105,6 +105,65 @@ async def test_provisioning_aborts_when_its_claim_lease_cannot_be_read(
     # The unrenewed claim lease is left for the reconciler, the row for stale recovery.
     assert [lease.workspace_id for lease in await held_leases(session_factory)] == [workspace_id]
     assert await status_of(session_factory, workspace_id) == WorkspaceStatus.provisioning.value
+
+
+class _BlockingProvisioner(RecordingProvisioner):
+    """Provisioning that runs until cancelled (worker shutdown)."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory, to_ready=False)
+        self.entered = asyncio.Event()
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        del workspace_id, execution_claim_epoch
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+async def test_second_cancel_on_the_provision_status_read_still_closes_and_releases(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The work-slot cleanup runs in the provisioning task's finally while a
+    # shutdown cancel propagates. A second cancel landing on its status read must
+    # not skip scope.close() (the lease would stay held with a leaked renewal) nor
+    # the shielded execution-claim release that follows it.
+    workspace_id = await create_requested(session_factory)
+    provisioner = _BlockingProvisioner(session_factory)
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), provisioner=provisioner)
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+    reading = asyncio.Event()
+    read_gate = asyncio.Event()
+    load_statuses = worker._load_workspace_statuses  # noqa: SLF001
+
+    async def _slow_status_read(workspace_ids: list[str]) -> dict[str, str]:
+        reading.set()
+        await read_gate.wait()
+        return await load_statuses(workspace_ids)
+
+    monkeypatch.setattr(worker, "_load_workspace_statuses", _slow_status_read)
+    task = asyncio.create_task(worker._safely_provision_claimed(workspace_id))  # noqa: SLF001
+    await asyncio.wait_for(provisioner.entered.wait(), timeout=_TIMEOUT)
+    scope = worker._work_slot_scopes[workspace_id]  # noqa: SLF001
+    assert scope.lease is not None
+
+    task.cancel()  # worker shutdown
+    await asyncio.wait_for(reading.wait(), timeout=_TIMEOUT)
+    task.cancel()  # a second cancellation lands on the status read
+    read_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=_TIMEOUT)
+
+    assert scope.lease is None
+    assert scope._renewal is None  # noqa: SLF001
+    assert workspace_id not in worker._work_slot_scopes  # noqa: SLF001
+    assert await held_leases(session_factory) == []
+    async with session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+    assert ws is not None and ws.execution_claimed_by is None
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
 
 
 async def test_ready_row_whose_lease_a_live_worker_holds_is_not_dispatched(
