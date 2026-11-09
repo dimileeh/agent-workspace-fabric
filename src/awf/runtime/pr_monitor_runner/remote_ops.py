@@ -1414,7 +1414,15 @@ async def _run_sync_base(
         and not push_result.terminal_monitor_failure
         and (push_result.details or {}).get("phase") == "pre_push_validation"
     ):
-        return parked_result
+        # Keep the merged-tree failure's command, reason code and validation run id
+        # alongside the park's budget evidence instead of dropping them.
+        return replace(
+            parked_result,
+            details={
+                **(parked_result.details or {}),
+                "sync_base_validation_failure": push_result.failure_evidence(),
+            },
+        )
     if merged_base_sha is not None:
         push_result = replace(push_result, merged_base_sha=merged_base_sha)
     if (

@@ -801,7 +801,12 @@ async def test_infra_park_disables_validation_fix_agents_after_a_clean_base_merg
 
     async def _validation_failed(**kwargs: object) -> _GitPushResult:
         validated_kwargs.append(kwargs)
-        return _fix_failed(reason_code=_PRE_PUSH_VALIDATION_FAILED)
+        return _fix_failed(
+            returncode=1,
+            command="pytest -q",
+            reason_code=_PRE_PUSH_VALIDATION_FAILED,
+            validation_run_id="vr_merged",
+        )
 
     sync_runner._validated_git_push_result = _validation_failed
     result = await remote_ops._run_sync_base(
@@ -822,6 +827,16 @@ async def test_infra_park_disables_validation_fix_agents_after_a_clean_base_merg
     assert result.parked_needs_human is True
     assert result.pushed is False
     assert state.last_push_sha is None
+    details = result.details or {}
+    # The park keeps its own budget evidence and also carries the merged-tree failure.
+    assert details["failing_command"] == "git diff --check"
+    assert details["validation_run_id"] == "vr_1"
+    merged_failure = details["sync_base_validation_failure"]
+    assert isinstance(merged_failure, dict)
+    assert merged_failure["reason_code"] == _PRE_PUSH_VALIDATION_FAILED
+    assert merged_failure["failing_command"] == "pytest -q"
+    assert merged_failure["failing_returncode"] == 1
+    assert merged_failure["validation_run_id"] == "vr_merged"
 
 
 @pytest.mark.unit
