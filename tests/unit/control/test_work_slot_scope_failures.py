@@ -295,6 +295,28 @@ async def test_failed_idle_release_is_retried_at_the_next_pure_wait(
     assert await _held_rows(session_factory, workspace_id) == []
 
 
+async def test_hold_after_a_failed_idle_release_resumes_renewal(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    scope = _scope(session_factory, workspace_id, lease_seconds=3)
+    async with scope:
+        async with scope.hold("agent"):
+            pass
+        with monkeypatch.context() as patch:
+            patch.setattr(work_slot_scope, "release_work", _db_down)
+            await scope.release_idle()
+
+        async with scope.hold("agent"):
+            (row,) = await _held_rows(session_factory, workspace_id)
+            entry_expiry = row.expires_at
+            await asyncio.sleep(1.3)
+            (row,) = await _held_rows(session_factory, workspace_id)
+            # The kept lease is renewed again, not left to expire mid-run.
+            assert row.expires_at > entry_expiry
+
+
 async def test_failed_close_release_hands_the_row_to_the_reconciler(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

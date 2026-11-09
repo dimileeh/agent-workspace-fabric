@@ -152,8 +152,12 @@ class InvocationWorkSlot:
     @contextlib.asynccontextmanager
     async def hold(self, phase: str) -> AsyncIterator[InvocationWorkSlot]:
         """Hold a work slot for one agent/validation run (nested holds are no-ops)."""
-        if self._depth == 0 and not await self._still_holding():
-            await self._acquire_until_granted(phase)
+        if self._depth == 0:
+            if await self._still_holding():
+                # A failed idle release keeps the lease but stopped renewing it.
+                self._start_renewal()
+            else:
+                await self._acquire_until_granted(phase)
         self._depth += 1
         try:
             yield self
