@@ -11,7 +11,7 @@ import json
 import re
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -316,7 +316,13 @@ def circuit_key(
 ) -> CircuitKey | None:
     selected = execution_from_policy(policy)
     if selected:
-        if selected.model is None:
+        # Executor defaults can replace a native model before its first launch.
+        # A historical placeholder cannot identify the circuit it will execute.
+        if selected.model is None or (
+            not selected.third_party
+            and not selected.model_explicit
+            and cast(Mapping[str, Any], policy).get("agent_execution_defaults_pending")
+        ):
             return None
         pair = (selected.provider, selected.model)
         return (*pair, selected.connection_scope(workspace_id)) if selected.third_party else pair

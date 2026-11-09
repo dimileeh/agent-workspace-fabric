@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from awf.common.agent_execution import circuit_key, resolve_execution
 from awf.control.worker.scheduler_methods import _filter_provider_recovery_suppressed_with_result
 from awf.db.models import Workspace
@@ -49,6 +51,63 @@ async def test_scheduler_capacity_share_connection_keys_and_one_batch(monkeypatc
     assert [c.workspace.id for c in eligible] == ["b"]
     assert batch.await_count == 2
     assert list(batch.call_args.kwargs["pairs"]) == scheduler_keys == keys
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude_code", "opencode"])
+async def test_pending_native_defaults_do_not_suppress_on_historical_model(monkeypatch, agent):
+    historical = resolve_execution(agent=agent)
+    explicit = resolve_execution(agent=agent, model=historical.model + "-pinned")
+    third_party = resolve_execution(
+        agent="codex", provider="ollama", model="coder", allow_unverified=True
+    )
+    workspaces = [
+        Workspace(
+            id=name,
+            agent=selected.agent,
+            task_policy={
+                "agent_execution": selected.model_dump(),
+                "agent_execution_defaults_pending": pending,
+            },
+        )
+        for name, selected, pending in (
+            ("pending-default", historical, True),
+            ("frozen-default", historical, False),
+            ("explicit-model", explicit, True),
+            ("third-party", third_party, True),
+        )
+    ]
+
+    async def open_breakers(*, pairs, now):
+        return {
+            key: SimpleNamespace(provider=key[0], model=key[1], cooldown_until=None)
+            for key in pairs
+        }
+
+    batch = AsyncMock(side_effect=open_breakers)
+    repository = Mock(return_value=SimpleNamespace(open_breakers_for_pairs=batch))
+    monkeypatch.setattr(
+        "awf.control.worker.scheduler_methods.ProviderModelCircuitBreakerRepository", repository
+    )
+    monkeypatch.setattr(
+        "awf.service.metrics_capacity.ProviderModelCircuitBreakerRepository", repository
+    )
+    result = await _filter_provider_recovery_suppressed_with_result(
+        None, Mock(), workspaces, decision_candidate_limit=0
+    )
+    assert result.workspace_ids == ["pending-default"]
+    expected_keys = [
+        circuit_key(ws.agent, ws.task_policy, workspace_id=ws.id) for ws in workspaces[1:]
+    ]
+    assert list(batch.call_args.kwargs["pairs"]) == expected_keys
+    eligible = await _provider_recovery_eligible_capacity_queue_candidates(
+        Mock(),
+        [SimpleNamespace(workspace=ws) for ws in workspaces],
+        scoring_at=datetime.now(UTC),
+    )
+    assert [candidate.workspace.id for candidate in eligible] == ["pending-default"]
+    assert batch.await_count == 2
+    assert list(batch.call_args.kwargs["pairs"]) == expected_keys
+    assert workspaces[0].task_policy["agent_execution"] == historical.model_dump()
 
 
 def test_claim_rejects_workers_missing_execution_contract_before_mutation():
