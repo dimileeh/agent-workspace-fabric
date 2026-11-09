@@ -619,6 +619,17 @@ async def acquire_work(
             return WorkSlotAcquireResult(
                 outcome=WorkSlotAcquireOutcome.refused, lease=None, in_use=in_use, limit=limit
             )
+        # A lease-less READY row may sit at steady (its parked lease was released):
+        # the steady->peak flip is gated exactly like a reacquire.
+        blockers = await _reacquire_peak_blockers(session, workspace_id=workspace_id, config=config)
+        if blockers:
+            return WorkSlotAcquireResult(
+                outcome=WorkSlotAcquireOutcome.refused,
+                lease=None,
+                in_use=in_use,
+                limit=limit,
+                blockers=tuple(blockers),
+            )
         row = await repo.add(
             WorkSlotLease(
                 invocation_id=invocation_id,

@@ -674,6 +674,43 @@ async def test_reacquire_peak_flip_gates_only_when_limits_configured(
     assert await _reservation_phase(session_factory, idle) == "peak"
 
 
+async def test_new_admission_of_steady_reservation_checks_peak_capacity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression (PR #1194 review): a lease-less READY workspace whose parked lease
+    # was released sits at steady; its fresh ``new`` admission must not flip it to
+    # peak past the configured limit (4 GB + 4 GB peak under a 6 GB budget).
+    configured = WorkerConfig(max_concurrent_executions=5, local_capacity_memory_gb=6.0)
+    busy = await _workspace(session_factory, status=WorkspaceStatus.running, steady=1.0, peak=4.0)
+    await _acquire(session_factory, busy, config=configured, admission="new")
+    ready = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        steady=1.0,
+        peak=4.0,
+        reservation_phase=ResourceReservationPhase.steady.value,
+    )
+
+    invocation_id, refused, lease = await _acquire(
+        session_factory, ready, config=configured, admission="new"
+    )
+
+    assert refused is WorkSlotAcquireOutcome.refused
+    assert lease is None
+    assert await _lease_row(session_factory, invocation_id) is None
+    assert await _reservation_phase(session_factory, ready) == "steady"
+
+    # Without limits the same admission is granted and flips to peak.
+    _, unset_outcome, _ = await _acquire(
+        session_factory,
+        ready,
+        config=WorkerConfig(max_concurrent_executions=5),
+        admission="new",
+    )
+    assert unset_outcome is WorkSlotAcquireOutcome.granted
+    assert await _reservation_phase(session_factory, ready) == "peak"
+
+
 async def test_unsatisfiable_waiter_leaves_queue_but_stays_visible(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
