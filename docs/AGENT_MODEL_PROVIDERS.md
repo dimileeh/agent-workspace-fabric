@@ -72,21 +72,38 @@ runtime configuration are rejected. Snapshots, argv and hosted payloads contain
 references, never credential values. Secret rotation behind the same reference
 does not alter connection identity.
 
-Local stacks suppress native auth mounts and competing model-service env,
-including Claude backend toggles and role-model variables. Ollama stacks omit
+Auto-profile requests defer endpoint, credential-reference and network-service
+snapshots until provisioning resolves the repository profile. The primary and
+all declared fallbacks bind together and are persisted before stack launch.
+Native selections carry a pending-default marker until the executor freezes its
+configured model/effort defaults; explicit request fields win, and restarts keep
+the authoritative values. Host-local endpoint normalization reuses the existing
+IPv4 loopback, expanded IPv6, mapped IPv4 and unspecified-address policy.
+
+Third-party stacks suppress native auth mounts and competing model-service env,
+including Claude backend toggles and role-model variables. Native selections
+retain their own backend configuration and auth while omitting fallback-provider
+material. Ollama stacks omit
 OpenRouter credentials from ambient auth, profile env and declared leases before
 rendering the container environment. OpenRouter materialization and execution
 passthrough use the frozen credential reference; separate tool auth is retained.
 The declared auth resolver copies only allowed instruction/tool configuration
 into a workspace owned, read-only source file under the existing `auth/<workspace>` cleanup
 root. Source auth/config is unchanged. A standalone stdlib runner in the pinned
-agent image creates a distinct temporary config for each invocation, injects
-only the selected model credential, and removes that config after completion,
-failure or TERM cancellation. Codex uses a custom Responses provider and an
+agent image creates a distinct config for each invocation under the controlled
+workspace-container path `/home/agent/.awf/provider-config`, outside OS temporary
+storage. It injects only the selected model credential and removes the config
+after completion, failure or TERM cancellation. Codex uses a custom Responses provider and an
 untrusted project-config layer; Claude disables inherited setting sources.
 Safe instructions and allowed tool/permission configuration remain available.
 The runner scrubs the selected credential before forwarding stdout/stderr.
 Hard-killed containers remain subject to AWF's ordinary container cleanup.
+
+Monitor resume resolves the promoted selection's actual auth mounts and provider
+environment before recreating the agent. This covers native/third-party changes
+and Ollama/OpenRouter changes across both supported agents. Fallback credentials
+are not preloaded. Companion services, database values and Compose interpolation
+remain intact; materialization failures stop the resume with a durable reason.
 
 The runtime performs bounded (10-second), redirect-disabled checks of the
 selected endpoint/model from its own network. Readiness is not coding
@@ -181,6 +198,15 @@ Postgres migration/concurrency, persisted recovery, registry defaults and
 scheduler/capacity parity. They are not live coding-compatibility passes. AWF
 and GitHub own the full suite and authoritative **99%** coverage gate; this
 workspace does not run or lower that gate.
+
+The follow-up regressions cover repository-profile binding before launch,
+configured native defaults through create/execute/restart, full loopback
+normalization, provider homes outside `/tmp`, actual Compose auth/env promotion,
+and fail-closed local/hosted monitor resume. Existing selected OpenRouter-key
+isolation and approved planning-retry model/connection regressions are retained.
+These deterministic checks do not supply a live provider compatibility pass;
+OpenRouter live evidence and the release gates above remain pending, and
+third-party admission stays disabled.
 
 Provider configuration references: [Codex advanced configuration](https://developers.openai.com/codex/config-advanced/),
 [Ollama Claude integration](https://docs.ollama.com/integrations/claude-code),
