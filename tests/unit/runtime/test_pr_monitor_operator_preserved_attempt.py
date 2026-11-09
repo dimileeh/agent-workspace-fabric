@@ -901,6 +901,8 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         f"Do not yet reject the preserved attempt d5889e51 on {_THREAD}; the thread is obsolete.",
         "Do not actually reject the preserved attempt d5889e51; resolve.",
         "You shouldn't ever reject the preserved commit d5889e51, resolve it.",
+        "Do not immediately reject the preserved attempt d5889e51; resolve.",
+        "Please don't, for now, reject the preserved commit d5889e51; it is obsolete.",
         "Reject the attempt d5889e51 and resolve.",
         f"Reject the preserved attempt d5889e51 on {_THREAD}, but do not resolve the thread; "
         "investigate the actual bug.",
@@ -923,6 +925,8 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         "do_not_yet",
         "do_not_actually",
         "shouldnt_ever",
+        "do_not_unlisted_modifier",
+        "dont_comma_aside",
         "not_preserved",
         "resolve_negated",
         "obsolete_negated",

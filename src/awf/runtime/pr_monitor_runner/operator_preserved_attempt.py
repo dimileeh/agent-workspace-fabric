@@ -74,14 +74,15 @@ _AUDIT_ACTION = "retire_preserved_attempt"
 _DISPOSITION_SOURCE = "operator_disposition"
 
 # "reject ... preserved [correction] attempt|commit" inside one clause (no ``.``,
-# ``;``, ``:`` or newline in between). A negation before "reject", even across
-# modifiers ("do not yet reject", "shouldn't ever reject"), captures ``neg`` so it
-# is never read as a rejection.
+# ``;``, ``:`` or newline in between).
 _REJECT_RE = re.compile(
-    r"(?P<neg>\b(?:not|never|\w+n['’]t)\s+(?:(?:yet|ever|actually|really|just)\s+)*)?"
     r"\breject(?:s|ed|ing)?\b[^.;:\n]*?\bpreserved\s+(?:correction\s+)?(?:attempt|commit)\b",
     re.IGNORECASE,
 )
+# Any negation earlier in the reject's clause voids it, whatever modifiers sit in
+# between ("do not yet reject", "don't, for now, reject"): fail closed rather than
+# enumerate the words an operator might insert.
+_REJECT_NEGATED_RE = re.compile(r"\b(?:not|never|no|\w+n['’]t)\b", re.IGNORECASE)
 _RESOLVE_RE = re.compile(r"\b(?:resolv\w*|obsolete)\b", re.IGNORECASE)
 # A resolve word only counts as the operator's ruling when it is affirmative: a
 # negation right before it ("do not resolve", "not obsolete") or a condition in
@@ -170,7 +171,10 @@ def preserved_attempt_disposition(text: str | None) -> PreservedAttemptDispositi
     """
     if not text:
         return None
-    rejects = any(match.group("neg") is None for match in _REJECT_RE.finditer(text))
+    rejects = any(
+        not _REJECT_NEGATED_RE.search(text[_clause_start(text, match.start()) : match.start()])
+        for match in _REJECT_RE.finditer(text)
+    )
     if not rejects or not _resolves_affirmatively(text):
         return None
     shas = tuple(dict.fromkeys(token.lower() for token in _SHA_TOKEN_RE.findall(text)))
@@ -180,11 +184,16 @@ def preserved_attempt_disposition(text: str | None) -> PreservedAttemptDispositi
     )
 
 
+def _clause_start(text: str, index: int) -> int:
+    """Index just past the last clause break before ``index`` (0 when there is none)."""
+    return max(text.rfind(char, 0, index) for char in _CLAUSE_BREAK) + 1
+
+
 def _resolves_affirmatively(text: str) -> bool:
     """True when the text asks to resolve and no resolve word is negated or conditional."""
     matches = list(_RESOLVE_RE.finditer(text))
     for match in matches:
-        start = max(text.rfind(char, 0, match.start()) for char in _CLAUSE_BREAK) + 1
+        start = _clause_start(text, match.start())
         ends = [i for i in (text.find(char, match.end()) for char in _CLAUSE_BREAK) if i >= 0]
         clause = text[start : min(ends, default=len(text))]
         if _RESOLVE_NEGATED_RE.search(text[start : match.start()]) or _CONDITION_RE.search(clause):
