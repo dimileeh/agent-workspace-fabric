@@ -157,3 +157,88 @@ async def test_concurrent_default_freeze_reuses_winner_and_preserves_expanded_fa
         contender.task_policy["provider_recovery"]["fallbacks"]
         == policy["provider_recovery"]["fallbacks"]
     )
+
+
+@pytest.mark.parametrize(
+    ("explicit", "configured_model", "expected_model", "expected_provider"),
+    [
+        ({}, "openai/gpt-5", "openai/gpt-5", "openai"),
+        ({"effort": "high"}, "openrouter/coder", "openrouter/coder", "openrouter"),
+        ({"model": "anthropic/coder"}, "openai/gpt-5", "anthropic/coder", "anthropic"),
+        ({"provider": "ollama"}, "ollama/coder:cloud", "ollama/coder:cloud", "ollama"),
+        (
+            {"provider": "ollama", "model": "ollama/explicit:cloud"},
+            "openai/gpt-5",
+            "ollama/explicit:cloud",
+            "ollama",
+        ),
+    ],
+)
+async def test_opencode_default_freeze_keeps_provider_model_and_explicit_fields_coherent(
+    factory, tmp_path, explicit, configured_model, expected_model, expected_provider
+):
+    from awf.control.executor.state_ops import _freeze_execution_defaults
+
+    policy = freeze_execution_policy(
+        request(agent="opencode", **explicit), profile={}, enabled=False, environ={}
+    )
+    async with factory() as session:
+        row = await WorkspaceRepository(session).create(
+            repo_url="https://example.com/repo",
+            branch_base="development",
+            task_title="OpenCode defaults",
+            task_prompt="fix",
+            agent="opencode",
+            test_commands=[],
+            task_policy=policy,
+        )
+        await session.commit()
+    executor = _make_executor(FakeCommandRunner(), factory, tmp_path)
+    executor._config = replace(
+        executor._config,
+        agent_defaults={AgentRuntime.opencode: AgentDefaults(model=configured_model, effort="low")},
+    )
+    assert await _freeze_execution_defaults(executor, row)
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(row.id)
+        selected = execution_from_policy(persisted.task_policy)
+    assert (selected.model, selected.provider) == (expected_model, expected_provider)
+    assert selected.effort == explicit.get("effort", "low")
+    assert selected.model_explicit == ("model" in explicit)
+    assert selected.effort_explicit == ("effort" in explicit)
+    executor._config = replace(
+        executor._config, default_models={AgentRuntime.opencode: "changed/model"}
+    )
+    assert await _freeze_execution_defaults(executor, persisted)
+    assert execution_from_policy(persisted.task_policy) == selected
+
+
+async def test_opencode_explicit_provider_cannot_be_overridden_by_configured_model(
+    factory, tmp_path
+):
+    from awf.control.executor.state_ops import _freeze_execution_defaults
+
+    policy = freeze_execution_policy(
+        request(agent="opencode", provider="ollama"), profile={}, enabled=False, environ={}
+    )
+    async with factory() as session:
+        row = await WorkspaceRepository(session).create(
+            repo_url="https://example.com/repo",
+            branch_base="development",
+            task_title="OpenCode provider constraint",
+            task_prompt="fix",
+            agent="opencode",
+            test_commands=[],
+            task_policy=policy,
+        )
+        await session.commit()
+    executor = _make_executor(FakeCommandRunner(), factory, tmp_path)
+    executor._config = replace(
+        executor._config, default_models={AgentRuntime.opencode: "openai/gpt-5"}
+    )
+    with pytest.raises(ValueError, match="AGENT_PROVIDER_UNSUPPORTED"):
+        await _freeze_execution_defaults(executor, row)
+    async with factory() as session:
+        persisted = await WorkspaceRepository(session).get(row.id)
+        assert persisted.task_policy == policy
+    assert row.task_policy == policy

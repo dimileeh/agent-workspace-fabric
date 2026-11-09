@@ -130,6 +130,16 @@ async def _freeze_execution_defaults(self: Any, ws: Workspace) -> bool:
                         "effort": selected.effort if selected.effort_explicit else defaults.effort,
                     }
                 )
+                if selected.agent == "opencode":
+                    from awf.adapters.opencode import opencode_provider_for_model
+
+                    provider = opencode_provider_for_model(selected.model)
+                    explicit_provider = target.get(
+                        "agent_provider" if target is policy else "provider"
+                    )
+                    if explicit_provider is not None and explicit_provider != provider:
+                        raise ValueError("AGENT_PROVIDER_UNSUPPORTED")
+                    selected = selected.model_copy(update={"provider": provider})
                 target["agent_execution"] = selected.model_dump(mode="json")
             persisted.task_policy = policy
             await WorkspaceRepository(session).advance_workspace_version(persisted)
