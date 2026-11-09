@@ -419,6 +419,75 @@ async def test_reconciler_adopts_or_releases_dead_holders_and_keeps_unknown(
     assert await _lease(session_factory, expired_ticket) is None
 
 
+async def test_reconciler_withdraws_a_crashed_peers_queued_tickets_at_once(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A peer that crashed while queued leaves unexpired tickets behind. Until
+    # expiry (~lease seconds) the oldest would head the FIFO and zero new-work
+    # capacity, so the reconciler withdraws any ticket whose holder is not fresh.
+    probe = FakeProbe()
+    worker = make_worker(
+        session_factory,
+        executor=SlotAwareExecutor(),
+        max_concurrent_executions=2,
+        work_slot_probe=probe,
+    )
+    dead_ws = await create_slot_workspace(session_factory, status=WorkspaceStatus.monitoring_pr)
+    unsatisfiable_ws = await create_slot_workspace(
+        session_factory, status=WorkspaceStatus.monitoring_pr
+    )
+    dead_ticket = await add_lease(
+        session_factory, dead_ws, holder=_DEAD, phase=WorkSlotLeasePhase.waiting
+    )
+    dead_unsatisfiable = await add_lease(
+        session_factory,
+        unsatisfiable_ws,
+        holder=_DEAD,
+        phase=WorkSlotLeasePhase.unsatisfiable,
+        ticket_offset=1,
+    )
+    assert await worker._new_work_slot_capacity(reserve_leaseless_ready=False) == 0  # noqa: SLF001
+
+    _reconcile_now(worker)
+    with structlog.testing.capture_logs() as logs:
+        await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+
+    assert await _lease(session_factory, dead_ticket) is None
+    assert await _lease(session_factory, dead_unsatisfiable) is None
+    assert probe.calls == []
+    assert await worker._new_work_slot_capacity(reserve_leaseless_ready=False) == 2  # noqa: SLF001
+    withdrawn = [
+        entry for entry in logs if entry.get("reason_code") == WORK_SLOT_RELEASED_BY_RECONCILER
+    ]
+    assert {entry["invocation_id"] for entry in withdrawn} == {dead_ticket, dead_unsatisfiable}
+
+
+async def test_reconciler_keeps_queued_tickets_of_live_holders(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    probe = FakeProbe()
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), work_slot_probe=probe)
+    fresh_ws = await create_slot_workspace(session_factory, status=WorkspaceStatus.monitoring_pr)
+    own_ws = await create_slot_workspace(session_factory, status=WorkspaceStatus.monitoring_pr)
+    fresh_ticket = await add_lease(
+        session_factory, fresh_ws, holder=_FRESH, phase=WorkSlotLeasePhase.waiting
+    )
+    own_ticket = await add_lease(
+        session_factory,
+        own_ws,
+        holder=worker._worker_id,  # noqa: SLF001
+        phase=WorkSlotLeasePhase.waiting,
+    )
+    await _record_fresh_heartbeat(session_factory, _FRESH)
+
+    _reconcile_now(worker)
+    await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+
+    assert await _lease(session_factory, fresh_ticket) is not None
+    assert await _lease(session_factory, own_ticket) is not None
+    assert probe.calls == []
+
+
 async def test_reconciler_skips_leases_tracked_by_a_running_scope_and_honours_cadence(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

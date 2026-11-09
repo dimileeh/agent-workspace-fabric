@@ -442,8 +442,9 @@ async def _maybe_reconcile_work_slot_leases(self: Any) -> None:
     Probes this worker's adopted, cleanup-unproven and expired untracked leases
     plus every lease whose holder stopped heartbeating: ``absent`` releases (and
     wakes waiters), ``present`` renews ours or adopts theirs, ``unknown`` and
-    ``unavailable`` keep (and renew ours). Expired waiting/unsatisfiable tickets
-    are deleted.
+    ``unavailable`` keep (and renew ours). Queued tickets whose holder stopped
+    heartbeating are withdrawn at once; expired waiting/unsatisfiable tickets are
+    deleted.
     """
     if self._executor is None or not self._work_slot_startup_checked:
         return
@@ -466,6 +467,12 @@ async def _maybe_reconcile_work_slot_leases(self: Any) -> None:
     for item in leases:
         lease = item.lease
         if lease.acquired_at is None:
+            if lease.holder_worker_id != self._worker_id and lease.holder_worker_id not in fresh:
+                # A crashed holder's ticket would head the FIFO and zero new-work
+                # capacity until it expires; nobody re-checks it, so withdraw it.
+                released |= await self._apply_work_slot_reconcile_action(
+                    item, "release", source="reconciler"
+                )
             continue
         own = lease.holder_worker_id == self._worker_id
         if own:
