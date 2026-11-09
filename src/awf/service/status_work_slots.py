@@ -1,9 +1,10 @@
 """``awf service status`` work-slot check (slot-release).
 
 Reports slots in use, queued waiters and unsatisfiable waiters for the local
-node. Informational only: the check is always ``ok`` so doctor, bootstrap and
-readiness never fail on queued work, and a lookup failure degrades to an
-``unavailable`` status instead of failing the service.
+node, with the holder and waiter workspace IDs. Informational only: the check
+is always ``ok`` so doctor, bootstrap and readiness never fail on queued work,
+and a lookup failure degrades to an ``unavailable`` status instead of failing
+the service.
 """
 
 from __future__ import annotations
@@ -60,6 +61,9 @@ async def collect_work_slot_status(
         "adopted": summary.adopted,
         "cleanup_unproven": summary.cleanup_unproven,
         "oldest_wait_seconds": summary.oldest_wait_seconds,
+        "holder_workspace_ids": list(summary.holder_workspace_ids),
+        "waiting_workspace_ids": list(summary.waiting_workspace_ids),
+        "unsatisfiable_workspace_ids": list(summary.unsatisfiable_workspace_ids),
     }
 
 

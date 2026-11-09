@@ -611,6 +611,9 @@ async def _work_slot_summary(
             if snapshot.waiting or snapshot.unsatisfiable
             else None
         ),
+        holder_workspace_ids=tuple(lease.workspace_id for lease in snapshot.holders()),
+        waiting_workspace_ids=tuple(snapshot.waiting_workspace_ids()),
+        unsatisfiable_workspace_ids=tuple(snapshot.unsatisfiable_workspace_ids()),
     )
 
 

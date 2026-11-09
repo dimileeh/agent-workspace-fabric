@@ -178,7 +178,9 @@ class WorkSlotSummary:
     right now; waiting monitors and paused workspaces hold none. ``in_use``
     counts held and adopted leases (cleanup-unproven included); ``waiting`` and
     ``unsatisfiable`` are queued invocations; ``reason_code`` is
-    ``MONITOR_WAITING_FOR_WORK_SLOT`` while anything is queued.
+    ``MONITOR_WAITING_FOR_WORK_SLOT`` while anything is queued. The
+    ``*_workspace_ids`` name the holders and the FIFO-ordered waiters so an
+    operator can act on a sustained wait.
     """
 
     limit: int
@@ -190,6 +192,9 @@ class WorkSlotSummary:
     cleanup_unproven: int
     oldest_wait_seconds: float | None
     reason_code: str | None
+    holder_workspace_ids: tuple[str, ...] = ()
+    waiting_workspace_ids: tuple[str, ...] = ()
+    unsatisfiable_workspace_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

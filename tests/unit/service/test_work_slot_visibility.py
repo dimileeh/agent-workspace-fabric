@@ -86,13 +86,13 @@ async def _seed_leases(factory: async_sessionmaker[AsyncSession]) -> dict[str, s
         expires_in=-1,
         ticket_offset=-120,
     )
-    return {"waiter": waiter}
+    return {"running": running, "adopted": adopted, "waiter": waiter, "huge": huge}
 
 
 async def test_work_slot_summary_counts_every_lease_state(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _seed_leases(session_factory)
+    seeded = await _seed_leases(session_factory)
     now = datetime.now(UTC)
 
     async with session_factory() as session:
@@ -108,6 +108,10 @@ async def test_work_slot_summary_counts_every_lease_state(
     assert summary.oldest_wait_seconds is not None
     assert 25 <= summary.oldest_wait_seconds <= 120
     assert summary.reason_code == MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE
+    # Operators need the holders and waiters by name to act on a sustained wait.
+    assert set(summary.holder_workspace_ids) == {seeded["running"], seeded["adopted"]}
+    assert summary.waiting_workspace_ids == (seeded["waiter"],)
+    assert summary.unsatisfiable_workspace_ids == (seeded["huge"],)
 
     async with session_factory() as session:
         empty = await _work_slot_summary(session, node_id="other-node", limit=3, now=now)
@@ -166,6 +170,9 @@ async def test_status_check_reports_waiters_and_stays_ok(tmp_path: Path) -> None
         cleanup_unproven=0,
         oldest_wait_seconds=42.0,
         reason_code=MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE,
+        holder_workspace_ids=("ws_holder_a", "ws_holder_b"),
+        waiting_workspace_ids=("ws_waiter_a", "ws_waiter_b", "ws_waiter_c"),
+        unsatisfiable_workspace_ids=("ws_huge",),
     )
 
     async def _lookup(_settings: ServiceSettings) -> WorkSlotSummary:
@@ -181,6 +188,9 @@ async def test_status_check_reports_waiters_and_stays_ok(tmp_path: Path) -> None
     assert check["detail"] == "2/2 work slots in use; 3 waiting; 1 unsatisfiable"
     assert (check["in_use"], check["waiting"], check["unsatisfiable"]) == (2, 3, 1)
     assert check["oldest_wait_seconds"] == 42.0
+    assert check["holder_workspace_ids"] == ["ws_holder_a", "ws_holder_b"]
+    assert check["waiting_workspace_ids"] == ["ws_waiter_a", "ws_waiter_b", "ws_waiter_c"]
+    assert check["unsatisfiable_workspace_ids"] == ["ws_huge"]
 
     async def _idle(_settings: ServiceSettings) -> WorkSlotSummary:
         return replace(summary, in_use=0, waiting=0, unsatisfiable=0, reason_code=None)
@@ -233,3 +243,5 @@ async def test_default_status_lookup_reads_the_local_node_leases(tmp_path: Path)
     assert (summary.limit, summary.in_use, summary.available) == (2, 1, 1)
     assert summary.reason_code is None
     assert summary.oldest_wait_seconds is None
+    assert summary.holder_workspace_ids == (busy,)
+    assert summary.waiting_workspace_ids == ()
