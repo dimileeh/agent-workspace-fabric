@@ -74,10 +74,11 @@ _AUDIT_ACTION = "retire_preserved_attempt"
 _DISPOSITION_SOURCE = "operator_disposition"
 
 # "reject ... preserved [correction] attempt|commit" inside one clause (no ``.``,
-# ``;``, ``:`` or newline in between). A negation right before "reject" captures
-# ``neg`` so "do not reject the preserved attempt" is never read as a rejection.
+# ``;``, ``:`` or newline in between). A negation before "reject", even across
+# modifiers ("do not yet reject", "shouldn't ever reject"), captures ``neg`` so it
+# is never read as a rejection.
 _REJECT_RE = re.compile(
-    r"(?P<neg>\b(?:do\s+not|don['’]t|never|not)\s+)?"
+    r"(?P<neg>\b(?:not|never|\w+n['’]t)\s+(?:(?:yet|ever|actually|really|just)\s+)*)?"
     r"\breject(?:s|ed|ing)?\b[^.;:\n]*?\bpreserved\s+(?:correction\s+)?(?:attempt|commit)\b",
     re.IGNORECASE,
 )
