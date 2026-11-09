@@ -52,6 +52,9 @@ from awf.control.worker.constants import (
 )
 from awf.control.worker.dispatch_methods import _monitor_recovery_handoff_failure_error
 from awf.control.worker.helpers import (
+    _apply_execution_claim as _apply_execution_claim,
+)
+from awf.control.worker.helpers import (
     _earliest_future_datetime,
     _latest_runtime_stranding_reason,
     _monitor_recovery_claim_cleanup_payload,
@@ -102,35 +105,6 @@ from awf.db.repositories._scheduler import _scheduler_node_scope_condition
 from awf.db.resilience import run_db_operation_with_retry
 from awf.service.provider_recovery import rearm_recovering_cooldown_task_policy
 from awf.service.scheduler import SchedulerOrderCursor
-
-
-def _apply_execution_claim(self: Any, ws: Workspace, *, owner_id: str) -> None:
-    """Stamp ``ws`` with this worker's execution claim and bump the fencing epoch.
-
-    Shared by both requested-claim blocks (D8). ``execution_claim_epoch`` is
-    incremented with a SQL-side expression so monotonicity holds regardless of
-    any in-memory staleness: the row is freshly row-locked / atomically
-    transitioned by the caller, so a later claimant always lands a strictly
-    higher epoch and a stale worker is fenced on its next CAS write. The
-    concrete value is read back later via ``_read_execution_claim_epoch`` (D2),
-    so the SQL-expression placeholder is never read inside the claim txn.
-    """
-    from awf.common.agent_execution import EXECUTION_CONTRACT_VERSION, execution_from_policy
-
-    selected = execution_from_policy(ws.task_policy)
-    if (
-        selected is not None
-        and selected.third_party
-        and getattr(self, "execution_contract_version", 0) != EXECUTION_CONTRACT_VERSION
-    ):
-        raise ValueError("EXECUTION_WORKER_CONTRACT_UNSUPPORTED")
-    ws.execution_claimed_by = owner_id
-    ws.execution_claim_expires_at = self._execution_claim_expires_at()
-    ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
-    if self._config.node_id is not None:
-        # Recovery for named workers is node-scoped, so ownership must be
-        # persisted with the claim before a provisioner crash can strand it.
-        ws.node_id = self._config.node_id
 
 
 def _empty_requested_capacity_claim_result() -> _RequestedCapacityClaimResult:

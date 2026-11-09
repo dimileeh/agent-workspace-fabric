@@ -40,6 +40,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
+from awf.db.model_summaries import _queue_decision_summary, _resource_reservation_summary
 from awf.db.work_slot_models import WorkSlotLease as WorkSlotLease
 from awf.hosted_node import lifecycle_models as lifecycle_models  # noqa: F401
 from awf.hosted_node import models as hosted_models  # noqa: F401
@@ -1476,35 +1477,3 @@ class ServiceGCRequest(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
     )
-
-
-def _queue_decision_summary(decision: QueueDecision) -> dict[str, Any]:
-    return {
-        "id": decision.id,
-        "decision": decision.decision,
-        "reason_code": decision.reason_code,
-        "class_priority": decision.class_priority,
-        "computed_priority": decision.computed_priority,
-        "age_boost": decision.age_boost,
-        "retry_bonus": decision.retry_bonus,
-        "resource_summary": decision.resource_summary,
-        "overlap_risk_summary": decision.overlap_risk_summary,
-        "score_summary": decision.score_summary,
-        "decided_at": decision.decided_at,
-    }
-
-
-def _resource_reservation_summary(reservation: ResourceReservation) -> dict[str, Any]:
-    return {
-        "id": reservation.id,
-        "node_id": reservation.node_id,
-        "steady_cpu": reservation.steady_cpu,
-        "steady_memory_gb": reservation.steady_memory_gb,
-        "peak_cpu": reservation.peak_cpu,
-        "peak_memory_gb": reservation.peak_memory_gb,
-        "disk_mb": reservation.disk_mb,
-        "dind_slots": reservation.dind_slots,
-        "phase": reservation.phase,
-        "reserved_at": reservation.reserved_at,
-        "released_at": reservation.released_at,
-    }

@@ -414,7 +414,7 @@ class TestResumeHandoffHostedCheckoutRestore:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from awf.node import provisioner as provisioner_module
+        from awf.node import provisioner_short_txn_helpers as provisioner_module
         from awf.node.git_manager import (
             GitManager,
             WorktreeLayout,
