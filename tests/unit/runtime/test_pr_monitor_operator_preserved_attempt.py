@@ -381,6 +381,33 @@ async def test_disposition_retires_a_previously_posted_reply_before_recording_it
     assert f"__awf_disposition_retired__:{_THREAD}:" in state.threads_addressed_ids
 
 
+@pytest.mark.unit
+async def test_disposition_leaves_other_parked_feedback_named_in_the_guide_untouched(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """Only the retired thread is finalized; the agent never ran on the rest."""
+    runner, workspace_id, _gh, cycle = await _runner(factory, tmp_path)
+    state = _parked_state()
+    comment_id = "issue:123456"
+    comment_reason = "needs a product decision"
+    state.mark_addressed(comment_id, "needs_human")
+    state.mark_addressed(f"__review_comment_body_hash__:{comment_id}", "hash-1")
+    state.mark_addressed(f"__needs_human_reason__:{comment_id}", comment_reason)
+    _arm(
+        state,
+        f"Reject the preserved attempt d5889e51 on {_THREAD} and resolve it. "
+        f"Investigate {comment_id} separately.",
+    )
+
+    await _guide_poll(runner, workspace_id, state, _status(_thread()))
+
+    assert cycle.calls == []
+    assert state.threads_addressed_ids[_THREAD] == "false_positive"
+    assert state.threads_addressed_ids[comment_id] == "needs_human"
+    assert state.threads_addressed_ids[f"__needs_human_reason__:{comment_id}"] == comment_reason
+    assert state.pending_operator_hint is None
+
+
 # --- T2: no disposition, behavior unchanged --------------------------------------
 
 
