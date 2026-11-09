@@ -36,6 +36,10 @@ class _RecordingWorker:
     async def wait_for_execution_tasks(self) -> None:
         self._calls.append("wait_for_execution_tasks")
 
+    async def run_once_and_drain(self) -> None:
+        await self.run_once()
+        await self.wait_for_execution_tasks()
+
     async def run_forever(self) -> None:
         self._calls.append("run_forever")
 

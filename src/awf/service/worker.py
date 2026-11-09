@@ -1113,8 +1113,7 @@ async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
     try:
         await verify_database_schema_not_ahead(runtime.engine)
         if once:
-            await runtime.worker.run_once()
-            await runtime.worker.wait_for_execution_tasks()
+            await runtime.worker.run_once_and_drain()
             return
         await runtime.worker.run_forever()
     finally:

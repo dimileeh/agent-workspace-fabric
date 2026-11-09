@@ -540,11 +540,22 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._ensure_work_slot_startup_check()
         await self._maybe_reconcile_work_slot_leases()
 
+    async def run_once_and_drain(self: Any) -> None:
+        """``once=True``: one ``run_once`` pass, then drain its execution tasks.
+
+        The heartbeat loop runs throughout, as under ``run_forever``: ``run_once``
+        awaits provisioning inline, and a stale heartbeat would let a peer's
+        reconciler free this worker's live provisioning lease (slot-release).
+        """
+        heartbeat_task = self._start_heartbeat_task()
+        try:
+            await self.run_once()
+            await self.wait_for_execution_tasks()
+        finally:
+            await self._stop_heartbeat_task(heartbeat_task)
+
     async def run_forever(self: Any) -> None:
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(),
-            name=f"awf-worker-heartbeat-{self._worker_id}",
-        )
+        heartbeat_task = self._start_heartbeat_task()
         try:
             while not self._stopped.is_set():
                 try:
@@ -561,20 +572,29 @@ class ControlWorker(WorkerDelegatesMixin):
                             timeout=self._config.poll_interval_seconds,
                         )
         finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                _log.warning(
-                    "worker.heartbeat_task_failed",
-                    reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
-                    worker_id=self._worker_id,
-                    node_id=effective_worker_config_node_id(self._config),
-                    error_type=type(exc).__name__,
-                    error=redact_audit_text(str(exc))[:240],
-                )
+            await self._stop_heartbeat_task(heartbeat_task)
+
+    def _start_heartbeat_task(self: Any) -> asyncio.Task[None]:
+        return asyncio.create_task(
+            self._heartbeat_loop(),
+            name=f"awf-worker-heartbeat-{self._worker_id}",
+        )
+
+    async def _stop_heartbeat_task(self: Any, heartbeat_task: asyncio.Task[None]) -> None:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            _log.warning(
+                "worker.heartbeat_task_failed",
+                reason_code=WORKER_HEARTBEAT_WRITE_FAILED_REASON,
+                worker_id=self._worker_id,
+                node_id=effective_worker_config_node_id(self._config),
+                error_type=type(exc).__name__,
+                error=redact_audit_text(str(exc))[:240],
+            )
 
     async def _heartbeat_loop(self: Any) -> None:
         interval = worker_heartbeat_write_interval_seconds(self._config.poll_interval_seconds)

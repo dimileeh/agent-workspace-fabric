@@ -561,6 +561,10 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         async def wait_for_execution_tasks(self) -> None:
             created["wait_for_execution_tasks"] = True
 
+        async def run_once_and_drain(self) -> None:
+            await self.run_once()
+            await self.wait_for_execution_tasks()
+
     engine = _Engine()
     session_factory = object()
 

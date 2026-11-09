@@ -34,6 +34,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import worker_heartbeat
 from tests.postgres import postgres_test_engine
 from tests.unit.control._work_slot_support import create_slot_workspace
 from tests.unit.control._worker_work_slot_support import (
@@ -43,6 +44,7 @@ from tests.unit.control._worker_work_slot_support import (
     add_lease,
     create_in_status,
     create_requested,
+    held_leases,
     make_worker,
     wait_until,
 )
@@ -522,6 +524,60 @@ async def test_once_drain_reconciles_so_a_retry_behind_an_unproven_lease_finishe
     assert retry.result() != unproven
     assert unproven in probe.calls
     assert await _lease(session_factory, unproven) is None
+
+
+class _GatedProvisioner(RecordingProvisioner):
+    """Provisioning that blocks until released, then stays ``provisioning``."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory, to_ready=False)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        self.entered.set()
+        await self.release.wait()
+        await super().provision_claimed(workspace_id, execution_claim_epoch)
+
+
+async def test_once_run_keeps_heartbeating_so_a_peer_never_frees_a_live_provision_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # run_once awaits provisioning inline, so a once=True worker never reaches the
+    # drain heartbeat meanwhile. A stale heartbeat would let a peer's reconciler
+    # probe the provisioning lease (no agent container yet: ``absent``) and free a
+    # slot provisioning still uses.
+    monkeypatch.setattr(worker_heartbeat, "WORKER_HEARTBEAT_MIN_STALE_AFTER_SECONDS", 0.3)
+    monkeypatch.setattr(
+        worker_manager, "worker_heartbeat_write_interval_seconds", lambda _poll_interval: 0.05
+    )
+    workspace_id = await create_requested(session_factory)
+    provisioner = _GatedProvisioner(session_factory)
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), provisioner=provisioner)
+    probe = FakeProbe(default="absent")
+    peer = make_worker(session_factory, executor=SlotAwareExecutor(), work_slot_probe=probe)
+
+    run = asyncio.create_task(worker.run_once_and_drain())
+    try:
+        await asyncio.wait_for(provisioner.entered.wait(), timeout=_TIMEOUT)
+        await asyncio.sleep(0.9)  # three staleness windows into provisioning
+        _reconcile_now(peer)
+        await peer._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+
+        leases = await held_leases(session_factory)
+        assert [(lease.workspace_id, lease.holder_worker_id) for lease in leases] == [
+            (workspace_id, worker._worker_id)  # noqa: SLF001
+        ]
+        assert probe.calls == []
+    finally:
+        provisioner.release.set()
+        await asyncio.wait_for(run, timeout=_TIMEOUT)
+
+    assert provisioner.calls == [workspace_id]
+    assert await held_leases(session_factory) == []
 
 
 async def _status(session_factory: async_sessionmaker[AsyncSession], workspace_id: str) -> str:
