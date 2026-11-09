@@ -110,6 +110,7 @@ class RunnerDelegatesMixin:
     _terminate_failed = _lifecycle._terminate_failed
 
     _execute = _loop._execute
+    _release_work_slot_before_retry_wait = _loop._release_work_slot_before_retry_wait
 
     _begin_monitor_operation = _operations._begin_monitor_operation
     _finish_monitor_operation = _operations._finish_monitor_operation

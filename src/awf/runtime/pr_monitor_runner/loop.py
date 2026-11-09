@@ -109,6 +109,19 @@ async def _release_work_slot_before_pure_wait(self: Any, action: MonitorAction) 
         await work_slot.release_idle()
 
 
+async def _release_work_slot_before_retry_wait(self: Any) -> None:
+    """Release a retained work slot before an outer-loop transient retry wait.
+
+    ``run()`` backs off on a status-fetch or escaped execute-path fault without
+    reaching ``_execute``'s release hook, and no repair cycle is active there, so
+    a lease kept from the inline claim or the last agent/validation run must not
+    be held through the backoff. Waits inside a repair cycle keep it.
+    """
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None:
+        await work_slot.release_idle()
+
+
 async def _execute(
     self: Any,
     *,

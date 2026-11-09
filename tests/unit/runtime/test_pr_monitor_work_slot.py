@@ -2,7 +2,8 @@
 
 A waiting PR monitor holds no work slot: ``loop._execute`` releases a retained
 lease before every action that runs neither an agent nor a validation
-(WaitForCI, NotifyHuman, Merge, ...). The work actions (AddressComments,
+(WaitForCI, NotifyHuman, Merge, ...), and ``run()`` releases it before its
+outer transient-retry backoffs. The work actions (AddressComments,
 AddressOperatorHint, ReportCiFailure, SyncBase) keep it, and the agent and
 pre-push validation runs they launch receive the runner's injected ``work_slot``.
 """
@@ -15,11 +16,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_mock
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     Abort,
@@ -42,6 +44,7 @@ from awf.runtime.pr_monitor import (
     WaitForTransientCI,
 )
 from awf.runtime.pr_monitor_runner import loop as monitor_loop
+from awf.runtime.pr_monitor_runner.types import BaseFetchError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -77,6 +80,18 @@ class _RecordingWorkSlot:
 
     def hold(self, phase: str) -> Any:  # pragma: no cover - holds happen in adapters
         raise AssertionError(f"unexpected hold({phase})")
+
+
+class _TimelineSleep(RecordedSleep):
+    """Sleep shim appending to the injected slot's event log, so order is visible."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    async def __call__(self, seconds: float) -> None:
+        self._events.append("sleep")
+        await super().__call__(seconds)
 
 
 class _SlotAwareAdapter(FakeAdapter):
@@ -252,3 +267,81 @@ async def test_pre_push_validation_receives_the_injected_work_slot(
     assert result.failed is False
     assert validation.calls[0]["work_slot"] is slot
     assert validation.coverage_calls[0]["work_slot"] is slot
+
+
+def _transient_github_error() -> GitHubClientError:
+    return GitHubClientError(
+        operation="gh api graphql", returncode=1, stderr="HTTP 502 Bad Gateway"
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _transient_github_error(),
+        BaseFetchError("fatal: unable to access: The requested URL returned error: 503"),
+    ],
+    ids=["forge", "base_fetch"],
+)
+async def test_status_fetch_retry_wait_releases_the_retained_slot_first(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error: Exception,
+) -> None:
+    """The status-fetch backoff runs before ``_execute``, so ``run()`` frees the slot."""
+    workspace_id = await seed_monitoring_workspace(
+        factory, pr_number=_PR_NUMBER, head_sha=_HEAD_SHA
+    )
+    slot = _RecordingWorkSlot()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=_TimelineSleep(slot.events),
+        worktrees_root=tmp_path / "worktrees",
+        max_outer_iterations=1,
+    )
+    mocker.patch.object(runner, "_fetch_status_for_decision", mocker.AsyncMock(side_effect=error))
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        work_slot=slot,  # type: ignore[arg-type]
+    )
+
+    assert slot.events == ["release_idle", "sleep"]
+
+
+async def test_execute_retry_wait_releases_the_retained_slot_first(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A forge fault escaping a work action's ``_execute`` frees the slot before backoff."""
+    workspace_id = await seed_monitoring_workspace(
+        factory, pr_number=_PR_NUMBER, head_sha=_HEAD_SHA
+    )
+    slot = _RecordingWorkSlot()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=_TimelineSleep(slot.events),
+        worktrees_root=tmp_path / "worktrees",
+        max_outer_iterations=1,
+    )
+    mocker.patch.object(
+        runner, "_fetch_status_for_decision", mocker.AsyncMock(return_value=_green_status())
+    )
+    mocker.patch.object(runner, "_execute", mocker.AsyncMock(side_effect=_transient_github_error()))
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        work_slot=slot,  # type: ignore[arg-type]
+    )
+
+    assert slot.events == ["release_idle", "sleep"]

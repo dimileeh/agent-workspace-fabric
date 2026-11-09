@@ -256,6 +256,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         base_branch=ws.branch_base,
                     )
                 except BaseFetchError as exc:
+                    # No action runs before this backoff, so ``_execute`` never
+                    # releases a retained work slot; free it here (slot-release).
+                    await self._release_work_slot_before_retry_wait()
                     base_fetch_result = await self._wait_after_transient_base_fetch_error(
                         exc,
                         workspace_id=workspace_id,
@@ -309,6 +312,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # reason code); Bitbucket propagates its specific ``reason_code``
                     # end-to-end. ``str(exc)`` already redacts, so it is safe to
                     # log/persist.
+                    await self._release_work_slot_before_retry_wait()
                     if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
@@ -533,6 +537,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # in-flight markers.
                     execute_retry_ws = await self._load_workspace(workspace_id)
                     execute_retry_state = self._load_state(execute_retry_ws)
+                    # The fault ended the action's repair cycle; the next poll's
+                    # work action reacquires, so the backoff holds no work slot.
+                    await self._release_work_slot_before_retry_wait()
                     if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
