@@ -153,6 +153,12 @@ async def _finish_parked_repair_cycle(
         workspace_id,
         reason=push_result.error_message or reason_code,
     )
+    # The park keeps ``decide()`` on a work action, so ``_execute`` never releases
+    # the lease retained from this cycle's agent/validation run; a human wait must
+    # not hold a work slot, so free it here before sleeping (slot-release).
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None:
+        await work_slot.release_idle()
     await self._deps.sleep(self._config.poll_interval_seconds)
     return False
 
