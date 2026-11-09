@@ -249,6 +249,15 @@ awf service status --format pretty
 awf init <path>
 ```
 
+If the image build itself fails while downloading a GitHub release asset (for
+example `curl: (22) The requested URL returned error: 504`), the build has
+already retried with exponential backoff for up to 15 minutes per source, and the
+GitHub CLI download has also tried the official `cli.github.com/packages` pool.
+The final error reads `<tool> <asset> could not be downloaded. Sources tried: ...`
+and lists every source. This is a GitHub-side outage, not a bad pin: wait and
+re-run `awf service bootstrap`. A `checksum mismatch` error is different and
+means the downloaded file is not the pinned release; do not bypass it.
+
 ## Symptom: Provider auth/preflight failure
 
 Use this when `awf service status` shows provider failures or warns for required
