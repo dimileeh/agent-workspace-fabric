@@ -538,12 +538,21 @@ async def test_repeated_guide_after_failed_reply_retries_the_disposition(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("outdated", "detail"),
-    [(True, "no_body_snapshot"), (False, "thread_not_outdated")],
-    ids=["outdated", "active"],
+    ("outdated", "fresh_reply", "detail"),
+    [
+        (True, True, "not_preserved_attempt"),
+        (False, True, "not_preserved_attempt"),
+        (True, False, "no_body_snapshot"),
+        (False, False, "thread_not_outdated"),
+    ],
+    ids=["outdated-fresh-reply", "active-fresh-reply", "outdated-readopt", "active-readopt"],
 )
 async def test_repeated_guide_after_reopen_with_fresh_reply_fails_closed(
-    factory: async_sessionmaker[AsyncSession], tmp_path: Path, outdated: bool, detail: str
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    outdated: bool,
+    fresh_reply: bool,
+    detail: str,
 ) -> None:
     """A tombstone is not proof of retirement once the thread is open with a new verdict."""
     runner, workspace_id, gh, cycle = await _runner(factory, tmp_path)
@@ -554,12 +563,18 @@ async def test_repeated_guide_after_reopen_with_fresh_reply_fails_closed(
     await _guide_poll(runner, workspace_id, state, status)
     await _next_poll(runner, gh, workspace_id, state, status)
     assert ("resolve", _THREAD) in gh.events
-    # A reviewer reopens the thread with a fresh reply: that feedback supersedes the
-    # operator-sourced false_positive verdict, but the tombstone stays behind.
-    _clear_addressed_state_by_id(
-        state, _THREAD, restore_operator_decision=False, keep_posted_reply=False
-    )
-    assert state.threads_addressed_ids[_RETIRED_KEY] == _SHORT_TIP
+    if fresh_reply:
+        # A reviewer reopens the thread with a fresh reply: that feedback supersedes
+        # the operator-sourced false_positive verdict and ends the retirement.
+        _clear_addressed_state_by_id(
+            state, _THREAD, restore_operator_decision=False, keep_posted_reply=False
+        )
+        assert _RETIRED_KEY not in state.threads_addressed_ids
+    else:
+        # A moved-head re-adopt carries the tombstone but drops the verdict it explains.
+        state.threads_addressed_ids.pop(_THREAD)
+        state.threads_addressed_ids.pop(review_thread_body_state_key(_THREAD))
+        assert state.threads_addressed_ids[_RETIRED_KEY] == _SHORT_TIP
     reopened = _thread(body="reopening: this is still broken", outdated=outdated)
     reopened_status = _status(reopened) if outdated else _status(active=(reopened,))
     gh.events.clear()
