@@ -438,6 +438,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace show <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#execution_network_probe_unsupported](#execution_network_probe_unsupported)
 
+### EXECUTION_PROFILE_CHANGED
+**Problem:** Provisioning retry found a repository profile or credential reference that differs from the frozen execution connection.
+**Likely Cause:** A profile changed after its connection was bound, or credential rehydration resolved a different OpenRouter key alias.
+**Operator Fix:** Restore the bound profile and credential reference before retrying, or create a new attempt with the intended profile. Keep third-party admission disabled until the provider release gates pass.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_profile_changed](#execution_profile_changed)
+
 ### EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED
 **Problem:** The runtime cannot enforce the selected provider isolation contract.
 **Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
