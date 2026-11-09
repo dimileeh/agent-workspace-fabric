@@ -53,7 +53,7 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _initial_review_grace_wall_started_value_from_datetime as _initial_review_grace_wall_started_value_from_datetime,
 )
-from awf.runtime.monitor_state_keys import _item_disposition_key
+from awf.runtime.monitor_state_keys import _item_disposition_key, _preserved_attempt_retired_key
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_done_key as _non_check_reviewer_settle_done_key,
 )
@@ -364,6 +364,9 @@ def _clear_addressed_state_by_id(
     rollback re-queues the item, and the retried resolve must reuse that reply,
     never post a second one. Pass ``keep_posted_reply=False`` only where fresh
     reviewer feedback supersedes it — that feedback is owed its own reply.
+    The fresh feedback likewise ends an operator's preserved-attempt retirement
+    (#1189): its tombstone is dropped so a repeated ruling is never consumed as
+    already applied while the thread stays open for the new conversation.
     """
     from awf.runtime.pr_monitor_runner.thread_disposition import read_item_disposition
 
@@ -378,6 +381,8 @@ def _clear_addressed_state_by_id(
     state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
     if posted is None or posted.reply_comment_id is None:
         state.threads_addressed_ids.pop(_item_disposition_key(item_id), None)
+    if not restore_operator_decision:
+        state.threads_addressed_ids.pop(_preserved_attempt_retired_key(item_id), None)
     retired_decision = state.threads_addressed_ids.pop(
         _retired_operator_decision_key(item_id), None
     )
