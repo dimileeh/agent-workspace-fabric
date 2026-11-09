@@ -81,3 +81,26 @@ def test_troubleshooting_guide_has_actionable_commands() -> None:
         assert required_command in content, (
             f"Troubleshooting guide missing actionable command: {required_command}"
         )
+
+
+def _agent_runtime_download_section(content: str) -> str:
+    """Return the normalized text of the agent-runtime image troubleshooting section."""
+    start = content.index("## Symptom: Agent runtime image is missing")
+    end = content.index("## Symptom:", start + 1)
+    return " ".join(content[start:end].split())
+
+
+@pytest.mark.unit
+def test_agent_runtime_download_troubleshooting_reads_curl_errors_first() -> None:
+    """Assert the download-failure advice branches on the preceding curl errors."""
+    section = _agent_runtime_download_section(TROUBLESHOOTING_PATH.read_text(encoding="utf-8"))
+
+    assert "Read the `curl:` lines" in section
+    assert "This is a GitHub-side outage, not a bad pin" not in section
+    assert "curl: (22)" in section and "504" in section
+    assert "temporary outage" in section
+    assert "404" in section and "pinned version" in section and "asset URL" in section
+    assert "certificate" in section and "proxy" in section
+    assert "checksum mismatch" in section and "Never bypass" in section
+    assert "GitHub CLI <asset> could not be downloaded. Sources tried:" in section
+    assert "Antigravity CLI <asset> could not be downloaded. Sources tried:" in section
