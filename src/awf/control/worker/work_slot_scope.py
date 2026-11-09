@@ -239,7 +239,9 @@ class InvocationWorkSlot:
     async def _acquire_until_granted(self, phase: str) -> None:
         try:
             await self._wait_for_grant(phase)
-        except asyncio.CancelledError:
+        except BaseException:
+            # Any abort (cancel, or a re-check DB error) withdraws the persisted
+            # ticket: a dead row would stay the FIFO head until it expires.
             await _run_shielded(self._withdraw_ticket())
             raise
 

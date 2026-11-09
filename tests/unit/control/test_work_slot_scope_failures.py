@@ -176,6 +176,31 @@ async def test_ticket_withdraw_failure_is_logged_and_left_to_expire(
     assert [row.phase for row in rows] == [WorkSlotLeasePhase.waiting.value]
 
 
+async def test_failed_recheck_while_waiting_withdraws_the_ticket(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dead waiting row would stay the FIFO head and a live waiter until it
+    # expires, blocking every other reacquire and all new admissions.
+    holder_ws = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    waiter_ws = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    wakeups = WorkSlotWakeups()
+    holder = _scope(session_factory, holder_ws, wakeups=wakeups)
+    waiter = _scope(session_factory, waiter_ws, wakeups=wakeups)
+    async with holder:
+        async with holder.hold("agent"):
+            pass
+        task = asyncio.create_task(_hold_once(waiter))
+        while not await lease_rows(session_factory, workspace_id=waiter_ws):
+            await asyncio.sleep(0.02)
+        monkeypatch.setattr(work_slot_scope, "acquire_work", _db_down)
+        wakeups.notify()
+        with pytest.raises(OperationalError):
+            await asyncio.wait_for(task, timeout=_TIMEOUT)
+
+    assert await lease_rows(session_factory, workspace_id=waiter_ws) == []
+
+
 async def test_cleanup_unproven_flag_write_failure_still_keeps_the_lease(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
