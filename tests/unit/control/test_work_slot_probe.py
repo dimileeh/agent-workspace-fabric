@@ -70,6 +70,17 @@ async def test_unqueryable_runtime_is_unknown(result: RuntimeSnapshot | BaseExce
     assert await _run(_probe(_Inspector(result))) == "unknown"
 
 
+def _unlabeled(state: str) -> RuntimeService:
+    # ``docker inspect`` failed: the name falls back to the container name.
+    return RuntimeService(
+        name="awf_ws_1-agent-1",
+        container_id="c1",
+        image="img",
+        state=state,
+        service_label_available=False,
+    )
+
+
 @pytest.mark.parametrize(
     "services",
     [
@@ -77,11 +88,17 @@ async def test_unqueryable_runtime_is_unknown(result: RuntimeSnapshot | BaseExce
         [_agent("exited")],
         [_agent("running", one_off=True)],
         [RuntimeService(name="postgres", container_id="p", image="pg", state="running")],
+        [_unlabeled("exited")],
     ],
 )
 async def test_no_running_agent_container_is_absent(services: list[RuntimeService]) -> None:
     snapshot = RuntimeSnapshot(stack_state="running", services=services)
     assert await _run(_probe(_Inspector(snapshot))) == "absent"
+
+
+async def test_running_container_without_service_label_is_unknown() -> None:
+    snapshot = RuntimeSnapshot(stack_state="running", services=[_unlabeled("running")])
+    assert await _run(_probe(_Inspector(snapshot))) == "unknown"
 
 
 @pytest.mark.parametrize(

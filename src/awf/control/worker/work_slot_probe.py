@@ -60,6 +60,13 @@ class LocalWorkSlotProcessProbe:
             ),
             None,
         )
+        if agent is None and any(
+            not service.service_label_available and service.state.strip().lower() == "running"
+            for service in snapshot.services
+        ):
+            # A failed ``docker inspect`` hides the Compose service label, so a
+            # running unlabeled container may still be the agent: fail closed.
+            return "unknown"
         if agent is None or agent.state.strip().lower() != "running":
             # No running agent container means no tagged process can survive.
             return "absent"
