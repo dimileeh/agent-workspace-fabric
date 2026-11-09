@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge_errors import ForgeClientError
-from awf.common.github_client import RepoRef
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.feedback_policy import review_thread_body_state_key
@@ -561,6 +561,46 @@ async def test_repeated_guide_after_failed_reply_retries_the_disposition(
     events = await _disposition_events(factory, workspace_id)
     assert [event.reason_code for event in events] == [OPERATOR_PRESERVED_ATTEMPT_RETIRED] * 2
     assert events[1].payload["evidence"]["hint_operation_id"] == "op_guide_1189_retry"
+
+
+@pytest.mark.unit
+async def test_repeated_guide_after_failed_resolve_reuses_the_posted_reply(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """A retry after a failed resolve resolves on the posted reply, never double-posts."""
+    runner, workspace_id, gh, cycle = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked_state(thread)
+    status = _status(thread)
+    _arm(state, _GUIDE)
+    await _guide_poll(runner, workspace_id, state, status)
+    gh.resolve_error = GitHubClientError(
+        operation="resolve_thread", returncode=1, stderr="HTTP 403: resource not accessible"
+    )
+    await _next_poll(runner, gh, workspace_id, state, status)
+    assert state.threads_addressed_ids[_THREAD] == "needs_human"
+    posted = read_item_disposition(state, _THREAD)
+    assert posted is not None
+    assert posted.reply_comment_id is not None
+    assert len(gh.replies()) == 1
+
+    gh.resolve_error = None
+    gh.events.clear()
+    _arm(state, _GUIDE, operation_id="op_guide_1189_retry")
+    await _guide_poll(runner, workspace_id, state, status)
+    await _next_poll(runner, gh, workspace_id, state, status)
+
+    assert cycle.calls == []
+    assert gh.replies() == []
+    assert ("resolve", _THREAD) in gh.events
+    assert state.threads_addressed_ids[_THREAD] == "false_positive"
+    retried = read_item_disposition(state, _THREAD)
+    assert retried is not None
+    assert retried.reply_comment_id == posted.reply_comment_id
+    assert not any(
+        key.startswith(f"__awf_disposition_retired__:{_THREAD}:")
+        for key in state.threads_addressed_ids
+    )
 
 
 @pytest.mark.unit

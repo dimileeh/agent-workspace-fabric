@@ -295,27 +295,34 @@ def _retire(state: MonitorState, target: _Target, thread: ReviewThread) -> None:
     state.threads_addressed_ids.pop(_agent_failed_reason_state_key(thread_id), None)
     _mark_review_thread_addressed(state, thread, "false_positive")
     state.mark_addressed(_preserved_attempt_retired_key(thread_id), target.tip)
+    # The reply cites the rejected tip, never the operator's free text: guide
+    # notes are private to the operator and the thread is public.
+    disposition = ThreadDisposition(
+        item_id=thread_id,
+        disposition_class="false_positive",
+        verdict="false_positive",
+        reason=(
+            f"Obsolete per operator ruling; the preserved correction attempt "
+            f"{target.tip} is rejected for this thread."
+        ),
+        source=_DISPOSITION_SOURCE,
+        thread_body_hash=review_thread_body_hash(thread),
+    )
     previous = read_item_disposition(state, thread_id)
     if previous is not None and previous.reply_comment_id:
+        if (
+            not previous.answers_resolution
+            and previous.source == disposition.source
+            and previous.reason == disposition.reason
+            and previous.thread_body_hash == disposition.thread_body_hash
+        ):
+            # This ruling's own reply landed but its resolve did not: the retry
+            # resolves on that reply instead of posting it again.
+            return
         # A reply AWF posted for an earlier verdict answers nothing the operator
         # ruled on; retire it so its marker never certifies this resolution.
         retire_item_disposition(state, previous)
-    # The reply cites the rejected tip, never the operator's free text: guide
-    # notes are private to the operator and the thread is public.
-    record_item_disposition(
-        state,
-        ThreadDisposition(
-            item_id=thread_id,
-            disposition_class="false_positive",
-            verdict="false_positive",
-            reason=(
-                f"Obsolete per operator ruling; the preserved correction attempt "
-                f"{target.tip} is rejected for this thread."
-            ),
-            source=_DISPOSITION_SOURCE,
-            thread_body_hash=review_thread_body_hash(thread),
-        ),
-    )
+    record_item_disposition(state, disposition)
 
 
 async def apply_preserved_attempt_disposition(
