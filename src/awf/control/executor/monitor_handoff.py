@@ -22,7 +22,7 @@ from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
-from awf.common.work_slot import work_slot_kwargs
+from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
@@ -365,8 +365,13 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         await pace_monitor_resume_restart(self, workspace_id=workspace_id)
         # Monitor agent-service recovery replays setup under this lock; holding it
         # across identity capture, restart and replay keeps a reclaimed lease's
-        # resume from replaying concurrently with the old runner's recovery.
-        async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+        # resume from replaying concurrently with the old runner's recovery. The
+        # replay is a validation run: take its work slot before the lock, so it
+        # never queues for one while GC and recovery git ops wait on the lock.
+        async with (
+            hold_work_slot(work_slot_for(self, workspace_id), "validation"),
+            hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id),
+        ):
             # The claim may have been reclaimed while waiting for the lock; fence
             # again so a superseded resume cannot force-recreate the new owner's runtime.
             if not await self._recheck_status(

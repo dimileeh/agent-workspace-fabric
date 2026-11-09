@@ -332,6 +332,9 @@ now*. The resource broker persists each slot as a `work_slot_leases` row:
   resumes reacquire a slot at their agent/validation hook. They are served in
   strict FIFO order, ahead of new requests. Queued work reports
   `MONITOR_WAITING_FOR_WORK_SLOT`.
+- A run never queues for a slot while holding the worktree writer lock. Callers
+  that lock the worktree around an agent or validation run take the slot first,
+  so GC and recovery git ops are never blocked by a queued run.
 - `awf service status` (`checks.work_slots`) and
   `GET /v1/metrics/resources/saturation` (`work_slots`) show slots in use,
   waiters and unsatisfiable waiters.

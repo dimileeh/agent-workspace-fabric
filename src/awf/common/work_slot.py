@@ -8,7 +8,9 @@ dependency-free contract so ``adapters/`` and ``runtime/`` never import
 ``control/``.
 
 Nested acquisition within the same invocation is a no-op, so the lease taken at
-the requested claim covers the first agent and validation runs.
+the requested claim covers the first agent and validation runs. Callers that
+take the worktree writer lock around a run enter :func:`hold_work_slot` before
+the lock, so a run queued for a slot never blocks GC or recovery git ops.
 """
 
 from __future__ import annotations

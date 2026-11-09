@@ -10,9 +10,11 @@ pre-push validation runs they launch receive the runner's injected ``work_slot``
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentRunResult
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.work_slot import hold_work_slot
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     Abort,
@@ -46,6 +49,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import loop as monitor_loop
 from awf.runtime.pr_monitor_runner.types import BaseFetchError
 from tests.postgres import postgres_test_engine
+from tests.unit.control._work_slot_support import LockProbeWorkSlot
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -78,8 +82,11 @@ class _RecordingWorkSlot:
     async def release_idle(self) -> None:
         self.events.append("release_idle")
 
-    def hold(self, phase: str) -> Any:  # pragma: no cover - holds happen in adapters
-        raise AssertionError(f"unexpected hold({phase})")
+    @contextlib.asynccontextmanager
+    async def hold(self, phase: str) -> AsyncIterator[Any]:
+        # Monitor agent runs take the slot before the writer lock (nested here).
+        del phase
+        yield SimpleNamespace(invocation_id="wsl_recording")
 
 
 class _TimelineSleep(RecordedSleep):
@@ -228,6 +235,48 @@ async def test_monitor_agent_runs_receive_the_injected_work_slot(
     await runner._run_monitor_agent_with_service_recovery(**kwargs)  # type: ignore[attr-defined]
 
     assert adapter.work_slots == [None, slot]
+
+
+class _HoldingAdapter(FakeAdapter):
+    """Holds the injected slot around the run, like ``AgentAdapter.run``."""
+
+    async def run(self, *, work_slot: Any = None, **kwargs: Any) -> AgentRunResult:  # type: ignore[override]
+        async with hold_work_slot(work_slot, "agent"):
+            return await super().run(**kwargs)
+
+
+async def test_monitor_agent_run_queues_for_its_slot_before_taking_the_writer_lock(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A run queued for a slot must never hold the worktree writer flock: GC and
+    # recovery git ops wait on it. The slot is taken first; the adapter's own
+    # hold (and a post-restart setup replay) then nests in it under the lock.
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = _HoldingAdapter()
+    adapter.queue(stdout="ok")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    slot = LockProbeWorkSlot(worktree)
+    runner._work_slot = slot  # type: ignore[assignment]
+
+    await runner._run_monitor_agent_with_service_recovery(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        prompt="fix the review comment",
+        log_source="monitor",
+    )
+
+    assert slot.acquisitions == [("agent", False)]
+    assert adapter.calls
 
 
 async def test_pre_push_validation_receives_the_injected_work_slot(

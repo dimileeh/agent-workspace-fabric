@@ -22,6 +22,7 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.work_slot import hold_work_slot
 from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE
 from awf.control.executor.git_ops import GIT_AGENT_WRITABILITY_FAILED_REASON_CODE
@@ -256,6 +257,12 @@ async def _run_agent_callable_with_service_recovery(
     worktree_path = _executor_worktree_path(self, workspace_id)
     async with AsyncExitStack() as stack:
         if hold_writer_lock and worktree_path is not None:
+            # Take the work slot before the writer lock: a run queued for a slot
+            # must not hold the lock GC and recovery git ops wait on. The agent run
+            # (and a setup replay after a service restart) then nests in this hold.
+            await stack.enter_async_context(
+                hold_work_slot(work_slot_for(self, workspace_id), "agent")
+            )
             await stack.enter_async_context(hold_exclusive_worktree_writer_lock(worktree_path))
         else:
             stack.enter_context(nullcontext())

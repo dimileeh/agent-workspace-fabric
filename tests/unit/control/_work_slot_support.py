@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.ids import new_work_slot_invocation_id
 from awf.db.enums import ResourceReservationPhase, WorkspaceStatus
 from awf.db.models import WorkSlotLease, WorkspaceEvent
 from awf.db.repositories import (
@@ -13,6 +19,34 @@ from awf.db.repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
+from awf.runtime.worktree_writer_lock import is_worktree_writer_lock_held
+
+
+class LockProbeWorkSlot:
+    """Work-slot double recording where a hold had to acquire (and may queue).
+
+    Like ``InvocationWorkSlot``, only the outermost ``hold()`` acquires; nested
+    holds reuse it. Each acquisition records whether the worktree writer lock was
+    already held at that moment: a run must never queue for a slot under it.
+    """
+
+    def __init__(self, worktree_path: Path) -> None:
+        self.worktree_path = worktree_path
+        self.depth = 0
+        self.acquisitions: list[tuple[str, bool]] = []
+
+    @contextlib.asynccontextmanager
+    async def hold(self, phase: str) -> AsyncIterator[SimpleNamespace]:
+        if self.depth == 0:
+            self.acquisitions.append((phase, is_worktree_writer_lock_held(self.worktree_path)))
+        self.depth += 1
+        try:
+            yield SimpleNamespace(invocation_id=new_work_slot_invocation_id())
+        finally:
+            self.depth -= 1
+
+    async def release_idle(self) -> None:
+        return None
 
 
 async def create_slot_workspace(

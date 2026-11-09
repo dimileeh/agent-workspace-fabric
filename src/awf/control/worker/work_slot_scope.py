@@ -21,6 +21,12 @@ Lifecycle:
   chain keeps the lease with ``cleanup_unproven``; the worker's reconciler
   releases it only once no tagged ``awf-exec`` remains. A later hold (a recovery
   retry) leaves it there and waits for a fresh lease under a new invocation.
+* Callers that take the worktree writer lock around a run enter ``hold()``
+  *before* the lock, so a run queued for a slot never holds the lock GC and
+  recovery git ops wait on; the run's own hold then nests. A recovery rerun
+  nested in such an outer hold (after an agent-service restart killed the old
+  process) keeps running on the lease, which stays this scope's until the outer
+  hold ends.
 """
 
 from __future__ import annotations
@@ -123,6 +129,7 @@ class InvocationWorkSlot:
         self._depth = 0
         self._cleanup_unproven = False
         self._cleanup_flag_pending = False
+        self._abandoned = False
         self._renewal: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -137,6 +144,18 @@ class InvocationWorkSlot:
     @property
     def cleanup_unproven(self) -> bool:
         return self._cleanup_unproven
+
+    @property
+    def tracks_lease(self) -> bool:
+        """Whether this scope still manages its lease (the reconciler leaves it alone).
+
+        A cleanup-unproven lease is the reconciler's once no hold is active, or
+        at once when the task was abandoned. While an outer hold is still active
+        a nested recovery rerun runs on it, so it must not be freed meanwhile.
+        """
+        if self._lease is None or self._abandoned:
+            return False
+        return not self._cleanup_unproven or self._depth > 0
 
     async def __aenter__(self) -> InvocationWorkSlot:
         if self._lease is not None:
@@ -166,7 +185,8 @@ class InvocationWorkSlot:
         try:
             yield self
         except BaseException as exc:
-            if _cleanup_unproven_in_chain(exc):
+            # An outer hold sees the failure a nested hold already retained.
+            if not self._cleanup_unproven and _cleanup_unproven_in_chain(exc):
                 await _run_shielded(self._retain_cleanup_unproven(phase))
             raise
         finally:
@@ -208,6 +228,7 @@ class InvocationWorkSlot:
         """Hand a wedged task's lease to the reconciler (#276 draining monitors)."""
         if self._lease is None:
             return
+        self._abandoned = True
         self._cancel_renewal()
         await self._retain_cleanup_unproven("abandoned")
 

@@ -20,6 +20,7 @@ import structlog.testing
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.worker import manager as worker_manager
 from awf.control.worker import work_slots as worker_work_slots
 from awf.control.worker.constants import (
@@ -514,6 +515,65 @@ async def test_reconciler_skips_leases_tracked_by_a_running_scope_and_honours_ca
         # The second call within the interval is a no-op.
         await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
         assert probe.calls == []
+
+
+async def test_a_rerun_nested_in_the_callers_hold_keeps_its_unproven_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Callers take the slot before the writer lock, so agent-service recovery
+    # reruns inside that outer hold after restarting the service (which killed the
+    # old process). Until the outer hold ends, the reconciler must not free the
+    # unproven lease the rerun runs on: probed ``absent`` in the gap before the
+    # rerun spawns, it would hand the slot to another workspace.
+    probe = FakeProbe(default="absent")
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), work_slot_probe=probe)
+    scope = worker._new_invocation_work_slot(workspace_id)  # noqa: SLF001
+
+    async with scope, scope.hold("agent"):
+        lease = scope.lease
+        assert lease is not None
+        with pytest.raises(ComposeExecCleanupError):
+            async with scope.hold("agent"):
+                raise ComposeExecCleanupError(
+                    invocation_id=lease.invocation_id,
+                    source="agent",
+                    label="codex",
+                    message="tagged processes still alive",
+                )
+        assert scope.cleanup_unproven
+        _reconcile_now(worker)
+        await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+        assert probe.calls == []
+        assert await _lease(session_factory, lease.invocation_id) is not None
+        async with scope.hold("agent") as rerun:
+            assert rerun.invocation_id == lease.invocation_id
+
+    # Once the caller's hold ends, the unproven lease is the reconciler's.
+    _reconcile_now(worker)
+    await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+    assert probe.calls == [lease.invocation_id]
+    assert await _lease(session_factory, lease.invocation_id) is None
+
+
+async def test_an_abandoned_lease_goes_to_the_reconciler_while_its_hold_is_active(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #276: a wedged task never leaves its hold; its abandoned lease must still be
+    # probed and released once the process is gone.
+    probe = FakeProbe(default="absent")
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), work_slot_probe=probe)
+    scope = worker._new_invocation_work_slot(workspace_id)  # noqa: SLF001
+
+    async with scope, scope.hold("agent"):
+        lease = scope.lease
+        assert lease is not None
+        await scope.abandon_to_reconciler()
+        _reconcile_now(worker)
+        await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+        assert probe.calls == [lease.invocation_id]
+        assert await _lease(session_factory, lease.invocation_id) is None
 
 
 async def test_reconciler_survives_read_and_write_failures(

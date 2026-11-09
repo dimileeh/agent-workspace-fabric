@@ -475,7 +475,7 @@ async def _maybe_reconcile_work_slot_leases(self: Any) -> None:
     tracked = {
         scope.lease.invocation_id
         for scope in self._work_slot_scopes.values()
-        if scope.lease is not None and not scope.cleanup_unproven
+        if scope.lease is not None and scope.tracks_lease
     }
     released = False
     for item in leases:

@@ -363,6 +363,24 @@ async def test_cleanup_unproven_failure_retains_the_lease(
     assert len(await _held(session_factory, workspace_id)) == 1
 
 
+async def test_cleanup_failure_through_nested_holds_flags_the_lease_once(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Callers that take the writer lock hold the slot first, so a run's own hold
+    # nests in theirs; one cleanup failure is retained (and logged) once.
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    scope = _scope(session_factory, workspace_id, wakeups=WorkSlotWakeups())
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(ComposeExecCleanupError):
+        async with scope, scope.hold("agent"), scope.hold("agent"):
+            _raise_direct()
+
+    rows = await _held(session_factory, workspace_id)
+    assert [row.cleanup_unproven for row in rows] == [True]
+    retained = [e for e in logs if e.get("reason_code") == WORK_SLOT_CLEANUP_UNPROVEN_RETAINED]
+    assert len(retained) == 1
+
+
 async def test_ordinary_failure_still_releases_the_lease(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
