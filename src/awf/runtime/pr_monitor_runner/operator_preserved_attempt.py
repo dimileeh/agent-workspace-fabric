@@ -251,6 +251,21 @@ def _resolve_targets(
     return matches, None
 
 
+def _retirement_holds(state: MonitorState, status: PRStatus, thread_id: str) -> bool:
+    """True while the tombstone's retirement still governs the live thread.
+
+    The tombstone outlives the verdict it explains: a reopened thread, fresh
+    replies or a moved-head re-adopt can drop the ``false_positive`` verdict and
+    leave the thread open. Only a thread that is gone from the PR, or still
+    carries that verdict, makes a repeated ruling a no-op; anything else goes
+    through the live-thread checks again.
+    """
+    if state.threads_addressed_ids.get(thread_id) == "false_positive":
+        return True
+    open_threads = status.unresolved_inline_threads + status.outdated_unresolved_inline_threads
+    return all(thread.thread_id != thread_id for thread in open_threads)
+
+
 def _live_thread(
     state: MonitorState, status: PRStatus, thread_id: str
 ) -> tuple[ReviewThread | None, str | None]:
@@ -330,7 +345,7 @@ async def apply_preserved_attempt_disposition(
     targets, detail = _resolve_targets(state, disposition)
     staged: list[tuple[_Target, ReviewThread]] = []
     for target in targets:
-        if target.already_retired:
+        if target.already_retired and _retirement_holds(state, status, target.thread_id):
             continue
         thread, detail = _live_thread(state, status, target.thread_id)
         if thread is None:

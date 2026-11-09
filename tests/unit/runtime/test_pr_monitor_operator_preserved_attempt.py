@@ -53,7 +53,11 @@ from awf.runtime.pr_monitor_runner.comment_verdict_correction import (
     correction_unscoped_fix_outcome,
 )
 from awf.runtime.pr_monitor_runner.comment_verdict_protocol_types import VerdictResult
-from awf.runtime.pr_monitor_runner.helpers import _notify_human_reason, _sync_needs_human_reason
+from awf.runtime.pr_monitor_runner.helpers import (
+    _clear_addressed_state_by_id,
+    _notify_human_reason,
+    _sync_needs_human_reason,
+)
 from awf.runtime.pr_monitor_runner.operator_hint_loop import handle_operator_hint_action
 from awf.runtime.pr_monitor_runner.operator_hint_retirement import (
     _finalize_processed_operator_hint,
@@ -530,6 +534,49 @@ async def test_repeated_guide_after_failed_reply_retries_the_disposition(
     events = await _disposition_events(factory, workspace_id)
     assert [event.reason_code for event in events] == [OPERATOR_PRESERVED_ATTEMPT_RETIRED] * 2
     assert events[1].payload["evidence"]["hint_operation_id"] == "op_guide_1189_retry"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("outdated", "detail"),
+    [(True, "no_body_snapshot"), (False, "thread_not_outdated")],
+    ids=["outdated", "active"],
+)
+async def test_repeated_guide_after_reopen_with_fresh_reply_fails_closed(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, outdated: bool, detail: str
+) -> None:
+    """A tombstone is not proof of retirement once the thread is open with a new verdict."""
+    runner, workspace_id, gh, cycle = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked_state(thread)
+    status = _status(thread)
+    _arm(state, _GUIDE)
+    await _guide_poll(runner, workspace_id, state, status)
+    await _next_poll(runner, gh, workspace_id, state, status)
+    assert ("resolve", _THREAD) in gh.events
+    # A reviewer reopens the thread with a fresh reply: that feedback supersedes the
+    # operator-sourced false_positive verdict, but the tombstone stays behind.
+    _clear_addressed_state_by_id(
+        state, _THREAD, restore_operator_decision=False, keep_posted_reply=False
+    )
+    assert state.threads_addressed_ids[_RETIRED_KEY] == _SHORT_TIP
+    reopened = _thread(body="reopening: this is still broken", outdated=outdated)
+    reopened_status = _status(reopened) if outdated else _status(active=(reopened,))
+    gh.events.clear()
+
+    _arm(state, _GUIDE, operation_id="op_guide_1189_reopened")
+    await _guide_poll(runner, workspace_id, state, reopened_status)
+
+    assert cycle.calls == []
+    assert operator_hint_processed_key("op_guide_1189_reopened") not in (
+        state.threads_addressed_ids
+    )
+    hint = state.pending_operator_hint
+    assert hint is not None
+    assert hint.status == "needs_human"
+    assert (hint.status_reason or "").startswith(OPERATOR_PRESERVED_ATTEMPT_DISPOSITION_UNAPPLIED)
+    assert detail in (hint.status_reason or "")
+    assert gh.events == []
 
 
 # --- T4: the disposition cannot be applied -> distinct reason, no silent re-raise --
