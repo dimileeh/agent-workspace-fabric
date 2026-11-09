@@ -22,6 +22,7 @@ from awf.common.agent_execution import (
     circuit_key,
     execution_from_policy,
     promote_execution,
+    require_execution_admission,
 )
 from awf.common.redaction import redact_secrets
 from awf.common.workspace_policy import CURSOR_AUTO_MODE_POLICY_KEY
@@ -1120,8 +1121,9 @@ def _install_fixed_recovery_model(
             from awf.common.agent_execution import resolve_execution
             from awf.common.config import get_settings
 
-            if not get_settings().third_party_agent_providers_enabled:
-                raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
+            require_execution_admission(
+                selected, enabled=get_settings().third_party_agent_providers_enabled
+            )
             # Approval changes the model only; validate that choice without
             # re-resolving the frozen endpoint, credential or network identity.
             resolve_execution(
@@ -1448,8 +1450,10 @@ def install_recovery_selection(
                 if target.execution.third_party:
                     from awf.common.config import get_settings
 
-                    if not get_settings().third_party_agent_providers_enabled:
-                        raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
+                    require_execution_admission(
+                        target.execution,
+                        enabled=get_settings().third_party_agent_providers_enabled,
+                    )
                 return promote_execution(task_policy, target.to_payload())
             if decision.target_provider in {"ollama", "openrouter"} and decision.target_agent in {
                 "codex",

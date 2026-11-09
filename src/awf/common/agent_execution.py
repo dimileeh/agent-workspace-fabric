@@ -303,6 +303,14 @@ def execution_from_policy(policy: object) -> ExecutionSelection | None:
         raise ValueError("EXECUTION_CONTRACT_UNSUPPORTED") from None
 
 
+def require_execution_admission(selection: ExecutionSelection, *, enabled: bool) -> None:
+    """Keep all expanded launch/promotion paths closed for the foundation release."""
+    if selection.third_party:
+        if not enabled:
+            raise ValueError("THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED")
+        raise ValueError("EXECUTION_NETWORK_PROBE_UNSUPPORTED")
+
+
 def circuit_key(
     agent: str, policy: object, *, workspace_id: str | None = None
 ) -> CircuitKey | None:

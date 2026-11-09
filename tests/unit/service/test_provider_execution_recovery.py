@@ -2,12 +2,30 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from awf.common.agent_execution import execution_from_policy, resolve_execution
 from awf.service.provider_recovery import decide_provider_recovery, install_recovery_selection
 from awf.service.workspaces_retry_recovery import _prune_and_migrate_retired_agent
 
 
-def test_full_fallback_selection_promotion(monkeypatch):
+@pytest.fixture
+def verified_future_network(monkeypatch):
+    """Exercise dormant full-selection wiring after a future network gate passes."""
+    import awf.common.agent_execution as execution
+    import awf.service.provider_recovery as recovery
+
+    original = execution.require_execution_admission
+
+    def verified(selection, *, enabled):
+        if not enabled:
+            original(selection, enabled=enabled)
+
+    monkeypatch.setattr(recovery, "require_execution_admission", verified)
+    monkeypatch.setattr(execution, "require_execution_admission", verified)
+
+
+def test_full_fallback_selection_promotion(monkeypatch, verified_future_network):
     from awf.common.config import get_settings
 
     monkeypatch.setenv("AWF_THIRD_PARTY_AGENT_PROVIDERS_ENABLED", "true")
@@ -179,7 +197,9 @@ def test_recovery_decision_exposes_complete_selected_target():
     assert decision.target_execution == target
 
 
-async def test_persisted_monitor_and_retry_fallback_promote_entire_snapshot(monkeypatch):
+async def test_persisted_monitor_and_retry_fallback_promote_entire_snapshot(
+    monkeypatch, verified_future_network
+):
     from awf.common.config import get_settings
     from awf.db.repositories import WorkspaceRepository
     from awf.db.session import make_session_factory
@@ -264,3 +284,55 @@ def test_retired_agent_cannot_promote_third_party_fallback_without_full_contract
     }
     with pytest.raises(ValueError, match="EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED"):
         _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_foundation_blocks_all_third_party_promotions(monkeypatch, provider, enabled):
+    from types import SimpleNamespace
+
+    from awf.service.provider_recovery import (
+        ProviderRecoveryDecision,
+        _install_fixed_recovery_model,
+    )
+
+    monkeypatch.setattr(
+        "awf.common.config.get_settings",
+        lambda: SimpleNamespace(third_party_agent_providers_enabled=enabled),
+    )
+    target = resolve_execution(
+        agent="codex", provider=provider, model="coder", allow_unverified=True
+    )
+    policy = {
+        "agent_execution": resolve_execution(agent="codex").model_dump(),
+        "provider_recovery": {
+            "fallbacks": [
+                {
+                    "agent": target.agent,
+                    "provider": target.provider,
+                    "model": target.model,
+                    "agent_execution": target.model_dump(),
+                }
+            ]
+        },
+    }
+    decision = ProviderRecoveryDecision(
+        action="fallback",
+        reason_code="fallback",
+        target_agent=target.agent,
+        retryable=True,
+        not_before=None,
+        terminal_reason=None,
+        fallback_attempt_number=1,
+        retry_attempt_number=0,
+        target_provider=target.provider,
+        target_model=target.model,
+    )
+    expected = "EXECUTION_NETWORK_PROBE_UNSUPPORTED" if enabled else "ADMISSION_DISABLED"
+    with pytest.raises(ValueError, match=expected):
+        install_recovery_selection(policy, decision)
+    with pytest.raises(ValueError, match=expected):
+        _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+    with pytest.raises(ValueError, match=expected):
+        _install_fixed_recovery_model({"agent_execution": target.model_dump()}, "new-coder")
+    assert execution_from_policy(policy).provider == "openai"

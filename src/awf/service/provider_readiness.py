@@ -342,16 +342,36 @@ def selected_provider_readiness_preflight(
     from awf.common.workspace_policy import agent_model_from_task_policy
 
     selection = execution_from_policy(task_policy)
+    recovery = (task_policy or {}).get("provider_recovery")
+    fallbacks = recovery.get("fallbacks", []) if isinstance(recovery, Mapping) else []
+    blocked_target = None
+    for target in [task_policy or {}, *fallbacks]:
+        if not isinstance(target, Mapping):
+            continue
+        selected = execution_from_policy(target)
+        target_agent = target.get("agent", str(agent))
+        target_provider = target.get("provider", target.get("agent_provider"))
+        if (selected is not None and selected.third_party) or (
+            target_agent in {"codex", "claude_code"} and target_provider in {"ollama", "openrouter"}
+        ):
+            blocked_target = target
+            selection = selected
+            break
     pending = bool(task_policy and task_policy.get("agent_execution_profile_pending"))
-    if pending or (selection is not None and selection.third_party):
+    if pending or blocked_target is not None:
         # Admission cannot certify an agent/sidecar network before provisioning.
         # No host-only success or readiness override can authorize that claim.
         return _launch_preflight_payload(
-            agent=selection.agent if selection else str(agent),
+            agent=selection.agent if selection else str((blocked_target or {}).get("agent", agent)),
             provider=selection.provider
             if selection
-            else str((task_policy or {}).get("agent_provider")),
-            model=selection.model if selection else agent_model_from_task_policy(task_policy),
+            else str(
+                (blocked_target or task_policy or {}).get("provider")
+                or (blocked_target or task_policy or {}).get("agent_provider")
+            ),
+            model=selection.model
+            if selection
+            else (blocked_target or {}).get("model") or agent_model_from_task_policy(task_policy),
             model_source="task_policy",
             provider_result=None,
             probe={"status": "unsupported"},

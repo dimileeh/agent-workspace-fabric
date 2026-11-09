@@ -163,6 +163,16 @@ def test_planning_scope_fallback_preserves_frozen_connection(provider, enabled, 
         "awf.common.config.get_settings",
         lambda: SimpleNamespace(third_party_agent_providers_enabled=enabled),
     )
+    # Test frozen model-change wiring under a future verified-network gate.
+    import awf.service.provider_recovery as recovery
+
+    original = recovery.require_execution_admission
+
+    def verified(selection, *, enabled):
+        if not enabled:
+            original(selection, enabled=enabled)
+
+    monkeypatch.setattr(recovery, "require_execution_admission", verified)
     selected = resolve_execution(
         agent="codex",
         provider=provider,

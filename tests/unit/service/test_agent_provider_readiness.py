@@ -125,3 +125,33 @@ def test_openrouter_runtime_probe_never_follows_credential_redirects():
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+def test_native_primary_cannot_admit_third_party_fallback(provider, pending):
+    primary = resolve_execution(agent="codex")
+    fallback = resolve_execution(
+        agent="claude_code", provider=provider, model="coder", allow_unverified=True
+    )
+    policy = {
+        "agent_execution": primary.model_dump(),
+        "provider_recovery": {
+            "fallbacks": [
+                {
+                    "agent": fallback.agent,
+                    "provider": provider,
+                    "model": fallback.model,
+                    **({} if pending else {"agent_execution": fallback.model_dump()}),
+                }
+            ]
+        },
+        **({"agent_execution_profile_pending": True} if pending else {}),
+    }
+    result = selected_provider_readiness_preflight(
+        Mock(), agent="codex", task_policy=policy, override=True, environ={}
+    )
+    assert result["blocks_launch"] is True
+    assert result["override_used"] is False
+    assert result["reason_code"] == "EXECUTION_NETWORK_PROBE_UNSUPPORTED"
+    assert result["provider"] == provider
