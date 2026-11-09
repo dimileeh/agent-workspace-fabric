@@ -74,11 +74,21 @@ does not alter connection identity.
 
 Auto-profile requests defer endpoint, credential-reference and network-service
 snapshots until provisioning resolves the repository profile. The primary and
-all declared fallbacks bind together and are persisted before stack launch.
+all declared fallbacks bind together and commit atomically with the resolved
+profile before stack launch, under the existing port-admission and claim locks.
+Worker loss before that commit leaves both unbound. Afterward, credential
+rehydration rejects changed repository profiles or credential aliases with
+`EXECUTION_PROFILE_CHANGED`; unchanged profiles retain the frozen connection even
+if worker defaults change. A competing resolver stops without replacing or
+failing the winning binding.
 Native selections carry a pending-default marker until the executor freezes its
 configured model/effort defaults; explicit request fields win, and restarts keep
-the authoritative values. Host-local endpoint normalization reuses the existing
-IPv4 loopback, expanded IPv6, mapped IPv4 and unspecified-address policy.
+the authoritative values. Initial feature/release sync monitors freeze before
+their first adapter, preserving that selection through restart. OpenCode derives
+its provider from the effective model and rejects a configured model that
+conflicts with an explicit provider constraint. Host-local endpoint normalization
+reuses the existing IPv4 loopback, expanded IPv6, mapped IPv4 and
+unspecified-address policy.
 
 Third-party stacks suppress native auth mounts and competing model-service env,
 including Claude backend toggles and role-model variables. Native selections
@@ -172,7 +182,7 @@ Docker's server/image digest was unavailable. Host provider auth/config was not
 changed or inspected for keys. Each CLI attempt used a disposable fixture,
 isolated home/config, no forge/native credentials, and a 12-second deadline.
 
-Local tag `qwen3.8:latest` had digest
+The historical local tag `qwen3.8:latest` had digest
 `22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643`.
 Cloud-through-daemon tag `kimi-k2.7-code:cloud` had local descriptor digest
 `eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`;
@@ -183,14 +193,21 @@ parsing retained ordered event types only, without raw model output.
 
 | Release path | Preliminary disposition | Coding-cycle/tool evidence |
 | --- | --- | --- |
-| Codex → Ollama local (`qwen3.8:latest`) | Exit 1 | `thread.started`, `item.completed(error)`, `turn.started`, `error`, `turn.failed`; no tool events or verified fixture |
+| Codex → Ollama local (`qwen3.8:latest`) | Historical exit 1; further live tests skipped | `thread.started`, `item.completed(error)`, `turn.started`, `error`, `turn.failed`; no tool events or verified fixture |
 | Codex → Ollama cloud through daemon (`kimi-k2.7-code:cloud`) | Attempted; evidence parser failed | Inconclusive; no retained tool evidence or pass |
-| Claude → Ollama local (`qwen3.8:latest`) | 12-second deadline; TERM exit 143 | Five `system` events; no tool events or verified fixture |
+| Claude → Ollama local (`qwen3.8:latest`) | Historical deadline/TERM exit 143; further live tests skipped | Five `system` events; no tool events or verified fixture |
 | Claude → Ollama cloud through daemon (`kimi-k2.7-code:cloud`) | Attempted; evidence parser failed | Inconclusive; no retained tool evidence or pass |
-| Codex → OpenRouter | Operator reports key unavailable | None; pending |
-| Claude → OpenRouter | Operator reports key unavailable | None; pending |
+| Codex → OpenRouter | Operator reports key configured for planned service restart | None; live validation pending |
+| Claude → OpenRouter | Operator reports key configured for planned service restart | None; live validation pending |
 | Codex native baseline | Installed CLI version recorded; deterministic native regression tests | Live baseline pending |
 | Claude native baseline | Installed CLI version recorded; deterministic native regression tests | Live baseline pending |
+
+Per the operator update, skip local Ollama live tests entirely. The required
+follow-up live matrix covers daemon-mediated cloud and OpenRouter for both CLIs,
+plus their native baselines. The OpenRouter credential is reported configured;
+service restart and subsequent live validation remain AWF/operator-managed.
+This repair cycle performs no live provider calls or service restart and claims
+no new compatibility passes. Third-party admission remains disabled.
 
 Focused tests exercise real rendered files, synthetic credential redaction,
 standalone CLI protocol fixtures, runtime cancellation, HTTP failures/redirects,
@@ -199,14 +216,17 @@ scheduler/capacity parity. They are not live coding-compatibility passes. AWF
 and GitHub own the full suite and authoritative **99%** coverage gate; this
 workspace does not run or lower that gate.
 
-The follow-up regressions cover repository-profile binding before launch,
+The follow-up regressions cover atomic repository-profile binding before launch,
 configured native defaults through create/execute/restart, full loopback
 normalization, provider homes outside `/tmp`, actual Compose auth/env promotion,
-and fail-closed local/hosted monitor resume. Existing selected OpenRouter-key
+and fail-closed local/hosted monitor resume. They also cover OpenCode provider
+consistency and explicit constraints, initial sync-to-restart identity, binding
+rollback/worker loss, changed profile/key aliases, and concurrent resolver/port
+admission fencing. Existing selected OpenRouter-key
 isolation and approved planning-retry model/connection regressions are retained.
 These deterministic checks do not supply a live provider compatibility pass;
-OpenRouter live evidence and the release gates above remain pending, and
-third-party admission stays disabled.
+cloud-through-daemon/OpenRouter/native live evidence and the release gates above
+remain pending, and third-party admission stays disabled.
 
 Provider configuration references: [Codex advanced configuration](https://developers.openai.com/codex/config-advanced/),
 [Ollama Claude integration](https://docs.ollama.com/integrations/claude-code),
