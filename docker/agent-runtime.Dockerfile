@@ -97,6 +97,26 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && docker buildx version
 
 # ── Stage 3: GitHub CLI ───────────────────────────────────────────────────
+# Shared curl policy for every GitHub-release download (gh here, agy in Stage
+# 5). The release CDN has served multi-minute runs of HTTP 504, and a fixed
+# short retry window fails the whole image build. No fixed delay is set, so curl
+# backs off exponentially between attempts. ``--retry-all-errors`` is required
+# because curl does not treat a 504 as transient on its own. ``--retry 10`` and
+# ``--retry-max-time 900`` allow up to 15 minutes of retrying; each attempt is
+# bounded by ``--max-time 300``. ``--show-error`` keeps every failed attempt on
+# the build log. The value is intentionally expanded unquoted so the shell
+# word-splits it; override with ``--build-arg GITHUB_RELEASE_CURL_OPTS=...``.
+ARG GITHUB_RELEASE_CURL_OPTS="--fail --show-error --silent --location --retry 10 --retry-all-errors --retry-max-time 900 --connect-timeout 20 --max-time 300"
+# The pinned .deb is fetched from the GitHub release first. If that fails after
+# the retries above, the SAME pinned asset is fetched from the official GitHub
+# CLI package pool (cli.github.com/packages), which serves a byte-identical file.
+# The pool names its files without the release asset's ``linux_`` infix
+# (gh_<version>_<dpkg arch>.deb), so the fallback builds its own file name.
+# The pool is fetched directly instead of through the apt index because that
+# index only lists the newest gh, and its signing key rotates, so a version- or
+# fingerprint-pinned apt install would break. Both sources go through the one
+# pinned sha256 check below before anything is installed; a mismatch is fatal
+# and never falls through to the other source.
 ARG GH_VERSION=2.102.0
 ARG GH_AMD64_SHA256=7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0
 ARG GH_ARM64_SHA256=5006962696f01e1624b3fcf1f9d8e1a11547f24bf067dd2a0371b7b421945237
@@ -112,16 +132,19 @@ RUN set -eux; \
       echo "GitHub CLI checksum is not pinned for ${gh_asset}" >&2; \
       exit 1; \
     fi; \
+    gh_primary_url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
+    gh_pool_file="gh_${GH_VERSION}_${gh_arch}.deb"; \
+    gh_fallback_url="https://cli.github.com/packages/pool/main/g/gh/${gh_pool_file}"; \
     gh_deb="/tmp/${gh_asset}"; \
     trap 'rm -f "$gh_deb"' EXIT; \
-    curl --fail --show-error --location --silent \
-      --retry 5 \
-      --retry-delay 2 \
-      --retry-all-errors \
-      --connect-timeout 20 \
-      --max-time 300 \
-      -o "$gh_deb" \
-      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"; \
+    if ! curl ${GITHUB_RELEASE_CURL_OPTS} -o "$gh_deb" "$gh_primary_url"; then \
+      echo "GitHub CLI release download failed for ${gh_asset}; trying ${gh_fallback_url}" >&2; \
+      rm -f "$gh_deb"; \
+      if ! curl ${GITHUB_RELEASE_CURL_OPTS} -o "$gh_deb" "$gh_fallback_url"; then \
+        echo "GitHub CLI ${gh_asset} could not be downloaded. Sources tried: 1) ${gh_primary_url} 2) ${gh_fallback_url}" >&2; \
+        exit 1; \
+      fi; \
+    fi; \
     actual_hash="$(sha256sum "$gh_deb")"; \
     actual_hash="${actual_hash%% *}"; \
     if [ "$actual_hash" != "$expected_hash" ]; then \
@@ -129,6 +152,11 @@ RUN set -eux; \
       exit 1; \
     fi; \
     apt-get install -y --no-install-recommends "$gh_deb"; \
+    gh_installed="$(gh --version)"; \
+    case "$gh_installed" in \
+      "gh version ${GH_VERSION} "*) ;; \
+      *) echo "Installed GitHub CLI is not the pinned ${GH_VERSION}: ${gh_installed}" >&2; exit 1 ;; \
+    esac; \
     gh --version
 
 # ── Stage 4: Node.js (for npm-backed coding CLIs) ─────────────────────────
@@ -210,7 +238,10 @@ RUN set -eux; \
 
 # Install a pinned Antigravity CLI (agy) release after verifying its
 # architecture-specific checksum. The release tarball ships ``antigravity``;
-# expose it as ``agy`` at /usr/local/bin to match the adapter contract.
+# expose it as ``agy`` at /usr/local/bin to match the adapter contract. It uses
+# the shared GITHUB_RELEASE_CURL_OPTS policy; there is no fallback because the
+# only official non-GitHub channel serves just the latest release, under a
+# different asset name and with a different checksum.
 RUN set -eux; \
     agy_dpkg_arch="$(dpkg --print-architecture)"; \
     case "$agy_dpkg_arch" in \
@@ -224,14 +255,11 @@ RUN set -eux; \
     fi; \
     agy_archive="/tmp/${agy_asset}"; \
     trap 'rm -f "$agy_archive"' EXIT; \
-    curl --fail --show-error --silent --location \
-      --retry 5 \
-      --retry-delay 2 \
-      --retry-all-errors \
-      --connect-timeout 20 \
-      --max-time 300 \
-      --output "$agy_archive" \
-      "https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_VERSION}/${agy_asset}"; \
+    agy_url="https://github.com/google-antigravity/antigravity-cli/releases/download/${ANTIGRAVITY_VERSION}/${agy_asset}"; \
+    if ! curl ${GITHUB_RELEASE_CURL_OPTS} --output "$agy_archive" "$agy_url"; then \
+      echo "Antigravity CLI ${agy_asset} could not be downloaded. Sources tried: 1) ${agy_url} (no official non-GitHub source exists for ${ANTIGRAVITY_VERSION})" >&2; \
+      exit 1; \
+    fi; \
     actual_hash="$(sha256sum "$agy_archive")"; \
     actual_hash="${actual_hash%% *}"; \
     if [ "$actual_hash" != "$expected_hash" ]; then \

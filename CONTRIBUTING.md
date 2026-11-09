@@ -97,6 +97,21 @@ image whenever the runtime Dockerfile or those Docker tooling packages change.
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
 ```
 
+GitHub-release downloads (the GitHub CLI `.deb` and the Antigravity CLI tarball)
+share one curl retry policy, the `GITHUB_RELEASE_CURL_OPTS` build arg: up to 10
+retries with curl's exponential backoff, capped at 15 minutes in total, so a
+multi-minute release CDN outage (HTTP 504) does not fail the build. Override it
+with `--build-arg GITHUB_RELEASE_CURL_OPTS="..."` if a builder needs a shorter or
+longer window. If the GitHub CLI release download still fails, the same pinned
+version is fetched from the official GitHub CLI package pool
+(`cli.github.com/packages`). The pool is fetched directly rather than through apt
+because the apt index only lists the newest `gh` and its signing key rotates; the
+file is byte-identical to the release asset, so both sources go through the same
+pinned `GH_*_SHA256` check before `gh` is installed, and a mismatch always fails
+the build. Antigravity has no fallback, because the only official non-GitHub
+channel serves just the latest release under a different checksum. When every
+source fails, the build error names the asset and each source tried.
+
 Verify:
 
 ```bash
