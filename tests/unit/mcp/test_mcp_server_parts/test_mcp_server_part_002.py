@@ -466,7 +466,24 @@ class TestCreateWorkspace:
         assert ws.task_policy["provider_recovery"] == {
             "max_fallback_attempts": 1,
             "fallbacks": [
-                {"agent": "codex", "provider": "openai", "model": "gpt-5.5"},
+                {
+                    "agent": "codex",
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                    "agent_execution": {
+                        "version": 1,
+                        "agent": "codex",
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "effort": "xhigh",
+                        "effort_explicit": False,
+                        "model_explicit": True,
+                        "endpoint": None,
+                        "credential_ref": None,
+                        "network_service": None,
+                        "compatibility": "native",
+                    },
+                },
             ],
         }
 
