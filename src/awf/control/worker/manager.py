@@ -435,38 +435,58 @@ class ControlWorker(WorkerDelegatesMixin):
             # READY dispatch stays bounded by work slots: a row is dispatched only
             # once it holds a lease — the claim lease its provisioning parked
             # (continued first) or a fresh ``new`` admission, which never jumps a
-            # live reacquire waiter.
+            # live reacquire waiter. A refused row (its peak does not fit, or
+            # another worker holds its lease) must not hide feasible rows behind
+            # it: while refusals leave slots free, the next unseen READY page is
+            # admitted too, so the listing limit bounds admissions, not attempts.
+            # Each page is dispatched before the refill read, so a failed read
+            # never strands leases already granted.
             parked_ready_ids = await self._list_parked_ready_work_slot_ids(
                 exclude_ids=set(self._execution_tasks),
             )
+            ready_seen_ids = set(self._execution_tasks) | set(parked_ready_ids)
             listed_ready_ids = await self._list_ready(
                 limit=self._config.max_concurrent_executions,
-                exclude_ids=set(self._execution_tasks) | set(parked_ready_ids),
+                exclude_ids=set(ready_seen_ids),
             )
-            ready_ids = await self._filter_current_status(
-                list(dict.fromkeys([*parked_ready_ids, *listed_ready_ids])),
-                expected=WorkspaceStatus.ready,
-                action="execute",
-            )
-            ready_candidate_ids = self._dispatchable_execution_ids(
-                ready_ids,
-                limit=len(ready_ids),
-            )
-            ready_leases = await self._claim_ready_work_slots(ready_candidate_ids)
-            ready_dispatch_ids = [
-                workspace_id for workspace_id in ready_candidate_ids if workspace_id in ready_leases
-            ]
-            await self._record_ordered_decisions(
-                ready_dispatch_ids,
-                reason_code=ORDERED_READY_EXECUTION_REASON,
-            )
-            ready_dispatched = self._dispatch_ready_executions(
-                ready_dispatch_ids,
-                limit=len(ready_dispatch_ids),
-                leases=ready_leases,
-            )
-            dispatched_ids.update(ready_dispatched)
-            execution_dispatched_ids.update(ready_dispatched)
+            ready_page_ids = list(dict.fromkeys([*parked_ready_ids, *listed_ready_ids]))
+            while ready_page_ids:
+                ready_seen_ids.update(ready_page_ids)
+                ready_ids = await self._filter_current_status(
+                    ready_page_ids,
+                    expected=WorkspaceStatus.ready,
+                    action="execute",
+                )
+                ready_candidate_ids = self._dispatchable_execution_ids(
+                    ready_ids,
+                    limit=len(ready_ids),
+                )
+                ready_leases = await self._claim_ready_work_slots(ready_candidate_ids)
+                ready_dispatch_ids = [
+                    workspace_id
+                    for workspace_id in ready_candidate_ids
+                    if workspace_id in ready_leases
+                ]
+                await self._record_ordered_decisions(
+                    ready_dispatch_ids,
+                    reason_code=ORDERED_READY_EXECUTION_REASON,
+                )
+                ready_dispatched = self._dispatch_ready_executions(
+                    ready_dispatch_ids,
+                    limit=len(ready_dispatch_ids),
+                    leases=ready_leases,
+                )
+                dispatched_ids.update(ready_dispatched)
+                execution_dispatched_ids.update(ready_dispatched)
+                if len(ready_dispatch_ids) == len(ready_candidate_ids):
+                    break
+                free_slots = await self._new_work_slot_capacity(reserve_leaseless_ready=False)
+                if free_slots <= 0:
+                    break
+                ready_page_ids = await self._list_ready(
+                    limit=free_slots,
+                    exclude_ids=set(ready_seen_ids),
+                )
 
         # Saturation reflects work slots only; provisioning dispatches must not
         # mask a worker whose slots are wedged with stuck holders.

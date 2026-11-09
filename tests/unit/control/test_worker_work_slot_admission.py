@@ -18,7 +18,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.work_slot import MONITOR_WAITING_FOR_WORK_SLOT_REASON_CODE
-from awf.db.enums import WorkSlotLeasePhase, WorkspaceStatus
+from awf.db.enums import ResourceReservationPhase, WorkSlotLeasePhase, WorkspaceStatus
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 from tests.unit.control._work_slot_support import create_slot_workspace, lease_rows
@@ -196,6 +196,48 @@ async def test_ready_dispatch_never_exceeds_free_work_slots(
             executor.gate(gate_id).set()
         await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=_TIMEOUT)
     assert await held_leases(session_factory) == []
+
+
+async def test_capacity_refused_ready_row_does_not_starve_a_feasible_one_behind_it(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression (PR #1194 review): one slot, an 8 GB limit and two steady READY
+    # rows. The 7 GB peak never fits beside the other's 2 GB steady floor; the
+    # 4 GB one does. The refused head must not hide the feasible row every cycle.
+    blocked = await create_slot_workspace(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        steady=2.0,
+        peak=7.0,
+        reservation_phase=ResourceReservationPhase.steady.value,
+        title="peak-too-big",
+    )
+    feasible = await create_slot_workspace(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        steady=2.0,
+        peak=4.0,
+        reservation_phase=ResourceReservationPhase.steady.value,
+        title="fits",
+    )
+    executor = GatedSlotExecutor()
+    worker = make_worker(
+        session_factory,
+        executor=executor,
+        max_concurrent_executions=1,
+        local_capacity_memory_gb=8.0,
+    )
+    assert await worker._list_ready(limit=1) == [blocked]  # noqa: SLF001
+
+    try:
+        assert await asyncio.wait_for(worker.run_once(), timeout=_TIMEOUT) == 1
+        await wait_until(lambda: executor.hold_order == [feasible])
+        assert [lease.workspace_id for lease in await held_leases(session_factory)] == [feasible]
+    finally:
+        for gate_id in list(executor.execute_calls):
+            executor.gate(gate_id).set()
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=_TIMEOUT)
+    assert blocked not in executor.execute_calls
 
 
 async def test_parked_claim_lease_and_one_free_slot_both_dispatch(
