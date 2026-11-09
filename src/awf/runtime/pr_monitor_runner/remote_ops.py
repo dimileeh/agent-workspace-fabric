@@ -1406,9 +1406,12 @@ async def _run_sync_base(
         operation_id=operation_id,
         operation_type=operation_type,
     )
+    # Fail-closed outcomes (toolchain missing, ownership repair, unowned dirty
+    # delta, ...) keep their terminal reason instead of being masked by the park.
     if (
         parked_result is not None
         and push_result.failed
+        and not push_result.terminal_monitor_failure
         and (push_result.details or {}).get("phase") == "pre_push_validation"
     ):
         return parked_result

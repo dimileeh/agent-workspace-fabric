@@ -46,6 +46,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_INFRASTRUCTURE_FAILURE_PARK_AFTER,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON,
+    _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome, _GitPushResult
 from tests.postgres import postgres_test_engine
@@ -820,4 +821,48 @@ async def test_infra_park_disables_validation_fix_agents_after_a_clean_base_merg
     assert result.reason_code == _PARKED
     assert result.parked_needs_human is True
     assert result.pushed is False
+    assert state.last_push_sha is None
+
+
+@pytest.mark.unit
+async def test_infra_park_keeps_terminal_validation_failures_after_a_clean_base_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fail-closed validation outcome is not masked by the park envelope."""
+
+    async def _ownership_ok(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(remote_ops, "repair_agent_runtime_ownership", _ownership_ok)
+    state = MonitorState(started_at=0.0)
+    for _ in range(_CAP):
+        budget.record_pre_push_infrastructure_failure(state, _fix_failed(), pr_head_sha=_HEAD)
+    cmd = FakeCommandRunner()
+    cmd.respond_when(
+        _is_clean_merge_rev_parse,
+        stdout=f"{_HEAD}\n{'d' * 40}\n{_HEAD}\n{'b' * 40}\n",
+    )
+    cmd.respond_when(_is_head_in_base, returncode=1)
+    sync_runner = _sync_base_runner(tmp_path, cmd)
+
+    async def _toolchain_missing(**_kwargs: object) -> _GitPushResult:
+        return _fix_failed(reason_code=_PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON)
+
+    sync_runner._validated_git_push_result = _toolchain_missing
+    result = await remote_ops._run_sync_base(
+        sync_runner,  # type: ignore[arg-type]
+        workspace_id="ws-sync",
+        state=state,
+        repo=RepoRef(owner="owner", name="repo"),
+        pr_number=614,
+        pr_head_sha=_HEAD,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON
+    assert result.terminal_monitor_failure is True
+    assert result.parked_needs_human is False
     assert state.last_push_sha is None
