@@ -17,6 +17,7 @@ import pytest
 import structlog
 
 from awf.common.config import Settings
+from awf.control.worker.work_slot_probe import LocalWorkSlotProcessProbe
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.driver import LocalRuntimeDriver
 from awf.runtime.hosted_delegation import HostedDelegationConfigError
@@ -199,6 +200,8 @@ def test_build_worker_runtime_defaults_to_local_runtime_driver_without_changing_
     assert created["worker_kwargs"]["executor"] is created["executor"]
     assert created["worker_kwargs"]["runtime_cleaner"] is created["runtime_cleaner"]
     assert created["worker_kwargs"]["open_pr_resolver"] is created["open_pr_resolver"]
+    # Restart adoption and the reconciler probe tagged awf-exec processes (slot-release).
+    assert isinstance(created["worker_kwargs"]["work_slot_probe"], LocalWorkSlotProcessProbe)
     assert created["executor_kwargs"]["compose"] is created["compose"]
     assert created["executor_kwargs"]["validation"] is created["validation"]
     assert created["executor_kwargs"]["agent_runtime_executor"] is None
@@ -700,6 +703,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -795,6 +799,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             created["worker_config"] = config
@@ -1097,6 +1102,7 @@ def _stub_worker_runtime_dependencies(
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
             config: object,
         ) -> None:
             """Test helper for  init  ."""

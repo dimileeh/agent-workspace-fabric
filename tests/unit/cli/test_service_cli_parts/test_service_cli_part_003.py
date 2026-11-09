@@ -540,6 +540,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             claude_base_reaper: object = None,
             terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
+            work_slot_probe: object = None,
         ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner

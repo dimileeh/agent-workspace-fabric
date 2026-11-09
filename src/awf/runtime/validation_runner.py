@@ -32,6 +32,7 @@ from awf.common.compose_exec import (
     cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
+from awf.common.work_slot import WorkSlot, hold_work_slot
 from awf.profiles.models import (
     ProfileAlembicValidation,
     ProfileCommand,
@@ -427,8 +428,14 @@ class ValidationRunner:
         run_healthchecks: bool = False,
         worktree_path: Path | None = None,
         include_coverage: bool = True,
+        work_slot: WorkSlot | None = None,
     ) -> ValidationResult:
-        """Run the selected profile phases in order."""
+        """Run the selected profile phases in order.
+
+        ``work_slot`` is the caller-injected work-slot scope (slot-release): the
+        run holds it throughout and tags each phase/coverage ``awf-exec`` with its
+        invocation.
+        """
         requested_phases = set(phase_names)
         healthchecks = profile.validation.healthchecks if run_healthchecks else []
         coverage = (
@@ -442,19 +449,21 @@ class ValidationRunner:
             if profile.database.pre_validation_refresh and "validate" in requested_phases
             else None
         )
-        return await self._run_commands(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            commands=profile_phase_command_plan(profile, phase_names),
-            healthchecks=list(healthchecks),
-            legacy_command_labels=False,
-            retry_budget=profile.validation.retry_budget,
-            coverage=coverage,
-            healthcheck_before_phase=healthcheck_before_phase,
-            alembic_policy=alembic_policy,
-            worktree_path=worktree_path,
-        )
+        async with hold_work_slot(work_slot, "validation") as work_slot_invocation_id:
+            return await self._run_commands(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                commands=profile_phase_command_plan(profile, phase_names),
+                healthchecks=list(healthchecks),
+                legacy_command_labels=False,
+                retry_budget=profile.validation.retry_budget,
+                coverage=coverage,
+                healthcheck_before_phase=healthcheck_before_phase,
+                alembic_policy=alembic_policy,
+                worktree_path=worktree_path,
+                work_slot_invocation_id=work_slot_invocation_id,
+            )
 
     async def run_profile_coverage(
         self,
@@ -467,6 +476,7 @@ class ValidationRunner:
         parallel_worker_cpu_limit: int | None = None,
         worktree_path: Path | None = None,
         pr_identity: object | None = None,
+        work_slot: WorkSlot | None = None,
     ) -> ValidationCoverageResult | None:
         """Run only the profile coverage command and return its policy result."""
         del worktree_path, pr_identity
@@ -475,18 +485,20 @@ class ValidationRunner:
             return None
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
-        return await self._collect_coverage(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            coverage=coverage,
-            artifacts_dir=workspace_artifacts,
-            results=[],
-            phase_indices={},
-            phase=phase,
-            full_gate_concurrency=profile.validation.strategy.full_gate_concurrency,
-            parallel_worker_cpu_limit=parallel_worker_cpu_limit,
-        )
+        async with hold_work_slot(work_slot, "validation") as work_slot_invocation_id:
+            return await self._collect_coverage(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                coverage=coverage,
+                artifacts_dir=workspace_artifacts,
+                results=[],
+                phase_indices={},
+                phase=phase,
+                full_gate_concurrency=profile.validation.strategy.full_gate_concurrency,
+                parallel_worker_cpu_limit=parallel_worker_cpu_limit,
+                work_slot_invocation_id=work_slot_invocation_id,
+            )
 
     async def _run_commands(
         self,
@@ -502,6 +514,7 @@ class ValidationRunner:
         healthcheck_before_phase: str | None = None,
         alembic_policy: ProfileAlembicValidation | None = None,
         worktree_path: Path | None = None,
+        work_slot_invocation_id: str | None = None,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
@@ -589,6 +602,7 @@ class ValidationRunner:
                     timeout_seconds=command.timeout_seconds,
                     is_retry=(total_retry_count > 0),
                     output_prefix=setup_dependency_output_prefix,
+                    work_slot_invocation_id=work_slot_invocation_id,
                 )
                 setup_dependency_output_prefix = None
 
@@ -773,6 +787,7 @@ class ValidationRunner:
                 results=results,
                 phase_indices=phase_indices,
                 full_gate_concurrency=0,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
 
         return ValidationResult(commands=results, coverage=coverage_result)
@@ -1035,6 +1050,7 @@ class ValidationRunner:
         phase: str = "coverage",
         full_gate_concurrency: int = 0,
         parallel_worker_cpu_limit: int | None = None,
+        work_slot_invocation_id: str | None = None,
     ) -> ValidationCoverageResult:
         if full_gate_concurrency > 0:
             semaphore = _FULL_GATE_SEMAPHORES.setdefault(
@@ -1051,6 +1067,7 @@ class ValidationRunner:
                     phase_indices=phase_indices,
                     phase=phase,
                     parallel_worker_cpu_limit=parallel_worker_cpu_limit,
+                    work_slot_invocation_id=work_slot_invocation_id,
                 )
         return await self._collect_coverage_unthrottled(
             workspace_id=workspace_id,
@@ -1062,6 +1079,7 @@ class ValidationRunner:
             phase_indices=phase_indices,
             phase=phase,
             parallel_worker_cpu_limit=parallel_worker_cpu_limit,
+            work_slot_invocation_id=work_slot_invocation_id,
         )
 
     async def _collect_coverage_unthrottled(
@@ -1076,6 +1094,7 @@ class ValidationRunner:
         phase_indices: dict[str, int],
         phase: str,
         parallel_worker_cpu_limit: int | None = None,
+        work_slot_invocation_id: str | None = None,
     ) -> ValidationCoverageResult:
         if coverage.provider != "python":
             return ValidationCoverageResult(
@@ -1106,6 +1125,7 @@ class ValidationRunner:
                 artifacts_dir=artifacts_dir,
                 phase=phase,
                 timeout_seconds=coverage.command.timeout_seconds,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             coverage_outputs = [command_result]
         else:
@@ -1204,6 +1224,7 @@ class ValidationRunner:
         timeout_seconds: float | None = None,
         is_retry: bool = False,
         output_prefix: str | None = None,
+        work_slot_invocation_id: str | None = None,
     ) -> ValidationCommandResult:
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
@@ -1211,6 +1232,7 @@ class ValidationRunner:
             cli_args=cli_args,
             source="validation",
             label=label,
+            work_slot_invocation_id=work_slot_invocation_id,
         )
         docker_args = invocation.args
         started = time.monotonic()

@@ -12,7 +12,11 @@ from awf.service.scheduler import SchedulerOrderCursor
 
 
 class _ExecutionTaskKind(StrEnum):
-    """Kind of work tracked in ``ControlWorker._execution_tasks`` slot accounting."""
+    """Kind of task tracked in ``ControlWorker._execution_tasks``.
+
+    Tracking is per-workspace dedup only: work slots are broker-owned DB leases
+    (slot-release), so no in-memory budget counts these tasks.
+    """
 
     MONITOR_RESUME = "monitor_resume"
     READY = "ready"
@@ -25,8 +29,8 @@ class _ExecutionTaskKind(StrEnum):
     # A monitor resume that reconcile has cancelled but whose coroutine has not
     # yet stopped. Cancellation is cooperative, so the task can keep running
     # after ``cancel()`` returns. We keep it tracked under its workspace_id so a
-    # fresh dispatch for the *same* workspace stays blocked, but exclude it from
-    # the slot budget so it does not starve *other* workspaces.
+    # fresh dispatch for the *same* workspace stays blocked; a lease it still
+    # holds is handed to the reconciler so it never starves *other* workspaces.
     MONITOR_DRAINING = "monitor_draining"
 
 

@@ -60,6 +60,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.common.work_slot import WorkSlot, hold_work_slot
 from awf.db.enums import AgentRuntime
 from awf.profiles.compose import (
     agent_exec_env_passthrough as agent_exec_env_passthrough,
@@ -300,10 +301,16 @@ class AgentAdapter(ABC):
         profile: WorkspaceProfile | None = None,
         worktree_path: Path | None = None,
         workdir: str = DEFAULT_AGENT_WORKDIR,
+        work_slot: WorkSlot | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
         Raises ``AgentRunError`` on non-zero exit.
+
+        ``work_slot`` is the caller-injected work-slot scope (slot-release): the
+        whole run (local or hosted) holds it, and the local ``awf-exec`` is tagged
+        with its invocation so a restarted worker can tell whether the run is
+        still in flight. ``None`` keeps the run byte-identical to an unslotted one.
 
         The user-supplied ``prompt`` is wrapped with an AWF preamble
         that encodes contract invariants the agent must honour — most
@@ -315,6 +322,39 @@ class AgentAdapter(ABC):
         empty. Preamble + post-agent branch-drift recovery in
         ``control/executor.py`` form a belt-and-braces defence.
         """
+        async with hold_work_slot(work_slot, "agent") as work_slot_invocation_id:
+            return await self._run_holding_work_slot(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
+                model=model,
+                workspace_id=workspace_id,
+                log_source=log_source,
+                hosted_pr_identity=hosted_pr_identity,
+                git_preparation=git_preparation,
+                profile=profile,
+                worktree_path=worktree_path,
+                workdir=workdir,
+                work_slot_invocation_id=work_slot_invocation_id,
+            )
+
+    async def _run_holding_work_slot(
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None,
+        workspace_id: str | None,
+        log_source: str,
+        hosted_pr_identity: dict[str, Any] | None,
+        git_preparation: AgentRuntimeGitPreparation | None,
+        profile: WorkspaceProfile | None,
+        worktree_path: Path | None,
+        workdir: str,
+        work_slot_invocation_id: str | None,
+    ) -> AgentRunResult:
+        """Run the agent once the caller's work slot (if any) is held."""
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         prompt_input = wrapped_prompt.encode("utf-8")
         selected_model = self._selected_model_for_run(model=model)
@@ -351,6 +391,7 @@ class AgentAdapter(ABC):
                 workdir=workdir,
                 preserve_stdin=True,
                 env_passthrough=env_passthrough,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             _log.info(
                 "agent.run.start",

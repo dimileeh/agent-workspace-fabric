@@ -41,6 +41,7 @@ from awf.common.forge import ForgeClient
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.common.github_retry import GitHubRetryContext, github_retry_context
+from awf.common.work_slot import WorkSlot
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
@@ -143,6 +144,9 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         # ``None`` on the inline initial handoff, where the executor still holds
         # the execution claim rather than a monitor claim.
         self._monitor_owner_id: str | None = None
+        # Work slot injected by the worker task driving this run (slot-release):
+        # agent and validation runs hold it, and every pure wait releases it.
+        self._work_slot: WorkSlot | None = None
 
     # ── Entry point ────────────────────────────────────────────────────────
 
@@ -153,10 +157,17 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
         compose_project: str,
         compose_file: Path,
         monitor_owner_id: str | None = None,
+        work_slot: WorkSlot | None = None,
     ) -> None:
-        """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
+        """Drive the monitor phase until a terminal ``MonitorAction`` fires.
+
+        ``work_slot`` is the worker task's work-slot scope: monitor actions that
+        run an agent or validation hold it; every other action first releases a
+        retained lease (``release_idle``), so pure waiting holds no slot.
+        """
 
         self._monitor_owner_id = monitor_owner_id
+        self._work_slot = work_slot
         monitor_log = await self._open_monitor_log(workspace_id)
         state: MonitorState | None = None
         # ``run()`` is awaited inline on the executor's initial handoff and on the

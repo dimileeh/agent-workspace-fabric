@@ -21,6 +21,7 @@ from awf.common.github_client import (
     RepoRef,
 )
 from awf.common.task_tag import title_with_task_tag
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
     _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
     _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
@@ -47,6 +48,7 @@ from awf.control.executor.monitor_handoff import (
     _prepare_handoff_pr_monitor_profile,
 )
 from awf.control.executor.quality_gates import _log
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -453,6 +455,7 @@ async def _handoff_sync_release_pr_monitor(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
+        **work_slot_kwargs(work_slot_for(self, workspace_id)),
     )
 
 
@@ -676,4 +679,5 @@ async def _handoff_sync_feature_pr_monitor(
         workspace_id=workspace_id,
         compose_project=compose_project,
         compose_file=compose_file,
+        **work_slot_kwargs(work_slot_for(self, workspace_id)),
     )

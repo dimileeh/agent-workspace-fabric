@@ -655,7 +655,9 @@ def _orchestrator_worker(
         _dispatch_preserved_active_validation=_dispatch,
         _execution_tasks=execution_tasks,
         _executor=executor,
-        _available_execution_slots=lambda: available_slots,
+        # Work slots are DB leases (slot-release): the flow only asks whether
+        # execution is enabled at all.
+        _can_dispatch_execution_when_slot_available=lambda: available_slots > 0,
     )
 
 
@@ -805,8 +807,8 @@ async def test_recover_validation_rewind_keeps_candidate_when_status_unchanged(
 async def test_recover_validation_salvage_returns_true_when_slot_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When re-dispatch is not immediately possible but an executor and a free
-    slot exist, recovery keeps the workspace eligible and returns True (268)."""
+    """When re-dispatch is not immediately possible but an executor exists and
+    execution is enabled, recovery keeps the workspace eligible and returns True."""
     ws = _stale_workspace(
         task_attempt=SimpleNamespace(id="att-1", task_id="task-1"),
     )

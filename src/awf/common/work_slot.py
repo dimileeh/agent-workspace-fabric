@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Final, Protocol
+from typing import Final, Protocol, TypedDict
 
 WORK_SLOT_INVOCATION_ENV: Final = "AWF_WORK_SLOT_INVOCATION_ID"
 """Env marker set on tagged ``awf-exec`` processes; the restart probe scans for it."""
@@ -42,13 +42,19 @@ class WorkSlot(Protocol):
     async def release_idle(self) -> None: ...  # pragma: no cover - Protocol declaration only.
 
 
-def work_slot_kwargs(work_slot: WorkSlot | None) -> dict[str, WorkSlot]:
+class WorkSlotKwargs(TypedDict, total=False):
+    """Keyword arguments carrying an injected work slot (absent when unbound)."""
+
+    work_slot: WorkSlot
+
+
+def work_slot_kwargs(work_slot: WorkSlot | None) -> WorkSlotKwargs:
     """Return ``{"work_slot": ...}`` only when a slot is bound.
 
     Call sites splat this into ``adapter.run(...)``/validation calls so existing
     fakes that predate the keyword keep working when no slot is bound.
     """
-    return {} if work_slot is None else {"work_slot": work_slot}
+    return WorkSlotKwargs() if work_slot is None else WorkSlotKwargs(work_slot=work_slot)
 
 
 @asynccontextmanager

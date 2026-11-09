@@ -22,6 +22,7 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor import validation_fix_helpers as _validation_fix_helpers
 from awf.control.executor.agent_service_recovery import _run_agent_callable_with_service_recovery
 from awf.control.executor.git_ops import _git_name_lines
@@ -32,6 +33,7 @@ from awf.control.executor.hosted_validation_sync import (
 )
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.validation_cleanup_guards import ExecutionValidationResult
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.control.quality_gates import find_protected_quality_gate_changes
 from awf.control.validation_fix_cycle import ValidationFixContext, build_fix_prompt
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
@@ -145,6 +147,7 @@ async def run_validation_fix_pass(
                 hosted_pr_identity=_hosted_pr_identity,
                 profile=profile,
                 worktree_path=worktree_path,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
 
         async def _finish_fix_recovery_failure(

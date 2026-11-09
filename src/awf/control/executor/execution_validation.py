@@ -19,6 +19,7 @@ from awf.common.compose_exec import (
     cleanup_failure_message,
 )
 from awf.common.redaction import redact_secrets
+from awf.common.work_slot import work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation_fix_pass as _execution_validation_fix_pass
 from awf.control.executor import planning_artifacts as _planning_artifacts
@@ -68,6 +69,7 @@ from awf.control.executor.validation_cleanup_guards import (
     handle_validation_cleanup_guard as _handle_validation_cleanup_guard,
 )
 from awf.control.executor.validation_side_effects import _side_effect_failure_result
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
     read_output_tail,
@@ -373,6 +375,7 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 include_coverage=False,
                 **validation_run_kwargs,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
             if run_local_coverage and val_result.all_passed:
                 coverage_evidence = await self._run_final_coverage_gate(

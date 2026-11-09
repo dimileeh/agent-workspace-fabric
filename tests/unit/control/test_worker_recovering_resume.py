@@ -12,10 +12,12 @@ teardown guards that keep the warm lease held while paused.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog.testing
@@ -28,6 +30,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
+from tests.unit.control._worker_work_slot_support import create_in_status
 
 WORKER_TEST_TIMEOUT_SECONDS = 60.0
 
@@ -236,6 +239,56 @@ async def test_run_once_resumes_cooled_down_recovering_workspace(
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.running.value
+
+
+class _HookingRecoveringExecutor(_RecordingRecoveringExecutor):
+    """The resume holds the injected work slot at its agent hook."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bound: dict[str, Any] = {}
+        self.held_slot: list[str] = []
+
+    def work_slot_binding(self, workspace_id: str, work_slot: Any) -> Any:
+        self.bound[workspace_id] = work_slot
+        return contextlib.nullcontext()
+
+    async def resume_recovering_execution(self, workspace_id: str, **_kwargs: object) -> None:
+        await super().resume_recovering_execution(workspace_id)
+        async with self.bound[workspace_id].hold("agent"):
+            self.held_slot.append(workspace_id)
+
+
+@pytest.mark.unit
+async def test_run_once_resumes_recovering_workspace_with_seven_idle_monitors_present(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # Regression for the measured starvation: idle monitors and paused rows
+    # occupied every admission slot. They hold no work slot now, so the cooled
+    # down resume runs and takes a slot at its agent hook (slot-release).
+    for index in range(7):
+        await create_in_status(session_factory, WorkspaceStatus.monitoring_pr, f"idle-{index}")
+    ws_id = await _create_recovering(
+        session_factory,
+        origin_repo,
+        "cooled-with-monitors",
+        not_before=datetime.now(UTC) - timedelta(seconds=5),
+    )
+    executor = _HookingRecoveringExecutor()
+    worker = _worker(session_factory, executor)  # type: ignore[arg-type]
+    worker._claim_monitoring_pr_ids = _claim_no_monitors  # type: ignore[method-assign]  # noqa: SLF001
+
+    await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    assert executor.resume_recovering_calls == [ws_id]
+    assert executor.held_slot == [ws_id]
+
+
+async def _claim_no_monitors(workspace_ids: list[str], *, limit: int) -> list[str]:
+    del workspace_ids, limit
+    return []
 
 
 @pytest.mark.unit

@@ -418,6 +418,13 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
 
 _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
 
+RESUME_DISPATCH_PAGE_LIMIT = 200
+"""Per-cycle listing page for monitor/blocked/recovering resume dispatch.
+
+Not a slot budget (slot-release): resumes start lease-less and only take a work
+slot at an agent/validation hook, so dispatch is bounded by per-workspace dedup;
+the page just bounds one cycle's listing and claim writes."""
+
 # Worker-internal work-slot log reason codes (slot-release). Like
 # ``EXECUTION_CLAIM_FENCED`` these are structured-log fields only, not doctor or
 # catalog entries; the operator-facing waiting reason is

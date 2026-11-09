@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
     _AWF_RUFF_CHECK_HOOK_ID,
     _AWF_RUFF_FORMAT_CHECK_HOOK_ID,
@@ -33,6 +34,7 @@ from awf.control.executor.types import (
     _CoverageEvidenceResult,
     _PlanningRunFailure,
 )
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason
 from awf.runtime.validation import ValidationCoverageResult
 
@@ -403,6 +405,7 @@ async def _run_baseline_coverage_preflight(
         profile=profile,
         phase="baseline_coverage",
         **run_kwargs,
+        **work_slot_kwargs(work_slot_for(executor, workspace_id)),
     )
     if result is not None and not result.ok:
         _log.info(
@@ -502,6 +505,7 @@ async def _run_final_coverage_gate(
             profile=profile,
         ),
         **dict(coverage_run_kwargs or {}),
+        **work_slot_kwargs(work_slot_for(executor, workspace_id)),
     )
     return _CoverageEvidenceResult(
         coverage=result,

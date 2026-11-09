@@ -22,6 +22,7 @@ from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
+from awf.common.work_slot import work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
@@ -58,6 +59,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
 from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
@@ -587,6 +589,7 @@ async def run_resumed_pr_monitor(
         compose_project=handoff.compose_project,
         compose_file=handoff.compose_file,
         **handoff.run_kwargs,
+        **work_slot_kwargs(work_slot_for(self, workspace_id)),
     )
     return True
 

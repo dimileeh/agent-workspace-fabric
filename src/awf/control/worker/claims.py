@@ -29,7 +29,6 @@ from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.admission import (
     _acquire_requested_admission_locks,
     _requested_admission_lock_node_ids,
-    _requested_admission_row_slots,
 )
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
@@ -84,6 +83,7 @@ from awf.control.worker.types import (
     _RequestedCapacityClaimResult,
     _RequestedCapacityQueueSignature,
 )
+from awf.control.worker.work_slots import _requested_claim_admission_slots
 from awf.db.enums import (
     OperationStatus,
     OperationType,
@@ -132,19 +132,6 @@ def _empty_requested_capacity_claim_result() -> _RequestedCapacityClaimResult:
         requested_queue_signature=None,
         provider_suppression_resume_expires_at=None,
     )
-
-
-async def _requested_claim_admission_slots(
-    self: Any,
-    session: AsyncSession,
-    *,
-    claim_limit: int,
-) -> int:
-    claim_limit = max(0, claim_limit)
-    if self._executor is None:
-        return claim_limit
-    row_slots = await _requested_admission_row_slots(session, config=self._config)
-    return min(claim_limit, row_slots)
 
 
 async def _claim_requested_ids(
@@ -412,6 +399,8 @@ async def _claim_requested_capacity_candidates(
                 context=queue_decision_context,
             )
             continue
+        # Claim + work-slot lease commit atomically; a race-refused lease rolls back.
+        claim_savepoint = await session.begin_nested()
         ws = await repo.transition_if_current(
             workspace.id,
             from_status=WorkspaceStatus.requested,
@@ -419,8 +408,13 @@ async def _claim_requested_capacity_candidates(
             reason_code="WORKER_CLAIMED",
         )
         if ws is None:
+            await claim_savepoint.rollback()
             await self._log_stale_requested_claims(session, [workspace.id])
             continue
+        if await self._requested_claim_work_slot_refused(session, workspace.id):
+            await claim_savepoint.rollback()
+            break
+        await claim_savepoint.commit()
         self._apply_execution_claim(ws, owner_id=self._worker_id)
         if demand.defaulted:
             await _record_capacity_queue_decision(
@@ -485,6 +479,10 @@ async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> boo
             ),
         )
         if ws is not None:
+            # The claim lease is taken atomically; a refusal leaves the row requested.
+            if await self._requested_claim_work_slot_refused(session, workspace_id):
+                await session.rollback()
+                return False
             self._apply_execution_claim(ws, owner_id=self._worker_id)
             await session.commit()
             return True
@@ -1216,10 +1214,12 @@ async def _safely_resume_claimed_pr_monitor(
     )
     resume_succeeded = False
     try:
-        resume_succeeded = await self._safely_resume_pr_monitor(
-            workspace_id,
-            recovery_operation_id=recovery_operation_id,
-        )
+        # A waiting monitor holds no work slot; its hooks reacquire (slot-release).
+        async with self._work_slot_task_scope(workspace_id):
+            resume_succeeded = await self._safely_resume_pr_monitor(
+                workspace_id,
+                recovery_operation_id=recovery_operation_id,
+            )
     finally:
         recovery_finalize_pending = workspace_id in self._monitor_recovery_operation_ids
         if (

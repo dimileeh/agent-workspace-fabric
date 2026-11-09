@@ -160,6 +160,56 @@ class WorkSlotLeaseRepository:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_for_workspace(self, workspace_id: str) -> list[WorkSlotLease]:
+        stmt = (
+            select(WorkSlotLease)
+            .where(WorkSlotLease.workspace_id == workspace_id)
+            .order_by(WorkSlotLease.ticket_at, WorkSlotLease.invocation_id)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_with_runtime_for_node(
+        self, *, node_id: str | None
+    ) -> list[tuple[WorkSlotLease, str | None, str | None]]:
+        """Return leases with their workspace compose project and file (probe input)."""
+        stmt = (
+            select(
+                WorkSlotLease,
+                Workspace.compose_project_name,
+                Workspace.compose_file_path,
+            )
+            .join(Workspace, Workspace.id == WorkSlotLease.workspace_id)
+            .order_by(WorkSlotLease.ticket_at, WorkSlotLease.invocation_id)
+        )
+        if node_id is not None:
+            stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
+        rows = (await self._session.execute(stmt)).all()
+        return [(row[0], row[1], row[2]) for row in rows]
+
+    async def list_parked_workspace_ids(
+        self,
+        *,
+        holder_worker_id: str,
+        workspace_status: WorkspaceStatus,
+    ) -> list[str]:
+        """Return workspaces in ``workspace_status`` whose held lease ``holder`` parked.
+
+        A parked lease is a plain held lease (not adopted, cleanup proven) that a
+        finished provisioning task kept for READY dispatch to continue.
+        """
+        stmt = (
+            select(WorkSlotLease.workspace_id)
+            .join(Workspace, Workspace.id == WorkSlotLease.workspace_id)
+            .where(
+                Workspace.status == workspace_status.value,
+                WorkSlotLease.holder_worker_id == holder_worker_id,
+                WorkSlotLease.phase == WorkSlotLeasePhase.held.value,
+                WorkSlotLease.cleanup_unproven.is_(False),
+            )
+            .order_by(WorkSlotLease.ticket_at, WorkSlotLease.invocation_id)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def count_in_use(self, *, node_id: str | None) -> int:
         """Count held/adopted leases on the node, including expired ones.
 

@@ -10,6 +10,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_EVENT_TYPE,
     HOSTED_MONITOR_HANDOFF_SETUP_COMPLETED_REASON_CODE,
@@ -22,6 +23,7 @@ from awf.control.executor.logging_ops import (
     _setup_dependency_network_failure_details,
 )
 from awf.control.executor.mirror_hooks_repair import repair_mirror_hooks_path_or_mark_failed
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import (
@@ -289,6 +291,7 @@ async def _run_monitor_handoff_profile_setup(
             profile=profile,
             phase_names=("setup", "pre_agent"),
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot_for(self, workspace_id)),
         )
     except _MonitorHandoffSetupFailureError:
         raise
@@ -457,6 +460,7 @@ async def _run_hosted_monitor_handoff_profile_setup(
             worktree_path=worktree_path,
             include_coverage=False,
             pr_identity=pr_identity,
+            **work_slot_kwargs(work_slot_for(self, workspace_id)),
         )
     except _MonitorHandoffSetupFailureError:
         raise

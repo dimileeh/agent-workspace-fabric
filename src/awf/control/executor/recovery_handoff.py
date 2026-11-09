@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from awf.adapters.base import AgentAdapter, AgentDefaults
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
     _provider_recovery_default_model_for_monitor_handoff,
@@ -20,6 +21,7 @@ from awf.control.executor.recovery_payloads import (
     _validate_only_recovery_target_head_sha,
 )
 from awf.control.executor.types import _RebaseRecoveryResult
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -168,5 +170,6 @@ async def handle_recovery_pr_handoff_after_validation(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
     return True

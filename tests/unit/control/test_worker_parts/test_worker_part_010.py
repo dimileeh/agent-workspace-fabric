@@ -25,6 +25,7 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
+from awf.control.worker.constants import RESUME_DISPATCH_PAGE_LIMIT
 from awf.control.worker.scheduling import (
     _scheduler_candidate_fetch_limit,
 )
@@ -1285,10 +1286,15 @@ class TestRunOnceExecutionPart003:
         assert set(executor.calls) == set(ready_ids[:3])
 
     @pytest.mark.unit
-    async def test_execution_queries_are_limited_to_available_slots(
+    async def test_execution_queries_exclude_tracked_ids_and_list_by_page(
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        """Tracked tasks are only deduped, never a budget (slot-release).
+
+        Monitor resumes list one resume page per cycle; READY lists up to the
+        work-slot count and is then bounded by DB leases, not by tracked tasks.
+        """
         executor = _RecordingExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
@@ -1334,7 +1340,7 @@ class TestRunOnceExecutionPart003:
 
         try:
             assert await worker.run_once() == 0
-            assert limits == {"monitoring": 2, "ready": 2}
+            assert limits == {"monitoring": RESUME_DISPATCH_PAGE_LIMIT, "ready": 3}
             assert exclusions == {"monitoring": {"busy"}, "ready": {"busy"}}
         finally:
             release.set()
@@ -1385,7 +1391,11 @@ class TestRunOnceExecutionPart003:
         assert await worker.run_once() == 0
         assert queries == [
             (WorkspaceStatus.requested, 8, set()),
-            (WorkspaceStatus.monitoring_pr, 16, set()),
+            (
+                WorkspaceStatus.monitoring_pr,
+                _scheduler_candidate_fetch_limit(RESUME_DISPATCH_PAGE_LIMIT),
+                set(),
+            ),
             (WorkspaceStatus.ready, 16, set()),
         ]
 

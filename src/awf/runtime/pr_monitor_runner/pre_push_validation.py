@@ -12,6 +12,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.github_client import RepoRef
 from awf.common.logging import get_logger
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.helpers import (
     _pre_push_validation_phase_names,
     _profile_for_workspace,
@@ -1101,6 +1102,8 @@ async def _run_pre_push_validation(
                 state=state,
             )
             validation_kwargs["pr_identity"] = hosted_pr_identity
+        work_slot = work_slot_kwargs(getattr(self, "_work_slot", None))
+        validation_kwargs.update(work_slot)
         result = await self._deps.validation.run_profile_phases(**validation_kwargs)
         # Hosted combined jobs request coverage in-band. Reject a passing result
         # that still omits coverage so push cannot proceed without evidence.
@@ -1118,6 +1121,7 @@ async def _run_pre_push_validation(
                 "profile": profile,
                 "phase": "coverage",
                 "worktree_path": worktree_path,
+                **work_slot,
             }
             coverage_result = await self._deps.validation.run_profile_coverage(**coverage_kwargs)
             if coverage_result is not None:
