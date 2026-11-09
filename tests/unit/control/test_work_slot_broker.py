@@ -603,6 +603,51 @@ async def test_different_invocation_never_shares_a_held_lease(
             )
 
 
+async def test_waiter_blocked_by_its_own_workspace_lease_does_not_stall_the_queue(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    config = WorkerConfig(max_concurrent_executions=3)
+    base = datetime.now(UTC)
+    leftover_ws = await _workspace(session_factory)
+    _, _, leftover = await _acquire(
+        session_factory, leftover_ws, config=config, admission="new", now=base
+    )
+    assert leftover is not None
+    assert await _release(session_factory, leftover, cleanup_unproven=True)
+    # The oldest live ticket belongs to the workspace whose leftover lease is held.
+    blocked_id, blocked_outcome, _ = await _acquire(
+        session_factory, leftover_ws, config=config, now=base + timedelta(seconds=1)
+    )
+    assert blocked_outcome is WorkSlotAcquireOutcome.waiting
+    other_ws = await _workspace(session_factory)
+    requested_ws = await _workspace(session_factory)
+    now = base + timedelta(seconds=2)
+
+    _, other_outcome, _ = await _acquire(session_factory, other_ws, config=config, now=now)
+    _, new_outcome, _ = await _acquire(
+        session_factory, requested_ws, config=config, admission="new", now=now
+    )
+
+    assert other_outcome is WorkSlotAcquireOutcome.granted
+    assert new_outcome is WorkSlotAcquireOutcome.granted
+    # Once the leftover lease is gone the blocked ticket is the head again and
+    # keeps its priority over new work.
+    async with session_factory() as session:
+        assert await WorkSlotLeaseRepository(session).delete_fenced(
+            leftover.invocation_id,
+            holder_worker_id=leftover.holder_worker_id,
+            holder_epoch=leftover.holder_epoch,
+        )
+        await session.commit()
+    async with session_factory() as session:
+        assert await new_work_capacity(session, config=config, now=now) == 0
+    _, outcome, lease = await _acquire(
+        session_factory, leftover_ws, config=config, invocation_id=blocked_id, now=now
+    )
+    assert outcome is WorkSlotAcquireOutcome.granted
+    assert lease is not None
+
+
 async def test_foreign_holder_of_the_invocation_is_refused(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

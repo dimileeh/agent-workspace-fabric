@@ -19,6 +19,7 @@ from typing import Any
 
 from sqlalchemy import Select, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from awf.db.enums import WorkSlotLeasePhase, WorkspaceStatus
 from awf.db.models import WorkSlotLease, Workspace
@@ -233,8 +234,8 @@ class WorkSlotLeaseRepository:
     async def fifo_head(self, *, node_id: str | None, now: datetime) -> WorkSlotLease | None:
         """Return the oldest live ``waiting`` ticket on the node.
 
-        Expired waiters (their invocation stopped re-checking) and ``unsatisfiable``
-        waiters never block the head.
+        Expired waiters (their invocation stopped re-checking), ``unsatisfiable``
+        waiters and waiters whose workspace already holds a lease never block the head.
         """
         stmt = (
             _live_waiters_stmt(select(WorkSlotLease), node_id=node_id, now=now)
@@ -345,7 +346,14 @@ def _node_scoped(stmt: Select[Any], *, node_id: str | None) -> Select[Any]:
 
 
 def _live_waiters_stmt(stmt: Select[Any], *, node_id: str | None, now: datetime) -> Select[Any]:
+    # A waiter whose workspace still holds another invocation's lease cannot be
+    # granted until that lease is gone, so it must not hold up the queue meanwhile.
+    held = aliased(WorkSlotLease)
+    held_workspace_ids = select(held.workspace_id).where(
+        held.phase.in_(IN_USE_WORK_SLOT_LEASE_PHASES)
+    )
     return _node_scoped(stmt, node_id=node_id).where(
         WorkSlotLease.phase == WorkSlotLeasePhase.waiting.value,
         WorkSlotLease.expires_at > now,
+        WorkSlotLease.workspace_id.not_in(held_workspace_ids),
     )
