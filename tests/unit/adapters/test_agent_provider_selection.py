@@ -84,9 +84,13 @@ async def test_local_execution_uses_isolated_runtime_wrapper_and_no_native_crede
     assert selected.model in str(command)
 
 
-async def test_capable_hosted_executor_gets_secret_free_full_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+async def test_capable_hosted_executor_gets_secret_free_full_snapshot(
+    tmp_path, monkeypatch, provider
+):
     from awf.adapters.runtime_executor import AgentRuntimeExecResult
     from awf.common.commands import FakeCommandRunner
+    from awf.profiles.models import ProfileRuntime, WorkspaceProfile
     from awf.runtime.hosted_delegation_payloads import _agent_start_payload
 
     class Capable:
@@ -98,8 +102,15 @@ async def test_capable_hosted_executor_gets_secret_free_full_snapshot(tmp_path, 
             return AgentRuntimeExecResult(returncode=0, stdout="ok", stderr="")
 
     selected = resolve_execution(
-        agent="claude_code", provider="openrouter", model="anthropic/test", allow_unverified=True
+        agent="claude_code", provider=provider, model="anthropic/test", allow_unverified=True
     )
+    profile = WorkspaceProfile(
+        name="selected-provider",
+        runtime=ProfileRuntime(
+            environment={"ANTHROPIC_MODEL": "competing-model", "TOOL_MODE": "safe"}
+        ),
+    )
+    original_profile = profile.model_dump()
     compose = tmp_path / "compose.yml"
     compose.write_text("services:\n  agent:\n    image: agent\n")
     monkeypatch.setenv("OPENROUTER_API_KEY", "router-opaque-secret")
@@ -111,14 +122,69 @@ async def test_capable_hosted_executor_gets_secret_free_full_snapshot(tmp_path, 
         execution=selected,
         runtime_executor=executor,
     )
-    await adapter.run(compose_project="ws", compose_file=compose, prompt="fix", workspace_id="ws")
+    await adapter.run(
+        compose_project="ws", compose_file=compose, prompt="fix", workspace_id="ws", profile=profile
+    )
     assert executor.request.execution == selected
     assert executor.request.effort is None
-    assert executor.request.env_passthrough_names == ("OPENROUTER_API_KEY",)
+    assert executor.request.env_passthrough_names == (
+        ("OPENROUTER_API_KEY",) if provider == "openrouter" else ()
+    )
+    assert executor.request.profile is not profile
+    assert executor.request.profile.runtime.environment == {
+        "TOOL_MODE": "safe",
+        **({"OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"} if provider == "openrouter" else {}),
+    }
+    assert profile.model_dump() == original_profile
     payload = _agent_start_payload(executor.request)
     assert payload["execution"] == selected.model_dump()
     assert "router-opaque-secret" not in str(payload)
     assert "xhigh" not in str(payload)
+
+
+@pytest.mark.parametrize(
+    "stderr,reason",
+    [
+        ("EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED", "EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED"),
+        ("PROVIDER_HTTP_429", "PROVIDER_HTTP_429"),
+        ("custom tool failed", "AGENT_CLI_FAILED"),
+    ],
+)
+async def test_hosted_failure_preserves_selected_provider_reason(tmp_path, stderr, reason):
+    from awf.adapters.base import AgentRunError
+    from awf.adapters.runtime_executor import AgentRuntimeExecResult
+    from awf.common.commands import FakeCommandRunner
+
+    class Capable:
+        execution_contract_version = 1
+
+        async def execute(self, request):
+            return AgentRuntimeExecResult(returncode=78, stdout="", stderr=stderr + "\n")
+
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="coder", allow_unverified=True
+    )
+    adapter = get_adapter(
+        "codex", runner=FakeCommandRunner(), execution=selected, runtime_executor=Capable()
+    )
+    with pytest.raises(AgentRunError) as failure:
+        await adapter.run(
+            compose_project="ws",
+            compose_file=tmp_path / "compose.yml",
+            prompt="fix",
+            workspace_id="ws",
+        )
+    error = failure.value
+    assert error.reason_code == reason
+    assert error.result.returncode == 78
+    assert error.result.stderr == stderr + "\n"
+    if reason != "AGENT_CLI_FAILED":
+        assert error.details == {
+            "provider": "ollama",
+            "model": "coder",
+            "execution": selected.model_dump(),
+            "retryable": False,
+        }
 
 
 async def test_old_local_runtime_has_structured_contract_rejection(tmp_path):

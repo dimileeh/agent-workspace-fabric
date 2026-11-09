@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from awf.adapters.provider_config import isolated_provider_config, provider_environment
+from awf.adapters.provider_config import (
+    isolated_provider_config,
+    provider_environment,
+    safe_provider_config,
+)
 from awf.common.agent_execution import resolve_execution
 
 
@@ -115,6 +119,12 @@ def test_safe_codex_tools_preserved_without_provider_env_or_role_settings(tmp_pa
             }
         },
     }
+    safe_source = safe_provider_config("codex", source)
+    assert safe_source == {
+        "developer_instructions": "Keep tests focused",
+        "mcp_servers": {"safe": {"command": "tool", "args": ["serve"]}},
+    }
+    assert source["mcp_servers"]["safe"]["env"] == {"OPENAI_API_KEY": "native-secret"}
     with isolated_provider_config(
         selected.model_dump(), root=tmp_path, environ={}, source_config=source
     ) as (_, _, directory):
@@ -167,7 +177,7 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     )
     executable = tmp_path / "fake-agent"
     executable.write_text(
-        f"#!{sys.executable}\nimport os,json,pathlib,sys\nroot=pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['CLAUDE_CONFIG_DIR'])\nprint(json.dumps({{'config':str(root),'args':sys.argv[1:],'token':os.environ.get('AWF_SELECTED_PROVIDER_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')}}))\n"
+        f"#!{sys.executable}\nimport os,json,pathlib,sys\nroot=pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['CLAUDE_CONFIG_DIR'])\ncontent=next(root.iterdir()).read_text()\nprint(json.dumps({{'config':str(root),'content':content,'args':sys.argv[1:],'token':os.environ.get('AWF_SELECTED_PROVIDER_KEY') or os.environ.get('ANTHROPIC_AUTH_TOKEN')}}))\n"
     )
     executable.chmod(0o755)
     monkeypatch.chdir(tmp_path)
@@ -179,6 +189,15 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     monkeypatch.setenv("OPENROUTER_API_KEY", "selected-opaque-secret")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "declared-codex"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "declared-claude"))
+    source = tmp_path / ("declared-codex" if agent == "codex" else "declared-claude")
+    source.mkdir()
+    source_file = source / ("config.toml" if agent == "codex" else "settings.json")
+    original = (
+        'developer_instructions="Keep focused"\nmodel="native"\n'
+        if agent == "codex"
+        else '{"language":"English","model":"native","apiKeyHelper":"competing-auth"}'
+    )
+    source_file.write_text(original)
     monkeypatch.setattr(runtime, "probe_connection", lambda *_args: {"ok": True})
     monkeypatch.setattr(
         sys,
@@ -203,6 +222,15 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     assert list(os_temp.iterdir()) == []
     assert "selected-opaque-secret" not in output
     assert "chosen/model" in observed["args"]
+    content = observed["content"]
+    config = tomllib.loads(content) if agent == "codex" else json.loads(content)
+    assert config["model"] == "chosen/model"
+    assert "native" not in content and "competing-auth" not in content
+    if agent == "codex":
+        assert config["developer_instructions"] == "Keep focused"
+    else:
+        assert config["language"] == "English"
+    assert source_file.read_text() == original
 
 
 def test_runtime_cancellation_stops_child_and_removes_only_owned_config(tmp_path):
@@ -455,3 +483,74 @@ def test_declared_cloud_tool_settings_survive_provider_isolation(agent):
     env = provider_environment(selected.model_dump(), {**tool_env, **model_env})
     assert all(env.get(k) == v for k, v in tool_env.items())
     assert not set(model_env).intersection(env)
+
+
+@pytest.mark.parametrize(
+    "updates,reason",
+    [
+        ({"version": 999}, "EXECUTION_CONTRACT_UNSUPPORTED"),
+        ({"provider": "unsupported"}, "EXECUTION_PROVIDER_UNSUPPORTED"),
+        ({"agent": "unsupported"}, "EXECUTION_AGENT_UNSUPPORTED"),
+    ],
+)
+def test_runtime_environment_rejects_unsupported_identity(updates, reason):
+    selected = resolve_execution(
+        agent="codex", provider="ollama", model="coder", allow_unverified=True
+    )
+    with pytest.raises(ValueError, match=f"^{reason}$") as failure:
+        provider_environment(
+            {**selected.model_dump(), **updates}, {"OPENAI_API_KEY": "unrelated-secret"}
+        )
+    assert "unrelated-secret" not in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "arguments,stdout,stderr,returncode",
+    [
+        (["--contract-version"], "1\n", "", 0),
+        ([json.dumps({"version": 999})], "", "EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED\n", 78),
+    ],
+)
+def test_standalone_runtime_negotiates_version_before_configuration(
+    monkeypatch, capsys, arguments, stdout, stderr, returncode
+):
+    import sys
+
+    import awf.adapters.provider_config as runtime
+
+    monkeypatch.setattr(sys, "argv", ["provider_config.py", *arguments])
+    assert runtime.main() == returncode
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == (stdout, stderr)
+
+
+@pytest.mark.parametrize("blocked_by", ["project_agents", "probe"])
+def test_standalone_runtime_refuses_unsafe_or_unready_execution(
+    tmp_path, monkeypatch, capsys, blocked_by
+):
+    import sys
+    from unittest.mock import Mock
+
+    import awf.adapters.provider_config as runtime
+
+    selected = resolve_execution(
+        agent="claude_code", provider="ollama", model="coder", allow_unverified=True
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "runtime-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-native-config"))
+    monkeypatch.setattr(sys, "argv", ["provider_config.py", json.dumps(selected.model_dump())])
+    probe = Mock(return_value={"ok": False, "reason_code": "PROVIDER_MODEL_UNAVAILABLE"})
+    monkeypatch.setattr(runtime, "probe_connection", probe)
+    if blocked_by == "project_agents":
+        (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    assert runtime.main() == 78
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if blocked_by == "project_agents":
+        assert captured.err == "EXECUTION_PROJECT_CONFIGURATION_UNSUPPORTED\n"
+        probe.assert_not_called()
+    else:
+        assert captured.err == "PROVIDER_MODEL_UNAVAILABLE\n"
+        probe.assert_called_once_with(selected.model_dump(), runtime.os.environ)
+    assert not (tmp_path / "runtime-home" / ".awf").exists()

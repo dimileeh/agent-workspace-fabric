@@ -233,3 +233,104 @@ def test_selected_endpoint_reuses_host_local_normalization(host):
         environ={"OLLAMA_HOST": f"http://{host}:12345/prefix/v1"},
     )
     assert selected.endpoint == "http://host.docker.internal:12345/prefix"
+
+
+def test_sidecar_circuit_requires_workspace_namespace():
+    selected = resolve_execution(
+        agent="codex",
+        provider="ollama",
+        model="coder",
+        allow_unverified=True,
+        profile={
+            "runtime": {"environment": {"OLLAMA_HOST": "http://ollama:11434"}},
+            "services": [{"name": "ollama"}],
+        },
+    )
+    assert selected.network_service == "ollama"
+    with pytest.raises(ValueError, match="^EXECUTION_NETWORK_NAMESPACE_REQUIRED$"):
+        circuit_key("codex", {"agent_execution": selected.model_dump()})
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"agent": "unknown"},
+        {"agent": "opencode", "model": "ollama/coder", "provider": "openrouter"},
+    ],
+)
+def test_unsupported_agent_or_mismatched_legacy_provider_is_rejected(arguments):
+    with pytest.raises(ValueError, match="^AGENT_PROVIDER_UNSUPPORTED$"):
+        resolve_execution(**arguments)
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"runtime": {"environment": {"OPENROUTER_API_KEY": ""}}},
+        {"secrets": [{"provider": "file", "ref": "ROUTER_TOKEN"}]},
+        {"secrets": [{"provider": "env", "ref": "invalid/reference"}]},
+    ],
+)
+def test_openrouter_rejects_unresolvable_credential_declarations(declaration):
+    for secret in declaration.get("secrets", []):
+        secret.update(kind="env", target="OPENROUTER_API_KEY")
+    with pytest.raises(ValueError, match="^PROVIDER_CREDENTIAL_REFERENCE_REQUIRED$"):
+        resolve_execution(
+            agent="codex",
+            provider="openrouter",
+            model="coder",
+            allow_unverified=True,
+            profile=declaration,
+        )
+
+
+@pytest.mark.parametrize("environ", [{"DAEMON_URL": "http://ollama:11434/prefix/v1/"}, {}])
+def test_profile_endpoint_expands_declared_environment_or_fails_safely(environ):
+    arguments = {
+        "agent": "codex",
+        "provider": "ollama",
+        "model": "coder",
+        "allow_unverified": True,
+        "profile": {"runtime": {"environment": {"OLLAMA_HOST": "${DAEMON_URL:?required}"}}},
+        "environ": environ,
+    }
+    if not environ:
+        with pytest.raises(ValueError, match="^PROVIDER_ENDPOINT_INVALID$"):
+            resolve_execution(**arguments)
+    else:
+        selected = resolve_execution(**arguments)
+        assert selected.endpoint == "http://ollama:11434/prefix"
+        assert execution_from_policy({"agent_execution": selected.model_dump()}) == selected
+
+
+@pytest.mark.parametrize(
+    "provider,updates",
+    [
+        ("ollama", {"agent": "unknown"}),
+        ("ollama", {"endpoint": None}),
+        ("ollama", {"model": None}),
+        ("ollama", {"effort": "xhigh"}),
+        ("ollama", {"compatibility": "native"}),
+        ("ollama", {"provider": "unsupported"}),
+        ("ollama", {"endpoint": "http://ollama:11434/v1/"}),
+        ("ollama", {"credential_ref": "literal-secret"}),
+        ("openrouter", {"credential_ref": None}),
+        ("openrouter", {"endpoint": "https://other.invalid/api"}),
+        ("openrouter", {"credential_ref": "env/invalid/reference"}),
+    ],
+)
+def test_persisted_third_party_contract_rejects_tampered_identity(provider, updates):
+    selected = resolve_execution(
+        agent="codex", provider=provider, model="coder", allow_unverified=True
+    )
+    with pytest.raises(ValueError, match="^EXECUTION_CONTRACT_UNSUPPORTED$") as failure:
+        execution_from_policy({"agent_execution": {**selected.model_dump(), **updates}})
+    assert "literal-secret" not in str(failure.value)
+
+
+def test_persisted_opencode_contract_rejects_provider_model_mismatch():
+    selected = resolve_execution(agent="opencode", model="ollama/coder")
+    with pytest.raises(ValueError, match="^EXECUTION_CONTRACT_UNSUPPORTED$"):
+        execution_from_policy(
+            {"agent_execution": {**selected.model_dump(), "provider": "openrouter"}}
+        )
