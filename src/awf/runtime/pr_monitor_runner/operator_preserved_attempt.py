@@ -216,6 +216,10 @@ def _resolve_targets(
                 live[item_id] = tip
         elif key.startswith(retired_prefix) and value:
             retired[key[len(retired_prefix) :]] = value
+    # A retirement is only done once its disposition reply and resolve landed: a
+    # failed reply re-parks the item ``needs_human`` under a reason that no longer
+    # cites the tip, and a repeated ruling must retry it rather than no-op.
+    done = {tid for tid in retired if entries.get(tid) != "needs_human"}
     shas = disposition.shas
     if len(disposition.thread_ids) > 1:
         # Thread ids are collected from the whole directive, so a second id may be
@@ -224,7 +228,7 @@ def _resolve_targets(
     if disposition.thread_ids:
         thread_id = disposition.thread_ids[0]
         tip = live.get(thread_id)
-        already_retired = tip is None and thread_id in retired
+        already_retired = tip is None and thread_id in done
         tip = tip or retired.get(thread_id)
         if tip is None:
             return [], "not_preserved_attempt"
@@ -236,7 +240,7 @@ def _resolve_targets(
     matches = [_Target(tid, tip, False) for tid, tip in live.items() if _sha_matches(shas, tip)]
     if not matches:
         matches = [
-            _Target(tid, tip, True)
+            _Target(tid, tip, tid in done)
             for tid, tip in retired.items()
             if tid not in live and _sha_matches(shas, tip)
         ]

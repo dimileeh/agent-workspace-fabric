@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -498,6 +499,37 @@ async def test_readopt_after_retirement_is_an_idempotent_processed_no_op(
     assert [e.id for e in await _disposition_events(factory, workspace_id)] == [
         e.id for e in first_events
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("guide", [_GUIDE, _SHA_ONLY_GUIDE], ids=["thread_and_sha", "sha_only"])
+async def test_repeated_guide_after_failed_reply_retries_the_disposition(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path, guide: str
+) -> None:
+    """A retirement whose reply never landed is not a no-op for the next guide."""
+    runner, workspace_id, gh, cycle = await _runner(factory, tmp_path)
+    thread = _thread()
+    state = _parked_state(thread)
+    original_reason = _original_park_reason(state)
+    status = _status(thread)
+    _arm(state, guide)
+    await _guide_poll(runner, workspace_id, state, status)
+    gh.reply_error = ForgeClientError("forge blip")
+    await _next_poll(runner, gh, workspace_id, state, status)
+    assert state.threads_addressed_ids[_THREAD] == "needs_human"
+    assert state.threads_addressed_ids[_REASON_KEY].startswith("THREAD_DISPOSITION_REPLY_FAILED")
+
+    gh.reply_error = None
+    gh.events.clear()
+    _arm(state, guide, operation_id="op_guide_1189_retry")
+    await _guide_poll(runner, workspace_id, state, status)
+    poll = await _next_poll(runner, gh, workspace_id, state, status)
+
+    assert cycle.calls == []
+    _assert_retired_and_resolved(state, gh, poll, original_reason)
+    events = await _disposition_events(factory, workspace_id)
+    assert [event.reason_code for event in events] == [OPERATOR_PRESERVED_ATTEMPT_RETIRED] * 2
+    assert events[1].payload["evidence"]["hint_operation_id"] == "op_guide_1189_retry"
 
 
 # --- T4: the disposition cannot be applied -> distinct reason, no silent re-raise --
