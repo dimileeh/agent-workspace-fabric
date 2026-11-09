@@ -119,29 +119,20 @@ async def _work_slot_task_scope(
     self: Any,
     workspace_id: str,
     *,
-    continue_parked_lease: bool = False,
+    lease: WorkSlotLeaseRef | None = None,
 ) -> AsyncIterator[InvocationWorkSlot | None]:
     """Run one execution task inside its work-slot scope, bound into the executor.
 
-    ``continue_parked_lease`` (READY dispatch) starts the scope with the lease the
-    dispatch pre-step transferred to this worker, so the first agent and
-    validation runs are nested no-ops. Every other task kind starts lease-less and
-    reacquires at its hooks. Executors without ``work_slot_binding`` (test fakes)
-    simply run unbound.
+    ``lease`` (READY dispatch) is the lease the dispatch pre-step transferred or
+    granted to this worker, handed over directly rather than re-read: a failed
+    re-read would leave it held but unrenewed, and the task's own hook reacquire
+    queued behind it. The first agent and validation runs are then nested no-ops.
+    Every other task kind starts lease-less and reacquires at its hooks.
+    Executors without ``work_slot_binding`` (test fakes) simply run unbound.
     """
     if self._executor is None:
         yield None
         return
-    lease: WorkSlotLeaseRef | None = None
-    if continue_parked_lease:
-        try:
-            lease = await self._own_parked_work_slot_lease(workspace_id)
-        except _DB_ERRORS as exc:
-            # The task reacquires at its first hook instead, queued until the parked
-            # lease expires and the reconciler releases it.
-            _log_work_slot_db_failure(
-                "worker.work_slot_parked_lease_lookup_failed", workspace_id, exc
-            )
     scope = self._new_invocation_work_slot(workspace_id, lease=lease)
     binding = getattr(self._executor, "work_slot_binding", None)
     try:

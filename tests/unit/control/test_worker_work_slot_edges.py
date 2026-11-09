@@ -53,33 +53,32 @@ async def test_provision_only_worker_runs_tasks_without_a_scope(
         assert scope is None
 
 
-async def test_parked_lease_lookup_failure_degrades_to_hook_reacquire(
+async def test_ready_dispatch_starts_on_its_transferred_lease_without_rereading_it(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace_id = await create_requested(session_factory)
-    worker = make_worker(
-        session_factory,
-        executor=SlotAwareExecutor(),
-        provisioner=RecordingProvisioner(session_factory, to_ready=False),
-    )
-    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+    executor = SlotAwareExecutor()
+    worker = make_worker(session_factory, executor=executor)
+    workspace_id = await create_in_status(session_factory, WorkspaceStatus.ready, "parked")
+    await add_lease(session_factory, workspace_id, holder=worker._worker_id)  # noqa: SLF001
+    leases = await worker._claim_ready_work_slots([workspace_id])  # noqa: SLF001
 
     async def _db_down(*_args: object, **_kwargs: object) -> object:
         raise OperationalError("SELECT", {}, Exception("db down"))
 
     with monkeypatch.context() as patch:
+        # A work-slot DB failure after the pre-step cannot strand the transferred
+        # lease (held, unrenewed, the task's hook reacquire queued behind it): the
+        # task is handed the lease directly instead of looking it up again.
         patch.setattr(worker_work_slots, "_work_slot_db", _db_down)
-        with structlog.testing.capture_logs() as logs:
-            async with worker._work_slot_task_scope(  # noqa: SLF001
-                workspace_id, continue_parked_lease=True
-            ) as scope:
-                # READY dispatch runs lease-less and reacquires at its first hook,
-                # queued until the reconciler releases the expired parked lease.
-                assert scope is not None
-                assert scope.lease is None
-    assert "worker.work_slot_parked_lease_lookup_failed" in {entry["event"] for entry in logs}
-    assert [lease.workspace_id for lease in await held_leases(session_factory)] == [workspace_id]
+        dispatched = worker._dispatch_ready_executions(  # noqa: SLF001
+            [workspace_id], limit=1, leases=leases
+        )
+        assert dispatched == {workspace_id}
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=_TIMEOUT)
+
+    assert executor.leases_at_start[workspace_id] == leases[workspace_id]
+    assert await held_leases(session_factory) == []
 
 
 async def test_provisioning_aborts_when_its_claim_lease_cannot_be_read(

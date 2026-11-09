@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, cast
 
@@ -28,6 +28,7 @@ from awf.control.worker.constants import (
     EXECUTION_CLAIM_FENCED,
 )
 from awf.control.worker.logging import _log
+from awf.control.worker.resource_broker import WorkSlotLeaseRef
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.control.worker.work_slot_scope import InvocationWorkSlot
 from awf.db.enums import (
@@ -147,7 +148,13 @@ def _dispatchable_execution_ids(self: Any, workspace_ids: list[str], *, limit: i
     return dispatchable
 
 
-def _dispatch_ready_executions(self: Any, workspace_ids: list[str], *, limit: int) -> set[str]:
+def _dispatch_ready_executions(
+    self: Any,
+    workspace_ids: list[str],
+    *,
+    limit: int,
+    leases: Mapping[str, WorkSlotLeaseRef] | None = None,
+) -> set[str]:
     dispatched: set[str] = set()
     for workspace_id in workspace_ids:
         if len(dispatched) >= limit:
@@ -156,7 +163,9 @@ def _dispatch_ready_executions(self: Any, workspace_ids: list[str], *, limit: in
             continue
 
         task = asyncio.create_task(
-            self._safely_execute_claimed(workspace_id),
+            self._safely_execute_claimed(
+                workspace_id, work_slot_lease=(leases or {}).get(workspace_id)
+            ),
             name=f"awf-execute-{workspace_id}",
         )
         self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.READY)
@@ -699,7 +708,12 @@ async def _safely_execute(self: Any, workspace_id: str) -> None:
         _log.exception("worker.execute_failed", workspace_id=workspace_id)
 
 
-async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
+async def _safely_execute_claimed(
+    self: Any,
+    workspace_id: str,
+    *,
+    work_slot_lease: WorkSlotLeaseRef | None = None,
+) -> None:
     """Run executor for a claimed ready workspace while heartbeating the execution claim."""
     heartbeat = asyncio.create_task(
         self._refresh_execution_claim_loop(workspace_id),
@@ -707,10 +721,11 @@ async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
     )
     try:
         # READY dispatch continues on the lease its pre-step transferred to this
-        # worker; a preserved-active validation starts lease-less and reacquires
-        # at its hook. Either way the scope is released when the workspace first
-        # waits (monitor ``release_idle``) or when the task ends.
-        async with self._work_slot_task_scope(workspace_id, continue_parked_lease=True):
+        # worker (handed over directly, so no re-read can strand it); a
+        # preserved-active validation starts lease-less and reacquires at its
+        # hook. Either way the scope is released when the workspace first waits
+        # (monitor ``release_idle``) or when the task ends.
+        async with self._work_slot_task_scope(workspace_id, lease=work_slot_lease):
             await self._safely_execute(workspace_id)
     finally:
         heartbeat.cancel()

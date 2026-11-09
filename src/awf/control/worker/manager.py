@@ -463,6 +463,7 @@ class ControlWorker(WorkerDelegatesMixin):
             ready_dispatched = self._dispatch_ready_executions(
                 ready_dispatch_ids,
                 limit=len(ready_dispatch_ids),
+                leases=ready_leases,
             )
             dispatched_ids.update(ready_dispatched)
             execution_dispatched_ids.update(ready_dispatched)
