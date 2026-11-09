@@ -129,10 +129,6 @@ class InvocationWorkSlot:
         return self._invocation_id
 
     @property
-    def workspace_id(self) -> str:
-        return self._workspace_id
-
-    @property
     def lease(self) -> WorkSlotLeaseRef | None:
         return self._lease
 
@@ -237,37 +233,58 @@ class InvocationWorkSlot:
         return renewed
 
     async def _acquire_until_granted(self, phase: str) -> None:
-        waited_since: float | None = None
         try:
-            while True:
-                waiter = self._wakeups.waiter()
-                result = await self._try_acquire()
-                if result.granted:
-                    self._lease = result.lease
-                    self._start_renewal()
-                    if waited_since is not None:
-                        _log.info(
-                            "worker.work_slot_granted",
-                            workspace_id=self._workspace_id,
-                            invocation_id=self._invocation_id,
-                            worker_id=self._worker_id,
-                            phase=phase,
-                            waited_seconds=round(monotonic() - waited_since, 3),
-                        )
-                    return
-                if result.outcome is WorkSlotAcquireOutcome.refused:
-                    # Another worker adopted this invocation's lease while we were
-                    # considered dead; continue under a fresh invocation.
-                    self._invocation_id = new_work_slot_invocation_id()
-                    continue
-                if waited_since is None:
-                    waited_since = monotonic()
-                    await self._record_waiting(phase, result)
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(waiter.wait(), timeout=_WORK_SLOT_WAIT_RECHECK_SECONDS)
+            await self._wait_for_grant(phase)
         except asyncio.CancelledError:
             await _run_shielded(self._withdraw_ticket())
             raise
+
+    async def _wait_for_grant(self, phase: str) -> None:
+        waited_since: float | None = None
+        while True:
+            waiter = self._wakeups.waiter()
+            result = await self._try_acquire()
+            if result.granted:
+                self._lease = result.lease
+                self._start_renewal()
+                self._log_granted(phase, waited_since)
+                return
+            if result.outcome is WorkSlotAcquireOutcome.refused:
+                # Another worker adopted this invocation's lease while we were
+                # considered dead; continue under a fresh invocation.
+                self._invocation_id = new_work_slot_invocation_id()
+            else:
+                waited_since = await self._wait_for_release(
+                    phase, result, waiter, waited_since=waited_since
+                )
+
+    async def _wait_for_release(
+        self,
+        phase: str,
+        result: WorkSlotAcquireResult,
+        waiter: asyncio.Event,
+        *,
+        waited_since: float | None,
+    ) -> float:
+        """Record the wait episode once, then sleep until a release or the re-check."""
+        if waited_since is None:
+            waited_since = monotonic()
+            await self._record_waiting(phase, result)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(waiter.wait(), timeout=_WORK_SLOT_WAIT_RECHECK_SECONDS)
+        return waited_since
+
+    def _log_granted(self, phase: str, waited_since: float | None) -> None:
+        if waited_since is None:
+            return
+        _log.info(
+            "worker.work_slot_granted",
+            workspace_id=self._workspace_id,
+            invocation_id=self._invocation_id,
+            worker_id=self._worker_id,
+            phase=phase,
+            waited_seconds=round(monotonic() - waited_since, 3),
+        )
 
     async def _try_acquire(self) -> WorkSlotAcquireResult:
         invocation_id = self._invocation_id
@@ -441,13 +458,12 @@ class InvocationWorkSlot:
 
     async def _renew_loop(self) -> None:
         interval = max(1.0, min(60.0, self._lease_seconds / 3))
-        while True:
+        renewing = True
+        while renewing:
             await asyncio.sleep(interval)
             lease = self._lease
-            if lease is None:
-                return
-            if not await self._renew_once(lease):
-                return
+            # Stop once the lease is gone (released or fenced) or renewal is fenced.
+            renewing = lease is not None and await self._renew_once(lease)
 
     async def _renew_once(self, lease: WorkSlotLeaseRef) -> bool:
         try:
