@@ -58,7 +58,7 @@ from awf.control.executor.quality_gates import (
     _log,
 )
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
-from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.state_ops import _freeze_execution_defaults, _sync_resolved_profile
 from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
@@ -207,6 +207,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         )
         if recovered_remote_push_branch:
             ws.remote_push_branch = recovered_remote_push_branch
+
+    if not await _freeze_execution_defaults(self, ws):
+        return None
 
     workspace_is_hosted = pr_adoption_is_hosted(ws.task_policy)
     missing = _missing_monitor_recovery_metadata(ws)

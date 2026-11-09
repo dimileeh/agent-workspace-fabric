@@ -308,6 +308,10 @@ async def execute(
 
     try:
         try:
+            from awf.control.executor.state_ops import _freeze_execution_defaults
+
+            if not await _freeze_execution_defaults(self, ws):
+                return
             try:
                 agent = AgentRuntime(ws.agent)
                 defaults = self._defaults_for(agent)

@@ -1574,6 +1574,8 @@ def freeze_execution_policy(
                 environ=environ if profile is not None else {},
             )
         )
+    if any(not s.third_party for s in snapshots):
+        policy["agent_execution_defaults_pending"] = True
     if profile is None and any(s.third_party for s in snapshots):
         policy["agent_execution_profile_pending"] = True
     if profile is not None or not snapshots[0].third_party:

@@ -96,6 +96,48 @@ def _resolved_profile_snapshot_from_db_value(value: object) -> dict[str, Any] | 
     return parsed if isinstance(parsed, dict) else None
 
 
+async def _freeze_execution_defaults(self: Any, ws: Workspace) -> bool:
+    """Freeze authoritative executor defaults once, before any adapter is built."""
+    from copy import deepcopy
+
+    from awf.common.agent_execution import execution_from_policy
+    from awf.db.enums import AgentRuntime
+
+    if not (ws.task_policy or {}).get("agent_execution_defaults_pending"):
+        return True
+    async with self._session_factory() as session:
+        persisted = await session.scalar(
+            select(Workspace).where(Workspace.id == ws.id).with_for_update()
+        )
+        if (
+            persisted is None
+            or persisted.status != ws.status
+            or persisted.execution_claim_epoch != ws.execution_claim_epoch
+            or persisted.monitor_claimed_by != ws.monitor_claimed_by
+        ):
+            return False
+        policy = deepcopy(persisted.task_policy)
+        if policy.pop("agent_execution_defaults_pending", False):
+            for target in [policy, *policy.get("provider_recovery", {}).get("fallbacks", [])]:
+                selected = execution_from_policy(target)
+                if selected is None or selected.third_party:
+                    continue
+                defaults = self._defaults_for(AgentRuntime(selected.agent))
+                assert defaults is not None  # supported native runtimes have historical defaults
+                selected = selected.model_copy(
+                    update={
+                        "model": selected.model if selected.model_explicit else defaults.model,
+                        "effort": selected.effort if selected.effort_explicit else defaults.effort,
+                    }
+                )
+                target["agent_execution"] = selected.model_dump(mode="json")
+            persisted.task_policy = policy
+            await WorkspaceRepository(session).advance_workspace_version(persisted)
+            await session.commit()
+        ws.task_policy = policy
+    return True
+
+
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
     async with self._session_factory() as session:
         return await WorkspaceRepository(session).get(workspace_id)
