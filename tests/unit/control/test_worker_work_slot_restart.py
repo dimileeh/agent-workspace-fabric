@@ -28,6 +28,7 @@ from awf.control.worker.constants import (
     WORK_SLOT_RELEASED_BY_RECONCILER,
     WORK_SLOT_STARTUP_CHECK_FAILED,
 )
+from awf.control.worker.resource_broker import acquire_work
 from awf.db.enums import ResourceReservationPhase, WorkSlotLeasePhase, WorkspaceStatus
 from awf.db.repositories import (
     ResourceReservationRepository,
@@ -461,6 +462,72 @@ async def test_reconciler_withdraws_a_crashed_peers_queued_tickets_at_once(
         entry for entry in logs if entry.get("reason_code") == WORK_SLOT_RELEASED_BY_RECONCILER
     ]
     assert {entry["invocation_id"] for entry in withdrawn} == {dead_ticket, dead_unsatisfiable}
+
+
+@pytest.mark.parametrize("source", ["startup", "reconciler"])
+async def test_withdraw_keeps_a_ticket_granted_after_the_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    # The withdraw is decided from a snapshot read without the capacity lock. A
+    # holder that only looked dead (stale heartbeat) can still be granted its
+    # ticket (same holder and epoch) before the withdraw runs: that lease is live.
+    probe = FakeProbe()
+    worker = make_worker(
+        session_factory,
+        executor=SlotAwareExecutor(),
+        max_concurrent_executions=2,
+        work_slot_probe=probe,
+    )
+    workspace_id = await create_slot_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        reservation_phase=ResourceReservationPhase.steady.value,
+    )
+    ticket = await add_lease(
+        session_factory, workspace_id, holder=_DEAD, phase=WorkSlotLeasePhase.waiting
+    )
+    load_snapshot = worker._load_work_slot_leases_for_reconcile  # noqa: SLF001
+
+    async def _snapshot_then_grant() -> object:
+        snapshot = await load_snapshot()
+        async with session_factory() as session:
+            result = await acquire_work(
+                session,
+                workspace_id=workspace_id,
+                invocation_id=ticket,
+                holder_worker_id=_DEAD,
+                config=worker._config,  # noqa: SLF001
+                now=datetime.now(UTC),
+                lease_seconds=300.0,
+                admission="reacquire",
+            )
+            await session.commit()
+        assert result.granted
+        return snapshot
+
+    monkeypatch.setattr(worker, "_load_work_slot_leases_for_reconcile", _snapshot_then_grant)
+
+    with structlog.testing.capture_logs() as logs:
+        if source == "startup":
+            await worker._ensure_work_slot_startup_check()  # noqa: SLF001
+        else:
+            _reconcile_now(worker)
+            await worker._maybe_reconcile_work_slot_leases()  # noqa: SLF001
+
+    granted = await _lease(session_factory, ticket)
+    assert granted is not None
+    assert granted.phase == WorkSlotLeasePhase.held.value
+    assert granted.acquired_at is not None
+    assert (granted.holder_worker_id, granted.holder_epoch) == (_DEAD, 1)
+    async with session_factory() as session:
+        reservation = await ResourceReservationRepository(session).active_for_workspace(
+            workspace_id
+        )
+    assert reservation is not None and reservation.phase == "peak"
+    assert not any(entry.get("reason_code") == WORK_SLOT_RELEASED_BY_RECONCILER for entry in logs)
+    assert probe.calls == []
 
 
 async def test_reconciler_keeps_queued_tickets_of_live_holders(

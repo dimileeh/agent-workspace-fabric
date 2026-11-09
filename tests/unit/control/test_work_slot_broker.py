@@ -29,6 +29,7 @@ from awf.control.worker.resource_broker import (
     release_work,
     renew_work,
     transfer_work,
+    withdraw_work_ticket,
     work_slot_snapshot,
 )
 from awf.db.enums import ResourceReservationPhase, WorkSlotLeasePhase, WorkspaceStatus
@@ -167,6 +168,13 @@ async def _release(
     return released
 
 
+async def _withdraw(factory: async_sessionmaker[AsyncSession], ticket: WorkSlotLeaseRef) -> bool:
+    async with factory() as session:
+        withdrawn = await withdraw_work_ticket(session, ticket=ticket)
+        await session.commit()
+    return withdrawn
+
+
 async def test_new_grant_inserts_held_lease_and_flips_reservation_to_peak(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -259,6 +267,55 @@ async def test_release_of_a_waiting_row_keeps_the_reservation_phase(
 
     assert await _lease_row(session_factory, invocation_id) is None
     assert await _reservation_phase(session_factory, waiter_ws) == "workspace_lifecycle"
+
+
+async def test_withdraw_deletes_a_queued_ticket_but_never_a_grant(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    config = WorkerConfig(max_concurrent_executions=1)
+    holder_ws = await _workspace(session_factory)
+    _, _, holder = await _acquire(session_factory, holder_ws, config=config, admission="new")
+    assert holder is not None
+    queued_ws = await _workspace(session_factory)
+    queued_id, outcome, _ = await _acquire(session_factory, queued_ws, config=config)
+    assert outcome is WorkSlotAcquireOutcome.waiting
+    granted_ws = await _workspace(session_factory)
+    granted_id, outcome, _ = await _acquire(
+        session_factory,
+        granted_ws,
+        config=config,
+        now=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    assert outcome is WorkSlotAcquireOutcome.waiting
+
+    def _ticket(invocation_id: str, workspace_id: str) -> WorkSlotLeaseRef:
+        return WorkSlotLeaseRef(
+            invocation_id=invocation_id,
+            workspace_id=workspace_id,
+            holder_worker_id=_WORKER,
+            holder_epoch=1,
+        )
+
+    # A withdraw decided from an earlier snapshot: the ticket's own invocation is
+    # granted first (same holder and epoch), so the withdraw must be a no-op.
+    assert await _release(session_factory, holder)
+    _, outcome, _ = await _acquire(
+        session_factory, granted_ws, config=config, invocation_id=granted_id
+    )
+    assert outcome is WorkSlotAcquireOutcome.granted
+
+    assert await _withdraw(session_factory, _ticket(granted_id, granted_ws)) is False
+    assert await _withdraw(session_factory, _ticket(queued_id, queued_ws)) is True
+
+    granted = await _lease_row(session_factory, granted_id)
+    assert granted is not None
+    assert granted.phase == WorkSlotLeasePhase.held.value
+    assert granted.acquired_at is not None
+    assert await _reservation_phase(session_factory, granted_ws) == "peak"
+    assert await _lease_row(session_factory, queued_id) is None
+    assert await _reservation_phase(session_factory, queued_ws) == "workspace_lifecycle"
+    # Withdrawing twice is a fenced no-op.
+    assert await _withdraw(session_factory, _ticket(queued_id, queued_ws)) is False
 
 
 async def test_cleanup_unproven_release_keeps_lease_flagged(

@@ -52,6 +52,7 @@ from awf.control.worker.resource_broker import (
     release_work,
     renew_work,
     transfer_work,
+    withdraw_work_ticket,
     work_slot_snapshot,
 )
 from awf.control.worker.work_slot_scope import InvocationWorkSlot, _run_shielded
@@ -68,7 +69,8 @@ from awf.service.worker_heartbeat import worker_heartbeat_write_interval_seconds
 _DB_ERRORS: tuple[type[BaseException], ...] = (SQLAlchemyError, OSError, TimeoutError)
 _PROBE_ERRORS: tuple[type[BaseException], ...] = (OSError, RuntimeError, TimeoutError, ValueError)
 
-_ReconcileAction = Literal["adopt", "renew", "release"]
+_ReconcileAction = Literal["adopt", "renew", "release", "withdraw"]
+_FREEING_ACTIONS: tuple[_ReconcileAction, ...] = ("release", "withdraw")
 
 
 @dataclass(frozen=True)
@@ -389,8 +391,8 @@ async def _ensure_work_slot_startup_check(self: Any) -> None:
         if holder == self._worker_id or holder in fresh:
             continue
         if item.lease.acquired_at is None:
-            # A dead holder's queued ticket: withdraw it.
-            decisions.append((item, "release"))
+            # A dead holder's queued ticket: withdraw it (never a grant since).
+            decisions.append((item, "withdraw"))
             continue
         outcome = await self._probe_work_slot_lease(item)
         if outcome == "unavailable":
@@ -422,7 +424,7 @@ async def _ensure_work_slot_startup_check(self: Any) -> None:
         worker_id=self._worker_id,
         checked=len(decisions) + kept_unknown,
         adopted=sum(1 for _, action in decisions if action == "adopt"),
-        released=sum(1 for _, action in decisions if action == "release"),
+        released=sum(1 for _, action in decisions if action in _FREEING_ACTIONS),
         kept_unknown=kept_unknown,
     )
     if decisions or was_blocked:
@@ -485,7 +487,7 @@ async def _maybe_reconcile_work_slot_leases(self: Any) -> None:
                 # A crashed holder's ticket would head the FIFO and zero new-work
                 # capacity until it expires; nobody re-checks it, so withdraw it.
                 released |= await self._apply_work_slot_reconcile_action(
-                    item, "release", source="reconciler"
+                    item, "withdraw", source="reconciler"
                 )
             continue
         own = lease.holder_worker_id == self._worker_id
@@ -573,7 +575,10 @@ async def _apply_work_slot_reconcile_action(
     *,
     source: str,
 ) -> bool:
-    """Apply one fenced adopt/renew/release; ``True`` when a slot or ticket was freed."""
+    """Apply one fenced adopt/renew/release/withdraw; ``True`` when a slot or ticket was freed.
+
+    ``withdraw`` deletes a queued ticket only: one granted since the snapshot is kept.
+    """
     node_id = effective_worker_config_node_id(self._config)
     lease = WorkSlotLeaseRef.from_row(item.lease, node_id=node_id)
     lease_seconds = float(self._config.execution_claim_lease_seconds)
@@ -591,6 +596,8 @@ async def _apply_work_slot_reconcile_action(
             return adopted is not None
         if action == "renew":
             return await renew_work(session, lease=lease, now=now, lease_seconds=lease_seconds)
+        if action == "withdraw":
+            return await withdraw_work_ticket(session, ticket=lease)
         return await release_work(session, lease=lease, now=now)
 
     try:
@@ -614,7 +621,7 @@ async def _apply_work_slot_reconcile_action(
                 WORK_SLOT_ADOPTED if action == "adopt" else WORK_SLOT_RELEASED_BY_RECONCILER
             ),
         )
-    return applied and action == "release"
+    return applied and action in _FREEING_ACTIONS
 
 
 def _work_slot_reconcile_interval(self: Any) -> float:

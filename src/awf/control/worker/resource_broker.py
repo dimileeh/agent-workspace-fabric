@@ -768,6 +768,24 @@ async def release_work(
     return deleted
 
 
+async def withdraw_work_ticket(session: AsyncSession, *, ticket: WorkSlotLeaseRef) -> bool:
+    """Delete ``ticket`` only while it is still queued (fenced, never a grant).
+
+    The startup check and reconciler decide to withdraw from a snapshot read
+    without the capacity lock; the ticket's own invocation may be granted in
+    between, keeping holder and epoch. Under the capacity lock the delete also
+    requires ``acquired_at IS NULL``, so a granted row is never deleted or
+    downgraded: ``False`` reports that no-op (or a newer holder/epoch).
+    """
+    await _acquire_local_capacity_scheduler_lock(session, node_id=ticket.node_id)
+    return await WorkSlotLeaseRepository(session).delete_fenced(
+        ticket.invocation_id,
+        holder_worker_id=ticket.holder_worker_id,
+        holder_epoch=ticket.holder_epoch,
+        ticket_only=True,
+    )
+
+
 async def renew_work(
     session: AsyncSession,
     *,

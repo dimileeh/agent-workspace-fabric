@@ -298,8 +298,13 @@ class WorkSlotLeaseRepository:
         *,
         holder_worker_id: str,
         holder_epoch: int,
+        ticket_only: bool = False,
     ) -> bool:
-        """Delete the lease only while ``holder_worker_id``/``holder_epoch`` still own it."""
+        """Delete the lease only while ``holder_worker_id``/``holder_epoch`` still own it.
+
+        With ``ticket_only`` the row must also still be queued (``acquired_at`` NULL):
+        a grant keeps holder and epoch, so only this guard tells it from a ticket.
+        """
         stmt = (
             delete(WorkSlotLease)
             .where(
@@ -309,6 +314,8 @@ class WorkSlotLeaseRepository:
             )
             .execution_options(synchronize_session=False)
         )
+        if ticket_only:
+            stmt = stmt.where(WorkSlotLease.acquired_at.is_(None))
         result = await self._session.execute(stmt)
         await self._session.flush()
         return bool(getattr(result, "rowcount", 0))
