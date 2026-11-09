@@ -45,8 +45,9 @@ class LocalWorkSlotProcessProbe:
         compose_project: str | None,
         compose_file: Path | None,
     ) -> WorkSlotProbeResult:
-        if not compose_project or compose_file is None:
-            return "absent"
+        # Unset compose metadata is not proof of no stack: the executor runs
+        # tagged execs in this default project when the column is empty.
+        compose_project = compose_project or f"awf_{workspace_id}"
         try:
             # The worker loop awaits this inline: a wedged Docker CLI must not stall it.
             snapshot = await asyncio.wait_for(
@@ -81,6 +82,9 @@ class LocalWorkSlotProcessProbe:
         if agent is None or agent.state.strip().lower() != "running":
             # No running agent container means no tagged process can survive.
             return "absent"
+        if compose_file is None:
+            # A running agent we cannot exec into cannot be proven idle.
+            return "unknown"
         try:
             return await probe_work_slot_invocation(
                 self._runner,

@@ -19,9 +19,10 @@ _COMPOSE_FILE = Path("/tmp/awf/ws/compose.yml")
 class _Inspector:
     def __init__(self, result: RuntimeSnapshot | BaseException) -> None:
         self._result = result
+        self.projects: list[str | None] = []
 
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
-        del compose_project_name
+        self.projects.append(compose_project_name)
         if isinstance(self._result, BaseException):
             raise self._result
         return self._result
@@ -53,10 +54,31 @@ async def _run(probe: LocalWorkSlotProcessProbe, **overrides: object) -> str:
     return await probe.probe(**kwargs)  # type: ignore[arg-type]
 
 
-async def test_missing_compose_stack_means_nothing_can_be_in_flight() -> None:
-    probe = _probe(_Inspector(RuntimeError("must not inspect")))
-    assert await _run(probe, compose_project=None) == "absent"
-    assert await _run(probe, compose_file=None) == "absent"
+async def test_missing_compose_project_probes_the_executor_default_project() -> None:
+    # The executor runs tagged execs in ``awf_<workspace>`` when the column is
+    # unset, so a missing name is not proof that nothing is in flight.
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="awf work-slot probe: present wsl_abc\n")
+    inspector = _Inspector(RuntimeSnapshot(stack_state="running", services=[_agent("running")]))
+
+    assert await _run(_probe(inspector, runner), compose_project=None) == "present"
+    assert inspector.projects == ["awf_ws_1"]
+    assert runner.calls[0].args[:4] == ["docker", "compose", "-p", "awf_ws_1"]
+
+
+async def test_missing_compose_metadata_without_a_running_agent_is_absent() -> None:
+    inspector = _Inspector(RuntimeSnapshot(stack_state="stopped", services=[]))
+
+    assert await _run(_probe(inspector), compose_project=None, compose_file=None) == "absent"
+    assert inspector.projects == ["awf_ws_1"]
+
+
+async def test_missing_compose_file_with_a_running_agent_is_unknown() -> None:
+    runner = FakeCommandRunner()
+    snapshot = RuntimeSnapshot(stack_state="running", services=[_agent("running")])
+
+    assert await _run(_probe(_Inspector(snapshot), runner), compose_file=None) == "unknown"
+    assert runner.calls == []
 
 
 @pytest.mark.parametrize(

@@ -162,3 +162,61 @@ async def test_probe_script_detects_a_live_tagged_process_and_its_absence() -> N
     assert present.stdout.strip() == f"awf work-slot probe: present {invocation_id}"
     assert absent.returncode == 0
     assert absent.stdout.strip() == f"awf work-slot probe: absent {invocation_id}"
+
+
+_NON_DUMPABLE_SLEEPER = """
+import ctypes, sys, time
+ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE=0
+print("ready", flush=True)
+time.sleep(30)
+"""
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or os.geteuid() == 0,
+    reason="needs Linux /proc and a non-root probe user",
+)
+async def test_probe_script_is_unknown_when_a_same_uid_environ_is_unreadable() -> None:
+    # A non-dumpable tagged process hides its environ even from its own uid; the
+    # scan cannot prove it gone, so it must not report ``absent``.
+    invocation_id = f"wsl_unreadable_{os.getpid()}"
+    script = compose_exec._work_slot_probe_script(invocation_id)  # noqa: SLF001
+    env = {**os.environ, WORK_SLOT_INVOCATION_ENV: invocation_id}
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        _NON_DUMPABLE_SLEEPER,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert process.stdout is not None
+        assert (await process.stdout.readline()).strip() == b"ready"
+        result = await AsyncioSubprocessRunner().run(
+            ["sh", "-c", script, "awf-work-slot-probe", invocation_id]
+        )
+    finally:
+        process.kill()
+        await process.wait()
+
+    assert result.returncode != 0
+    assert result.stdout.strip().startswith(f"awf work-slot probe: unknown {invocation_id}")
+
+
+async def test_probe_script_is_unknown_when_the_proc_walk_cannot_see_itself(
+    tmp_path: Path,
+) -> None:
+    # An empty or hidden walk (no /proc, hidepid, foreign pid namespace) proves
+    # nothing, so it must not report ``absent``.
+    (tmp_path / "proc").mkdir()
+    invocation_id = "wsl_empty_walk"
+    script = compose_exec._work_slot_probe_script(invocation_id).replace(  # noqa: SLF001
+        "/proc/", f"{tmp_path}/proc/"
+    )
+
+    result = await AsyncioSubprocessRunner().run(
+        ["sh", "-c", script, "awf-work-slot-probe", invocation_id]
+    )
+
+    assert result.returncode != 0
+    assert result.stdout.strip().startswith(f"awf work-slot probe: unknown {invocation_id}")

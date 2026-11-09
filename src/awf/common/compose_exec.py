@@ -263,6 +263,7 @@ WORK_SLOT_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 """Deadline for one work-slot probe exec; the worker loop awaits it inline."""
 _WORK_SLOT_PROBE_PRESENT = "awf work-slot probe: present"
 _WORK_SLOT_PROBE_ABSENT = "awf work-slot probe: absent"
+_WORK_SLOT_PROBE_UNKNOWN = "awf work-slot probe: unknown"
 
 
 def build_work_slot_probe_compose_exec(
@@ -576,23 +577,45 @@ exit 0
 
 
 def _work_slot_probe_script(invocation_id: str) -> str:
-    """Scan ``/proc`` for the exact work-slot marker; read-only, never kills."""
+    """Scan ``/proc`` for the exact work-slot marker; read-only, never kills.
+
+    ``absent`` needs a walk that saw the probe itself and read every live process
+    sharing a uid with it (the exec user that runs ``awf-exec``; a setuid
+    descendant keeps its real uid). Anything less is ``unknown``, never ``absent``.
+    """
     target_marker = f"{WORK_SLOT_INVOCATION_ENV}={invocation_id}"
     return f"""
 set +e
 invocation_id={invocation_id}
 target_marker='{target_marker}'
 self_pid=$$
+probe_uid=$(id -u 2>/dev/null)
+seen_self=0
+unknown() {{
+  echo "{_WORK_SLOT_PROBE_UNKNOWN} $invocation_id: $1"
+  exit 1
+}}
+[ -n "$probe_uid" ] || unknown "probe uid unavailable"
 for env in /proc/[0-9]*/environ; do
-  [ -r "$env" ] || continue
   pid=${{env%/environ}}
   pid=${{pid##*/}}
-  [ "$pid" = "$self_pid" ] && continue
-  if tr '\\000' '\\n' < "$env" 2>/dev/null | grep -qx "$target_marker"; then
+  if [ "$pid" = "$self_pid" ]; then
+    seen_self=1
+    continue
+  fi
+  if ! environ=$(tr '\\000' '\\n' 2>/dev/null < "$env"); then
+    [ -d "/proc/$pid" ] || continue
+    if grep -Eq "^Uid:.*[[:space:]]$probe_uid([[:space:]]|\\$)" "/proc/$pid/status" 2>/dev/null; then
+      unknown "cannot read environ of live pid $pid"
+    fi
+    continue
+  fi
+  if printf '%s\\n' "$environ" | grep -qx "$target_marker"; then
     echo "{_WORK_SLOT_PROBE_PRESENT} $invocation_id"
     exit 0
   fi
 done
+[ "$seen_self" = 1 ] || unknown "/proc walk did not see the probe"
 echo "{_WORK_SLOT_PROBE_ABSENT} $invocation_id"
 exit 0
 """.strip()
