@@ -357,3 +357,34 @@ def test_implicit_native_capacity_fallback_preserves_frozen_contract():
     assert promoted == source.model_copy(
         update={"model": decision.target_model, "model_explicit": True}
     )
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude_code"])
+def test_disabled_third_party_admission_preserves_native_retired_agent_fallback(monkeypatch, agent):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "awf.common.config.get_settings",
+        lambda: SimpleNamespace(third_party_agent_providers_enabled=False),
+    )
+    target = resolve_execution(agent=agent)
+    policy = {
+        "agent_effort": "xhigh",
+        "cursor_auto_mode": "cost",
+        "provider_recovery": {
+            "fallbacks": [
+                {
+                    "agent": target.agent,
+                    "provider": target.provider,
+                    "model": target.model,
+                    "agent_execution": target.model_dump(),
+                }
+            ]
+        },
+    }
+    promoted, runtime = _prune_and_migrate_retired_agent(policy, current_agent="gemini")
+    assert runtime == target.agent
+    assert execution_from_policy(promoted) == target
+    assert promoted["provider_recovery"]["fallbacks"] == [None]
+    assert promoted.get("agent_effort") == target.effort
+    assert "cursor_auto_mode" not in promoted
