@@ -321,6 +321,7 @@ def test_opencode_planning_model_promotion_recomputes_provider(provider_constrai
             _retry_task_policy(source, (), planning_scope_context=context)
     else:
         promoted, agent = _retry_task_policy(source, (), planning_scope_context=context)
+        assert promoted.get("agent_provider") == provider_constraint
         execution = execution_from_policy(promoted)
         assert execution == selected.model_copy(
             update={"provider": provider, "model": target_model, "model_explicit": True}
@@ -336,3 +337,29 @@ def test_opencode_planning_model_promotion_recomputes_provider(provider_constrai
         assert adapter.get_provider(None) == provider
         assert adapter.default_model == target_model
     assert source.task_policy == policy
+
+
+def test_opencode_repeated_planning_promotions_keep_provider_unconstrained():
+    selected = resolve_execution(agent="opencode", model="ollama/original-coder")
+    source = SimpleNamespace(
+        id="ws-opencode-repeated-promotion",
+        agent="opencode",
+        failure_reason=None,
+        task_policy={"agent_execution": selected.model_dump(), "agent_model": selected.model},
+    )
+    for model in ("openai/gpt-oss", "anthropic/claude-sonnet"):
+        context = _PlanningScopeRetryContext(
+            reason_code="AGENT_PLAN_PHASE_SCOPE_VIOLATION",
+            evidence={},
+            evidence_ref={},
+            recovery_strategy="retry_with_fallback_model",
+            salvage_policy="discard",
+            fallback_model={"model": model},
+        )
+        promoted, agent = _retry_task_policy(source, (), planning_scope_context=context)
+        execution = execution_from_policy(promoted)
+        assert agent == "opencode"
+        assert execution.model == model
+        assert execution.provider == model.partition("/")[0]
+        assert "agent_provider" not in promoted
+        source.task_policy = promoted

@@ -1142,10 +1142,14 @@ def _install_fixed_recovery_model(
             if constraint is not None and constraint != provider:
                 raise ValueError("AGENT_PROVIDER_UNSUPPORTED")
             promoted = promoted.model_copy(update={"provider": provider})
-        return promote_execution(
+        updated = promote_execution(
             task_policy,
             {"model": target_model, "agent_execution": promoted.model_dump(mode="json")},
         )
+        if selected.agent == "opencode" and task_policy.get("agent_provider") is None:
+            # A model-only approval must not turn an inferred backend into a constraint.
+            updated.pop("agent_provider", None)
+        return updated
     updated = {**dict(task_policy), "agent_model": target_model}
     updated.pop(CURSOR_AUTO_MODE_POLICY_KEY, None)
     return updated
