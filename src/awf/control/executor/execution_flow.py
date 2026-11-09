@@ -72,7 +72,11 @@ from awf.control.executor.recovery_payloads import (
     _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
 )
-from awf.control.executor.state_ops import ProviderFailureDivert, _sync_resolved_profile
+from awf.control.executor.state_ops import (
+    ProviderFailureDivert,
+    _execution_circuit_allows_launch,
+    _sync_resolved_profile,
+)
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     PauseResumeReason,
@@ -311,6 +315,12 @@ async def execute(
             from awf.control.executor.state_ops import _freeze_execution_defaults
 
             if not await _freeze_execution_defaults(self, ws):
+                return
+            if (
+                recovery is None
+                and not resume_skip_agent
+                and not await _execution_circuit_allows_launch(self, ws)
+            ):
                 return
             try:
                 agent = AgentRuntime(ws.agent)

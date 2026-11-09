@@ -71,12 +71,14 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
 from awf.runtime.planning import PLAN_CONFORMANCE_NEEDS_HUMAN
 from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
 from awf.service.provider_recovery import (
+    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+    PROVIDER_RECOVERY_STATE_KEY,
     _policy_model,
     _record_provider_circuit_breaker,
     in_place_recovery_task_policy,
@@ -146,6 +148,65 @@ async def _freeze_execution_defaults(self: Any, ws: Workspace) -> bool:
             await session.commit()
         ws.task_policy = policy
     return True
+
+
+async def _execution_circuit_allows_launch(self: Any, ws: Workspace) -> bool:
+    """Enforce the frozen circuit that pending defaults could not identify at dispatch."""
+    from awf.common.agent_execution import circuit_key
+
+    async with self._session_factory() as session:
+        current = await session.scalar(
+            select(Workspace)
+            .where(
+                Workspace.id == ws.id,
+                Workspace.status == WorkspaceStatus.running.value,
+                Workspace.execution_claim_epoch == ws.execution_claim_epoch,
+                Workspace.execution_claimed_by == ws.execution_claimed_by,
+                Workspace.monitor_claimed_by == ws.monitor_claimed_by,
+            )
+            .with_for_update()
+        )
+        if current is None or current.task_policy != ws.task_policy or current.agent != ws.agent:
+            return False
+        key = circuit_key(current.agent, current.task_policy, workspace_id=current.id)
+        if key is None:
+            return True
+        now = datetime.now(UTC)
+        breaker = await ProviderModelCircuitBreakerRepository(session).open_breaker(
+            provider=key[0],
+            model=key[1],
+            connection_scope=key[2] if len(key) == 3 else "legacy",
+            now=now,
+        )
+        if breaker is None:
+            await session.commit()
+            return True
+        # No invocation failed: preserve all retry counters and fingerprints while
+        # using the existing cooldown/resume lifecycle to retain the warm workspace.
+        policy = dict(current.task_policy or {})
+        raw_state = policy.get(PROVIDER_RECOVERY_STATE_KEY)
+        state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+        state.update(
+            action="retry",
+            decision_reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+            not_before=(breaker.cooldown_until or now).isoformat(),
+        )
+        policy[PROVIDER_RECOVERY_STATE_KEY] = state
+        repo = WorkspaceRepository(session)
+        await repo.transition(
+            current,
+            to=WorkspaceStatus.recovering,
+            reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+            payload={
+                "provider": key[0],
+                "model": key[1],
+                "connection_scope": key[2] if len(key) == 3 else "legacy",
+                "not_before": state["not_before"],
+            },
+        )
+        current.task_policy = policy
+        await session.commit()
+        return False
 
 
 async def _load_workspace(self: Any, workspace_id: str) -> Workspace | None:
