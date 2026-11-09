@@ -90,6 +90,13 @@ def _agent_runtime_download_section(content: str) -> str:
     return " ".join(content[start:end].split())
 
 
+def _curl_branch(section: str, status_marker: str) -> str:
+    """Return the bullet of the download-failure advice that starts at ``status_marker``."""
+    start = section.index(status_marker)
+    end = section.find(" - ", start)
+    return section[start:] if end == -1 else section[start:end]
+
+
 @pytest.mark.unit
 def test_agent_runtime_download_troubleshooting_reads_curl_errors_first() -> None:
     """Assert the download-failure advice branches on the preceding curl errors."""
@@ -104,3 +111,11 @@ def test_agent_runtime_download_troubleshooting_reads_curl_errors_first() -> Non
     assert "checksum mismatch" in section and "Never bypass" in section
     assert "GitHub CLI <asset> could not be downloaded. Sources tried:" in section
     assert "Antigravity CLI <asset> could not be downloaded. Sources tried:" in section
+
+    branch_504 = _curl_branch(section, "`curl: (22) The requested URL returned error: 504`")
+    assert "Wait" in branch_504
+    assert "awf service bootstrap" in branch_504
+
+    branch_404 = _curl_branch(section, "`curl: (22) The requested URL returned error: 404`")
+    assert "pinned version" in branch_404
+    assert "wait" not in branch_404.lower()
