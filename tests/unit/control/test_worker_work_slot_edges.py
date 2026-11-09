@@ -29,6 +29,7 @@ from tests.unit.control._worker_work_slot_support import (
     create_requested,
     held_leases,
     make_worker,
+    status_of,
 )
 
 pytestmark = pytest.mark.unit
@@ -70,13 +71,41 @@ async def test_parked_lease_lookup_failure_degrades_to_hook_reacquire(
     with monkeypatch.context() as patch:
         patch.setattr(worker_work_slots, "_work_slot_db", _db_down)
         with structlog.testing.capture_logs() as logs:
-            assert await worker._own_parked_work_slot_lease(workspace_id) is None  # noqa: SLF001
-            # Provisioning then runs without a scope: the claim lease is not
-            # renewed and is left for the reconciler once it expires.
-            assert await worker._start_provision_work_slot(workspace_id) is None  # noqa: SLF001
+            async with worker._work_slot_task_scope(  # noqa: SLF001
+                workspace_id, continue_parked_lease=True
+            ) as scope:
+                # READY dispatch runs lease-less and reacquires at its first hook,
+                # queued until the reconciler releases the expired parked lease.
+                assert scope is not None
+                assert scope.lease is None
     assert "worker.work_slot_parked_lease_lookup_failed" in {entry["event"] for entry in logs}
-    await worker._finish_provision_work_slot(workspace_id, None)  # noqa: SLF001
     assert [lease.workspace_id for lease in await held_leases(session_factory)] == [workspace_id]
+
+
+async def test_provisioning_aborts_when_its_claim_lease_cannot_be_read(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await create_requested(session_factory)
+    provisioner = RecordingProvisioner(session_factory)
+    worker = make_worker(session_factory, executor=SlotAwareExecutor(), provisioner=provisioner)
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    async def _db_down(*_args: object, **_kwargs: object) -> object:
+        raise OperationalError("SELECT", {}, Exception("db down"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(worker_work_slots, "_work_slot_db", _db_down)
+        with structlog.testing.capture_logs() as logs:
+            await worker._safely_provision_claimed(workspace_id)  # noqa: SLF001
+
+    # Provisioning has no hook to reacquire at, so it never runs on a claim lease
+    # nobody renews (the reconciler would free the slot mid-provision).
+    assert provisioner.calls == []
+    assert "worker.provision_claim_setup_failed" in {entry["event"] for entry in logs}
+    # The unrenewed claim lease is left for the reconciler, the row for stale recovery.
+    assert [lease.workspace_id for lease in await held_leases(session_factory)] == [workspace_id]
+    assert await status_of(session_factory, workspace_id) == WorkspaceStatus.provisioning.value
 
 
 async def test_ready_row_whose_lease_a_live_worker_holds_is_not_dispatched(

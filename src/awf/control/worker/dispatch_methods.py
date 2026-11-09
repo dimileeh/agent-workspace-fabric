@@ -586,7 +586,8 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
     # mid-write so neither the DB lease nor the epoch entry leaks.
     work_slot: InvocationWorkSlot | None = None
     try:
-        # The claim's work-slot lease covers provisioning; renew it meanwhile.
+        # The claim's work-slot lease covers provisioning; renew it meanwhile. A
+        # failed lease read aborts the attempt here, like the epoch read below.
         work_slot = await self._start_provision_work_slot(workspace_id)
         # D2: read our fencing epoch back at provision start. ``None`` means a newer
         # claimant already superseded us (or the row is gone), so abort before any

@@ -132,7 +132,16 @@ async def _work_slot_task_scope(
     if self._executor is None:
         yield None
         return
-    lease = await self._own_parked_work_slot_lease(workspace_id) if continue_parked_lease else None
+    lease: WorkSlotLeaseRef | None = None
+    if continue_parked_lease:
+        try:
+            lease = await self._own_parked_work_slot_lease(workspace_id)
+        except _DB_ERRORS as exc:
+            # The task reacquires at its first hook instead, queued until the parked
+            # lease expires and the reconciler releases it.
+            _log_work_slot_db_failure(
+                "worker.work_slot_parked_lease_lookup_failed", workspace_id, exc
+            )
     scope = self._new_invocation_work_slot(workspace_id, lease=lease)
     binding = getattr(self._executor, "work_slot_binding", None)
     try:
@@ -157,17 +166,16 @@ async def _own_parked_work_slot_lease(self: Any, workspace_id: str) -> WorkSlotL
             return None
         return WorkSlotLeaseRef.from_row(row, node_id=node_id)
 
-    try:
-        return await _work_slot_db(self, _operation)
-    except _DB_ERRORS as exc:
-        # The parked lease then expires and the reconciler releases it; the task
-        # reacquires at its first hook instead.
-        _log_work_slot_db_failure("worker.work_slot_parked_lease_lookup_failed", workspace_id, exc)
-        return None
+    return await _work_slot_db(self, _operation)
 
 
 async def _start_provision_work_slot(self: Any, workspace_id: str) -> InvocationWorkSlot | None:
-    """Scope for a provisioning task, starting on its claim lease (renewed meanwhile)."""
+    """Scope for a provisioning task, starting on its claim lease (renewed meanwhile).
+
+    A failed lease read propagates: provisioning has no hook to reacquire at, so
+    it must not run on a claim lease nobody renews (the reconciler would free the
+    slot mid-provision). The caller aborts the attempt before any work.
+    """
     if self._executor is None:
         return None
     lease = await self._own_parked_work_slot_lease(workspace_id)
