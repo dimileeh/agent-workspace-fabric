@@ -117,6 +117,25 @@ async def test_probe_parses_present_absent_and_unknown(
 
     assert result == expected
     assert runner.calls[0].args[-1] == "wsl_abc123"
+    assert runner.calls[0].timeout_seconds == compose_exec.WORK_SLOT_PROBE_TIMEOUT_SECONDS
+
+
+async def test_probe_hung_exec_times_out_as_unknown() -> None:
+    # A wedged ``docker compose exec`` must not freeze the worker loop that awaits
+    # this probe; the deadline expiring is "could not tell", so the lease is kept.
+    runner = FakeCommandRunner()
+    runner.queue_hang()
+
+    result = await probe_work_slot_invocation(
+        runner,
+        compose_project="awf_ws_123",
+        compose_file=_COMPOSE_FILE,
+        invocation_id="wsl_abc123",
+        timeout_seconds=0.01,
+    )
+
+    assert result == "unknown"
+    assert runner.calls[0].timeout_seconds == 0.01
 
 
 async def test_probe_script_detects_a_live_tagged_process_and_its_absence() -> None:

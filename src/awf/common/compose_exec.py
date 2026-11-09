@@ -259,6 +259,8 @@ async def cleanup_compose_exec_invocation_after_cancellation(
 
 
 WorkSlotProbeResult = Literal["present", "absent", "unknown"]
+WORK_SLOT_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
+"""Deadline for one work-slot probe exec; the worker loop awaits it inline."""
 _WORK_SLOT_PROBE_PRESENT = "awf work-slot probe: present"
 _WORK_SLOT_PROBE_ABSENT = "awf work-slot probe: absent"
 
@@ -296,11 +298,13 @@ async def probe_work_slot_invocation(
     compose_file: Path,
     invocation_id: str,
     service: str = "agent",
+    timeout_seconds: float = WORK_SLOT_PROBE_TIMEOUT_SECONDS,
 ) -> WorkSlotProbeResult:
     """Return whether an ``awf-exec`` for ``invocation_id`` is still in flight.
 
-    ``unknown`` (the exec failed or printed something unexpected) must never be
-    treated as ``absent``: callers keep the lease and fail closed.
+    ``unknown`` (the exec failed, timed out, or printed something unexpected)
+    must never be treated as ``absent``: callers keep the lease and fail closed.
+    The deadline keeps a wedged exec from stalling the worker loop that awaits it.
     """
 
     result = await runner.run(
@@ -309,7 +313,8 @@ async def probe_work_slot_invocation(
             compose_file=compose_file,
             invocation_id=invocation_id,
             service=service,
-        )
+        ),
+        timeout_seconds=timeout_seconds,
     )
     if not result.ok:
         return "unknown"
