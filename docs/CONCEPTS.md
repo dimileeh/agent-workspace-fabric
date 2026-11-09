@@ -315,6 +315,49 @@ reclaimed paths, with the cleanup reason code and counts (warning on partial
 cleanup). Retention ages, cleanup order, shared-base pin protection, and durable
 rows, events, logs, and artifacts retain their existing policies.
 
+### Work slots
+
+`AWF_WORKER_MAX_CONCURRENT_EXECUTIONS` is the number of **work slots**. A work
+slot means provisioning, an agent run or a validation run is in flight *right
+now*. The resource broker persists each slot as a `work_slot_leases` row:
+
+- A requested workspace takes its lease atomically with the claim and keeps it
+  through provisioning, the agent, validation and push.
+- The lease is released when the workspace first waits. That covers
+  `monitoring_pr` waits (WaitForCI, NotifyHuman, ...), `blocked`, `recovering`,
+  and the paused monitor parks. Waiting holds no slot, so idle monitors never
+  starve new work.
+- Monitor actions that run an agent or validation (AddressComments, CI repair,
+  base-sync conflict repair, pre-push validation) and blocked/recovering
+  resumes reacquire a slot at their agent/validation hook. They are served in
+  strict FIFO order, ahead of new requests. Queued work reports
+  `MONITOR_WAITING_FOR_WORK_SLOT`.
+- A run never queues for a slot while holding the worktree writer lock. Callers
+  that lock the worktree around an agent or validation run take the slot first,
+  so GC and recovery git ops are never blocked by a queued run.
+- `awf service status` (`checks.work_slots`) and
+  `GET /v1/metrics/resources/saturation` (`work_slots`) show slots in use,
+  waiters and unsatisfiable waiters.
+- On restart, the worker adopts a lease whose tagged `awf-exec` is still
+  running and releases the rest before dispatching anything. A lease whose
+  process cannot be proven either way is kept and re-probed every reconciler
+  pass without holding up new work. Only if Docker cannot be queried at all does
+  it keep every lease and admit nothing new.
+
+Warm stacks of waiting workspaces still consume RAM and ports. On small hosts,
+set `AWF_LOCAL_CAPACITY_MEMORY_GB` so admission accounts for peak usage (unset
+by default).
+
+The manual soak `scripts/slot_release_soak.py` exercises this against the local
+control-plane Postgres, in a scratch database it drops afterwards. It never runs
+in CI:
+
+```bash
+uv run --python 3.12 --extra dev python scripts/slot_release_soak.py \
+  --database-url "$AWF_DATABASE_URL" --slots 3 --monitors 7 --queued 3 \
+  --agent-seconds 0.5 --duration 60
+```
+
 ## PR Monitor Actions
 
 `monitoring_pr` is where AWF stops being just a task runner and starts acting
@@ -1623,6 +1666,7 @@ Recent dogfood observability slices added:
 | Profile | Project-specific runtime, services, phases, validation, secrets, and monitor policy. |
 | Agent runtime | The coding CLI launched inside the workspace container. |
 | PR monitor | Per-workspace loop that owns a PR through comments, CI, base sync, and merge. |
+| Work slot | One of `AWF_WORKER_MAX_CONCURRENT_EXECUTIONS`; held only while provisioning, an agent run or a validation run is in flight. |
 | `AddressComments` | PR monitor action that asks the agent to fix meaningful review feedback. |
 | `NotifyHuman` | PR monitor action for manual-merge mode or non-code policy blockers. |
 | Initial review grace | One-time wait after PR monitoring starts before auto-merge may happen. |

@@ -37,6 +37,21 @@
   slots for operator pauses.
 - **Depends on / blocked by:** #612 (in-place retry) shipping first — you'll know the real herd frequency.
 
+## Aging for work-slot waits
+
+- **What:** Age queued work-slot waits so a request that has waited long enough competes with (or
+  overtakes) reacquire waiters, instead of always yielding to them.
+- **Why:** Slot-release serves reacquires (PR monitor fixes, blocked/recovering/paused resumes)
+  strictly FIFO *before* any new requested admission. A sustained burst of monitor fixes can then
+  starve new work indefinitely.
+- **Pros:** Bounds the wait for new requests under heavy monitor churn.
+- **Cons:** Weakens the monitors-first ordering; needs a tunable threshold, and real data to set it.
+- **Context:** Deliberately left out of the slot-release design (`MONITOR_WAITING_FOR_WORK_SLOT`
+  waits are visible in `awf service status` and capacity metrics). The recovering/blocked slot entry
+  above covers the related warm-stack herd.
+- **Effort:** S. **Priority:** P3.
+- **Depends on / blocked by:** slot-release shipping, plus observed work-slot wait times.
+
 ## Create the MergeCandidate at PR-adoption time (close the orphan class)
 
 - **What:** Move `MergeCandidate` creation earlier so that any workspace holding a `pr_url` also holds

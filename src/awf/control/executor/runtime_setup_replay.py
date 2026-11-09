@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
+from awf.common.work_slot import WorkSlot, work_slot_kwargs
 from awf.control.executor.constants import (
     RUNTIME_IDENTITY_PROBE_TIMEOUT_REASON_CODE,
     RUNTIME_SETUP_REPLAY_FAILED_REASON_CODE,
@@ -198,8 +199,12 @@ async def replay_setup_if_recreated(
     trigger: str,
     ownership_event_name: str,
     recover_missing_head: MissingHeadRecovery | None = None,
+    work_slot: WorkSlot | None = None,
 ) -> SetupReplayOutcome:
     """Replay ``setup``/``pre_agent`` once when the agent container was recreated.
+
+    ``work_slot`` is the caller's work-slot scope; the replay holds it like any
+    other validation run (slot-release).
 
     Like ``execution_flow``'s profile setup, the replay is bracketed by a mirror
     ``core.hooksPath`` repair before and after the phases, and a Compose exec
@@ -256,6 +261,7 @@ async def replay_setup_if_recreated(
             profile=profile,
             phase_names=SETUP_REPLAY_PHASE_NAMES,
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot),
         )
     except ComposeExecCleanupError as exc:
         # A tagged process that outlived its exec can poison the mirror hooks

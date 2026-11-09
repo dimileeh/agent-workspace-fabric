@@ -104,6 +104,7 @@ async def replay_setup_after_monitor_agent_service_restart(
             trigger=MONITOR_AGENT_SERVICE_RECOVERY_TRIGGER,
             ownership_event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
             recover_missing_head=recover_missing_head,
+            work_slot=getattr(self, "_work_slot", None),
         )
     if outcome.ok:
         return

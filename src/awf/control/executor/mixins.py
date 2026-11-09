@@ -14,10 +14,13 @@ from awf.control.executor import quality_methods as _quality_methods
 from awf.control.executor import quality_resource_ops as _quality_resource_ops
 from awf.control.executor import state_ops as _state_ops
 from awf.control.executor import validation_ops as _validation_ops
+from awf.control.executor import work_slot_binding as _work_slot_binding
 
 
 class ExecutorDelegatesMixin:
     """Methods mechanically delegated to focused implementation modules."""
+
+    _work_slot_for = _work_slot_binding.work_slot_for
 
     _repair_agent_git_ownership = _git_methods._repair_agent_git_ownership
     _run_agent_git_writability_preflight = _git_methods._run_agent_git_writability_preflight

@@ -28,6 +28,7 @@ from awf.common.audit import (
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_REPORT_CLEANUP_FAILED_REASON_CODE,
@@ -51,6 +52,7 @@ from awf.control.executor.types import (
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
@@ -313,6 +315,7 @@ async def _run_post_validation_conformance_check(
             hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot_for(self, workspace.id)),
         )
     except AgentRunError as exc:
         terminal_head_sha = (

@@ -33,6 +33,7 @@ from awf.service.orphan_resources import (
     scan_managed_worktrees,
 )
 from awf.service.resource_capacity import LocalCapacityLimits
+from tests.unit.control._worker_work_slot_support import add_lease
 
 
 async def _workspace(
@@ -384,7 +385,12 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
         WorkspaceStatus.validating,
         WorkspaceStatus.completed,
     ):
-        await _workspace(engine, status=status, updated_at=now - timedelta(minutes=5))
+        workspace_id = await _workspace(
+            engine, status=status, updated_at=now - timedelta(minutes=5)
+        )
+        if status in {WorkspaceStatus.running, WorkspaceStatus.validating}:
+            # The agent/validation run in flight holds a work slot (slot-release).
+            await add_lease(make_session_factory(engine), workspace_id, holder="control-worker")
 
     response = await client.get("/v1/metrics/resources/saturation")
 
@@ -419,6 +425,17 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
         "in_use": 2,
         "queued": 1,
         "available": 0,
+    }
+    assert body["work_slots"] == {
+        "limit": 2,
+        "in_use": 2,
+        "available": 0,
+        "waiting": 0,
+        "unsatisfiable": 0,
+        "adopted": 0,
+        "cleanup_unproven": 0,
+        "oldest_wait_seconds": None,
+        "reason_code": None,
     }
     assert body["disk"]["reason"] == "SUFFICIENT_DISK"
     assert body["orphan_resources"]["reason"] == "NO_ORPHANS"

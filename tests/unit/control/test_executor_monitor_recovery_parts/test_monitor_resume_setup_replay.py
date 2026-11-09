@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.common.work_slot import hold_work_slot
 from awf.control.blocked_transition import is_monitor_origin_block_resume_phase
 from awf.control.executor import (
     monitor_handoff,
@@ -41,6 +42,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError
 from awf.profiles.resolver import ProfileResolutionError
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+from tests.unit.control._work_slot_support import LockProbeWorkSlot
 from tests.unit.control.runtime_setup_replay_fakes import (
     TOOL_PATH,
     FakeAgentContainer,
@@ -251,6 +253,42 @@ async def test_resume_restart_and_replay_wait_for_worktree_writer_lock(
     await resume
     assert len(compose.calls) == 2  # dependencies, then the agent (#936)
     assert validation.setup_runs() == 1
+
+
+class _SlotHoldingValidation(FakeToolValidation):
+    """Holds the injected work slot around the phases, like ``ValidationRunner``."""
+
+    async def run_profile_phases(  # type: ignore[override]
+        self, *, phase_names: tuple[str, ...], work_slot: Any = None, **kwargs: Any
+    ) -> Any:
+        async with hold_work_slot(work_slot, "validation"):
+            return await super().run_profile_phases(phase_names=phase_names, **kwargs)
+
+
+@pytest.mark.unit
+async def test_resume_queues_for_its_work_slot_before_taking_the_writer_lock(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resume restarts the runtime and replays setup under the writer lock; a
+    replay queued for a slot there would block GC and recovery git ops meanwhile."""
+    container = _provisioned_container()
+    patch_identity(monkeypatch, container)
+    validation = _SlotHoldingValidation(container)
+    monitor = ValidatingMonitor(validation)
+    ws_id = await _seed_monitoring_pr(factory, compose_file_path=str(tmp_path / "compose.yml"))
+    executor, _compose = _executor(
+        fake, factory, tmp_path, container=container, validation=validation, monitor=monitor
+    )
+    slot = LockProbeWorkSlot(executor._config.worktrees_root / ws_id)
+
+    with executor.work_slot_binding(ws_id, slot):
+        await executor.resume_pr_monitor(ws_id)
+
+    assert validation.setup_runs() == 1
+    assert slot.acquisitions == [("validation", False)]
 
 
 @pytest.mark.unit

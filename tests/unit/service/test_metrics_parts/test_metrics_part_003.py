@@ -21,6 +21,7 @@ from awf.db.repositories import (
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 from awf.service.resource_capacity import LocalCapacityLimits
+from tests.unit.control._worker_work_slot_support import add_lease
 from tests.unit.helpers import create_operation, create_workspace
 
 _MIB = 1024 * 1024
@@ -330,7 +331,11 @@ async def test_resource_saturation_admission_reports_both_saturated_concurrency_
     )
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     await create_workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
-    await create_workspace(session_factory, status=WorkspaceStatus.running, updated_at=now)
+    running_id = await create_workspace(
+        session_factory, status=WorkspaceStatus.running, updated_at=now
+    )
+    # The running agent holds the only work slot (slot-release).
+    await add_lease(session_factory, running_id, holder="control-worker")
 
     summary = await summarize_resource_saturation(
         session_factory,

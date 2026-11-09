@@ -21,6 +21,7 @@ import structlog
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
+from awf.common.work_slot import hold_work_slot
 from awf.runtime.pr_monitor import MonitorState
 from awf.runtime.pr_monitor_runner import thread_disposition_ack_check as ack_check
 from awf.runtime.pr_monitor_runner.thread_disposition_ack import ACKNOWLEDGES, UNJUDGED
@@ -30,6 +31,7 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
 )
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
+from tests.unit.control._work_slot_support import LockProbeWorkSlot
 
 pytestmark = pytest.mark.unit
 
@@ -780,3 +782,24 @@ async def test_a_hosted_adapter_is_never_asked_and_the_check_is_unjudged(tmp_pat
 
     assert calls == []
     assert _snapshot(worktree) == before
+
+
+async def test_the_check_queues_for_its_work_slot_before_taking_the_writer_lock(
+    tmp_path: Path,
+) -> None:
+    # The check holds the writer lock from snapshot through rollback; a run queued
+    # for a slot inside it would block GC and recovery git ops meanwhile.
+    worktree = _worktree(tmp_path)
+    slot = LockProbeWorkSlot(worktree)
+
+    async def run_agent(**kwargs: Any) -> Any:
+        async with hold_work_slot(runner._work_slot, "agent"):
+            return SimpleNamespace(stdout=_ACK)
+
+    runner = _runner(tmp_path, lambda: None)
+    runner._work_slot = slot
+    runner._run_monitor_agent_with_service_recovery = run_agent
+
+    assert await _check(runner) == (ACKNOWLEDGES, "judged")
+
+    assert slot.acquisitions == [("agent", False)]

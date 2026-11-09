@@ -16,6 +16,7 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,9 +31,11 @@ from awf.adapters.defaults import HISTORICAL_AGENT_DEFAULTS, defaults_with_model
 from awf.adapters.runtime_executor import AgentRuntimeExecutor
 from awf.adapters.usage import UsageSampler
 from awf.common.commands import AsyncCommandRunner
+from awf.common.work_slot import WorkSlot
 from awf.common.workspace_scope import WorkspaceScope, workspace_consumer
 from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import monitor_handoff as _monitor_handoff
+from awf.control.executor import work_slot_binding as _work_slot_binding
 from awf.control.executor.config import ExecutorConfig
 from awf.control.executor.mixins import ExecutorDelegatesMixin  # noqa: E402
 from awf.control.executor.protocols import _MonitorRunnerProto
@@ -114,6 +117,14 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._ensure_hosted_monitor_checkout = ensure_hosted_monitor_checkout
         self._worktree_activity_git_roots = worktree_activity_git_roots
         self._workspace_scope = workspace_scope
+        # Work slots bound by the worker per dispatched task (slot-release).
+        self._work_slots: dict[str, WorkSlot] = {}
+
+    def work_slot_binding(
+        self: Any, workspace_id: str, work_slot: WorkSlot | None
+    ) -> AbstractContextManager[None]:
+        """Bind the worker's per-task work slot for agent/validation/monitor runs."""
+        return _work_slot_binding.work_slot_binding(self, workspace_id, work_slot)
 
     @workspace_consumer
     async def execute(

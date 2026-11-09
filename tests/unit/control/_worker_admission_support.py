@@ -9,18 +9,23 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.ids import new_work_slot_invocation_id
 from awf.control.worker import ControlWorker
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import WorkSlotLeasePhase, WorkspaceStatus
+from awf.db.models import WorkSlotLease
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkerHeartbeatRepository,
+    WorkSlotLeaseRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -199,12 +204,23 @@ async def _create_requested(
         return workspace.id
 
 
+ACTIVE_SLOT_HOLDER_WORKER_ID = "control-worker-active-slot-holder"
+"""Fake live worker that owns the work-slot lease of an ``_create_active_slot`` row."""
+
+
 async def _create_active_slot(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     node_id: str | None,
     status: WorkspaceStatus = WorkspaceStatus.running,
+    holds_work_slot: bool = True,
 ) -> str:
+    """Create an active workspace that (by default) occupies a work slot.
+
+    Work slots are broker-owned leases (slot-release), so an active consumer holds
+    a ``held`` lease owned by a fake worker with a fresh heartbeat; the worker
+    under test's startup check therefore leaves it alone.
+    """
     async with session_factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.create(
@@ -231,6 +247,28 @@ async def _create_active_slot(
             )
         if status not in {WorkspaceStatus.provisioning, WorkspaceStatus.ready}:
             await repo.transition(workspace, to=status, reason_code="TEST_ACTIVE")
+        if holds_work_slot:
+            now = datetime.now(UTC)
+            await WorkerHeartbeatRepository(session).record_heartbeat(
+                worker_id=ACTIVE_SLOT_HOLDER_WORKER_ID,
+                node_id=node_id or "local",
+                started_at=now,
+                last_heartbeat_at=now + timedelta(minutes=10),
+                poll_interval_seconds=60.0,
+            )
+            await WorkSlotLeaseRepository(session).add(
+                WorkSlotLease(
+                    invocation_id=new_work_slot_invocation_id(),
+                    workspace_id=workspace.id,
+                    holder_worker_id=ACTIVE_SLOT_HOLDER_WORKER_ID,
+                    holder_epoch=1,
+                    ticket_at=now,
+                    acquired_at=now,
+                    expires_at=now + timedelta(minutes=10),
+                    phase=WorkSlotLeasePhase.held.value,
+                    cleanup_unproven=False,
+                )
+            )
         await session.commit()
         return workspace.id
 
@@ -312,6 +350,10 @@ async def _reset_to_requested(
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
         workspace.status = WorkspaceStatus.requested.value
+        # The earlier attempt released its work slot before the row re-queued.
+        await session.execute(
+            delete(WorkSlotLease).where(WorkSlotLease.workspace_id == workspace_id)
+        )
         await session.commit()
 
 
@@ -335,17 +377,35 @@ def _gate_admission_prechecks(
     release = asyncio.Event()
 
     for worker in workers:
-        original: Callable[[], Awaitable[int]] = worker._requested_admission_row_slots  # noqa: SLF001
+        original: Callable[..., Awaitable[int]] = worker._new_work_slot_capacity  # noqa: SLF001
 
-        async def _gated(original: Callable[[], Awaitable[int]] = original) -> int:
+        async def _gated(
+            *,
+            reserve_leaseless_ready: bool,
+            original: Callable[..., Awaitable[int]] = original,
+        ) -> int:
             nonlocal observed
-            slots = await original()
+            slots = await original(reserve_leaseless_ready=reserve_leaseless_ready)
             observed += 1
             if observed == len(workers):
                 all_observed.set()
             await release.wait()
             return slots
 
-        monkeypatch.setattr(worker, "_requested_admission_row_slots", _gated)
+        monkeypatch.setattr(worker, "_new_work_slot_capacity", _gated)
 
     return all_observed, release
+
+
+def _keep_claim_leases_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: list[ControlWorker],
+    provisioner: _RecordingProvisioner,
+) -> None:
+    """Model provisioning still running: the claim's work-slot lease stays held."""
+    for worker in workers:
+
+        async def _provision_in_flight(workspace_id: str) -> None:
+            provisioner.calls.append(workspace_id)
+
+        monkeypatch.setattr(worker, "_safely_provision_claimed", _provision_in_flight)

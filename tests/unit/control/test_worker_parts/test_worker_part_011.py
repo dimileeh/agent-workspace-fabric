@@ -52,6 +52,7 @@ from awf.service.scheduler import (
     scheduler_score_from_workspace,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit.control._worker_work_slot_support import held_leases
 
 PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
 PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
@@ -1133,7 +1134,8 @@ class TestRunOnceExecutionPart004:
                 await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
             )
             await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-            assert worker._available_execution_slots() == 0  # noqa: SLF001
+            # A waiting monitor holds no work slot (slot-release).
+            assert await held_leases(session_factory) == []
             assert (
                 worker._execution_task_kinds[monitor_id]  # noqa: SLF001
                 is worker_dispatch_methods._ExecutionTaskKind.MONITOR_RESUME
@@ -1213,7 +1215,7 @@ class TestRunOnceExecutionPart004:
             )
             await asyncio.wait_for(executor.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
             monitor_task = worker._execution_tasks[monitor_id]  # noqa: SLF001
-            assert worker._available_execution_slots() == 0  # noqa: SLF001
+            assert await held_leases(session_factory) == []
 
             # The workspace leaves monitoring_pr, so the resume is now stale.
             async with session_factory() as s:
@@ -1246,8 +1248,8 @@ class TestRunOnceExecutionPart004:
             )
             # Same-workspace dispatch stays blocked while it drains ...
             assert worker._dispatchable_execution_ids([monitor_id], limit=1) == []  # noqa: SLF001
-            # ... yet the slot is excluded from accounting, so it frees for others.
-            assert worker._available_execution_slots() == 1  # noqa: SLF001
+            # ... yet it never counts toward work slots (DB leases), so others run.
+            assert await held_leases(session_factory) == []
 
             # A second reconcile pass leaves the already-draining task alone:
             # no re-cancel and no duplicate warning.

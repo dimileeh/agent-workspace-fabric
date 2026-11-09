@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 import structlog
-from sqlalchemy import update
+from sqlalchemy import delete, update
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,8 +28,9 @@ from awf.control.worker import (
     WorkerConfig,
 )
 from awf.control.worker import dispatch_methods as worker_dispatch_methods
+from awf.control.worker.constants import _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import WorkSlotLease, Workspace
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -51,6 +52,7 @@ from awf.service.scheduler import (
     scheduler_score_from_workspace,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit.control._worker_work_slot_support import add_lease
 
 PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
 PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
@@ -926,18 +928,27 @@ def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
     return _UnexpectedCleaner()
 
 
+async def _claim_none(workspace_ids: list[str], *, limit: int) -> list[str]:
+    del workspace_ids, limit
+    return []
+
+
+class _PresentProbe:
+    async def probe(self, **_kwargs: object) -> str:
+        return "present"
+
+
 class TestRunOnceExecutionPart005:
     @pytest.mark.unit
-    async def test_draining_exclusion_is_capped_to_bound_in_flight_coroutines(
+    async def test_draining_tasks_never_count_toward_work_slots(
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         # cancel() is cooperative, so wedged monitors can keep running as
-        # MONITOR_DRAINING tasks indefinitely. Draining tasks are excluded from
-        # the slot budget (issue #276) so a wedged monitor does not starve other
-        # workspaces -- but that exclusion is capped at max_concurrent_executions.
-        # A flood of stale-and-wedged monitors must NOT let dispatch run unbounded
-        # past the budget, or in-flight coroutines could exhaust runtime resources.
+        # MONITOR_DRAINING tasks indefinitely (issue #276). Work slots are DB
+        # leases (slot-release): however many draining tasks pile up, none of them
+        # reduces new-work capacity (a lease one still held goes to the
+        # reconciler), while dedup still blocks re-dispatching the same workspace.
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -964,23 +975,15 @@ class TestRunOnceExecutionPart005:
             )
 
         try:
-            # Up to the budget, every wedged monitor still frees its slot so other
-            # workspaces keep moving (issue #276): 1 then 2 draining -> 2 free.
-            _add_draining("drain-1")
-            assert worker._available_execution_slots() == 2  # noqa: SLF001
-            _add_draining("drain-2")
-            assert worker._available_execution_slots() == 2  # noqa: SLF001
-
-            # Beyond the budget the exclusion is capped, so surplus draining tasks
-            # count as occupied. (The uncapped behavior would still report 2 free
-            # here no matter how many monitors wedged.) This bounds total in-flight
-            # coroutines at 2x the budget: available reaches 0 and stays there.
-            _add_draining("drain-3")
-            assert worker._available_execution_slots() == 1  # noqa: SLF001
-            _add_draining("drain-4")
-            assert worker._available_execution_slots() == 0  # noqa: SLF001
-            _add_draining("drain-5")
-            assert worker._available_execution_slots() == 0  # noqa: SLF001
+            draining_ids = [f"drain-{index}" for index in range(1, 6)]
+            for workspace_id in draining_ids:
+                _add_draining(workspace_id)
+                capacity = await worker._new_work_slot_capacity(  # noqa: SLF001
+                    reserve_leaseless_ready=False
+                )
+                assert capacity == 2
+            assert sorted(worker._tracked_draining_workspace_ids()) == draining_ids  # noqa: SLF001
+            assert worker._dispatchable_execution_ids(draining_ids, limit=5) == []  # noqa: SLF001
         finally:
             stop.set()
             for task in tasks:
@@ -1159,7 +1162,7 @@ class TestRunOnceExecutionPart005:
                 worker._execution_task_kinds[workspace_id]  # noqa: SLF001
                 is worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING
             )
-            assert worker._available_execution_slots() == 1  # noqa: SLF001
+            assert await worker._new_work_slot_capacity(reserve_leaseless_ready=False) == 1  # noqa: SLF001
         finally:
             if not execution_task.done():
                 execution_task.cancel()
@@ -1210,120 +1213,13 @@ class TestRunOnceExecutionPart005:
             worker._execution_task_kinds.clear()  # noqa: SLF001
 
     @pytest.mark.unit
-    async def test_execution_slots_saturation_logs_only_at_intended_cadence(
+    async def test_work_slot_saturation_logs_only_at_intended_cadence(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        interval = worker_dispatch_methods._EXECUTION_SLOTS_SATURATED_LOG_INTERVAL  # noqa: SLF001
+        interval = _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL
         monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "saturating-monitor")
-        executor = _RecordingExecutor()
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=executor,
-            config=WorkerConfig(
-                poll_interval_seconds=0.01,
-                max_concurrent_executions=1,
-            ),
-        )
-        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
-
-        # Occupy the single slot with a still-monitoring monitor task so reconcile
-        # leaves it in place every cycle and the slot stays saturated.
-        slot_task = asyncio.create_task(_pending_execution_task())
-        worker._execution_tasks[monitor_id] = slot_task  # noqa: SLF001
-        worker._execution_task_kinds[monitor_id] = (  # noqa: SLF001
-            worker_dispatch_methods._ExecutionTaskKind.MONITOR_RESUME
-        )
-
-        async def _empty_list(
-            *,
-            limit: int | None = None,
-            exclude_ids: set[str] | None = None,
-        ) -> list[str]:
-            return []
-
-        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
-        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
-
-        def _saturation_events(captured: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return [
-                event
-                for event in captured
-                if event.get("event") == "worker.execution_slots_saturated"
-            ]
-
-        try:
-            with structlog.testing.capture_logs() as captured:
-                for _ in range(interval):
-                    assert (
-                        await asyncio.wait_for(
-                            worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
-                        )
-                        == 0
-                    )
-            events = _saturation_events(captured)
-            assert len(events) == 1
-            event = events[0]
-            assert event.get("log_level") == "warning"
-            assert event["slot_limit"] == 1
-            assert event["tracked_count"] == 1
-            assert event["tracked_workspace_ids"] == [monitor_id]
-            assert event["tracked_monitor_ids"] == [monitor_id]
-            assert event["tracked_draining_ids"] == []
-            assert event["consecutive_saturated_cycles"] == interval
-
-            # Fires again only on the next multiple of the cadence interval.
-            with structlog.testing.capture_logs() as captured_again:
-                for _ in range(interval):
-                    assert (
-                        await asyncio.wait_for(
-                            worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
-                        )
-                        == 0
-                    )
-            events_again = _saturation_events(captured_again)
-            assert len(events_again) == 1
-            assert events_again[0]["consecutive_saturated_cycles"] == 2 * interval
-
-            # A non-saturated cycle (slot free) resets the counter.
-            worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
-            worker._execution_task_kinds.pop(monitor_id, None)  # noqa: SLF001
-            assert (
-                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
-            )
-            assert worker._consecutive_saturated_cycles == 0  # noqa: SLF001
-
-            # The next saturated run restarts at 1 and does not immediately log.
-            worker._execution_tasks[monitor_id] = slot_task  # noqa: SLF001
-            worker._execution_task_kinds[monitor_id] = (  # noqa: SLF001
-                worker_dispatch_methods._ExecutionTaskKind.MONITOR_RESUME
-            )
-            with structlog.testing.capture_logs() as captured_restart:
-                assert (
-                    await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-                    == 0
-                )
-            assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
-            assert _saturation_events(captured_restart) == []
-        finally:
-            worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
-            worker._execution_task_kinds.pop(monitor_id, None)  # noqa: SLF001
-            slot_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
-
-    @pytest.mark.unit
-    async def test_execution_slots_saturation_log_surfaces_draining_ids(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        # When starvation is driven by draining tasks past the 2x cap, no
-        # MONITOR_RESUME tasks remain, so tracked_monitor_ids is empty. The log
-        # must still name the occupying workspaces via tracked_draining_ids,
-        # otherwise an operator sees tracked_count > 0 with no IDs to explain it.
-        interval = worker_dispatch_methods._EXECUTION_SLOTS_SATURATED_LOG_INTERVAL  # noqa: SLF001
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1334,32 +1230,95 @@ class TestRunOnceExecutionPart005:
             ),
         )
         worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+        worker._claim_monitoring_pr_ids = _claim_none  # type: ignore[method-assign]  # noqa: SLF001
+        # The single slot is held by a running agent's lease (slot-release).
+        lease_id = await add_lease(session_factory, monitor_id, holder=worker._worker_id)  # noqa: SLF001
 
-        # Two draining tasks against a budget of 1: the cap excludes only one, so
-        # the surplus counts as occupied and the slot stays saturated every cycle.
-        draining_ids = ["drain-a", "drain-b"]
-        draining_tasks: list[asyncio.Task[None]] = []
-        for workspace_id in draining_ids:
-            task = asyncio.create_task(_pending_execution_task(), name=workspace_id)
-            draining_tasks.append(task)
-            worker._track_execution_task(  # noqa: SLF001
-                workspace_id,
-                task,
-                kind=worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING,  # noqa: SLF001
+        def _saturation_events(captured: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                event for event in captured if event.get("event") == "worker.work_slots_saturated"
+            ]
+
+        with structlog.testing.capture_logs() as captured:
+            for _ in range(interval):
+                assert (
+                    await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+                    == 0
+                )
+        events = _saturation_events(captured)
+        assert len(events) == 1
+        event = events[0]
+        assert event.get("log_level") == "warning"
+        assert event["slot_limit"] == 1
+        assert event["in_use"] == 1
+        assert event["holders"] == [
+            {"workspace_id": monitor_id, "phase": "held", "cleanup_unproven": False}
+        ]
+        assert event["waiting"] == 0
+        assert event["tracked_draining_ids"] == []
+        assert event["consecutive_saturated_cycles"] == interval
+        assert not any(
+            event.get("event") == "worker.execution_slots_saturated" for event in captured
+        )
+
+        # Fires again only on the next multiple of the cadence interval.
+        with structlog.testing.capture_logs() as captured_again:
+            for _ in range(interval):
+                assert (
+                    await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+                    == 0
+                )
+        events_again = _saturation_events(captured_again)
+        assert len(events_again) == 1
+        assert events_again[0]["consecutive_saturated_cycles"] == 2 * interval
+
+        # A non-saturated cycle (slot free) resets the counter.
+        async with session_factory() as session:
+            await session.execute(
+                delete(WorkSlotLease).where(WorkSlotLease.invocation_id == lease_id)
             )
+            await session.commit()
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
+        assert worker._consecutive_saturated_cycles == 0  # noqa: SLF001
 
-        async def _empty_list(
-            *,
-            limit: int | None = None,
-            exclude_ids: set[str] | None = None,
-        ) -> list[str]:
-            return []
+        # The next saturated run restarts at 1 and does not immediately log.
+        await add_lease(session_factory, monitor_id, holder=worker._worker_id)  # noqa: SLF001
+        with structlog.testing.capture_logs() as captured_restart:
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
+            )
+        assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
+        assert _saturation_events(captured_restart) == []
 
-        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
-        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
+    @pytest.mark.unit
+    async def test_work_slot_saturation_log_surfaces_draining_holders(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        # A draining task's lease handed to the reconciler (cleanup unproven, its
+        # process still alive) keeps occupying the slot; the saturation log must
+        # name it via holders and tracked_draining_ids.
+        interval = _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL
+        drain_id = await _create_monitoring_pr(session_factory, origin_repo, "draining-monitor")
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            work_slot_probe=_PresentProbe(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+        worker._claim_monitoring_pr_ids = _claim_none  # type: ignore[method-assign]  # noqa: SLF001
+        await add_lease(session_factory, drain_id, holder=worker._worker_id, cleanup_unproven=True)  # noqa: SLF001
+        task = asyncio.create_task(_pending_execution_task(), name=drain_id)
+        worker._track_execution_task(  # noqa: SLF001
+            drain_id,
+            task,
+            kind=worker_dispatch_methods._ExecutionTaskKind.MONITOR_DRAINING,  # noqa: SLF001
+        )
 
         try:
-            assert worker._available_execution_slots() == 0  # noqa: SLF001
             with structlog.testing.capture_logs() as captured:
                 for _ in range(interval):
                     assert (
@@ -1369,21 +1328,17 @@ class TestRunOnceExecutionPart005:
                         == 0
                     )
             events = [
-                event
-                for event in captured
-                if event.get("event") == "worker.execution_slots_saturated"
+                event for event in captured if event.get("event") == "worker.work_slots_saturated"
             ]
             assert len(events) == 1
-            event = events[0]
-            assert event["tracked_count"] == 2
-            assert event["tracked_workspace_ids"] == sorted(draining_ids)
-            assert event["tracked_monitor_ids"] == []
-            assert event["tracked_draining_ids"] == sorted(draining_ids)
+            assert events[0]["holders"] == [
+                {"workspace_id": drain_id, "phase": "held", "cleanup_unproven": True}
+            ]
+            assert events[0]["tracked_draining_ids"] == [drain_id]
         finally:
-            for task in draining_tasks:
-                task.cancel()
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.gather(*draining_tasks, return_exceptions=True)
+                await task
 
     @pytest.mark.unit
     async def test_provisioning_dispatch_does_not_mask_execution_saturation(
@@ -1391,7 +1346,7 @@ class TestRunOnceExecutionPart005:
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        # A wedged monitor fills the only execution slot, so requested work stays
+        # A running agent's lease fills the only work slot, so requested work stays
         # queued and the idle saturated cycle still increments its counter.
         requested_id = await _create_requested(
             session_factory, origin_repo, "provisioning-while-saturated"
@@ -1409,41 +1364,18 @@ class TestRunOnceExecutionPart005:
             ),
         )
         worker._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+        worker._claim_monitoring_pr_ids = _claim_none  # type: ignore[method-assign]  # noqa: SLF001
+        await add_lease(session_factory, monitor_id, holder=worker._worker_id)  # noqa: SLF001
 
-        slot_task = asyncio.create_task(_pending_execution_task())
-        worker._execution_tasks[monitor_id] = slot_task  # noqa: SLF001
-        worker._execution_task_kinds[monitor_id] = (  # noqa: SLF001
-            worker_dispatch_methods._ExecutionTaskKind.MONITOR_RESUME
-        )
-
-        async def _empty_list(
-            *,
-            limit: int | None = None,
-            exclude_ids: set[str] | None = None,
-        ) -> list[str]:
-            return []
-
-        worker._list_monitoring_pr = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
-        worker._list_ready = _empty_list  # type: ignore[method-assign]  # noqa: SLF001
-
-        try:
-            dispatched = await asyncio.wait_for(
-                worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS
-            )
-            assert dispatched == 0
-            assert provisioner.calls == []
-            async with session_factory() as session:
-                requested = await WorkspaceRepository(session).get(requested_id)
-                assert requested is not None
-                assert requested.status == WorkspaceStatus.requested.value
-            # The execution slot was never freed, so saturation still ticks.
-            assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
-        finally:
-            worker._execution_tasks.pop(monitor_id, None)  # noqa: SLF001
-            worker._execution_task_kinds.pop(monitor_id, None)  # noqa: SLF001
-            slot_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(slot_task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        dispatched = await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+        assert dispatched == 0
+        assert provisioner.calls == []
+        async with session_factory() as session:
+            requested = await WorkspaceRepository(session).get(requested_id)
+            assert requested is not None
+            assert requested.status == WorkspaceStatus.requested.value
+        # The work slot was never freed, so saturation still ticks.
+        assert worker._consecutive_saturated_cycles == 1  # noqa: SLF001
 
     @pytest.mark.unit
     async def test_recovery_redispatch_counts_as_execution_progress(

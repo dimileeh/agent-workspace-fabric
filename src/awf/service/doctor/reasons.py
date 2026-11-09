@@ -21,6 +21,7 @@ from awf.service.doctor.reasons_monitor_runtime_restart import (
     get_monitor_runtime_restart_reasons,
 )
 from awf.service.doctor.reasons_runtime_setup_replay import get_runtime_setup_replay_reasons
+from awf.service.doctor.reasons_work_slots import get_work_slot_reasons
 from awf.service.doctor.reasons_worktree_registration import (
     get_worktree_registration_reasons,
 )
@@ -1426,6 +1427,7 @@ _REASON_TEXT.update(get_runtime_setup_replay_reasons(_ReasonText))
 _REASON_TEXT.update(get_monitor_runtime_restart_reasons(_ReasonText))
 _REASON_TEXT.update(get_worktree_registration_reasons(_ReasonText))
 _REASON_TEXT.update(get_core_startup_reasons(_ReasonText))
+_REASON_TEXT.update(get_work_slot_reasons(_ReasonText))
 
 
 def _reason_text(

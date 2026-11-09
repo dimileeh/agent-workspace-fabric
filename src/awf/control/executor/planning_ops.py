@@ -32,6 +32,7 @@ from awf.common.command_evidence import (
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE, PLAN_CONFORMANCE_UNSATISFIED
 from awf.control.executor.helpers import (
     _digest_file_if_present,
@@ -58,6 +59,7 @@ from awf.control.executor.types import (
     _PlanningRunFailure,
     _PlanningValidationHandoff,
 )
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     WorkspaceRepository,
@@ -717,6 +719,7 @@ async def _run_agent_task_with_optional_planning(
             hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot_for(self, workspace.id)),
         )
         hosted_sync_failure = await _record_and_sync_hosted_phase(
             self,
@@ -825,6 +828,7 @@ async def _run_agent_task_with_optional_planning(
             hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot_for(self, workspace.id)),
         )
         hosted_sync_failure = await _record_and_sync_hosted_phase(
             self,
@@ -941,6 +945,7 @@ async def _run_agent_task_with_optional_planning(
             hosted_pr_identity=hosted_pr_identity,
             profile=profile,
             worktree_path=worktree_path,
+            **work_slot_kwargs(work_slot_for(self, workspace.id)),
         )
         hosted_sync_failure = await _record_and_sync_hosted_phase(
             self,
@@ -997,6 +1002,7 @@ async def _run_agent_task_with_optional_planning(
                 hosted_pr_identity=hosted_pr_identity,
                 profile=profile,
                 worktree_path=worktree_path,
+                **work_slot_kwargs(work_slot_for(self, workspace.id)),
             )
             hosted_sync_failure = await _record_and_sync_hosted_phase(
                 self,

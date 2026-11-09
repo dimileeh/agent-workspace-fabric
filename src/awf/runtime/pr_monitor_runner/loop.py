@@ -91,6 +91,36 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentServiceRecoverySupersededError,
 )
 
+_WORK_SLOT_MONITOR_ACTIONS = (AddressComments, AddressOperatorHint, ReportCiFailure, SyncBase)
+"""Monitor actions that may run an agent or validation and so keep a work slot."""
+
+
+async def _release_work_slot_before_pure_wait(self: Any, action: MonitorAction) -> None:
+    """Release a retained work slot before an action that runs no agent/validation.
+
+    Pure waiting holds no work slot (slot-release). A lease the worker task
+    retained from the previous agent/validation action (or the inline claim lease
+    of the first monitor run) is released before WaitForCI, NotifyHuman, Merge
+    and every other non-work action; the work actions reacquire at their
+    agent/validation hooks.
+    """
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None and not isinstance(action, _WORK_SLOT_MONITOR_ACTIONS):
+        await work_slot.release_idle()
+
+
+async def _release_work_slot_before_retry_wait(self: Any) -> None:
+    """Release a retained work slot before an outer-loop transient retry wait.
+
+    ``run()`` backs off on a status-fetch or escaped execute-path fault without
+    reaching ``_execute``'s release hook, and no repair cycle is active there, so
+    a lease kept from the inline claim or the last agent/validation run must not
+    be held through the backoff. Waits inside a repair cycle keep it.
+    """
+    work_slot = getattr(self, "_work_slot", None)
+    if work_slot is not None:
+        await work_slot.release_idle()
+
 
 async def _execute(
     self: Any,
@@ -166,6 +196,8 @@ async def _execute(
             "blocking_reviews": len(status.blocking_reviews),
         },
     )
+
+    await _release_work_slot_before_pure_wait(self, action)
 
     # Clear awaiting-human attention as soon as the monitor resumes with a
     # non-human action. ``Merge`` owns its own attention handling because branch

@@ -22,6 +22,7 @@ from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.control.executor import runtime_setup_replay as _runtime_setup_replay
 from awf.control.protected_file_diffs import protected_file_diffs_for_committed_paths
 from awf.control.quality_gates import (
@@ -136,7 +137,13 @@ async def _run_monitor_agent_with_service_recovery(
     work.
     """
     worktree_path = self._worktrees_root / workspace_id
-    async with hold_exclusive_worktree_writer_lock(worktree_path):
+    # Take the work slot before the writer lock: a run queued for a slot must not
+    # hold the lock GC and recovery git ops wait on. The agent run (and a setup
+    # replay after a service restart) then nests in this hold.
+    async with (
+        hold_work_slot(getattr(self, "_work_slot", None), "agent"),
+        hold_exclusive_worktree_writer_lock(worktree_path),
+    ):
         return await _run_monitor_agent_with_service_recovery_locked(
             self,
             workspace_id=workspace_id,
@@ -212,6 +219,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 }
                 if git_preparation is not None:
                     hosted_run_kwargs["git_preparation"] = git_preparation
+                hosted_run_kwargs.update(work_slot_kwargs(getattr(self, "_work_slot", None)))
                 result = await self._deps.adapter.run(**hosted_run_kwargs)
             else:
                 local_run_kwargs: dict[str, Any] = {
@@ -228,6 +236,7 @@ async def _run_monitor_agent_with_service_recovery_locked(
                 profile = getattr(self, "_workspace_profile", None)
                 if profile is not None:
                     local_run_kwargs["profile"] = profile
+                local_run_kwargs.update(work_slot_kwargs(getattr(self, "_work_slot", None)))
                 result = await self._deps.adapter.run(**local_run_kwargs)
         except AgentRunError as exc:
             if self._deps.adapter.is_hosted:

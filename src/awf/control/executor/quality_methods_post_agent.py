@@ -19,6 +19,7 @@ from awf.common.command_evidence import (
 )
 from awf.common.commands import CommandResult
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.common.work_slot import work_slot_kwargs
 from awf.control.executor.agent_service_recovery import (
     _run_agent_callable_with_service_recovery,
 )
@@ -43,6 +44,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.state_ops import ProviderFailureDivert
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
     QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
@@ -110,6 +112,7 @@ async def _run_post_agent_semantic_precommit_repair(
                 hosted_pr_identity=hosted_pr_identity,
                 profile=profile,
                 worktree_path=worktree_path,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
 
         recovered, repair_result = await _run_agent_callable_with_service_recovery(

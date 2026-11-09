@@ -9,6 +9,7 @@ concurrency, so end-to-end is the most useful test.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -1262,36 +1263,50 @@ class TestRunOnceMonitorRecoveryPart003:
         assert executor.resume_calls == [monitor_id]
 
     @pytest.mark.unit
-    async def test_monitor_resume_and_ready_execution_share_execution_limit(
+    async def test_idle_monitor_does_not_share_the_work_slot_limit(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
     ) -> None:
-        """Monitor resume and ready execution share the same execution-slot limit."""
+        """A waiting monitor holds no work slot; a monitor running an agent does (slot-release)."""
         monitor_id = await _create_monitoring_pr(
             session_factory, origin_repo, "needs-monitor-resume"
         )
         ready_id = await _create_ready(session_factory, origin_repo, "already-ready")
+        second_ready_id = await _create_ready(session_factory, origin_repo, "ready-later")
         monitor_started = asyncio.Event()
-        release_monitor = asyncio.Event()
+        start_agent = asyncio.Event()
+        agent_holding = asyncio.Event()
+        release_agent = asyncio.Event()
+        executed = asyncio.Event()
 
-        class _BlockingExecutor(_RecordingExecutor):
-            async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
-                """Test helper for run resumed pr monitor."""
-                del handoff
-                self.resume_calls.append(workspace_id)
-                monitor_started.set()
-                await release_monitor.wait()
+        class _MonitorWithAgentExecutor(_RecordingExecutor):
+            def work_slot_binding(self, workspace_id: str, work_slot: Any) -> Any:
+                self.bound = {**getattr(self, "bound", {}), workspace_id: work_slot}
+                return contextlib.nullcontext()
+
+            async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+                self.calls.append(workspace_id)
+                executed.set()
                 async with session_factory() as s:
-                    repo = WorkspaceRepository(s)
-                    ws = await repo.get(workspace_id)
+                    ws = await WorkspaceRepository(s).get(workspace_id)
                     assert ws is not None
-                    await repo.transition(
-                        ws, to=WorkspaceStatus.completed, reason_code="TEST_MONITOR_DONE"
+                    await WorkspaceRepository(s).transition(
+                        ws, to=WorkspaceStatus.running, reason_code="TEST_RUNNING"
                     )
                     await s.commit()
 
-        executor = _BlockingExecutor()
+            async def run_resumed_pr_monitor(self, workspace_id: str, handoff: object) -> None:
+                """Wait like WaitForCI, then run an agent like AddressComments."""
+                del handoff
+                self.resume_calls.append(workspace_id)
+                monitor_started.set()
+                await start_agent.wait()
+                async with self.bound[workspace_id].hold("agent"):
+                    agent_holding.set()
+                    await release_agent.wait()
+
+        executor = _MonitorWithAgentExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1304,24 +1319,36 @@ class TestRunOnceMonitorRecoveryPart003:
             ),
         )
 
-        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        await asyncio.wait_for(monitor_started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
-        assert executor.resume_calls == [monitor_id]
-        assert executor.calls == []
+        try:
+            # The waiting monitor and a ready execution run side by side.
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 2
+            )
+            await asyncio.wait_for(monitor_started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            await asyncio.wait_for(executed.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            assert executor.resume_calls == [monitor_id]
+            assert executor.calls == [ready_id]
 
-        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
-        assert executor.calls == []
+            # Once the monitor runs an agent it holds the only slot: new READY work
+            # is not dispatched until it lets go.
+            start_agent.set()
+            await asyncio.wait_for(agent_holding.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+            assert (
+                await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 0
+            )
+            assert executor.calls == [ready_id]
+        finally:
+            start_agent.set()
+            release_agent.set()
+            await asyncio.wait_for(
+                worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+            )
 
-        release_monitor.set()
+        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) >= 1
         await asyncio.wait_for(
             worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
         )
-
-        assert await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS) == 1
-        await asyncio.wait_for(
-            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
-        )
-        assert executor.calls == [ready_id]
+        assert executor.calls == [ready_id, second_ready_id]
 
     @pytest.mark.unit
     @pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])

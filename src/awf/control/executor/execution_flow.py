@@ -23,6 +23,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.common.work_slot import hold_work_slot, work_slot_kwargs
 from awf.common.workspace_policy import pr_adoption_is_hosted
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor import planning_artifacts as _planning_artifacts
@@ -79,6 +80,7 @@ from awf.control.executor.types import (
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.control.quality_gates import find_protected_quality_gate_changes
 from awf.db.enums import (
     AgentRuntime,
@@ -452,6 +454,7 @@ async def execute(
                 phase_names=setup_phase_names,
                 worktree_path=worktree_path,
                 **setup_run_kwargs,
+                **work_slot_kwargs(work_slot_for(self, workspace_id)),
             )
         except ComposeExecCleanupError as exc:
             if not await _repair_mirror_hooks_path_after_cleanup_failure(
@@ -895,7 +898,12 @@ async def execute(
             timeout_seconds=timeout_seconds,
         )
 
-    async with hold_exclusive_worktree_writer_lock(worktree_path):
+    # The work slot first: a pre-commit repair below can run an agent, and a run
+    # queued for a slot must never hold the lock GC and recovery git ops wait on.
+    async with (
+        hold_work_slot(work_slot_for(self, workspace_id), "agent"),
+        hold_exclusive_worktree_writer_lock(worktree_path),
+    ):
         try:
             if recovery is None:
                 # Branch-drift recovery: fast-forward the expected AWF branch onto

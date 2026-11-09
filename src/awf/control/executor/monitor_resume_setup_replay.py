@@ -23,6 +23,7 @@ from awf.control.executor.constants import RUNTIME_SETUP_REPLAY_FAILED_REASON_CO
 from awf.control.executor.helpers import _profile_for_workspace
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.state_ops import enter_blocked_for_monitor_setup_replay_failure
+from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import MergeCandidateRepository
@@ -102,6 +103,7 @@ async def replay_setup_on_monitor_resume(
             after=identity_after,
             trigger=MONITOR_RESUME_TRIGGER,
             ownership_event_name=EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+            work_slot=work_slot_for(self, workspace_id),
             recover_missing_head=partial(
                 _recover_pr_head_after_cleanup_failure,
                 self,

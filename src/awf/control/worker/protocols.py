@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
+from awf.common.compose_exec import WorkSlotProbeResult
 from awf.common.github_client import BranchOpenPullRequest
 from awf.node.cleanup import WorkspaceCleanupResult
 from awf.runtime.inspection import RuntimeSnapshot
@@ -75,3 +76,26 @@ class RuntimeCleanerProtocol(Protocol):
         remove_worktree: bool = True,
         skip_compose: bool = False,
     ) -> WorkspaceCleanupResult: ...
+
+
+WorkSlotLeaseProbeResult = WorkSlotProbeResult | Literal["unavailable"]
+"""A lease probe result: ``unavailable`` means the runtime itself cannot be queried."""
+
+
+class WorkSlotProcessProbe(Protocol):
+    """Report whether a work-slot invocation's ``awf-exec`` is still in flight.
+
+    ``unknown`` means this lease's process cannot be proven either way; callers
+    keep that lease rather than treating it as ``absent`` (slot-release).
+    ``unavailable`` means Docker itself cannot be queried, so no lease can be
+    proven anywhere and the worker fails closed node-wide.
+    """
+
+    async def probe(  # pragma: no cover - Protocol method declaration only.
+        self: Any,
+        *,
+        workspace_id: str,
+        invocation_id: str,
+        compose_project: str | None,
+        compose_file: Path | None,
+    ) -> WorkSlotLeaseProbeResult: ...

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, cast
 
@@ -21,7 +21,6 @@ from awf.control.executor.types import PauseResumeReason
 from awf.control.worker.constants import (
     _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE,
-    _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
     _MONITOR_RECOVERY_START_SKIPPED_ERROR_CODE,
     _RECOVERING_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _RECOVERING_RESUME_EXECUTION_FAILED_REASON_CODE,
@@ -29,7 +28,9 @@ from awf.control.worker.constants import (
     EXECUTION_CLAIM_FENCED,
 )
 from awf.control.worker.logging import _log
+from awf.control.worker.resource_broker import WorkSlotLeaseRef
 from awf.control.worker.types import _ExecutionTaskKind
+from awf.control.worker.work_slot_scope import InvocationWorkSlot
 from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
@@ -126,33 +127,6 @@ def _monitor_recovery_handoff_failure_error_code(event: WorkspaceEvent) -> str:
     return event_reason_code
 
 
-def _draining_execution_task_count(self: Any) -> int:
-    """Count in-flight monitor draining tasks tracked for slot-budget exclusion."""
-    return sum(
-        1
-        for kind in self._execution_task_kinds.values()
-        if kind is _ExecutionTaskKind.MONITOR_DRAINING
-    )
-
-
-def _available_execution_slots(self: Any) -> int:
-    # Draining tasks (cancelled monitors not yet stopped) stay tracked for
-    # same-workspace dedup but are excluded from the slot budget so a wedged
-    # monitor does not keep starving other workspaces (issue #276).
-    #
-    # That exclusion is capped, though: cancel() is cooperative, so a steady
-    # supply of stale-and-wedged monitors could otherwise accumulate draining
-    # coroutines without bound and let dispatch run arbitrarily far past the
-    # budget, exhausting runtime resources. Excluding at most
-    # max_concurrent_executions draining tasks bounds total in-flight
-    # coroutines at 2x the budget; beyond that, surplus draining tasks count
-    # as occupied and throttle fresh dispatch until they truly stop.
-    max_executions = self._config.max_concurrent_executions
-    excluded_draining = min(self._draining_execution_task_count(), max_executions)
-    occupied = len(self._execution_tasks) - excluded_draining
-    return cast(int, max(0, max_executions - occupied))
-
-
 def _can_dispatch_execution_when_slot_available(self: Any) -> bool:
     return self._executor is not None and self._config.max_concurrent_executions > 0
 
@@ -174,7 +148,13 @@ def _dispatchable_execution_ids(self: Any, workspace_ids: list[str], *, limit: i
     return dispatchable
 
 
-def _dispatch_ready_executions(self: Any, workspace_ids: list[str], *, limit: int) -> set[str]:
+def _dispatch_ready_executions(
+    self: Any,
+    workspace_ids: list[str],
+    *,
+    limit: int,
+    leases: Mapping[str, WorkSlotLeaseRef] | None = None,
+) -> set[str]:
     dispatched: set[str] = set()
     for workspace_id in workspace_ids:
         if len(dispatched) >= limit:
@@ -183,7 +163,9 @@ def _dispatch_ready_executions(self: Any, workspace_ids: list[str], *, limit: in
             continue
 
         task = asyncio.create_task(
-            self._safely_execute_claimed(workspace_id),
+            self._safely_execute_claimed(
+                workspace_id, work_slot_lease=(leases or {}).get(workspace_id)
+            ),
             name=f"awf-execute-{workspace_id}",
         )
         self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.READY)
@@ -374,17 +356,21 @@ async def _safely_resume_paused_claimed(
                     rearm_recovering_cooldown=True,
                 )
                 return
-            await self._executor.resume_recovering_execution(
-                workspace_id,
-                execution_owner_id=self._worker_id,
-                execution_lease_expires_at=self._execution_claim_expires_at(),
-            )
+            # The resume starts lease-less and reacquires a work slot at its
+            # first agent/validation hook, FIFO ahead of new work (slot-release).
+            async with self._work_slot_task_scope(workspace_id):
+                await self._executor.resume_recovering_execution(
+                    workspace_id,
+                    execution_owner_id=self._worker_id,
+                    execution_lease_expires_at=self._execution_claim_expires_at(),
+                )
         else:
-            await self._executor.resume_blocked_execution(
-                workspace_id,
-                execution_owner_id=self._worker_id,
-                execution_lease_expires_at=self._execution_claim_expires_at(),
-            )
+            async with self._work_slot_task_scope(workspace_id):
+                await self._executor.resume_blocked_execution(
+                    workspace_id,
+                    execution_owner_id=self._worker_id,
+                    execution_lease_expires_at=self._execution_claim_expires_at(),
+                )
         executor_drove_resume = True
     except asyncio.CancelledError:
         # The resume CAS already committed ``<paused> -> running`` before dispatch.
@@ -458,9 +444,9 @@ async def _safely_resume_recovering_claimed(self: Any, workspace_id: str) -> Non
 
 
 def _dispatch_preserved_active_validation(self: Any, workspace_id: str) -> bool:
-    if self._executor is None:
-        return False
-    if self._available_execution_slots() <= 0:
+    # The preserved validation reacquires a work slot at its validation hook;
+    # dispatch itself is only refused when execution is disabled (slot-release).
+    if not self._can_dispatch_execution_when_slot_available():
         return False
     if workspace_id in self._execution_tasks:
         return False
@@ -537,16 +523,16 @@ def _tracked_draining_workspace_ids(self: Any) -> list[str]:
 async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
     """Cancel tracked PR-monitor tasks whose workspace has left ``monitoring_pr``.
 
-    A wedged monitor resume coroutine keeps occupying an execution slot
-    forever. Once its workspace row is gone or has transitioned away from
-    ``monitoring_pr`` the resume is stale, so we cancel it and reclassify it
-    as ``MONITOR_DRAINING``. Reclassifying frees its slot for *other*
-    workspaces synchronously in the current ``run_once`` (the slot budget
-    excludes draining tasks) while keeping the task tracked under its
-    workspace_id. ``cancel()`` is cooperative, so the coroutine can keep
-    running afterwards; retaining the tracking reference keeps slot dedup
-    blocking a fresh dispatch for the *same* workspace until it truly stops,
-    and the existing done-callback drops it once it does.
+    A wedged monitor resume coroutine must never pin capacity forever. Once its
+    workspace row is gone or has transitioned away from ``monitoring_pr`` the
+    resume is stale, so we cancel it and reclassify it as ``MONITOR_DRAINING``
+    (issue #276). A tracked task never counts toward work slots (slots are DB
+    leases), and a lease its scope still holds is handed to the reconciler as
+    cleanup-unproven, which releases it once no ``awf-exec`` remains — so other
+    workspaces are never starved. ``cancel()`` is cooperative, so the coroutine
+    can keep running afterwards; retaining the tracking reference keeps dedup
+    blocking a fresh dispatch for the *same* workspace until it truly stops, and
+    the existing done-callback drops it once it does.
 
     Several dispatch paths hand off to a long-lived monitor without
     reclassifying the tracked kind (``READY`` first-run/adopted monitors,
@@ -589,29 +575,9 @@ async def _reconcile_stale_monitor_execution_tasks(self: Any) -> None:
         )
         task.cancel()
         self._execution_task_kinds[workspace_id] = _ExecutionTaskKind.MONITOR_DRAINING
-
-
-def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
-    saturated = (
-        self._can_dispatch_execution_when_slot_available()
-        and dispatched == 0
-        and self._available_execution_slots() <= 0
-    )
-    if not saturated:
-        self._consecutive_saturated_cycles = 0
-        return
-    self._consecutive_saturated_cycles += 1
-    if self._consecutive_saturated_cycles % _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL != 0:
-        return
-    _log.warning(
-        "worker.execution_slots_saturated",
-        slot_limit=self._config.max_concurrent_executions,
-        tracked_count=len(self._execution_tasks),
-        tracked_workspace_ids=sorted(self._execution_tasks),
-        tracked_monitor_ids=sorted(self._tracked_monitor_workspace_ids()),
-        tracked_draining_ids=sorted(self._tracked_draining_workspace_ids()),
-        consecutive_saturated_cycles=self._consecutive_saturated_cycles,
-    )
+        scope = self._work_slot_scopes.get(workspace_id)
+        if scope is not None:
+            await scope.abandon_to_reconciler()
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
@@ -627,7 +593,11 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
     # newer claimant already fenced us; the shielded helper still runs it to
     # completion across a second cancellation (worker shutdown) landing
     # mid-write so neither the DB lease nor the epoch entry leaks.
+    work_slot: InvocationWorkSlot | None = None
     try:
+        # The claim's work-slot lease covers provisioning; renew it meanwhile. A
+        # failed lease read aborts the attempt here, like the epoch read below.
+        work_slot = await self._start_provision_work_slot(workspace_id)
         # D2: read our fencing epoch back at provision start. ``None`` means a newer
         # claimant already superseded us (or the row is gone), so abort before any
         # work — never touch the new claimant's row.
@@ -705,17 +675,25 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
         # the heartbeat-fence path above.
         _log.exception("worker.provision_claim_setup_failed", workspace_id=workspace_id)
     finally:
-        # Release CAS on the stored epoch so a release issued after a newer
-        # claimant reclaimed the row cannot clobber it (D6). This finally runs
-        # while an external cancel may already be propagating; shield the release
-        # and the epoch pop so a second cancellation (worker shutdown) landing
-        # mid-write cannot skip them and leak the DB lease or the epoch entry.
-        await self._release_execution_claim_after_cancellation(workspace_id)
-        # Promptly release the terminal runtime when provisioning ended terminal
-        # (provision failure → ``failed``), reclaiming the compose stack + per-ws
-        # auth overlay immediately rather than on the ~1h interval (#583, #584). A
-        # no-op for non-terminal exits and idempotent against the periodic backstop.
-        await self._release_terminal_runtime_promptly(workspace_id)
+        try:
+            # A row that ended ``ready`` keeps (parks) the claim lease for READY
+            # dispatch to continue on; every other exit releases it. Shielded: a
+            # second cancellation is re-raised only once the scope is settled.
+            await self._finish_provision_work_slot(workspace_id, work_slot)
+        finally:
+            # Release CAS on the stored epoch so a release issued after a newer
+            # claimant reclaimed the row cannot clobber it (D6). This finally runs
+            # while an external cancel may already be propagating; shield the
+            # release and the epoch pop so a second cancellation (worker shutdown)
+            # landing mid-write cannot skip them and leak the DB lease or the
+            # epoch entry.
+            await self._release_execution_claim_after_cancellation(workspace_id)
+            # Promptly release the terminal runtime when provisioning ended
+            # terminal (provision failure → ``failed``), reclaiming the compose
+            # stack + per-ws auth overlay immediately rather than on the ~1h
+            # interval (#583, #584). A no-op for non-terminal exits and idempotent
+            # against the periodic backstop.
+            await self._release_terminal_runtime_promptly(workspace_id)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:
@@ -735,14 +713,25 @@ async def _safely_execute(self: Any, workspace_id: str) -> None:
         _log.exception("worker.execute_failed", workspace_id=workspace_id)
 
 
-async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
+async def _safely_execute_claimed(
+    self: Any,
+    workspace_id: str,
+    *,
+    work_slot_lease: WorkSlotLeaseRef | None = None,
+) -> None:
     """Run executor for a claimed ready workspace while heartbeating the execution claim."""
     heartbeat = asyncio.create_task(
         self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-execution-claim-{workspace_id}",
     )
     try:
-        await self._safely_execute(workspace_id)
+        # READY dispatch continues on the lease its pre-step transferred to this
+        # worker (handed over directly, so no re-read can strand it); a
+        # preserved-active validation starts lease-less and reacquires at its
+        # hook. Either way the scope is released when the workspace first waits
+        # (monitor ``release_idle``) or when the task ends.
+        async with self._work_slot_task_scope(workspace_id, lease=work_slot_lease):
+            await self._safely_execute(workspace_id)
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

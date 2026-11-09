@@ -46,6 +46,7 @@ TABLES = tuple(
             "egress_audit_records",
             "operator_grant_audit_records",
             "worker_heartbeats",
+            "work_slot_leases",
             "hosted_owners",
             "hosted_preparations",
             "hosted_grants",

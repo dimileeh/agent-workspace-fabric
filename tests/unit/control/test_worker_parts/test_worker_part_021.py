@@ -53,6 +53,7 @@ from awf.service.scheduler import (
     scheduler_score_from_workspace,
 )
 from tests.postgres import postgres_test_engine
+from tests.unit.control._worker_work_slot_support import add_lease
 
 PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
 PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
@@ -1207,7 +1208,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart006:
         )
 
     @pytest.mark.unit
-    async def test_preserved_active_validation_busy_worker_blocks_stale_failure_after_grace(
+    async def test_preserved_active_validation_busy_slots_still_dispatch_and_block_failure(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1281,13 +1282,13 @@ class TestRunOnceStaleActiveExecutionRecoveryPart006:
                 active_execution_preservation_grace_seconds=0.0,
             ),
         )
-        slot_released = asyncio.Event()
-
-        async def _block_execution_slot() -> None:
-            await slot_released.wait()
-
-        slot_task = asyncio.create_task(_block_execution_slot())
-        worker._execution_tasks["other-workspace"] = slot_task  # noqa: SLF001
+        # Every work slot is busy with another workspace's lease. Slots are DB
+        # leases (slot-release), so the preserved validation is still dispatched
+        # (it waits at its validation hook) and the stale failure stays blocked.
+        busy_id = await _create_active_execution(
+            session_factory, origin_repo, "busy-slot-holder", WorkspaceStatus.running
+        )
+        await add_lease(session_factory, busy_id, holder="stale-worker")
         candidate = _ActiveExecutionCandidate(
             workspace_id=workspace_id,
             status=WorkspaceStatus.running,
@@ -1295,15 +1296,12 @@ class TestRunOnceStaleActiveExecutionRecoveryPart006:
             compose_project_name="awf_preserved_validation_event_busy_worker",
         )
 
-        try:
-            assert worker._available_execution_slots() == 0  # noqa: SLF001
-            assert await worker._recover_preserved_active_execution(candidate)  # noqa: SLF001
-            assert not await worker._stale_active_execution_can_fail(candidate)  # noqa: SLF001
-            assert executor.calls == []
-        finally:
-            slot_released.set()
-            await slot_task
-            worker._execution_tasks.pop("other-workspace", None)  # noqa: SLF001
+        assert await worker._recover_preserved_active_execution(candidate)  # noqa: SLF001
+        assert not await worker._stale_active_execution_can_fail(candidate)  # noqa: SLF001
+        await asyncio.wait_for(
+            worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS
+        )
+        assert executor.calls == [workspace_id]
 
     @pytest.mark.unit
     async def test_validating_candidate_reuses_running_validation_salvage_event(
