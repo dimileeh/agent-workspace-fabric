@@ -23,6 +23,7 @@ from typing import Any, Final, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.agent_execution import execution_from_policy
 from awf.common.audit import redact_audit_value
 from awf.common.auto_merge import (
     DEFAULT_AUTO_MERGE,
@@ -44,6 +45,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
+    host_ports_from_resolved_profile,
 )
 from awf.node import provisioner_config as _provisioner_config
 from awf.node import provisioner_helpers as _provisioner_helpers
@@ -59,7 +61,7 @@ from awf.node.compose_manager import (
     ComposeProjectPaths,
 )
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
-from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
+from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.provisioner_cursor_preflight import ProvisionerCursorPreflightMixin
 from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
 from awf.node.provisioner_launch_cleanup import ProvisionerLaunchCleanupMixin
@@ -208,78 +210,6 @@ class Provisioner(
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
         return self._git.get_worktree_path(workspace_id)
-
-    @workspace_consumer
-    async def ensure_hosted_monitor_worktree(self, workspace_id: str) -> WorktreeLayout:
-        """Restore the managed checkout for a hosted ``monitoring_pr`` resume.
-
-        Loads persisted workspace/adoption fields and recreates the worktree at
-        the current PR head tip via :meth:`GitManager.ensure_worktree` and the
-        shared :func:`_provision_checkout_base_branch` helpers. Callers must
-        only invoke this for hosted adoption workspaces.
-        """
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None:
-                raise GitOperationError(
-                    operation="hosted_monitor.ensure_worktree",
-                    returncode=1,
-                    stdout="",
-                    stderr=f"workspace {workspace_id} not found for checkout restore",
-                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
-                )
-            if not pr_adoption_is_hosted(ws.task_policy):
-                raise GitOperationError(
-                    operation="hosted_monitor.ensure_worktree",
-                    returncode=1,
-                    stdout="",
-                    stderr=(
-                        "ensure_hosted_monitor_worktree requires hosted PR adoption "
-                        f"for workspace {workspace_id}"
-                    ),
-                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
-                )
-            if not ws.repo_url:
-                raise GitOperationError(
-                    operation="hosted_monitor.ensure_worktree",
-                    returncode=1,
-                    stdout="",
-                    stderr=(
-                        "hosted monitor checkout restore missing repo_url for "
-                        f"workspace {workspace_id}"
-                    ),
-                    reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
-                )
-            branch_name = ws.branch_name or _provision_local_branch_name(
-                ws,
-                workspace_id=workspace_id,
-                branch_prefix=self._config.branch_prefix,
-                task_tag=ws.task_tag,
-            )
-            checkout_base = _provision_checkout_base_branch(ws)
-            repo_url = ws.repo_url
-
-        try:
-            return await self._git.ensure_worktree(
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                base_branch=checkout_base,
-                new_branch=branch_name,
-            )
-        except GitOperationError as exc:
-            if exc.reason_code == "MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED":
-                raise
-            raise GitOperationError(
-                operation="hosted_monitor.ensure_worktree",
-                returncode=exc.returncode,
-                stdout=exc.stdout,
-                stderr=(
-                    "hosted monitor checkout restore failed "
-                    f"(underlying={exc.reason_code}): {exc.stderr or exc.stdout}"
-                ),
-                reason_code="MONITOR_RECOVERY_CHECKOUT_RESTORE_FAILED",
-            ) from exc
 
     async def _provision_claimed_workspace(
         self,
@@ -443,6 +373,52 @@ class Provisioner(
             resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
                 resolved_profile_dict, profile
             )
+            if ws.resolved_profile is not None and profile_resolution is not None:
+                try:
+                    _provisioner_helpers._validate_bound_execution_profile(ws, profile)
+                except ProfileResolutionError:
+                    resolved_profile_for_failure = None
+                    trusted_base_profile_sha = None
+                    raise
+            if (ws.task_policy or {}).get("agent_execution_profile_pending") and (
+                not host_ports_from_resolved_profile(resolved_profile_dict)
+            ):
+                # Port-free bindings can freeze early for restart safety. Profiles
+                # claiming ports wait for preflight/companions and locked admission.
+                try:
+                    bound = await self._check_auto_resolved_profile_host_ports(
+                        workspace_id=workspace_id,
+                        profile=profile,
+                        profile_resolution=profile_resolution,
+                        excluding_workspace_id=workspace_id,
+                        task_policy=ws.task_policy,
+                        resolved_profile_dict=resolved_profile_dict,
+                        execution_claim_epoch=execution_claim_epoch,
+                        trusted_base_profile_sha=trusted_base_profile_sha,
+                        bind_execution=True,
+                    )
+                except (
+                    WorkspaceCreateHostPortConflictError,
+                    WorkspaceCreateDuplicateHostPortError,
+                ) as exc:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=str(exc)[:2000],
+                        from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
+                        reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                        resolved_profile=resolved_profile_for_failure,
+                        trusted_base_profile_sha=trusted_base_profile_sha,
+                    )
+                    return
+                if bound is None:
+                    return
+                profile, ws.task_policy = bound
+                resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                    resolved_profile_dict, profile
+                )
             # Adoption may defer Cursor Router preflight until this checkout
             # profile is known (``profile_ref=auto`` + repo-local CURSOR_API_KEY).
             if await self._run_deferred_cursor_auto_router_preflight(
@@ -479,11 +455,34 @@ class Provisioner(
                     companions=companion_specs,
                     default_base_branch=ws.branch_base,
                 )
+            if (hosted_pr_adoption or self._stack_launcher is None) and (ws.task_policy or {}).get(
+                "agent_execution_profile_pending"
+            ):
+                bound = await self._check_auto_resolved_profile_host_ports(
+                    workspace_id=workspace_id,
+                    profile=profile,
+                    profile_resolution=profile_resolution,
+                    excluding_workspace_id=workspace_id,
+                    task_policy=ws.task_policy,
+                    resolved_profile_dict=resolved_profile_dict,
+                    execution_claim_epoch=execution_claim_epoch,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
+                    bind_execution=True,
+                )
+                if bound is None:
+                    return
+                profile, ws.task_policy = bound
+                resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                    resolved_profile_dict, profile
+                )
+            if self._stack_launcher is not None and hosted_pr_adoption:
                 stack_paths = await self._stack_launcher.render(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        execution=execution_from_policy(ws.task_policy),
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                     )
@@ -561,7 +560,10 @@ class Provisioner(
                 ):
                     return
                 try:
-                    await self._check_auto_resolved_profile_host_ports(
+                    needs_binding = bool(
+                        (ws.task_policy or {}).get("agent_execution_profile_pending")
+                    )
+                    bound = await self._check_auto_resolved_profile_host_ports(
                         workspace_id=workspace_id,
                         profile=profile,
                         profile_resolution=profile_resolution,
@@ -570,7 +572,16 @@ class Provisioner(
                         resolved_profile_dict=resolved_profile_dict,
                         execution_claim_epoch=execution_claim_epoch,
                         trusted_base_profile_sha=trusted_base_profile_sha,
+                        bind_execution=needs_binding,
                     )
+                    if needs_binding:
+                        if bound is None:
+                            return
+                        profile, ws.task_policy = bound
+                        resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                        resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        )
                 except (
                     WorkspaceCreateHostPortConflictError,
                     WorkspaceCreateDuplicateHostPortError,
@@ -759,6 +770,7 @@ class Provisioner(
                         workspace_id=workspace_id,
                         layout=layout,
                         profile=profile,
+                        execution=execution_from_policy(ws.task_policy),
                         companions=materialized_companions,
                         companion_graph_prevalidated=companion_graph_prevalidated,
                         on_compose_up_started=_mark_compose_up_started,
@@ -766,6 +778,18 @@ class Provisioner(
                 )
                 if await self._launch_lost_to_terminal_cleanup(workspace_id):
                     return
+        except (WorkspaceCreateHostPortConflictError, WorkspaceCreateDuplicateHostPortError) as exc:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
+                reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                resolved_profile=resolved_profile_for_failure,
+                trusted_base_profile_sha=trusted_base_profile_sha,
+            )
+            return
         except GitOperationError as exc:
             _log.error(
                 "provisioner.git_failed",
@@ -1199,37 +1223,6 @@ class Provisioner(
                 )
             )
         return tuple(materialized)
-
-    async def _load_and_claim(self, session: AsyncSession, workspace_id: str) -> Workspace | None:
-        """Transition requested -> provisioning. Returns the loaded workspace or None.
-
-        Returns None (rather than raising) if the workspace isn't in ``requested`` —
-        another worker may have already claimed it. This makes the provisioner safe
-        to call at-least-once from the poll loop. The claim is a conditional
-        ``requested`` -> ``provisioning`` transition, so concurrent workers cannot
-        both commit it.
-        """
-        repo = WorkspaceRepository(session)
-        ws = await repo.transition_if_current(
-            workspace_id,
-            from_status=WorkspaceStatus.requested,
-            to=WorkspaceStatus.provisioning,
-            reason_code="WORKER_CLAIMED",
-        )
-        if ws is not None:
-            await session.commit()
-            return ws
-
-        current = await repo.get(workspace_id)
-        if current is None:
-            _log.warning("provisioner.skip_unknown", workspace_id=workspace_id)
-            return None
-        _log.info(
-            "provisioner.skip_not_requested",
-            workspace_id=workspace_id,
-            status=current.status,
-        )
-        return None
 
     async def _capture_service_startup_diagnostics(
         self, workspace_id: str

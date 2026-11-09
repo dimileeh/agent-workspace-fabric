@@ -466,7 +466,24 @@ class TestCreateWorkspace:
         assert ws.task_policy["provider_recovery"] == {
             "max_fallback_attempts": 1,
             "fallbacks": [
-                {"agent": "codex", "provider": "openai", "model": "gpt-5.5"},
+                {
+                    "agent": "codex",
+                    "provider": "openai",
+                    "model": "gpt-5.5",
+                    "agent_execution": {
+                        "version": 1,
+                        "agent": "codex",
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "effort": "xhigh",
+                        "effort_explicit": False,
+                        "model_explicit": True,
+                        "endpoint": None,
+                        "credential_ref": None,
+                        "network_service": None,
+                        "compatibility": "native",
+                    },
+                },
             ],
         }
 
@@ -683,33 +700,43 @@ class TestCreateWorkspace:
     async def test_create_workspace_allows_retired_gemini_idempotency_replay(
         self,
         mcp,
-        monkeypatch: pytest.MonkeyPatch,
+        factory: async_sessionmaker[AsyncSession],
     ) -> None:  # type: ignore[no-untyped-def]
         idempotency_key = "mcp-gemini-replay-key"
 
-        # Create initial workspace row for gemini while launchability and preflight are bypassed
-        monkeypatch.setattr(
-            "awf.service.workspaces_create._assert_supported_agent_runtime",
-            lambda _a: None,
-        )
-        monkeypatch.setattr(
-            "awf.service.workspaces_create._raise_if_provider_preflight_blocks",
-            lambda _p: None,
-        )
-        initial_result = await mcp.call_tool(
-            "awf_create_workspace",
-            {
-                **_CREATE_ARGS,
-                "agent": "gemini",
-                "idempotency_key": idempotency_key,
-                "provider_readiness_override": False,
-            },
-        )
-        assert isinstance(initial_result, CallToolResult)
-        assert initial_result.isError is False
-        existing_id = initial_result.structuredContent["workspace_id"]
-
-        monkeypatch.undo()
+        # Seed a historical row without the modern execution snapshot. Fresh
+        # Gemini admission remains forbidden; replay must not invoke it.
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url=str(_CREATE_ARGS["repo_url"]),
+                branch_base=str(_CREATE_ARGS["base_branch"]),
+                task_title=str(_CREATE_ARGS["task_title"]),
+                task_prompt=str(_CREATE_ARGS["task_prompt"]),
+                agent="gemini",
+                test_commands=["pytest -q"],
+                auto_merge=True,
+                task_policy={
+                    "provider_readiness_preflight": {
+                        "provider": "gemini",
+                        "agent": "gemini",
+                        "readiness_status": "ready",
+                        "auth_status": "authenticated",
+                        "auth_source": "env",
+                        "probe_status": "ok",
+                        "reason_code": "PROVIDER_READY",
+                        "message": "Historical Gemini readiness check passed.",
+                        "override_required": False,
+                        "override_requested": False,
+                        "override_used": False,
+                        "override_reason": _CREATE_ARGS["provider_readiness_override_reason"],
+                        "blocks_launch": False,
+                        "checked_at": "2026-01-15T00:00:00Z",
+                    }
+                },
+                idempotency_key=idempotency_key,
+            )
+            await session.commit()
+            existing_id = workspace.id
 
         # Replay identical MCP create call; preflight is active but bypassed via idempotency lookup
         replay_result = await mcp.call_tool(
@@ -724,6 +751,11 @@ class TestCreateWorkspace:
         assert isinstance(replay_result, CallToolResult)
         assert replay_result.isError is False
         assert replay_result.structuredContent["workspace_id"] == existing_id
+        async with factory() as session:
+            rows = await WorkspaceRepository(session).list(limit=10)
+        assert [row.id for row in rows] == [existing_id]
+        assert rows[0].agent == "gemini"
+        assert "agent_execution" not in rows[0].task_policy
 
     @pytest.mark.unit
     async def test_create_workspace_rejects_fresh_gemini_creation(

@@ -1430,6 +1430,27 @@ _REASON_TEXT.update(get_core_startup_reasons(_ReasonText))
 _REASON_TEXT.update(get_work_slot_reasons(_ReasonText))
 
 
+_REASON_TEXT.update(
+    {
+        code: _ReasonText(
+            message,
+            "Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.",
+            "The selected execution contract cannot safely run on this configuration or fleet.",
+            "awf workspace show <workspace_id>",
+            _reason_catalog_link(code),
+        )
+        for code, message in {
+            "THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED": "Third-party Codex/Claude admission is disabled by default.",
+            "EXECUTION_CONTRACT_UNSUPPORTED": "The stored execution snapshot has an unknown version or invalid identity.",
+            "EXECUTION_WORKER_CONTRACT_UNSUPPORTED": "A live queue consumer does not advertise execution contract v1.",
+            "EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED": "The runtime cannot enforce the selected provider isolation contract.",
+            "EXECUTION_NETWORK_PROBE_UNSUPPORTED": "Admission cannot verify the selected connection from the actual agent network.",
+            "EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED": "The declared fallback lacks a complete enforceable execution snapshot.",
+        }.items()
+    }
+)
+
+
 def _reason_text(
     reason: str,
     *,

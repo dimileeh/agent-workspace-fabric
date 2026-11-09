@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from awf.adapters.provider_config import competing_provider_env
+from awf.common.agent_execution import ExecutionSelection
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.companion_images import CompanionImageBuilder
@@ -80,6 +82,7 @@ class WorkspaceStackLaunchRequest:
     workspace_id: str
     layout: WorktreeLayout
     profile: WorkspaceProfile
+    execution: ExecutionSelection | None = None
     companions: tuple[MaterializedCompanionService, ...] = ()
     companion_graph_prevalidated: bool = False
     on_compose_up_started: Callable[[], Awaitable[None]] | None = None
@@ -223,6 +226,19 @@ class ComposeStackLauncher:
             secret_lease_mount_metadata=secret_metadata,
         )
 
+    async def agent_spec(
+        self, request: WorkspaceStackLaunchRequest, *, hosted: bool = False
+    ) -> WorkspaceComposeSpec:
+        """Resolve current agent material without regenerating the existing services."""
+        spec, _, _ = await self._compose_spec(
+            replace(
+                request, profile=request.profile.model_copy(update={"services": []}), companions=()
+            ),
+            build_companion_images=False,
+            use_hosted_secret_placeholders=hosted,
+        )
+        return spec
+
     async def _compose_spec(
         self,
         request: WorkspaceStackLaunchRequest,
@@ -233,6 +249,79 @@ class ComposeStackLauncher:
         """Build the rendered stack spec shared by launch and render-only paths."""
         layout = request.layout
         profile = request.profile
+        selected = request.execution
+        third_party = selected is not None and selected.third_party
+        selected_agent = selected.agent if selected is not None else None
+        isolated = selected_agent in {"codex", "claude_code"}
+        native_prefixes = (
+            ("OPENAI_", "CODEX_")
+            if isolated and not third_party and selected_agent == "codex"
+            else ("ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_", "GEMINI_")
+            if isolated and not third_party
+            else ()
+        )
+        suppressed_paths = {
+            "/home/agent/.codex",
+            "/home/agent/.claude",
+            "/home/agent/.claude.json",
+            "/home/agent/.ollama",
+            "/home/agent/.config/opencode",
+            "/home/agent/.grok",
+        }
+        suppressed_providers = {
+            "codex",
+            "claude_code",
+            "opencode",
+            "ollama",
+            "cursor",
+            "antigravity",
+            "grok",
+        }
+        if isolated and not third_party:
+            suppressed_providers.discard(str(selected_agent))
+            suppressed_paths -= (
+                {"/home/agent/.codex"}
+                if selected_agent == "codex"
+                else {"/home/agent/.claude", "/home/agent/.claude.json"}
+            )
+        if isolated:
+            selected_credential = (
+                selected.credential_ref
+                if third_party and selected is not None and selected.provider == "openrouter"
+                else None
+            )
+            profile = profile.model_copy(deep=True)
+            profile.runtime.environment = {
+                k: v
+                for k, v in profile.runtime.environment.items()
+                if not competing_provider_env(k) or k.startswith(native_prefixes)
+            }
+            if selected_credential is not None:
+                # Resolve only the frozen reference, even if a copied profile
+                # or ambient conventional key now points at another connection.
+                source_name = selected_credential.removeprefix("env/")
+                profile.runtime.environment["OPENROUTER_API_KEY"] = f"${{{source_name}}}"
+            profile.secrets = [
+                secret
+                for secret in profile.secrets
+                if (
+                    not competing_provider_env(secret.target)
+                    or secret.target.startswith(native_prefixes)
+                    or (
+                        selected_credential is not None
+                        and secret.target == "OPENROUTER_API_KEY"
+                        and secret.kind == "env"
+                        and (secret.provider or "").strip().lower() == "env"
+                        and "env/" + (secret.ref or "").strip().removeprefix("env/")
+                        == selected_credential
+                    )
+                )
+                and not any(
+                    p.removeprefix("/home/agent/.config").removeprefix("/home/agent")
+                    in secret.target
+                    for p in suppressed_paths
+                )
+            ]
         reservation_limits = (
             await self._resource_limits(request.workspace_id)
             if self._resource_limits is not None
@@ -275,6 +364,9 @@ class ComposeStackLauncher:
             if secret_lease_resolution is not None
             else frozenset()
         )
+        if isolated:
+            satisfied_targets = satisfied_targets | frozenset(suppressed_paths)
+            satisfied_providers = satisfied_providers | frozenset(suppressed_providers)
         suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(satisfied_providers)
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
@@ -291,6 +383,15 @@ class ComposeStackLauncher:
             )
             auth_mounts.extend(
                 mount for mount in legacy_mounts if mount.target not in suppressed_legacy_targets
+            )
+        if selected is not None and selected.third_party and self._auth_mount_resolver is not None:
+            prepare = getattr(self._auth_mount_resolver, "resolve_execution_config", None)
+            if not callable(prepare):
+                raise ValueError("EXECUTION_CONFIGURATION_ISOLATION_UNSUPPORTED")
+            auth_mounts.append(
+                await asyncio.to_thread(
+                    prepare, workspace_id=request.workspace_id, agent=selected.agent
+                )
             )
         services = await asyncio.to_thread(
             profile_services,
@@ -344,6 +445,14 @@ class ComposeStackLauncher:
             agent_environment,
             host_env={} if self._protected_profile_mounts is not None else None,
         )
+        if isolated:
+            agent_environment = tuple(
+                (k, v)
+                for k, v in agent_environment
+                if not competing_provider_env(k)
+                or k.startswith(native_prefixes)
+                or (selected_credential is not None and k == "OPENROUTER_API_KEY")
+            )
         if use_hosted_secret_placeholders and self._auth_mount_resolver is not None:
             _append_hosted_auth_placeholder_mounts(
                 auth_mounts,

@@ -133,6 +133,8 @@ any supported provider subset in one scorecard response.
 
 ## Create Workspace
 
+Optional `task.provider` separates agent and model service; `preflight.allow_unverified_model` defaults to false. Third-party Codex/Claude admission remains disabled and unsupported agent-network verification cannot be overridden. Existing responses expose `agent_provider`, `agent_execution`, and `agent_connection_scope`. See [the foundation contract and pending interfaces](AGENT_MODEL_PROVIDERS.md).
+
 ### Create a workspace
 
 Uses the canonical structured workspace request body. Supports idempotency via

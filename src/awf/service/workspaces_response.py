@@ -121,6 +121,11 @@ def _provider_recovery_state_response(
     fallback_target_response: FallbackTargetResponse | None = None
     if view.fallback_target is not None:
         fallback_target_response = FallbackTargetResponse(
+            agent_execution=(
+                view.fallback_target.execution.model_dump(mode="json")
+                if view.fallback_target.execution is not None
+                else None
+            ),
             agent=view.fallback_target.agent,
             provider=view.fallback_target.provider,
             model=view.fallback_target.model,

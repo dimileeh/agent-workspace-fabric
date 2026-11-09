@@ -595,6 +595,7 @@ def build_worker_runtime(
         await provisioner.ensure_hosted_monitor_worktree(workspace_id)
 
     executor = WorkspaceExecutor(
+        stack_launcher=stack_launcher,
         session_factory=session_factory,
         runner=runner,
         compose=compose,

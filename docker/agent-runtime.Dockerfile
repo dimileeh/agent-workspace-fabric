@@ -367,3 +367,6 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # Default command keeps the container alive so ``docker compose exec`` can run
 # coding CLIs inside. The adapter layer owns the actual invocations.
 CMD ["sh", "-c", "sleep infinity"]
+
+# Execution contract v1: isolated third-party provider runner (stdlib only).
+COPY src/awf/adapters/provider_config.py /opt/awf/provider_config.py

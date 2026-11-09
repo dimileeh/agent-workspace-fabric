@@ -1079,6 +1079,7 @@ def _stub_worker_runtime_dependencies(
             hosted_validation: object = None,
             ensure_hosted_monitor_checkout: object = None,
             worktree_activity_git_roots: object = None,
+            stack_launcher: object = None,
         ) -> None:
             """Test helper for  init  ."""
             del hosted_validation

@@ -3,6 +3,7 @@
 - [Quickstart](QUICKSTART.md)
 - [Start Here](START_HERE.md) compatibility pointer for older links.
 - [Upgrade Guide](UPGRADE.md)
+- [Agent and model-provider foundation](AGENT_MODEL_PROVIDERS.md) (admission disabled; T4–T6 pending).
 - [Uninstall Guide](UNINSTALL.md)
 - [MCP Setup](MCP_SETUP.md)
 - [Release Checklist](../RELEASING.md)

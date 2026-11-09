@@ -19,6 +19,14 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationResult
 
 
+@pytest.fixture(autouse=True)
+def _allow_circuit_launch_for_isolated_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These fake executors have no DB; real admission is covered by test_executor_default_circuit.
+    monkeypatch.setattr(
+        execution_flow, "_execution_circuit_allows_launch", AsyncMock(return_value=True)
+    )
+
+
 class _NoTrustedGitRootsExecutor:
     def _trusted_git_roots_for_workspace(
         self, *, workspace_id: str, repo_url: str

@@ -2860,6 +2860,18 @@
             "title": "Agent",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "model": {
             "title": "Model",
             "type": "string"
@@ -5918,6 +5930,11 @@
       },
       "ProviderCircuitBreakerSummaryResponse": {
         "properties": {
+          "connection_scope": {
+            "default": "legacy",
+            "title": "Connection Scope",
+            "type": "string"
+          },
           "cooldown_until": {
             "anyOf": [
               {
@@ -8414,6 +8431,62 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
+          "agent_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Effort"
+          },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
+          "agent_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Model"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
+          },
           "attempt_id": {
             "title": "Attempt Id",
             "type": "string"
@@ -8634,6 +8707,17 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
           "agent_effort": {
             "anyOf": [
               {
@@ -8655,6 +8739,18 @@
             "title": "Agent Effort Source",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "agent_model": {
             "anyOf": [
               {
@@ -8675,6 +8771,17 @@
             ],
             "title": "Agent Model Source",
             "type": "string"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
           },
           "attempt_id": {
             "anyOf": [
@@ -11381,6 +11488,11 @@
       "WorkspaceLaunchPreflight": {
         "additionalProperties": false,
         "properties": {
+          "allow_unverified_model": {
+            "default": false,
+            "title": "Allow Unverified Model",
+            "type": "boolean"
+          },
           "provider_readiness_override": {
             "default": false,
             "title": "Provider Readiness Override",
@@ -12292,6 +12404,17 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
           "agent_effort": {
             "anyOf": [
               {
@@ -12313,6 +12436,18 @@
             "title": "Agent Effort Source",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "agent_model": {
             "anyOf": [
               {
@@ -12333,6 +12468,17 @@
             ],
             "title": "Agent Model Source",
             "type": "string"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
           },
           "attention_required": {
             "default": false,
@@ -13578,6 +13724,17 @@
             ],
             "title": "Agent"
           },
+          "agent_connection_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Connection Scope"
+          },
           "agent_effort": {
             "anyOf": [
               {
@@ -13599,6 +13756,18 @@
             "title": "Agent Effort Source",
             "type": "string"
           },
+          "agent_execution": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Execution"
+          },
           "agent_model": {
             "anyOf": [
               {
@@ -13619,6 +13788,17 @@
             ],
             "title": "Agent Model Source",
             "type": "string"
+          },
+          "agent_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Provider"
           },
           "app_endpoints": {
             "items": {
@@ -14705,6 +14885,19 @@
             "minLength": 1,
             "title": "Prompt",
             "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
           },
           "provider_recovery": {
             "anyOf": [

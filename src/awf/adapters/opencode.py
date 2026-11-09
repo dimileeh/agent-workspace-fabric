@@ -97,6 +97,7 @@ class OpenCodeAdapter(AgentAdapter):
         executor resolves only the names whose backing values exist.
         """
         return (
+            "AWF_OLLAMA_BASE_URL",
             "AWF_OPENCODE_OLLAMA_BASE_URL",
             "OLLAMA_HOST",
             "OLLAMA_API_KEY",
@@ -215,7 +216,7 @@ def _ollama_base_url_prelude() -> str:
     launch/preflight split.
     """
     return (
-        '__awf_ollama_host="${AWF_OPENCODE_OLLAMA_BASE_URL:-}"\n'
+        '__awf_ollama_host="${AWF_OLLAMA_BASE_URL:-${AWF_OPENCODE_OLLAMA_BASE_URL:-}}"\n'
         'if [ -z "$__awf_ollama_host" ]; then\n'
         '  __awf_ollama_host="${OLLAMA_HOST:-}"\n'
         "fi\n"

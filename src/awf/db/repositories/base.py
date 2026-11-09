@@ -134,6 +134,7 @@ _CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
 _PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "provider",
     "model",
+    "connection_scope",
 )
 _WORKER_HEARTBEAT_CONFLICT_COLUMNS: Final[tuple[str, ...]] = ("worker_id",)
 _PR_FEEDBACK_RESOLUTION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
@@ -427,6 +428,10 @@ def _worker_heartbeat_upsert_stmt(dialect_name: str | None) -> Any | None:
     return inserted.on_conflict_do_update(
         index_elements=_WORKER_HEARTBEAT_CONFLICT_COLUMNS,
         set_={
+            "execution_contract_version": case(
+                (excluded_is_newer, inserted.excluded.execution_contract_version),
+                else_=WorkerHeartbeat.execution_contract_version,
+            ),
             "node_id": case(
                 (excluded_is_newer, inserted.excluded.node_id),
                 else_=WorkerHeartbeat.node_id,

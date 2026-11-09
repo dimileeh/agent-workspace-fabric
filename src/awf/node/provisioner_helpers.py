@@ -603,6 +603,46 @@ def _resolved_profile_requires_credential_rehydration(value: object) -> bool:
     return value == REDACTION_MARKER
 
 
+def _validate_bound_execution_profile(ws: Workspace, profile: WorkspaceProfile) -> None:
+    """Reject profile drift when rehydrating an already-bound connection."""
+    from awf.common.agent_execution import execution_from_policy, resolve_execution
+    from awf.profiles.resolver import ProfileResolutionError
+
+    policy = ws.task_policy or {}
+    if policy.get("agent_execution_profile_pending"):
+        return
+    targets = [policy, *policy.get("provider_recovery", {}).get("fallbacks", [])]
+    selections = [execution_from_policy(target) for target in targets]
+    expanded = [
+        selected for selected in selections if selected is not None and selected.third_party
+    ]
+    if not expanded:
+        return
+    snapshot = profile.model_dump(mode="json", by_alias=True)
+    try:
+        if redact_audit_value(snapshot) != redact_audit_value(ws.resolved_profile):
+            raise ValueError
+        for selected in expanded:
+            if selected.provider != "openrouter":
+                continue
+            # The audit snapshot hides credential aliases. Compare their names
+            # separately, while leaving frozen daemon defaults authoritative.
+            rebound = resolve_execution(
+                agent=selected.agent,
+                provider=selected.provider,
+                model=selected.model,
+                allow_unverified=True,
+                profile=snapshot,
+            )
+            if rebound.credential_ref != selected.credential_ref:
+                raise ValueError
+    except ValueError:
+        raise ProfileResolutionError(
+            "Resolved profile no longer matches the frozen execution connection.",
+            reason_code="EXECUTION_PROFILE_CHANGED",
+        ) from None
+
+
 def check_unsupported_agent_runtime(agent_name: str) -> str | None:
     """Return error message if agent_name is unsupported, else None."""
     from awf.service.provider_readiness import is_launchable_agent, supported_launchable_agents

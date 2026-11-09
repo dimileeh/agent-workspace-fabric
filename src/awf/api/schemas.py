@@ -186,6 +186,7 @@ class WorkspaceProviderRecoveryPolicy(BaseModel):
 class WorkspaceLaunchPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    allow_unverified_model: bool = False
     provider_readiness_override: bool = False
     provider_readiness_override_reason: Annotated[
         str | None, Field(default=None, max_length=512)
@@ -199,6 +200,7 @@ class WorkspaceTask(CursorAutoModeSelectionMixin):
     prompt: Annotated[str, Field(min_length=1, max_length=16384)]
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
@@ -731,6 +733,7 @@ class FallbackTargetResponse(BaseModel):
 
     agent: str
     provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
     model: str
 
 
@@ -911,6 +914,9 @@ class WorkspaceResponse(CursorAutoModeResponseMixin):
     initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime | str
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1088,6 +1094,9 @@ class TaskResponse(CursorAutoModeResponseMixin):
     task_class: TaskClass | None
     owned_paths: list[str]
     agent: AgentRuntime | str
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
@@ -1123,6 +1132,11 @@ class TaskAttemptResponse(BaseModel):
     candidate_id: str | None = None
     candidate_status: MergeCandidateStatus | None = None
     readiness: MergeCandidateReadinessResponse | None = None
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
+    agent_model: str | None = None
+    agent_effort: str | None = None
     agent: AgentRuntime | str
     status: WorkspaceStatus
     pr_url: str | None
@@ -1161,6 +1175,9 @@ class WorkspaceOverviewResponse(CursorAutoModeResponseMixin):
     task_class: TaskClass | None
     owned_paths: list[str]
     agent: AgentRuntime | str
+    agent_provider: str | None = None
+    agent_execution: dict[str, Any] | None = None
+    agent_connection_scope: str | None = None
     agent_model: str | None = None
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"

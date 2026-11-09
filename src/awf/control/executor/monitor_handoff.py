@@ -58,7 +58,11 @@ from awf.control.executor.quality_gates import (
     _log,
 )
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
-from awf.control.executor.state_ops import _sync_resolved_profile
+from awf.control.executor.state_ops import (
+    _execution_circuit_allows_launch,
+    _freeze_execution_defaults,
+    _sync_resolved_profile,
+)
 from awf.control.executor.work_slot_binding import work_slot_for
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
@@ -74,7 +78,9 @@ from awf.node.companion_services import (
     companion_specs_from_task_policy,
 )
 from awf.node.git_manager import GitOperationError
-from awf.node.stack_launcher import effective_compose_up_timeout_seconds
+from awf.node.stack_launcher import (
+    effective_compose_up_timeout_seconds,
+)
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
@@ -105,6 +111,7 @@ _present_optional_companion_env_secret_refs = (
 _refresh_optional_companion_env_secrets_for_resume = (
     _companion_env._refresh_optional_companion_env_secrets_for_resume
 )
+_refresh_selected_agent_material = _companion_env._refresh_selected_agent_material
 _companions_with_set_env_secrets_for_resume = (
     _companion_env._companions_with_set_env_secrets_for_resume
 )
@@ -207,6 +214,9 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
         )
         if recovered_remote_push_branch:
             ws.remote_push_branch = recovered_remote_push_branch
+
+    if not await _freeze_execution_defaults(self, ws):
+        return None
 
     workspace_is_hosted = pr_adoption_is_hosted(ws.task_policy)
     missing = _missing_monitor_recovery_metadata(ws)
@@ -384,6 +394,10 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             await lock_resumed_worktree_registration(
                 self, workspace_id=workspace_id, repo_url=ws.repo_url
             )
+            if not await _refresh_selected_agent_material(
+                self, ws=ws, profile=profile, compose_file=compose_file
+            ):
+                return None
             identity_before = await _runtime_setup_replay.capture_agent_container_identity(
                 compose_project
             )
@@ -405,6 +419,20 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 profile=profile,
                 identity_before=identity_before,
                 monitor_owner_id=monitor_owner_id,
+            ):
+                return None
+
+    if workspace_is_hosted:
+        async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_hosted_material",
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
+            if not await _refresh_selected_agent_material(
+                self, ws=ws, profile=profile, compose_file=compose_file
             ):
                 return None
 
@@ -1336,6 +1364,10 @@ async def _build_handoff_pr_monitor(
             expected=WorkspaceStatus.running,
             action=stale_action,
         ):
+            return None
+        if not await _freeze_execution_defaults(self, workspace):
+            return None
+        if not await _execution_circuit_allows_launch(self, workspace):
             return None
         if monitor is None and self._pr_monitor_factory is not None:
             agent: AgentRuntime | str

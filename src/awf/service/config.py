@@ -104,6 +104,7 @@ class ServiceSettings:
     github_token: str | None
     worker_poll_interval_seconds: float
     worker_max_concurrent_provisions: int
+    third_party_agent_providers_enabled: bool = False
     worker_max_concurrent_executions: int = 3
     workspace_steady_cpu: float = 3.0
     workspace_steady_memory_gb: float = 10.0
@@ -257,6 +258,7 @@ def resolve_service_settings(
         database_url=database_url,
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
+        third_party_agent_providers_enabled=settings.third_party_agent_providers_enabled,
         companion_image_cache_enabled=settings.companion_image_cache_enabled,
         companion_image_retention_hours=settings.companion_image_retention_hours,
         work_dir=work_dir,

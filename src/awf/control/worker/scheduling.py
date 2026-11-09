@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.workspace_policy import agent_model_from_task_policy
+from awf.common.agent_execution import circuit_key
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import QueueDecision, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -22,7 +22,6 @@ from awf.db.repositories import (
 from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_STATE_KEY,
     provider_cooldown_not_before,
-    provider_for_agent_model,
 )
 from awf.service.scheduler import (
     SchedulerOrderCursor,
@@ -309,15 +308,16 @@ async def _monitor_provider_recovery_resume_pending(
     if candidate.agent is None:
         return False
 
-    model = agent_model_from_task_policy(candidate.task_policy)
-    provider = provider_for_agent_model(candidate.agent, model)
-    if provider is None or model is None:
+    key = circuit_key(candidate.agent, candidate.task_policy, workspace_id=candidate.workspace_id)
+    if key is None:
         return False
+    provider, model = key[:2]
 
     async with session_factory() as session:
         breaker = await ProviderModelCircuitBreakerRepository(session).open_breaker(
             provider=provider,
             model=model,
+            connection_scope=key[2] if len(key) == 3 else "legacy",
             now=now,
         )
         return breaker is not None

@@ -403,6 +403,7 @@ class CapacityQueueSummaryResponse(BaseModel):
 class ProviderCircuitBreakerSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    connection_scope: str = "legacy"
     provider: str
     model: str
     state: str

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from awf.common.agent_execution import ExecutionSelection, execution_from_policy
 from awf.db.models import Workspace
 from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_COOLDOWN_EVENT,
@@ -132,7 +133,12 @@ def _build_provider_recovery_state_view(
     target_provider = _mapping_str(recovery, "target_provider")
     target_model = _mapping_str(recovery, "target_model")
     fallback_target = (
-        FallbackTarget(agent=target_agent, provider=target_provider, model=target_model)
+        FallbackTarget(
+            agent=target_agent,
+            provider=target_provider,
+            model=target_model,
+            execution=_target_execution(recovery),
+        )
         if action == "fallback" and target_agent and target_model
         else None
     )
@@ -221,3 +227,8 @@ def _merge_recovery_views(
         for name in ProviderRecoveryStateView.__dataclass_fields__
     }
     return ProviderRecoveryStateView(**merged)
+
+
+def _target_execution(recovery: Mapping[str, Any]) -> ExecutionSelection | None:
+    raw = recovery.get("target_execution")
+    return execution_from_policy({"agent_execution": raw}) if raw is not None else None

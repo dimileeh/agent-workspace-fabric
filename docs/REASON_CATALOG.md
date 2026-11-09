@@ -417,6 +417,48 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#duplicate_host_port](#duplicate_host_port)
 
+### EXECUTION_CONTRACT_UNSUPPORTED
+**Problem:** The stored execution snapshot has an unknown version or invalid identity.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_contract_unsupported](#execution_contract_unsupported)
+
+### EXECUTION_FALLBACK_CONTRACT_UNSUPPORTED
+**Problem:** The declared fallback lacks a complete enforceable execution snapshot.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_fallback_contract_unsupported](#execution_fallback_contract_unsupported)
+
+### EXECUTION_NETWORK_PROBE_UNSUPPORTED
+**Problem:** Admission cannot verify the selected connection from the actual agent network.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_network_probe_unsupported](#execution_network_probe_unsupported)
+
+### EXECUTION_PROFILE_CHANGED
+**Problem:** Provisioning retry found a repository profile or credential reference that differs from the frozen execution connection.
+**Likely Cause:** A profile changed after its connection was bound, or credential rehydration resolved a different OpenRouter key alias.
+**Operator Fix:** Restore the bound profile and credential reference before retrying, or create a new attempt with the intended profile. Keep third-party admission disabled until the provider release gates pass.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_profile_changed](#execution_profile_changed)
+
+### EXECUTION_RUNTIME_CONTRACT_UNSUPPORTED
+**Problem:** The runtime cannot enforce the selected provider isolation contract.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_runtime_contract_unsupported](#execution_runtime_contract_unsupported)
+
+### EXECUTION_WORKER_CONTRACT_UNSUPPORTED
+**Problem:** A live queue consumer does not advertise execution contract v1.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#execution_worker_contract_unsupported](#execution_worker_contract_unsupported)
+
 ### FORGE_NOT_SUPPORTED
 **Problem:** AWF detected a code forge it does not support. GitHub and Bitbucket Cloud are implemented; any other forge fails fast.
 **Likely Cause:** The workspace repository URL resolved to an unsupported forge (a host other than github.com or bitbucket.org), or the workspace profile set an unsupported `forge:` value. AWF fails fast instead of mis-routing to GitHub.
@@ -1165,6 +1207,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the listed workspaces before running cleanup or recovery.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#stranded_workspaces_present](#stranded_workspaces_present)
+
+### THIRD_PARTY_AGENT_PROVIDER_ADMISSION_DISABLED
+**Problem:** Third-party Codex/Claude admission is disabled by default.
+**Likely Cause:** The selected execution contract cannot safely run on this configuration or fleet.
+**Operator Fix:** Keep third-party admission disabled; deploy compatible API, worker and runtime code and complete the provider rollout gates in docs/AGENT_MODEL_PROVIDERS.md. Preserve selected work and schema during rollback.
+**Related Command:** `awf workspace show <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#third_party_agent_provider_admission_disabled](#third_party_agent_provider_admission_disabled)
 
 ### THREAD_DISPOSITION_EVIDENCE_MISSING
 **Problem:** AWF did not resolve a review thread because its FIXED disposition had no fix commit (or its DEFER had no tracking issue) to cite.
