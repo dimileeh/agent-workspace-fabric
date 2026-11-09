@@ -112,6 +112,10 @@ _UNAPPLIED_EXPLANATION: dict[str, str] = {
         "it names more than one review thread id, so AWF cannot tell which thread the "
         "ruling covers; rule on one thread per guide."
     ),
+    "multiple_shas_named": (
+        "it names more than one commit SHA, so AWF cannot tell which one is the rejected "
+        "attempt; name only the preserved attempt SHA."
+    ),
     "no_matching_item": "no parked preserved correction attempt matches the named SHA.",
     "ambiguous_item": "the named SHA matches more than one parked preserved correction attempt.",
     "sha_mismatch": "the named thread's preserved attempt is not the named SHA.",
@@ -221,6 +225,10 @@ def _resolve_targets(
     # cites the tip, and a repeated ruling must retry it rather than no-op.
     done = {tid for tid in retired if entries.get(tid) != "needs_human"}
     shas = disposition.shas
+    if any(not _sha_matches((sha,), other) for sha in shas for other in shas):
+        # SHAs are collected from the whole directive too, so a second commit may be
+        # one the operator kept ("keep d5889e51"); only the rejected one may match.
+        return [], "multiple_shas_named"
     if len(disposition.thread_ids) > 1:
         # Thread ids are collected from the whole directive, so a second id may be
         # one the operator excluded ("keep PRRT_B parked"); never guess which.

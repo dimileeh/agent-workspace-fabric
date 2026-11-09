@@ -749,6 +749,17 @@ _UNAPPLIED_CASES: list[tuple[str, Any, str]] = [
         "parked for investigation.",
     ),
     (
+        "multiple_shas_named",
+        lambda: (_parked_state(_thread()), (_thread(),)),
+        f"Reject the preserved attempt 0badc0de on {_THREAD} and resolve it. Keep d5889e51 "
+        "for investigation.",
+    ),
+    (
+        "multiple_shas_named",
+        lambda: (_parked_state(_thread()), (_thread(),)),
+        "Reject the preserved attempt 0badc0de and resolve it. Keep d5889e51 for investigation.",
+    ),
+    (
         "no_matching_item",
         lambda: (_parked_state(_thread()), (_thread(),)),
         "Reject the preserved attempt 0badc0de; resolve the thread.",
