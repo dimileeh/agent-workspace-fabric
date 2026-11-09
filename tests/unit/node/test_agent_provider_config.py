@@ -192,7 +192,9 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     output = capsys.readouterr().out
     observed = json.loads(output)
     assert observed["token"] == "<redacted>"
-    assert not Path(observed["config"]).exists()
+    config_path = Path(observed["config"])
+    assert config_path.parent == Path("/home/agent/.awf/provider-config")
+    assert not config_path.exists()
     assert "selected-opaque-secret" not in output
     assert "chosen/model" in observed["args"]
 

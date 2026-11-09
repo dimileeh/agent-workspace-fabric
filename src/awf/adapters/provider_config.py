@@ -125,7 +125,7 @@ def isolated_provider_config(
     source_config: Mapping[str, Any],
 ) -> Iterator[tuple[list[str], dict[str, str], Path]]:
     env = provider_environment(selection, environ)
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="awf-provider-", dir=root) as temporary:
         directory = Path(temporary)
         if selection["agent"] == "codex":
@@ -270,7 +270,10 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, cancelled)
     with isolated_provider_config(
-        selection, root=Path(tempfile.gettempdir()), environ=os.environ, source_config=source_config
+        selection,
+        root=Path("/home/agent/.awf/provider-config"),
+        environ=os.environ,
+        source_config=source_config,
     ) as (extra, env, _directory):
         cli = sys.argv[2:]
         # Insert after the executable/subcommand, before the stdin prompt marker.
