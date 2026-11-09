@@ -211,6 +211,15 @@ clear, and the recovery path appends its operator-facing park event once per
 distinct situation rather than once per poll."""
 
 
+_PRE_PUSH_INFRA_FAILURE_STATE_KEY = "__awf_pre_push_infra_failure__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key holding the JSON budget
+record for repeated infrastructure-signature pre-push validation fix failures
+(#1182): signature, attempt count, the PR head it was counted on, and the
+preserved evidence. Owned by ``pr_monitor_runner.pre_push_infrastructure_budget``.
+Like the park key above it is inert to ``decide``; it lets the comment-repair
+arm park for a human, without running agents, once the attempt cap is reached."""
+
+
 _MERGE_BLOCK_ATTENTION_STATE_KEY = "__awf_merge_block_attention__"
 """Reserved ``MonitorState.threads_addressed_ids`` key flagging that the merge
 loop's branch-protection fallback set the awaiting-human attention flag for an
@@ -351,6 +360,20 @@ class MonitorState:
     def clear_parked_unpublished_repair(self) -> None:
         """Drop the parked-repair marker (idempotent)."""
         self.threads_addressed_ids.pop(_PARKED_UNPUBLISHED_REPAIR_STATE_KEY, None)
+
+    @property
+    def pre_push_infra_failure(self) -> str | None:
+        """Raw JSON budget record for repeated pre-push infrastructure failures (#1182)."""
+        value = self.threads_addressed_ids.get(_PRE_PUSH_INFRA_FAILURE_STATE_KEY)
+        return value or None
+
+    def mark_pre_push_infra_failure(self, record: str) -> None:
+        """Store the pre-push infrastructure-failure budget record."""
+        self.threads_addressed_ids[_PRE_PUSH_INFRA_FAILURE_STATE_KEY] = record
+
+    def clear_pre_push_infra_failure(self) -> None:
+        """Drop the pre-push infrastructure-failure budget record (idempotent)."""
+        self.threads_addressed_ids.pop(_PRE_PUSH_INFRA_FAILURE_STATE_KEY, None)
 
     def merge_block_attention_active(
         self,

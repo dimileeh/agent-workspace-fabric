@@ -70,9 +70,17 @@ Response shape:
   "capabilities": [
     "workspace.execution.v1",
     "workspace.create.expected_base_sha.v1"
-  ]
+  ],
+  "schema_head": "a1b2c3d4e5f6"
 }
 ```
+
+`schema_head` is the Alembic head revision of this Core build's migration graph.
+It lets clients that pin a Core build classify releases that change the schema.
+When the graph has several heads, they are sorted ascending and joined with
+commas (for example `"a1b2c3d4e5f6,c3d4e5f6a7b8"`). The API and worker refuse to
+start with `DATABASE_SCHEMA_AHEAD_OF_CODE` when the database records a revision
+this build does not know (the database was migrated by newer code).
 
 ### Liveness check
 

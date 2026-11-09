@@ -46,6 +46,7 @@ from awf.api.routes import (
     ws,
 )
 from awf.common.config import Settings, get_settings, validate_production_settings
+from awf.db.schema_head import verify_database_schema_not_ahead
 from awf.db.session import make_engine, make_session_factory
 from awf.hosted_node.api import configure as configure_hosted
 from awf.hosted_node.host_startup import start_hosted
@@ -85,6 +86,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     stack = AsyncExitStack()
     try:
+        await verify_database_schema_not_ahead(engine)
         if settings.hosted_node is not None:
             app.state.hosted_receiver = await stack.enter_async_context(
                 start_hosted(settings.hosted_node, factory)

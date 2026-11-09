@@ -2,7 +2,9 @@
 
 The default ``client`` fixture uses ``create_app(use_lifespan=False)`` so the
 real startup body never runs in that path. This file exercises the production
-lifespan wiring with stubs.
+lifespan wiring with stubs. The fake engines cannot answer the schema-head
+guard's query, so it is stubbed here; ``test_app_schema_head_guard.py`` runs
+the real guard against a real database.
 """
 
 from __future__ import annotations
@@ -24,6 +26,21 @@ def _clear_settings_cache() -> None:
     _cfg.get_settings.cache_clear()
     yield
     _cfg.get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def schema_guard_engines(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record the engines the lifespan hands to the schema-head guard."""
+    from awf.api import app as app_mod
+
+    engines: list[object] = []
+
+    async def _record(engine: object) -> str:
+        engines.append(engine)
+        return "at_head"
+
+    monkeypatch.setattr(app_mod, "verify_database_schema_not_ahead", _record)
+    return engines
 
 
 class TestLifespan:
@@ -103,6 +120,7 @@ class TestLifespan:
     def test_lifespan_disposes_original_engine_when_state_engine_is_replaced(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        schema_guard_engines: list[object],
     ) -> None:
         from awf.api import app as app_mod
 
@@ -126,6 +144,7 @@ class TestLifespan:
 
         assert replacement_engine.dispose_count == 1
         assert original_engine.dispose_count == 1
+        assert schema_guard_engines == [original_engine]
 
     @pytest.mark.unit
     def test_lifespan_shuts_down_callback_target_validation_executor(

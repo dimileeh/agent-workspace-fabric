@@ -2399,6 +2399,11 @@
           },
           "profile_capability_schema": {
             "$ref": "#/components/schemas/ProfileCapabilitySchema"
+          },
+          "schema_head": {
+            "description": "Alembic head revision of this Core build's migration graph. Multiple heads are sorted ascending and joined with commas.",
+            "title": "Schema Head",
+            "type": "string"
           }
         },
         "required": [
@@ -2406,7 +2411,8 @@
           "package_version",
           "git_commit",
           "capabilities",
-          "profile_capability_schema"
+          "profile_capability_schema",
+          "schema_head"
         ],
         "title": "CoreDiscoveryResponse",
         "type": "object"

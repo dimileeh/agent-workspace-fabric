@@ -375,6 +375,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace create --agent cursor --cursor-auto-mode intelligence`
 **Docs Link:** [Cursor Router](https://cursor.com/docs/cursor-router)
 
+### DATABASE_SCHEMA_AHEAD_OF_CODE
+**Problem:** AWF Core refused to start because the database schema is newer than this Core build.
+**Likely Cause:** A stale or restored image, or a rollback, is running code whose migration graph does not contain the database's alembic_version revision.
+**Operator Fix:** Run the Core build that matches or postdates the database revision, or restore a database backup that matches this build. Do not downgrade the database with this build's migrations.
+**Related Command:** `awf service logs --service api`
+**Docs Link:** [docs/REASON_CATALOG.md#database_schema_ahead_of_code](#database_schema_ahead_of_code)
+
 ### DISK_USAGE_UNAVAILABLE
 **Problem:** Free disk could not be inspected for the AWF work directory.
 **Likely Cause:** Permission denied or path does not exist.
@@ -829,6 +836,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Inspect the worktree, recover any salvageable files manually, and recreate the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#post_agent_git_add_failed](#post_agent_git_add_failed)
+
+### PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED
+**Problem:** AWF parked agent repair (PR comments, CI fixes, base-conflict resolution) for a human: pre-push validation failed the same way on every attempt, with an exit status that points at the validation environment rather than the code.
+**Likely Cause:** The failing command exited 126 or 128 and above (not executable, invalid usage, killed by a signal), such as `git diff` exiting 129 outside a git work tree. The fix-pass agent cannot repair that, so after a few identical attempts on an unchanged PR head AWF stopped running agents. Unpushed repair commits are kept.
+**Operator Fix:** Read the workspace event for the failing command, return code and validation run id, and that run's logs. Fix the validation environment (for example git ownership or a missing work tree). Then push to the PR, or guide the workspace so the monitor retries; a guide or a new PR head lifts the park.
+**Related Command:** `awf workspace guide <workspace_id> --directive '...'`
+**Docs Link:** [docs/REASON_CATALOG.md#pre_push_validation_infrastructure_failure_parked](#pre_push_validation_infrastructure_failure_parked)
 
 ### PROTECTED_SCOPE_DIFF_UNAVAILABLE
 **Problem:** The PR monitor could not verify protected-scope changes against the remote PR branch before push.

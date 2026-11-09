@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor_runner.loop_helpers import (
 from awf.runtime.pr_monitor_runner.loop_recovery_ops import (
     _finish_agent_service_recovery_failed_operation,
     _finish_agent_service_recovery_superseded_operation,
+    _finish_parked_repair_cycle,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _git_push_failure_outcome
 from awf.runtime.pr_monitor_runner.types import (
@@ -245,6 +246,19 @@ async def handle_sync_base_action(
             },
         )
         return True
+    if push_result.parked_needs_human:
+        # #1182: a base conflict while the pre-push infrastructure park is active
+        # needs an agent the park forbids; hold the same human wait.
+        return bool(
+            await _finish_parked_repair_cycle(
+                self,
+                workspace_id=workspace_id,
+                state=state,
+                operation=operation,
+                push_result=push_result,
+                extra_result={},
+            )
+        )
     if push_result.failed:
         reason_code = push_result.reason_code
         outcome = _git_push_failure_outcome(push_result)

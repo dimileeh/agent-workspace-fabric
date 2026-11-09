@@ -53,6 +53,7 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
+    _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON,
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
@@ -315,6 +316,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         return "sync_base_pushed_head_unavailable"
     if push_result.reason_code == _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON:
         return "pre_push_validation_toolchain_missing"
+    if push_result.reason_code == _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILURE_PARKED_REASON:
+        return "pre_push_validation_infrastructure_parked"
     if push_result.reason_code in {
         _PRE_PUSH_VALIDATION_FAILED_REASON,
         _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
@@ -873,7 +876,11 @@ async def _run_sync_base(
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+    from awf.runtime.pr_monitor_runner.pre_push_infrastructure_budget import (
+        pre_push_infrastructure_park_result,
+    )
 
     worktree_path = runner._worktrees_root / workspace_id
     operation_start_head, head_result = await runner._repair_operation_start_head_result(
@@ -1022,6 +1029,14 @@ async def _run_sync_base(
                     "status_returncode": status_rc,
                 },
             )
+        # #1182: a conflict needs a resolution agent, which the pre-push
+        # infrastructure park forbids on this PR head. Leave the worktree as it
+        # was and return the park; a clean merge above stays allowed.
+        if isinstance(state, MonitorState) and pr_head_sha is not None:
+            parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=pr_head_sha)
+            if parked_result is not None:
+                await _git("merge", "--abort")
+                return parked_result
         # The mirror's origin/<base> ref is shared across worktrees and can
         # advance after this merge. MERGE_HEAD is worktree-local and records
         # the exact commit that produced the conflict being resolved.
@@ -1367,6 +1382,11 @@ async def _run_sync_base(
             reason_code=protected_scope_block.reason_code,
             merged_base_sha=merged_base_sha,
         )
+    # #1182: a clean merge stays allowed while parked, but its validation must not
+    # launch fix-pass agents; a validation failure returns the park instead.
+    parked_result = None
+    if isinstance(state, MonitorState) and pr_head_sha is not None:
+        parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=pr_head_sha)
     push_result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -1376,6 +1396,7 @@ async def _run_sync_base(
         remote_url=remote_push_url,
         state=state,
         operation_start_head=operation_start_head,
+        allow_validation_fix_passes=parked_result is None,
         # Re-arm the terminal guard AFTER pre-push validation: the check above ran
         # before a validation suite (plus its fix passes) that can take minutes, so
         # the PR can go terminal in between (PRRT_kwDOSJAM6s6fjOze).
@@ -1385,6 +1406,23 @@ async def _run_sync_base(
         operation_id=operation_id,
         operation_type=operation_type,
     )
+    # Fail-closed outcomes (toolchain missing, ownership repair, unowned dirty
+    # delta, ...) keep their terminal reason instead of being masked by the park.
+    if (
+        parked_result is not None
+        and push_result.failed
+        and not push_result.terminal_monitor_failure
+        and (push_result.details or {}).get("phase") == "pre_push_validation"
+    ):
+        # Keep the merged-tree failure's command, reason code and validation run id
+        # alongside the park's budget evidence instead of dropping them.
+        return replace(
+            parked_result,
+            details={
+                **(parked_result.details or {}),
+                "sync_base_validation_failure": push_result.failure_evidence(),
+            },
+        )
     if merged_base_sha is not None:
         push_result = replace(push_result, merged_base_sha=merged_base_sha)
     if (
