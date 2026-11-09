@@ -269,6 +269,50 @@ async def test_release_failure_keeps_the_row_and_never_wakes_waiters(
     assert len(await _held_rows(session_factory, workspace_id)) == 1
 
 
+async def test_failed_idle_release_is_retried_at_the_next_pure_wait(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    wakeups = WorkSlotWakeups()
+    scope = _scope(session_factory, workspace_id, wakeups=wakeups)
+    async with scope.hold("agent"):
+        pass
+    lease = scope.lease
+
+    with monkeypatch.context() as patch:
+        patch.setattr(work_slot_scope, "release_work", _db_down)
+        await scope.release_idle()
+    # The row is still held, so the scope keeps tracking it instead of
+    # treating the slot as freed (which would also hide it from the reconciler).
+    assert scope.lease == lease
+
+    released_event = wakeups.waiter()
+    await scope.release_idle()
+
+    assert scope.lease is None
+    assert released_event.is_set()
+    assert await _held_rows(session_factory, workspace_id) == []
+
+
+async def test_failed_close_release_hands_the_row_to_the_reconciler(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    scope = _scope(session_factory, workspace_id)
+    async with scope.hold("agent"):
+        pass
+
+    with monkeypatch.context() as patch:
+        patch.setattr(work_slot_scope, "release_work", _db_down)
+        await scope.close()
+
+    # A closed scope never retries; its untracked row expires to the reconciler.
+    assert scope.lease is None
+    assert len(await _held_rows(session_factory, workspace_id)) == 1
+
+
 async def test_renewal_extends_the_lease_and_survives_db_errors(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

@@ -415,8 +415,11 @@ class InvocationWorkSlot:
                 lambda session: release_work(session, lease=lease, now=datetime.now(UTC)),
             )
         except _DB_ERRORS as exc:
-            # The lease row survives until a live worker's reconciler releases
-            # it; never pretend the slot was freed.
+            # The row is still held; never pretend the slot was freed. An open
+            # scope keeps the ref so the next pure wait (or close) retries the
+            # delete; a closed one leaves the untracked row to the reconciler.
+            if not self._closed:
+                self._lease = lease
             _log.warning(
                 "worker.work_slot_release_failed",
                 workspace_id=self._workspace_id,
