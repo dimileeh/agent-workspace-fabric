@@ -1382,6 +1382,11 @@ async def _run_sync_base(
             reason_code=protected_scope_block.reason_code,
             merged_base_sha=merged_base_sha,
         )
+    # #1182: a clean merge stays allowed while parked, but its validation must not
+    # launch fix-pass agents; a validation failure returns the park instead.
+    parked_result = None
+    if isinstance(state, MonitorState) and pr_head_sha is not None:
+        parked_result = pre_push_infrastructure_park_result(state, pr_head_sha=pr_head_sha)
     push_result = await runner._validated_git_push_result(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
@@ -1391,6 +1396,7 @@ async def _run_sync_base(
         remote_url=remote_push_url,
         state=state,
         operation_start_head=operation_start_head,
+        allow_validation_fix_passes=parked_result is None,
         # Re-arm the terminal guard AFTER pre-push validation: the check above ran
         # before a validation suite (plus its fix passes) that can take minutes, so
         # the PR can go terminal in between (PRRT_kwDOSJAM6s6fjOze).
@@ -1400,6 +1406,12 @@ async def _run_sync_base(
         operation_id=operation_id,
         operation_type=operation_type,
     )
+    if (
+        parked_result is not None
+        and push_result.failed
+        and (push_result.details or {}).get("phase") == "pre_push_validation"
+    ):
+        return parked_result
     if merged_base_sha is not None:
         push_result = replace(push_result, merged_base_sha=merged_base_sha)
     if (

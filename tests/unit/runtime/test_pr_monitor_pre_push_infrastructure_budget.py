@@ -774,3 +774,50 @@ async def test_infra_park_still_allows_a_clean_base_merge(
     assert result.failed is False
     assert state.last_push_sha == "d" * 40
     assert not any(call.args[-2:] == ["merge", "--abort"] for call in cmd.calls[1:])
+
+
+@pytest.mark.unit
+async def test_infra_park_disables_validation_fix_agents_after_a_clean_base_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parked clean base sync validates without fix agents and returns the park on failure."""
+
+    async def _ownership_ok(**_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(remote_ops, "repair_agent_runtime_ownership", _ownership_ok)
+    state = MonitorState(started_at=0.0)
+    for _ in range(_CAP):
+        budget.record_pre_push_infrastructure_failure(state, _fix_failed(), pr_head_sha=_HEAD)
+    cmd = FakeCommandRunner()
+    cmd.respond_when(
+        _is_clean_merge_rev_parse,
+        stdout=f"{_HEAD}\n{'d' * 40}\n{_HEAD}\n{'b' * 40}\n",
+    )
+    cmd.respond_when(_is_head_in_base, returncode=1)
+    sync_runner = _sync_base_runner(tmp_path, cmd)
+    validated_kwargs: list[dict[str, object]] = []
+
+    async def _validation_failed(**kwargs: object) -> _GitPushResult:
+        validated_kwargs.append(kwargs)
+        return _fix_failed(reason_code=_PRE_PUSH_VALIDATION_FAILED)
+
+    sync_runner._validated_git_push_result = _validation_failed
+    result = await remote_ops._run_sync_base(
+        sync_runner,  # type: ignore[arg-type]
+        workspace_id="ws-sync",
+        state=state,
+        repo=RepoRef(owner="owner", name="repo"),
+        pr_number=614,
+        pr_head_sha=_HEAD,
+        base_branch="main",
+        remote_branch="awf/ws-sync",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert [kwargs["allow_validation_fix_passes"] for kwargs in validated_kwargs] == [False]
+    assert result.reason_code == _PARKED
+    assert result.parked_needs_human is True
+    assert result.pushed is False
+    assert state.last_push_sha is None
