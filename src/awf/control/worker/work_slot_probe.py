@@ -8,10 +8,15 @@ never ``absent``: only proof that the process is gone may release a lease.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner
-from awf.common.compose_exec import WorkSlotProbeResult, probe_work_slot_invocation
+from awf.common.compose_exec import (
+    WORK_SLOT_PROBE_TIMEOUT_SECONDS,
+    WorkSlotProbeResult,
+    probe_work_slot_invocation,
+)
 from awf.control.worker.logging import _log
 from awf.control.worker.protocols import RuntimeInspectorProtocol
 
@@ -26,9 +31,11 @@ class LocalWorkSlotProcessProbe:
         *,
         runner: AsyncCommandRunner,
         runtime_inspector: RuntimeInspectorProtocol,
+        inspect_timeout_seconds: float = WORK_SLOT_PROBE_TIMEOUT_SECONDS,
     ) -> None:
         self._runner = runner
         self._runtime_inspector = runtime_inspector
+        self._inspect_timeout_seconds = inspect_timeout_seconds
 
     async def probe(
         self,
@@ -41,7 +48,11 @@ class LocalWorkSlotProcessProbe:
         if not compose_project or compose_file is None:
             return "absent"
         try:
-            snapshot = await self._runtime_inspector.inspect(compose_project)
+            # The worker loop awaits this inline: a wedged Docker CLI must not stall it.
+            snapshot = await asyncio.wait_for(
+                self._runtime_inspector.inspect(compose_project),
+                timeout=self._inspect_timeout_seconds,
+            )
         except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
             _log.warning(
                 "worker.work_slot_probe_inspect_failed",

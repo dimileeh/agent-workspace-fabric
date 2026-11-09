@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,21 @@ async def test_exec_failure_is_unknown() -> None:
 
     snapshot = RuntimeSnapshot(stack_state="running", services=[_agent("running")])
     assert await _run(_probe(_Inspector(snapshot), _ExplodingRunner())) == "unknown"
+
+
+async def test_hung_runtime_inspection_is_bounded_and_unknown() -> None:
+    class _HangingInspector(_Inspector):
+        async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+            del compose_project_name
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    runner = FakeCommandRunner()
+    probe = LocalWorkSlotProcessProbe(
+        runner=runner,
+        runtime_inspector=_HangingInspector(RuntimeError("unused")),
+        inspect_timeout_seconds=0.01,
+    )
+
+    assert await _run(probe) == "unknown"
+    assert runner.calls == []
