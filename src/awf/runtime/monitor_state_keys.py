@@ -216,6 +216,17 @@ def _disposition_retired_key(thread_id: str, conversation_digest: str) -> str:
     return f"__awf_disposition_retired__:{thread_id}:{conversation_digest}"
 
 
+def _preserved_attempt_retired_key(thread_id: str) -> str:
+    """Build state key recording an operator-retired preserved correction attempt (#1189).
+
+    The value is the full preserved tip the operator's disposition rejected. It
+    keeps the retirement's provenance after the ``needs_human`` reason that named
+    the tip is gone, so a repeated guide, or a re-adopted successor's ``--hint``,
+    is recognized as already applied instead of being reported as unapplicable.
+    """
+    return f"__awf_preserved_attempt_retired__:{thread_id}"
+
+
 # Reserved ``MonitorState.threads_addressed_ids`` key holding the summary of the
 # current review-thread audit outage (#1018). The disposition gate records its
 # ``REVIEW_THREAD_AUDIT_UNAVAILABLE`` audit event once per outage, not once per

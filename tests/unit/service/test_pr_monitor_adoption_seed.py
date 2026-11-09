@@ -54,6 +54,15 @@ _COPIED_CASES: list[tuple[str, str]] = [
     # ruling has to cross with it or the successor re-prompts without it.
     ("__operator_decision__:PRRT_kwDOSJAM6s6fNhZo", "take the anchored fix, not the rename"),
     ("__operator_decision__:bb:acme/widgets#12:99", "ship the guard, skip the refactor"),
+    # A park on a preserved correction attempt keeps the reason naming its tip, and
+    # an operator's retirement of that attempt keeps its tombstone (#1189).
+    (
+        "__needs_human_reason__:PRRT_kwDOSJAM6s6fNhZo",
+        "FIXED claimed on the correction attempt, but this item's commit (attempt tip "
+        "d5889e51aaaa) carries no item-scoped evidence for src/a.py; the commit is "
+        "preserved for human review.",
+    ),
+    ("__awf_preserved_attempt_retired__:PRRT_kwDOSJAM6s6fNhZo", "d5889e51aaaa"),
 ]
 
 # ``fix_committed`` asserts the fix is in the branch and ``false_positive`` asserts
@@ -96,6 +105,11 @@ _DROPPED_CASES: list[tuple[str, str]] = [
     ("__awf_protected_history_directive_reblocked__", "reblocked"),
     ("__defer_reason__:PRRT_kwDOSJAM6s6fNhZo", "waiting on reviewer"),
     ("__needs_human_reason__:5120013294", "ambiguous"),
+    # Preserved-attempt records only cross under a verdict-key id with a well-formed value.
+    ("__needs_human_reason__:not-a-key", "attempt tip d5889e51aaaa is preserved"),
+    ("__needs_human_reason__:5120013296", "(attempt tip d5889e51aaaa) carries no evidence"),
+    ("__awf_preserved_attempt_retired__:not-a-thread", "d5889e51aaaa"),
+    ("__awf_preserved_attempt_retired__:PRRT_kwDOSJAM6s6fNhZq", "not a sha"),
     ("__truncated__", "true"),
 ]
 
