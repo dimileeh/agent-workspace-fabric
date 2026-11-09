@@ -433,8 +433,8 @@ class ValidationRunner:
         """Run the selected profile phases in order.
 
         ``work_slot`` is the caller-injected work-slot scope (slot-release): the
-        run holds it throughout and tags each phase/coverage ``awf-exec`` with its
-        invocation.
+        run holds it throughout and tags each phase/healthcheck/coverage
+        ``awf-exec`` with its invocation.
         """
         requested_phases = set(phase_names)
         healthchecks = profile.validation.healthchecks if run_healthchecks else []
@@ -552,6 +552,7 @@ class ValidationRunner:
                 healthchecks=pending_healthchecks,
                 results=results,
                 phase_indices=phase_indices,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             pending_healthchecks = []
             if failure is not None:
@@ -573,6 +574,7 @@ class ValidationRunner:
                     healthchecks=pending_healthchecks,
                     results=results,
                     phase_indices=phase_indices,
+                    work_slot_invocation_id=work_slot_invocation_id,
                 )
                 pending_healthchecks = []
                 if failure is not None:
@@ -772,6 +774,7 @@ class ValidationRunner:
                 healthchecks=pending_healthchecks,
                 results=results,
                 phase_indices=phase_indices,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             if failure is not None:
                 return ValidationResult(commands=results)
@@ -808,6 +811,7 @@ class ValidationRunner:
         healthchecks: list[ProfileHealthCheck],
         results: list[ValidationCommandResult],
         phase_indices: dict[str, int],
+        work_slot_invocation_id: str | None = None,
     ) -> ValidationCommandResult | None:
         for healthcheck in healthchecks:
             phase = "healthcheck"
@@ -820,6 +824,7 @@ class ValidationRunner:
                 healthcheck=healthcheck,
                 label=label,
                 artifacts_dir=artifacts_dir,
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             results.append(result)
             if not result.ok:
@@ -926,6 +931,7 @@ class ValidationRunner:
         healthcheck: ProfileHealthCheck,
         label: str,
         artifacts_dir: Path,
+        work_slot_invocation_id: str | None = None,
     ) -> ValidationCommandResult:
         started = time.monotonic()
         deadline = started + healthcheck.timeout_seconds
@@ -952,6 +958,7 @@ class ValidationRunner:
                     attempt=attempts,
                     elapsed_seconds=time.monotonic() - started,
                 ),
+                work_slot_invocation_id=work_slot_invocation_id,
             )
             latest = result
             if result.ok:

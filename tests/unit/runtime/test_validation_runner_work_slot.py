@@ -1,9 +1,10 @@
 """``ValidationRunner`` holds the caller-injected work slot (slot-release).
 
 ``run_profile_phases`` and ``run_profile_coverage`` hold the slot for the whole
-validation run; every phase command and the coverage command run as
-``awf-exec`` tagged with ``AWF_WORK_SLOT_INVOCATION_ID``. Short-lived healthcheck
-probes stay unmarked, like toolchain probes.
+validation run; every phase command, profile healthcheck, and the coverage
+command run as ``awf-exec`` tagged with ``AWF_WORK_SLOT_INVOCATION_ID``.
+Healthcheck attempts can run for up to an hour and share the timeout-cleanup
+path, so a survivor of failed cleanup must stay visible to the slot probe.
 """
 
 from __future__ import annotations
@@ -80,6 +81,46 @@ async def test_profile_phases_hold_the_slot_and_tag_every_phase_exec(tmp_path: P
     assert slot.events == ["enter:validation", "exit:validation"]
     # setup + 2 validate commands + the coverage command.
     assert len(fake.calls) == 4
+    assert all(_MARKER in call.args for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    "database",
+    [{}, {"pre_validation_refresh": ["./refresh-db"]}],
+    ids=["healthchecks_first", "healthchecks_before_validate"],
+)
+async def test_profile_phases_tag_the_healthcheck_exec(
+    tmp_path: Path, database: dict[str, object]
+) -> None:
+    fake = FakeCommandRunner()
+    slot = _RecordingWorkSlot()
+    runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "slot-healthcheck-profile",
+            "phases": {"validate": ["pytest -q"]},
+            "database": database,
+            "validation": {
+                "healthchecks": [{"name": "app", "command": "./wait-for-app"}],
+            },
+        }
+    )
+
+    await runner.run_profile_phases(
+        workspace_id="ws_slot",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=True,
+        work_slot=slot,
+    )
+
+    healthcheck_calls = [
+        call for call in fake.calls if any("./wait-for-app" in arg for arg in call.args)
+    ]
+    assert len(healthcheck_calls) == 1
+    assert _MARKER in healthcheck_calls[0].args
     assert all(_MARKER in call.args for call in fake.calls)
 
 
