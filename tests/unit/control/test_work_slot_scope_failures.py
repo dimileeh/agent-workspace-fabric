@@ -24,6 +24,7 @@ from awf.control.worker.resource_broker import (
     WorkSlotAcquireResult,
     WorkSlotLeaseRef,
     adopt_work,
+    release_work,
 )
 from awf.control.worker.work_slot_scope import (
     InvocationWorkSlot,
@@ -216,6 +217,57 @@ async def test_cleanup_unproven_flag_write_failure_still_keeps_the_lease(
     assert "worker.work_slot_cleanup_unproven_flag_failed" in _events(logs)
     assert scope.cleanup_unproven is True
     assert len(await _held_rows(session_factory, workspace_id)) == 1
+
+
+async def test_failed_cleanup_unproven_flag_write_is_retried_by_renewal(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reconciler skips an own, unexpired, unflagged lease, and release_idle()
+    # refuses an unproven one: a renewed row without the flag would pin the slot.
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    scope = _scope(session_factory, workspace_id, lease_seconds=3)
+    async with scope:
+        with monkeypatch.context() as patch, pytest.raises(ComposeExecCleanupError):
+            async with scope.hold("agent"):
+                patch.setattr(work_slot_scope, "release_work", _db_down)
+                raise _cleanup_error()
+        (row,) = await _held_rows(session_factory, workspace_id)
+        assert row.cleanup_unproven is False
+
+        async with asyncio.timeout(_TIMEOUT):
+            while not row.cleanup_unproven:
+                await asyncio.sleep(0.05)
+                (row,) = await _held_rows(session_factory, workspace_id)
+        assert scope.cleanup_unproven is True
+        assert scope.lease is not None
+
+
+async def test_fresh_grant_drops_a_pending_cleanup_unproven_flag_write(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    scope = _scope(session_factory, workspace_id)
+    async with scope:
+        with monkeypatch.context() as patch, pytest.raises(ComposeExecCleanupError):
+            async with scope.hold("agent"):
+                patch.setattr(work_slot_scope, "release_work", _db_down)
+                raise _cleanup_error()
+        unproven = scope.lease
+        assert unproven is not None
+        # The unflagged row expired and the reconciler released it.
+        async with session_factory() as session:
+            assert await release_work(session, lease=unproven, now=datetime.now(UTC))
+            await session.commit()
+
+        async with scope.hold("agent"):
+            fresh = scope.lease
+            assert fresh is not None
+            assert await scope._renew_once(fresh)  # noqa: SLF001
+            # The fresh lease is ordinary: renewal must not flag it unproven.
+            rows = await _held_rows(session_factory, workspace_id)
+            assert [row.cleanup_unproven for row in rows] == [False]
 
 
 async def test_cleanup_failure_on_a_lease_another_worker_took_logs_the_fence(

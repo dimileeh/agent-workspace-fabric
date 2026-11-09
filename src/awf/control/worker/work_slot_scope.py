@@ -121,6 +121,7 @@ class InvocationWorkSlot:
         self._on_retry = on_retry
         self._depth = 0
         self._cleanup_unproven = False
+        self._cleanup_flag_pending = False
         self._renewal: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -255,6 +256,7 @@ class InvocationWorkSlot:
                 # An unproven lease we no longer hold was reconciled (or adopted)
                 # away; the fresh lease is ordinary and must release at idle.
                 self._cleanup_unproven = False
+                self._cleanup_flag_pending = False
                 self._start_renewal()
                 self._log_granted(phase, waited_since)
                 return
@@ -391,6 +393,10 @@ class InvocationWorkSlot:
             phase=phase,
             reason_code=WORK_SLOT_CLEANUP_UNPROVEN_RETAINED,
         )
+        await self._flag_cleanup_unproven(lease, phase=phase)
+
+    async def _flag_cleanup_unproven(self, lease: WorkSlotLeaseRef, *, phase: str) -> bool:
+        """Persist ``cleanup_unproven`` on the held row; ``False`` means we were fenced."""
         try:
             flagged = await self._db(
                 lambda session: release_work(
@@ -401,7 +407,10 @@ class InvocationWorkSlot:
                 ),
             )
         except _DB_ERRORS as exc:
-            # The row stays held either way; the reconciler still probes it.
+            # The row stays held but unflagged, and the reconciler skips an own
+            # lease we keep renewing: the renewal loop retries the write. A
+            # stopped renewal lets the row expire into the reconciler's probe.
+            self._cleanup_flag_pending = True
             _log.warning(
                 "worker.work_slot_cleanup_unproven_flag_failed",
                 workspace_id=self._workspace_id,
@@ -409,9 +418,11 @@ class InvocationWorkSlot:
                 error_type=type(exc).__name__,
                 error=redact_audit_text(str(exc))[:240],
             )
-            return
+            return True
+        self._cleanup_flag_pending = False
         if not flagged:
             self._fenced(lease, phase=phase)
+        return flagged
 
     async def _release_lease(self, *, reason: str) -> None:
         lease = self._lease
@@ -478,6 +489,10 @@ class InvocationWorkSlot:
             renewing = lease is not None and await self._renew_once(lease)
 
     async def _renew_once(self, lease: WorkSlotLeaseRef) -> bool:
+        if self._cleanup_flag_pending:
+            # Land the flag first so the reconciler probes this row; the next
+            # tick (well inside the lease) renews it again.
+            return await self._flag_cleanup_unproven(lease, phase="renew")
         try:
             renewed = await self._db(
                 lambda session: renew_work(
