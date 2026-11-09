@@ -95,3 +95,13 @@ def new_egress_audit_record_id() -> str:
 
 def new_service_gc_request_id() -> str:
     return f"sgc_{uuid4().hex[:24]}"
+
+
+def new_work_slot_invocation_id() -> str:
+    """Return a work-slot invocation id.
+
+    The id doubles as the ``AWF_WORK_SLOT_INVOCATION_ID`` marker on tagged
+    ``awf-exec`` processes, so it stays within the compose-exec invocation id
+    alphabet (``[A-Za-z0-9_.-]``).
+    """
+    return f"wsl_{uuid4().hex}"
