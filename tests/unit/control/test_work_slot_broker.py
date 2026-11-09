@@ -806,6 +806,43 @@ async def test_unsatisfiable_waiter_leaves_queue_but_stays_visible(
     assert row is not None and row.ticket_at == base
 
 
+async def test_waiter_that_cannot_fit_beside_steady_footprints_does_not_block_the_head(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression (PR #1194 review): with no slot held, A's 7 GB peak never fits
+    # beside B's irreducible 2 GB steady footprint under an 8 GB limit. A must not
+    # sit at the FIFO head and stall B's feasible 6 GB repair forever.
+    configured = WorkerConfig(max_concurrent_executions=2, local_capacity_memory_gb=8.0)
+    base = datetime.now(UTC)
+    first = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        steady=2.0,
+        peak=7.0,
+        reservation_phase=ResourceReservationPhase.steady.value,
+    )
+    second = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        steady=2.0,
+        peak=6.0,
+        reservation_phase=ResourceReservationPhase.steady.value,
+    )
+
+    first_invocation, first_outcome, _ = await _acquire(
+        session_factory, first, config=configured, now=base
+    )
+    assert first_outcome is WorkSlotAcquireOutcome.unsatisfiable
+    row = await _lease_row(session_factory, first_invocation)
+    assert row is not None and row.phase == WorkSlotLeasePhase.unsatisfiable.value
+
+    _, second_outcome, _ = await _acquire(
+        session_factory, second, config=configured, now=base + timedelta(seconds=1)
+    )
+    assert second_outcome is WorkSlotAcquireOutcome.granted
+    assert await _reservation_phase(session_factory, second) == "peak"
+
+
 async def test_snapshot_counts_adopted_cleanup_unproven_and_waiters(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

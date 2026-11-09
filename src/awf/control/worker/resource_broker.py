@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
@@ -915,6 +915,16 @@ async def _reacquire_peak_blockers(
             ),
             requested=getattr(reservation, constraint.dimension),
         )
-        if blocker is not None:
-            blockers.append(blocker)
+        if blocker is None:
+            continue
+        # Every other workspace keeps at least its steady footprint until it
+        # leaves; a peak that cannot fit beside that floor would otherwise sit at
+        # the FIFO head forever and stall feasible waiters queued behind it.
+        steady_floor = max(
+            0.0,
+            getattr(allocated, steady_dimension) - getattr(reservation, steady_dimension),
+        )
+        if steady_floor + blocker.requested > blocker.limit:
+            blocker = replace(blocker, unsatisfiable=True)
+        blockers.append(blocker)
     return blockers
