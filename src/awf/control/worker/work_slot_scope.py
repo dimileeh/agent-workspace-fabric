@@ -252,6 +252,9 @@ class InvocationWorkSlot:
             result = await self._try_acquire()
             if result.granted:
                 self._lease = result.lease
+                # An unproven lease we no longer hold was reconciled (or adopted)
+                # away; the fresh lease is ordinary and must release at idle.
+                self._cleanup_unproven = False
                 self._start_renewal()
                 self._log_granted(phase, waited_since)
                 return

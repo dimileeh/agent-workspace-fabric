@@ -498,6 +498,34 @@ async def test_hold_reacquires_when_the_retained_lease_was_taken_away(
             assert [row.invocation_id for row in rows] == [scope.invocation_id]
 
 
+async def test_fresh_lease_after_reconciled_cleanup_unproven_lease_is_released_idle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await create_slot_workspace(session_factory, status=WorkspaceStatus.running)
+    scope = _scope(session_factory, workspace_id, wakeups=WorkSlotWakeups())
+    async with scope:
+        with pytest.raises(ComposeExecCleanupError):
+            async with scope.hold("agent"):
+                _raise_direct()
+        unproven = scope.lease
+        assert unproven is not None
+        assert scope.cleanup_unproven is True
+        # The reconciler proved no awf-exec remains and released the flagged row.
+        async with session_factory() as session:
+            assert await release_work(session, lease=unproven, now=datetime.now(UTC))
+            await session.commit()
+
+        # Agent-service recovery retries within the same scope on a fresh lease.
+        async with scope.hold("agent"):
+            assert scope.cleanup_unproven is False
+            rows = await _held(session_factory, workspace_id)
+            assert [row.cleanup_unproven for row in rows] == [False]
+
+        await scope.release_idle()
+        assert scope.lease is None
+        assert await lease_rows(session_factory, workspace_id=workspace_id) == []
+
+
 async def test_detach_parks_the_lease_and_abandon_hands_it_to_the_reconciler(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
