@@ -148,9 +148,13 @@ promotes the target's entire snapshot for both a new attempt and an in-place
 monitor repair, clearing incompatible effort and Cursor Auto selection. An
 approved planning-scope model fallback also updates the frozen selection used by
 executor helpers and adapter reconstruction, preserving provider, endpoint,
-credential reference and native effort. Third-party promotions still require
-enabled admission and a compatible model. An uncontracted third-party fallback
-is rejected. Cross-choice native fallback is never inferred for a third-party
+credential reference and native effort. OpenCode model promotion recomputes its
+provider and honors an explicit provider constraint. The foundation blocks
+third-party primaries, declared fallbacks, and every promotion even when the
+feature flag is enabled; actual-network verification and T4–T6 remain required.
+A native primary with a third-party fallback is intentionally rejected, including
+while auto-profile binding is pending. An uncontracted third-party fallback is
+rejected. Cross-choice native fallback is never inferred for a third-party
 selection. Disabling admission blocks new
 third-party fallback promotions as well as creation; already selected work
 retains its identity while draining or parked.
@@ -233,3 +237,35 @@ Provider configuration references: [Codex advanced configuration](https://develo
 [OpenRouter Codex](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli),
 [OpenRouter Claude](https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration),
 and [Claude settings](https://code.claude.com/docs/en/settings).
+
+
+## PR 1199 regression repairs
+
+Local service Compose forwards `OPENROUTER_API_KEY` and `AWF_OLLAMA_BASE_URL`
+to both API and worker, using empty defaults. Declared AWS/Google tool settings
+(such as regions, profiles and application credentials) survive provider
+isolation; model-backend overrides and role settings are still removed.
+
+The runtime bounds pipe draining after CLI exit and terminates the CLI process
+group on completion or cancellation, including inherited writers that ignore
+TERM. Temporary invocation configuration is removed after shutdown.
+
+A corrupt or unknown execution snapshot fails only its workspace during
+scheduling, with a version fence protecting a concurrently repaired row.
+Capacity excludes that row; list/show/overview expose
+`agent_execution.reason_code=EXECUTION_CONTRACT_UNSUPPORTED` with unavailable
+identity and pricing, without inferring a native selection.
+
+Native hosted monitor resume works without Compose. Expanded hosted selection
+without materialization remains rejected. Existing Compose refresh replaces the
+selected environment and mounts before recreation. OpenCode configured defaults
+and recovery models keep their provider/model pair coherent.
+
+Profiles with host ports defer binding/publication until preflight and companion
+checks finish, then freeze the profile and execution snapshots in the existing
+locked admission transaction. Port-free profiles retain early atomic binding
+for worker-replacement safety.
+
+Focused regressions cover these repairs. Full validation, coverage, review
+replies, push and merge remain owned by AWF/GitHub. T4–T6 and the live compatibility
+matrix remain pending; no additional live compatibility pass is claimed.
