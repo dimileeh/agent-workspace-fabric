@@ -336,3 +336,24 @@ def test_foundation_blocks_all_third_party_promotions(monkeypatch, provider, ena
     with pytest.raises(ValueError, match=expected):
         _install_fixed_recovery_model({"agent_execution": target.model_dump()}, "new-coder")
     assert execution_from_policy(policy).provider == "openai"
+
+
+def test_implicit_native_capacity_fallback_preserves_frozen_contract():
+    source = resolve_execution(agent="codex", model="gpt-5.3-codex-spark")
+    policy = {
+        "agent_execution": source.model_dump(),
+        "agent_model": source.model,
+        "provider_recovery": {"max_same_provider_retries": 0},
+    }
+    decision = decide_provider_recovery(
+        {"retryable": True, "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED"},
+        task_policy=policy,
+        current_agent="codex",
+        current_model=source.model,
+        now=datetime.now(UTC),
+    )
+    assert decision.action == "fallback"
+    promoted = execution_from_policy(install_recovery_selection(policy, decision))
+    assert promoted == source.model_copy(
+        update={"model": decision.target_model, "model_explicit": True}
+    )

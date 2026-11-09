@@ -1470,6 +1470,4 @@ def install_recovery_selection(
             return updated
     # Preserve the existing implicit native capacity fallback only for native
     # selections. Expanded selections never reach this path.
-    updated = _install_fixed_recovery_model(task_policy, decision.target_model or "")
-    updated.pop("agent_execution", None)
-    return updated
+    return _install_fixed_recovery_model(task_policy, decision.target_model or "")
