@@ -42,6 +42,11 @@ def test_runtime_bounds_inherited_pipe_drain_and_kills_process_group(tmp_path, c
         "scope['main'].__globals__['probe_connection']=lambda *a:{'ok':True}; "
         "sys.argv=['provider_config.py',*sys.argv[2:]]; raise SystemExit(scope['main']())"
     )
+    home = tmp_path / "runtime-home"
+    runtime_root = home / ".awf" / "provider-config"
+    runtime_root.mkdir(parents=True)
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
     wrapper = subprocess.Popen(
         [
             sys.executable,
@@ -53,7 +58,12 @@ def test_runtime_bounds_inherited_pipe_drain_and_kills_process_group(tmp_path, c
             str(agent),
         ],
         cwd=tmp_path,
-        env={**os.environ, "CODEX_HOME": str(tmp_path / "no-native-auth")},
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "TMPDIR": str(os_temp),
+            "CODEX_HOME": str(tmp_path / "no-native-auth"),
+        },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
@@ -63,7 +73,11 @@ def test_runtime_bounds_inherited_pipe_drain_and_kills_process_group(tmp_path, c
         assert wrapper.returncode == (143 if cancel else 0), stderr.decode()
         if not cancel:
             assert b"cli finished" in stdout
-        assert not Path((tmp_path / "config.path").read_text()).exists()
+        config_path = Path((tmp_path / "config.path").read_text())
+        assert config_path.parent == runtime_root
+        assert not config_path.exists()
+        assert list(runtime_root.iterdir()) == []
+        assert list(os_temp.iterdir()) == []
         for name in ("leader.pid", "writer.pid"):
             stat = Path("/proc") / (tmp_path / name).read_text() / "stat"
             assert not stat.exists() or stat.read_text().split()[2] == "Z"

@@ -280,7 +280,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, cancelled)
     with isolated_provider_config(
         selection,
-        root=Path("/home/agent/.awf/provider-config"),
+        root=Path.home() / ".awf" / "provider-config",
         environ=os.environ,
         source_config=source_config,
     ) as (extra, env, _directory):

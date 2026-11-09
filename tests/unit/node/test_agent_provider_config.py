@@ -171,6 +171,11 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     )
     executable.chmod(0o755)
     monkeypatch.chdir(tmp_path)
+    home = tmp_path / "runtime-home"
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TMPDIR", str(os_temp))
     monkeypatch.setenv("OPENROUTER_API_KEY", "selected-opaque-secret")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "declared-codex"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "declared-claude"))
@@ -193,8 +198,9 @@ def test_standalone_runtime_runs_cli_with_selected_config_then_cleans_it(
     observed = json.loads(output)
     assert observed["token"] == "<redacted>"
     config_path = Path(observed["config"])
-    assert config_path.parent == Path("/home/agent/.awf/provider-config")
+    assert config_path.parent == home / ".awf" / "provider-config"
     assert not config_path.exists()
+    assert list(os_temp.iterdir()) == []
     assert "selected-opaque-secret" not in output
     assert "chosen/model" in observed["args"]
 
@@ -211,11 +217,14 @@ def test_runtime_cancellation_stops_child_and_removes_only_owned_config(tmp_path
     )
     executable = tmp_path / "cancel-agent"
     executable.write_text(
-        f"#!{sys.executable}\nimport os,signal,time\nos.kill(os.getppid(),signal.SIGTERM)\ntime.sleep(20)\n"
+        f"#!{sys.executable}\nimport os,pathlib,signal,time\npathlib.Path('config.path').write_text(os.environ['CODEX_HOME'])\nos.kill(os.getppid(),signal.SIGTERM)\ntime.sleep(20)\n"
     )
     executable.chmod(0o755)
-    runtime_root = tmp_path / "runtime-owned"
-    runtime_root.mkdir()
+    home = tmp_path / "runtime-home"
+    runtime_root = home / ".awf" / "provider-config"
+    runtime_root.mkdir(parents=True)
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
     unrelated = tmp_path / "unrelated"
     unrelated.write_text("keep")
     script = "import runpy,sys; scope=runpy.run_path(sys.argv[1]); scope['main'].__globals__['probe_connection']=lambda *a:{'ok':True}; sys.argv=['provider_config.py',*sys.argv[2:]]; raise SystemExit(scope['main']())"
@@ -233,7 +242,8 @@ def test_runtime_cancellation_stops_child_and_removes_only_owned_config(tmp_path
         cwd=tmp_path,
         env={
             **os.environ,
-            "TMPDIR": str(runtime_root),
+            "HOME": str(home),
+            "TMPDIR": str(os_temp),
             "CODEX_HOME": str(tmp_path / "no-native-auth"),
         },
         capture_output=True,
@@ -241,7 +251,11 @@ def test_runtime_cancellation_stops_child_and_removes_only_owned_config(tmp_path
         timeout=5,
     )
     assert result.returncode == 143, result.stderr
+    config_path = Path((tmp_path / "config.path").read_text())
+    assert config_path.parent == runtime_root
+    assert not config_path.exists()
     assert list(runtime_root.iterdir()) == []
+    assert list(os_temp.iterdir()) == []
     assert unrelated.read_text() == "keep"
 
 
