@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,19 @@ import pytest
 
 def _agent_runtime_dockerfile() -> str:
     return Path("docker/agent-runtime.Dockerfile").read_text(encoding="utf-8")
+
+
+def _between(text: str, start: str, end: str) -> str:
+    begin = text.index(start)
+    return text[begin : text.index(end, begin)]
+
+
+def _gh_block(dockerfile: str) -> str:
+    return _between(dockerfile, "ARG GH_VERSION=", "# ── Stage 4")
+
+
+def _agy_block(dockerfile: str) -> str:
+    return _between(dockerfile, "# Install a pinned Antigravity CLI", "# Grok's ACP probe")
 
 
 @pytest.mark.unit
@@ -24,12 +38,7 @@ def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     )
     assert "github.com/cli/cli/releases/download/v${GH_VERSION}" in dockerfile
     assert "gh_${GH_VERSION}_linux_${gh_arch}.deb" in dockerfile
-    assert "curl --fail --show-error --location" in dockerfile
-    assert "--retry 5" in dockerfile
-    assert "--retry-delay 2" in dockerfile
-    assert "--retry-all-errors" in dockerfile
-    assert "--connect-timeout 20" in dockerfile
-    assert "--max-time 300" in dockerfile
+    assert "curl ${GITHUB_RELEASE_CURL_OPTS}" in _gh_block(dockerfile)
     assert "gh_${GH_VERSION}_checksums.txt" not in dockerfile
     assert 'expected_hash="${GH_AMD64_SHA256}"' in dockerfile
     assert 'expected_hash="${GH_ARM64_SHA256}"' in dockerfile
@@ -51,6 +60,122 @@ def test_agent_runtime_installs_pinned_github_cli_from_release_asset() -> None:
     )
     assert 'apt-get install -y --no-install-recommends "$gh_deb"' in dockerfile
     assert "gh --version" in dockerfile
+
+
+@pytest.mark.unit
+def test_github_release_downloads_share_one_retry_policy() -> None:
+    """A multi-minute release CDN 504 outage must not fail the image build."""
+    dockerfile = _agent_runtime_dockerfile()
+
+    arg_lines = [
+        line for line in dockerfile.splitlines() if line.startswith("ARG GITHUB_RELEASE_CURL_OPTS=")
+    ]
+    assert len(arg_lines) == 1
+    for flag in (
+        "--fail",
+        "--show-error",
+        "--location",
+        "--retry 10",
+        "--retry-all-errors",
+        "--retry-max-time 900",
+        "--connect-timeout 20",
+        "--max-time 300",
+    ):
+        assert flag in arg_lines[0]
+    # No fixed delay: curl then backs off exponentially between attempts.
+    assert "--retry-delay" not in arg_lines[0]
+
+    for block in (_gh_block(dockerfile), _agy_block(dockerfile)):
+        assert "curl ${GITHUB_RELEASE_CURL_OPTS}" in block
+        assert "--retry" not in block
+        assert "--retry-delay" not in block
+        assert "--max-time" not in block
+
+    # Every GitHub-release URL is held in a variable that is fetched by a curl
+    # call using the shared options.
+    release_url_vars = re.findall(
+        r'^\s*(\w+)="https://github\.com/[^"]*/releases/download/', dockerfile, re.MULTILINE
+    )
+    assert sorted(release_url_vars) == ["agy_url", "gh_primary_url"]
+    for name in release_url_vars:
+        assert re.search(r'curl \${GITHUB_RELEASE_CURL_OPTS} [^;]*"\$' + name + '"', dockerfile), (
+            name
+        )
+    assert dockerfile.count("/releases/download/") == len(release_url_vars)
+
+
+@pytest.mark.unit
+def test_agent_runtime_github_cli_falls_back_to_pinned_official_apt_pool() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+    block = _gh_block(dockerfile)
+
+    primary = (
+        'gh_primary_url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_asset}"'
+    )
+    fallback = 'gh_fallback_url="https://cli.github.com/packages/pool/main/g/gh/${gh_asset}"'
+    assert primary in block
+    assert fallback in block
+    # Same pinned asset name (and therefore the same GH_VERSION) on both sources.
+    assert 'gh_asset="gh_${GH_VERSION}_linux_${gh_arch}.deb"' in block
+
+    primary_download = block.index('"$gh_primary_url"; then')
+    fallback_download = block.index('"$gh_fallback_url"; then')
+    checksum = block.index('actual_hash="$(sha256sum "$gh_deb")"')
+    mismatch = block.index('if [ "$actual_hash" != "$expected_hash" ]; then')
+    install = 'apt-get install -y --no-install-recommends "$gh_deb"'
+    assert block.index(primary) < block.index(fallback) < primary_download < fallback_download
+    assert fallback_download < checksum < mismatch < block.index(install)
+    # Exactly one checksum gate and one install, shared by both sources.
+    assert block.count("sha256sum") == 1
+    assert block.count("apt-get install") == 1
+    assert block.count("curl ${GITHUB_RELEASE_CURL_OPTS}") == 2
+
+    # The apt index only lists the newest gh, so no apt-managed or unverified
+    # installs by name: only the checksum-verified .deb is ever installed.
+    assert "apt-get download" not in block
+    assert "gh=${GH_VERSION}" not in block
+    assert "apt-get update" not in block
+    assert "sources.list.d" not in block
+    # A checksum mismatch is an integrity failure, not an outage: no fall-through.
+    assert block.index("checksum mismatch") > checksum
+
+    installed = 'gh_installed="$(gh --version)"'
+    assert installed in block
+    assert 'case "$gh_installed" in' in block
+    assert '"gh version ${GH_VERSION} "*) ;;' in block
+    assert block.index(install) < block.index(installed)
+
+
+@pytest.mark.unit
+def test_agent_runtime_download_failures_name_asset_and_sources_and_fail_closed() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+    gh_block = _gh_block(dockerfile)
+    agy_block = _agy_block(dockerfile)
+
+    gh_message = (
+        "GitHub CLI ${gh_asset} could not be downloaded. Sources tried: "
+        "1) ${gh_primary_url} 2) ${gh_fallback_url}"
+    )
+    assert gh_message in gh_block
+    assert gh_block.index(gh_message) < gh_block.index("exit 1", gh_block.index(gh_message))
+    assert gh_block.index('"$gh_primary_url"; then') < gh_block.index(gh_message)
+
+    agy_url = (
+        "https://github.com/google-antigravity/antigravity-cli/releases/download/"
+        "${ANTIGRAVITY_VERSION}/${agy_asset}"
+    )
+    assert f'agy_url="{agy_url}"' in agy_block
+    agy_message = (
+        "Antigravity CLI ${agy_asset} could not be downloaded. Sources tried: "
+        "1) ${agy_url} (no official non-GitHub source exists for ${ANTIGRAVITY_VERSION})"
+    )
+    assert agy_message in agy_block
+    assert agy_block.index(agy_message) < agy_block.index("exit 1", agy_block.index(agy_message))
+    # Only the pinned release asset is fetched; no invented mirror.
+    assert agy_block.count("curl ") == 1
+    assert agy_block.index('actual_hash="$(sha256sum "$agy_archive")"') < agy_block.index(
+        'tar -xzf "$agy_archive"'
+    )
 
 
 @pytest.mark.unit
@@ -290,3 +415,15 @@ def test_readme_notes_agent_runtime_rebuild_for_docker_tooling_changes() -> None
     assert "buildx" in section.lower()
     assert "rebuild" in section.lower()
     assert "docker build -t awf-agent-runtime:latest" in section
+
+
+@pytest.mark.unit
+def test_contributing_documents_github_release_download_hardening() -> None:
+    readme = Path("CONTRIBUTING.md").read_text(encoding="utf-8")
+    section = readme[
+        readme.index("### Build the Agent Runtime Image") : readme.index("### Database Migrations")
+    ]
+
+    assert "GITHUB_RELEASE_CURL_OPTS" in section
+    assert "cli.github.com/packages" in section
+    assert "Antigravity" in section
