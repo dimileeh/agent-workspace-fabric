@@ -82,6 +82,18 @@ _REJECT_RE = re.compile(
     re.IGNORECASE,
 )
 _RESOLVE_RE = re.compile(r"\b(?:resolv\w*|obsolete)\b", re.IGNORECASE)
+# A resolve word only counts as the operator's ruling when it is affirmative: a
+# negation right before it ("do not resolve", "not obsolete") or a condition in
+# its clause ("resolve if CI passes", "only resolve once ...") voids the ruling.
+_RESOLVE_NEGATED_RE = re.compile(
+    r"\b(?:not|never|no|without|\w+n['’]t)\s+(?:(?:yet|ever|actually|really)\s+)?$",
+    re.IGNORECASE,
+)
+_CONDITION_RE = re.compile(
+    r"\b(?:if|unless|once|when|whenever|until|only|after|before|provided)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_BREAK = ".;:\n"
 # A standalone 7-40 hex token with at least one digit and one letter: an all-digit
 # token is a comment id far more often than a SHA, and an all-letter one is a word
 # ("defaced"). Either would otherwise fail a named thread closed as a mismatch.
@@ -143,19 +155,32 @@ def preserved_attempt_disposition(text: str | None) -> PreservedAttemptDispositi
     """Parse an explicit preserved-attempt disposition from an operator directive.
 
     ``None`` unless the text both rejects a preserved attempt (not negated) and
-    asks for the thread to be resolved / called obsolete. Thread ids and SHA
+    affirmatively asks for the thread to be resolved / called obsolete (no
+    negated or conditional resolve word anywhere). Thread ids and SHA
     tokens are returned deduplicated in first-occurrence order, SHAs lowercased.
     """
     if not text:
         return None
     rejects = any(match.group("neg") is None for match in _REJECT_RE.finditer(text))
-    if not rejects or _RESOLVE_RE.search(text) is None:
+    if not rejects or not _resolves_affirmatively(text):
         return None
     shas = tuple(dict.fromkeys(token.lower() for token in _SHA_TOKEN_RE.findall(text)))
     return PreservedAttemptDisposition(
         thread_ids=_operator_hint_review_thread_id_candidates(text),
         shas=shas,
     )
+
+
+def _resolves_affirmatively(text: str) -> bool:
+    """True when the text asks to resolve and no resolve word is negated or conditional."""
+    matches = list(_RESOLVE_RE.finditer(text))
+    for match in matches:
+        start = max(text.rfind(char, 0, match.start()) for char in _CLAUSE_BREAK) + 1
+        ends = [i for i in (text.find(char, match.end()) for char in _CLAUSE_BREAK) if i >= 0]
+        clause = text[start : min(ends, default=len(text))]
+        if _RESOLVE_NEGATED_RE.search(text[start : match.start()]) or _CONDITION_RE.search(clause):
+            return False
+    return bool(matches)
 
 
 def preserved_attempt_tip(reason: str | None) -> str | None:

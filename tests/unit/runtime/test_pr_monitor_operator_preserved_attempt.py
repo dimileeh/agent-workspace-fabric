@@ -684,6 +684,14 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         "Don't reject the preserved attempt d5889e51, resolve it.",
         "Never reject the preserved commit d5889e51; resolve.",
         "Reject the attempt d5889e51 and resolve.",
+        f"Reject the preserved attempt d5889e51 on {_THREAD}, but do not resolve the thread; "
+        "investigate the actual bug.",
+        "Reject the preserved attempt d5889e51; it is not obsolete, resolve nothing yet.",
+        "Reject the preserved attempt d5889e51 and don't resolve.",
+        "Reject the preserved attempt d5889e51 and never resolve it.",
+        "Reject the preserved attempt d5889e51 and resolve the thread if CI passes.",
+        "Reject the preserved attempt d5889e51; only resolve once the fix lands.",
+        "Reject the preserved attempt d5889e51; resolve. Do not resolve it yet.",
     ],
     ids=[
         "none",
@@ -695,6 +703,13 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         "dont",
         "never",
         "not_preserved",
+        "resolve_negated",
+        "obsolete_negated",
+        "resolve_dont",
+        "resolve_never",
+        "resolve_conditional_if",
+        "resolve_conditional_once",
+        "resolve_contradicted",
     ],
 )
 def test_disposition_grammar_negatives(text: str | None) -> None:
