@@ -659,6 +659,14 @@ async def acquire_work(
             ticket_at=now,
         )
 
+    refused = WorkSlotAcquireResult(
+        outcome=WorkSlotAcquireOutcome.refused, lease=None, in_use=in_use, limit=limit
+    )
+    blockers = await _reacquire_peak_blockers(session, workspace_id=workspace_id, config=config)
+    unsatisfiable = any(blocker.unsatisfiable for blocker in blockers)
+    phase = (
+        WorkSlotLeasePhase.unsatisfiable if unsatisfiable else WorkSlotLeasePhase.waiting
+    ).value
     if existing is None:
         row = await repo.add(
             WorkSlotLease(
@@ -669,29 +677,19 @@ async def acquire_work(
                 ticket_at=now,
                 acquired_at=None,
                 expires_at=expires_at,
-                phase=WorkSlotLeasePhase.waiting.value,
+                phase=phase,
                 cleanup_unproven=False,
             )
         )
-    else:
+    elif await _update_lease_fenced(repo, existing, expires_at=expires_at, phase=phase):
         # Keep the original ticket; an ``unsatisfiable`` row is re-evaluated on
         # every re-check and returns to the queue if the limits now allow it.
         row = existing
-        row.expires_at = expires_at
-        row.phase = WorkSlotLeasePhase.waiting.value
-        await session.flush()
-    blockers = await _reacquire_peak_blockers(session, workspace_id=workspace_id, config=config)
-    waiting = WorkSlotAcquireResult(
-        outcome=WorkSlotAcquireOutcome.waiting,
-        lease=None,
-        in_use=in_use,
-        limit=limit,
-        ticket_at=row.ticket_at,
-        blockers=tuple(blockers),
-    )
-    if any(blocker.unsatisfiable for blocker in blockers):
-        row.phase = WorkSlotLeasePhase.unsatisfiable.value
-        await session.flush()
+    else:
+        # Withdrawn or taken over since we read it (the reconciler writes without
+        # the capacity lock): losing that race is a clean refusal.
+        return refused
+    if unsatisfiable:
         return WorkSlotAcquireResult(
             outcome=WorkSlotAcquireOutcome.unsatisfiable,
             lease=None,
@@ -700,6 +698,14 @@ async def acquire_work(
             ticket_at=row.ticket_at,
             blockers=tuple(blockers),
         )
+    waiting = WorkSlotAcquireResult(
+        outcome=WorkSlotAcquireOutcome.waiting,
+        lease=None,
+        in_use=in_use,
+        limit=limit,
+        ticket_at=row.ticket_at,
+        blockers=tuple(blockers),
+    )
     if not allow_grant or in_use >= limit or blockers:
         return waiting
     if await repo.held_for_workspace(workspace_id) is not None:
@@ -708,10 +714,14 @@ async def acquire_work(
     head = await repo.fifo_head(node_id=node_id, now=now)
     if head is None or head.invocation_id != invocation_id:
         return waiting
-    row.phase = WorkSlotLeasePhase.held.value
-    row.acquired_at = now
-    row.expires_at = expires_at
-    await session.flush()
+    if not await _update_lease_fenced(
+        repo,
+        row,
+        phase=WorkSlotLeasePhase.held.value,
+        acquired_at=now,
+        expires_at=expires_at,
+    ):
+        return refused
     await _flip_reservation_phase(session, workspace_id, ResourceReservationPhase.peak)
     return WorkSlotAcquireResult(
         outcome=WorkSlotAcquireOutcome.granted,
@@ -747,9 +757,7 @@ async def release_work(
         return False
     held = row.phase in IN_USE_WORK_SLOT_LEASE_PHASES
     if cleanup_unproven and held:
-        row.cleanup_unproven = True
-        await session.flush()
-        return True
+        return await _update_lease_fenced(repo, row, cleanup_unproven=True)
     deleted = await repo.delete_fenced(
         lease.invocation_id,
         holder_worker_id=lease.holder_worker_id,
@@ -843,6 +851,24 @@ async def work_slot_snapshot(
         node_id=effective_worker_config_node_id(config)
     )
     return summarize_work_slot_leases(leases, limit=work_slot_limit(config), now=now)
+
+
+async def _update_lease_fenced(
+    repo: WorkSlotLeaseRepository,
+    row: WorkSlotLease,
+    **values: Any,
+) -> bool:
+    """Fenced UPDATE of a lease row read earlier, never an ORM write by primary key.
+
+    ``False`` when the row was deleted or taken over (newer holder/epoch) since
+    it was read, instead of a ``StaleDataError`` or a write onto the new owner.
+    """
+    return await repo.update_fenced(
+        row.invocation_id,
+        holder_worker_id=row.holder_worker_id,
+        holder_epoch=row.holder_epoch,
+        values=values,
+    )
 
 
 async def _take_over(

@@ -955,3 +955,135 @@ async def test_phase_aware_totals_count_steady_reservations_at_steady(
     assert totals["steady_cpu"] == pytest.approx(4.0)
     assert totals["peak_cpu"] == pytest.approx(1.0 + 4.0 + 8.0)
     assert totals["peak_memory_gb"] == pytest.approx(1.0 + 4.0 + 8.0)
+
+
+# --- Lost races are clean refusals (fenced UPDATEs, never ORM writes by PK) ----
+
+
+def _race_after_read(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    invocation_id: str,
+    race: str,
+) -> None:
+    """Commit a concurrent withdrawal/takeover right after the broker reads the row.
+
+    The reconciler (withdraw, adopt) writes without the capacity lock, so the row
+    the broker read may be gone or owned by a newer holder/epoch by the time it
+    writes.
+    """
+    original_get = WorkSlotLeaseRepository.get
+    pending = [race]
+
+    async def _get(self: WorkSlotLeaseRepository, wanted: str) -> WorkSlotLease | None:
+        row = await original_get(self, wanted)
+        if wanted == invocation_id and row is not None and pending:
+            pending.clear()
+            async with factory() as other:
+                other_repo = WorkSlotLeaseRepository(other)
+                if race == "withdrawn":
+                    assert await other_repo.delete_fenced(
+                        invocation_id, holder_worker_id=_WORKER, holder_epoch=1
+                    )
+                else:
+                    assert await other_repo.update_fenced(
+                        invocation_id,
+                        holder_worker_id=_WORKER,
+                        holder_epoch=1,
+                        values={"holder_worker_id": _OTHER_WORKER, "holder_epoch": 2},
+                    )
+                await other.commit()
+        return row
+
+    monkeypatch.setattr(WorkSlotLeaseRepository, "get", _get)
+
+
+@pytest.mark.parametrize("race", ["withdrawn", "taken_over"])
+async def test_reacquire_that_loses_a_race_for_its_ticket_is_a_clean_refusal(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    config = WorkerConfig(max_concurrent_executions=1)
+    holder_ws = await _workspace(session_factory)
+    await _acquire(session_factory, holder_ws, config=config, admission="new")
+    waiter_ws = await _workspace(session_factory)
+    invocation_id, outcome, _ = await _acquire(session_factory, waiter_ws, config=config)
+    assert outcome is WorkSlotAcquireOutcome.waiting
+    before = await _lease_row(session_factory, invocation_id)
+    assert before is not None
+    _race_after_read(monkeypatch, session_factory, invocation_id, race)
+
+    _, outcome, lease = await _acquire(
+        session_factory,
+        waiter_ws,
+        config=config,
+        invocation_id=invocation_id,
+        now=datetime.now(UTC) + timedelta(seconds=30),
+    )
+
+    assert outcome is WorkSlotAcquireOutcome.refused
+    assert lease is None
+    after = await _lease_row(session_factory, invocation_id)
+    if race == "withdrawn":
+        assert after is None
+    else:
+        # The newer holder's row is untouched (no expiry refresh, no phase write).
+        assert after is not None
+        assert (after.holder_worker_id, after.holder_epoch) == (_OTHER_WORKER, 2)
+        assert after.expires_at == before.expires_at
+        assert after.phase == WorkSlotLeasePhase.waiting.value
+
+
+async def test_grant_whose_fenced_write_loses_is_refused_without_a_phase_flip(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = WorkerConfig(max_concurrent_executions=1)
+    workspace_id = await _workspace(session_factory, reservation_phase="steady")
+    original_update = WorkSlotLeaseRepository.update_fenced
+
+    async def _grant_fenced_out(
+        self: WorkSlotLeaseRepository, invocation_id: str, **kwargs: object
+    ) -> bool:
+        values = kwargs["values"]
+        assert isinstance(values, dict)
+        if "acquired_at" in values:
+            return False
+        return await original_update(self, invocation_id, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(WorkSlotLeaseRepository, "update_fenced", _grant_fenced_out)
+
+    invocation_id, outcome, lease = await _acquire(session_factory, workspace_id, config=config)
+
+    assert outcome is WorkSlotAcquireOutcome.refused
+    assert lease is None
+    row = await _lease_row(session_factory, invocation_id)
+    assert row is not None and row.acquired_at is None
+    assert await _reservation_phase(session_factory, workspace_id) == "steady"
+
+
+@pytest.mark.parametrize("race", ["withdrawn", "taken_over"])
+async def test_cleanup_unproven_flag_that_loses_a_race_is_fenced_not_stale(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    workspace_id = await _workspace(session_factory)
+    config = WorkerConfig(max_concurrent_executions=1)
+    invocation_id, _, lease = await _acquire(
+        session_factory, workspace_id, config=config, admission="new"
+    )
+    assert lease is not None
+    _race_after_read(monkeypatch, session_factory, invocation_id, race)
+
+    assert await _release(session_factory, lease, cleanup_unproven=True) is False
+
+    row = await _lease_row(session_factory, invocation_id)
+    if race == "withdrawn":
+        assert row is None
+    else:
+        # Never flag the adopter's lease: it owns that process now.
+        assert row is not None
+        assert row.holder_worker_id == _OTHER_WORKER
+        assert row.cleanup_unproven is False
