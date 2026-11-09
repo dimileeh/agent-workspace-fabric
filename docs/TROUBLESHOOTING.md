@@ -258,17 +258,21 @@ is one of these, depending on the tool:
 The build has already retried each source with exponential backoff for up to 15
 minutes, and the GitHub CLI download also tried the official `cli.github.com/packages`
 pool. The retries cover every kind of curl failure, so the same final message can
-come from different causes. Read the `curl:` lines printed just before it first:
+come from different causes. Read the `curl:` lines printed just before it first,
+and check which source each failure came from. The GitHub CLI download tries a
+primary source and then a fallback, so a primary failure followed by a fallback
+failure does not on its own show that the pinned release is wrong.
 
-- `curl: (22) The requested URL returned error: 504`: a temporary outage on the
-  GitHub side. Wait, then re-run `awf service bootstrap`.
-- `curl: (22) The requested URL returned error: 404`: the pinned version or the
-  asset URL is wrong. Check the pinned version and the asset URL in
-  `docker/agent-runtime.Dockerfile`. Re-running will not fix this.
+- `curl: (22) The requested URL returned error: 504`: may indicate a temporary
+  outage on the GitHub side. Wait, then re-run `awf service bootstrap`.
+- `curl: (22) The requested URL returned error: 404`: may indicate that the pinned
+  version or the asset URL is wrong. Check the pinned version and the asset URL in
+  `docker/agent-runtime.Dockerfile` before re-running, because re-running alone
+  will not change a wrong URL.
 - Certificate errors (for example `curl: (60) SSL certificate problem`) or proxy
   errors (for example `curl: (5) Couldn't resolve proxy`, or a failed CONNECT
-  tunnel): the builder cannot reach GitHub cleanly. Check the builder's proxy and
-  CA certificate settings, then re-run `awf service bootstrap`.
+  tunnel): may indicate that the builder cannot reach GitHub cleanly. Check the
+  builder's proxy and CA certificate settings, then re-run `awf service bootstrap`.
 - `checksum mismatch`: the downloaded file is not the pinned release. This is a
   different failure, not a network failure. Never bypass it by editing or removing
   the checksum, or by retrying until it passes.
