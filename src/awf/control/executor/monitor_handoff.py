@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.adapters.base import get_adapter
+from awf.adapters.provider_config import competing_provider_env
+from awf.common.agent_execution import execution_from_policy
 from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
@@ -73,8 +75,12 @@ from awf.node.companion_services import (
     WorkspaceCompanionSpec,
     companion_specs_from_task_policy,
 )
-from awf.node.git_manager import GitOperationError
-from awf.node.stack_launcher import effective_compose_up_timeout_seconds
+from awf.node.git_manager import GitOperationError, WorktreeLayout
+from awf.node.stack_launcher import (
+    WorkspaceStackLaunchRequest,
+    effective_compose_up_timeout_seconds,
+)
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.hosted_pr_identity import hosted_pr_identity_for_workspace
 from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 from awf.runtime.worktree_writer_lock import hold_exclusive_worktree_writer_lock
@@ -153,6 +159,65 @@ class _ComposeRuntimeRequirements:
 
 class MonitorResumePreStartError(Exception):
     """Raised when resumed monitor setup fails before entering the monitor loop."""
+
+
+async def _refresh_selected_agent_material(
+    self: Any, *, ws: Workspace, profile: WorkspaceProfile | None, compose_file: Path
+) -> bool:
+    """Materialize the persisted selection before a monitor runtime is reused."""
+    selected = execution_from_policy(ws.task_policy)
+    if selected is None:
+        return True
+    try:
+        roots = self._trusted_git_roots_for_workspace(workspace_id=ws.id, repo_url=ws.repo_url)
+        if self._stack_launcher is None or roots is None or profile is None:
+            raise ValueError("EXECUTION_CONFIGURATION_REFRESH_UNSUPPORTED")
+        spec = await self._stack_launcher.agent_spec(
+            WorkspaceStackLaunchRequest(
+                workspace_id=ws.id,
+                layout=WorktreeLayout(
+                    mirror_path=roots[1],
+                    worktree_path=self._config.worktrees_root / ws.id,
+                    branch_name=ws.branch_name or "",
+                ),
+                profile=profile,
+                execution=selected,
+            ),
+            hosted=pr_adoption_is_hosted(ws.task_policy),
+        )
+        # Retain existing passwords, companions, images and dependency state.
+        payload = cast(
+            dict[str, Any],
+            _safe_load_compose_payload_for_resume(compose_file.read_text(encoding="utf-8")),
+        )
+        agent = payload["services"]["agent"]
+        environment = {
+            k: v for k, v in agent.get("environment", {}).items() if not competing_provider_env(k)
+        }
+        environment.update((k, v) for k, v in spec.agent_environment if competing_provider_env(k))
+        agent["environment"] = environment
+        agent["volumes"] = [
+            f"{spec.worktree_host_path}:/workspace",
+            *(f"{mount.source}:{mount.target}:{mount.mode}" for mount in spec.auth_mounts),
+        ]
+        _atomic_write_text(
+            compose_file, _safe_dump_compose_payload_for_resume(payload), encoding="utf-8"
+        )
+    except Exception as exc:
+        await self._mark_failed(
+            workspace_id=ws.id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="Could not materialize the selected agent connection for monitor resume.",
+            reason_code="EXECUTION_CONFIGURATION_REFRESH_FAILED",
+            details={
+                "error_type": type(exc).__name__,
+                "cause_reason_code": getattr(exc, "reason_code", None),
+            },
+            monitor_owner_id=ws.monitor_claimed_by,
+        )
+        return False
+    return True
 
 
 async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
@@ -387,6 +452,10 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
             await lock_resumed_worktree_registration(
                 self, workspace_id=workspace_id, repo_url=ws.repo_url
             )
+            if not await _refresh_selected_agent_material(
+                self, ws=ws, profile=profile, compose_file=compose_file
+            ):
+                return None
             identity_before = await _runtime_setup_replay.capture_agent_container_identity(
                 compose_project
             )
@@ -408,6 +477,20 @@ async def resume_pr_monitor_handoff(self: Any, workspace_id: str) -> ResumeHando
                 profile=profile,
                 identity_before=identity_before,
                 monitor_owner_id=monitor_owner_id,
+            ):
+                return None
+
+    if workspace_is_hosted:
+        async with hold_exclusive_worktree_writer_lock(self._config.worktrees_root / workspace_id):
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="resume_hosted_material",
+                monitor_owner_id=monitor_owner_id,
+            ):
+                return None
+            if not await _refresh_selected_agent_material(
+                self, ws=ws, profile=profile, compose_file=compose_file
             ):
                 return None
 

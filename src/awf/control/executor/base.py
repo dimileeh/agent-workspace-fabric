@@ -42,6 +42,7 @@ from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.types import PauseResumeReason
 from awf.db.enums import AgentRuntime
 from awf.node.compose_manager import ComposeManager
+from awf.node.stack_launcher import ComposeStackLauncher
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
@@ -68,6 +69,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         ensure_hosted_monitor_checkout: Callable[[str], Awaitable[None]] | None = None,
         worktree_activity_git_roots: Callable[..., tuple[Path, Path]] | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        stack_launcher: ComposeStackLauncher | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -105,6 +107,7 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
         self._session_factory = session_factory
         self._runner = runner
         self._compose = compose
+        self._stack_launcher = stack_launcher
         self._validation = validation
         self._pr_creator = pr_creator
         self._config = config

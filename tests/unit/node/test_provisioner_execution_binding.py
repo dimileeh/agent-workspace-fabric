@@ -3,7 +3,7 @@
 import pytest
 import yaml
 
-from awf.common.agent_execution import execution_from_policy
+from awf.common.agent_execution import bind_execution_profile, execution_from_policy
 from awf.db.repositories import WorkspaceRepository
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from tests.unit.node.test_provisioner_parts.test_provisioner_part_001 import (
@@ -17,7 +17,7 @@ from tests.unit.service.test_agent_execution_snapshot import freeze_execution_po
 _IMPORTED_FIXTURES = (git_manager, origin_repo, session_factory)
 
 
-@pytest.mark.parametrize("provider", ["ollama", "openrouter"])
+@pytest.mark.parametrize("provider", ["native", "ollama", "openrouter"])
 async def test_auto_profile_binds_primary_and_fallback_before_launch(
     origin_repo, git_manager, session_factory, monkeypatch, provider
 ):
@@ -36,7 +36,7 @@ async def test_auto_profile_binds_primary_and_fallback_before_launch(
     _git(["add", ".awf/workspace.yml"], origin_repo)
     _git(["commit", "-m", "repo profile"], origin_repo)
     payload = request(
-        provider=provider,
+        provider=None if provider == "native" else provider,
         model="coder",
         provider_recovery={
             "fallbacks": [
@@ -89,6 +89,24 @@ async def test_auto_profile_binds_primary_and_fallback_before_launch(
         assert daemon.endpoint == "http://model-sidecar:12345/prefix"
         assert daemon.network_service == "model-sidecar"
         assert router.credential_ref == "env/REPO_ROUTER_KEY"
-        assert primary.endpoint == (daemon.endpoint if provider == "ollama" else router.endpoint)
-        assert primary.credential_ref == (None if provider == "ollama" else router.credential_ref)
+        if provider == "native":
+            assert primary.provider == "openai"
+            assert primary.endpoint is None
+        else:
+            assert primary.endpoint == (
+                daemon.endpoint if provider == "ollama" else router.endpoint
+            )
+        assert primary.credential_ref == (
+            router.credential_ref if provider == "openrouter" else None
+        )
         assert primary.network_service == ("model-sidecar" if provider == "ollama" else None)
+
+        assert (
+            bind_execution_profile(
+                ws.task_policy,
+                agent="codex",
+                profile={},
+                environ={"OLLAMA_HOST": "http://later-changed:11434"},
+            )
+            == ws.task_policy
+        )
