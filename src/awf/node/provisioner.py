@@ -45,6 +45,7 @@ from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
+    host_ports_from_resolved_profile,
 )
 from awf.node import provisioner_config as _provisioner_config
 from awf.node import provisioner_helpers as _provisioner_helpers
@@ -451,8 +452,11 @@ class Provisioner(
                     resolved_profile_for_failure = None
                     trusted_base_profile_sha = None
                     raise
-            if (ws.task_policy or {}).get("agent_execution_profile_pending"):
-                # Freeze both together under port-admission and claim locks.
+            if (ws.task_policy or {}).get("agent_execution_profile_pending") and (
+                not host_ports_from_resolved_profile(resolved_profile_dict)
+            ):
+                # Port-free bindings can freeze early for restart safety. Profiles
+                # claiming ports wait for preflight/companions and locked admission.
                 try:
                     bound = await self._check_auto_resolved_profile_host_ports(
                         workspace_id=workspace_id,
@@ -523,6 +527,28 @@ class Provisioner(
                     companions=companion_specs,
                     default_base_branch=ws.branch_base,
                 )
+            if (hosted_pr_adoption or self._stack_launcher is None) and (ws.task_policy or {}).get(
+                "agent_execution_profile_pending"
+            ):
+                bound = await self._check_auto_resolved_profile_host_ports(
+                    workspace_id=workspace_id,
+                    profile=profile,
+                    profile_resolution=profile_resolution,
+                    excluding_workspace_id=workspace_id,
+                    task_policy=ws.task_policy,
+                    resolved_profile_dict=resolved_profile_dict,
+                    execution_claim_epoch=execution_claim_epoch,
+                    trusted_base_profile_sha=trusted_base_profile_sha,
+                    bind_execution=True,
+                )
+                if bound is None:
+                    return
+                profile, ws.task_policy = bound
+                resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                    resolved_profile_dict, profile
+                )
+            if self._stack_launcher is not None and hosted_pr_adoption:
                 stack_paths = await self._stack_launcher.render(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
@@ -606,7 +632,10 @@ class Provisioner(
                 ):
                     return
                 try:
-                    await self._check_auto_resolved_profile_host_ports(
+                    needs_binding = bool(
+                        (ws.task_policy or {}).get("agent_execution_profile_pending")
+                    )
+                    bound = await self._check_auto_resolved_profile_host_ports(
                         workspace_id=workspace_id,
                         profile=profile,
                         profile_resolution=profile_resolution,
@@ -615,7 +644,16 @@ class Provisioner(
                         resolved_profile_dict=resolved_profile_dict,
                         execution_claim_epoch=execution_claim_epoch,
                         trusted_base_profile_sha=trusted_base_profile_sha,
+                        bind_execution=needs_binding,
                     )
+                    if needs_binding:
+                        if bound is None:
+                            return
+                        profile, ws.task_policy = bound
+                        resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
+                        resolved_profile_for_failure = _resolved_profile_snapshot_for_failure(
+                            resolved_profile_dict, profile
+                        )
                 except (
                     WorkspaceCreateHostPortConflictError,
                     WorkspaceCreateDuplicateHostPortError,
@@ -812,6 +850,18 @@ class Provisioner(
                 )
                 if await self._launch_lost_to_terminal_cleanup(workspace_id):
                     return
+        except (WorkspaceCreateHostPortConflictError, WorkspaceCreateDuplicateHostPortError) as exc:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
+                reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
+                resolved_profile=resolved_profile_for_failure,
+                trusted_base_profile_sha=trusted_base_profile_sha,
+            )
+            return
         except GitOperationError as exc:
             _log.error(
                 "provisioner.git_failed",

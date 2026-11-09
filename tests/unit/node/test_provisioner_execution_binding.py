@@ -501,3 +501,190 @@ async def test_native_profile_rehydration_preserves_existing_resolution_behavior
         assert row.status == "ready"
         assert row.resolved_profile["name"] == "rehydrated-native"
         assert row.task_policy == policy
+
+
+@pytest.mark.parametrize("stop_at", ["cursor_preflight", "companion_materialization"])
+async def test_pending_binding_does_not_publish_ports_before_prelaunch_checks(
+    origin_repo, git_manager, session_factory, monkeypatch, stop_at
+):
+    from unittest.mock import AsyncMock
+
+    from awf.profiles.resolver import ProfileResolutionError
+
+    profile = {
+        "name": "pending-ports",
+        "services": [{"name": "daemon", "image": "ollama:test", "ports": [[11434, 18080]]}],
+    }
+    (origin_repo / ".awf").mkdir()
+    (origin_repo / ".awf/workspace.yml").write_text(yaml.safe_dump(profile))
+    _git(["add", ".awf/workspace.yml"], origin_repo)
+    _git(["commit", "-m", "profile ports"], origin_repo)
+    payload = request(
+        agent="cursor",
+        cursor_auto_mode="intelligence",
+        provider_recovery={
+            "fallbacks": [{"agent": "codex", "provider": "ollama", "model": "coder"}]
+        },
+    )
+    payload.preflight.allow_unverified_model = True
+    policy = freeze_execution_policy(payload, profile=None, enabled=True, environ={})
+    async with session_factory() as session:
+        row = await WorkspaceRepository(session).create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="preflight ports",
+            task_prompt="fix",
+            agent="cursor",
+            test_commands=[],
+            profile_ref="auto",
+            task_policy=policy,
+        )
+        await session.commit()
+        workspace_id = row.id
+    launcher = AsyncMock()
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="node"),
+        stack_launcher=launcher,
+    )
+    observed = []
+
+    async def before_port_admission():
+        async with session_factory() as session:
+            repo = WorkspaceRepository(session)
+            row = await repo.get(workspace_id)
+            assert row.resolved_profile is None
+            assert row.task_policy == policy
+            assert not await repo.find_host_port_conflicts(
+                host_ports=[18080], excluding_workspace_id="other-workspace", node_id="node"
+            )
+            observed.append(True)
+
+    async def preflight(**_kwargs):
+        if stop_at == "cursor_preflight":
+            await before_port_admission()
+            return True
+        return False
+
+    async def materialize(**_kwargs):
+        await before_port_admission()
+        raise ProfileResolutionError("invalid companion", reason_code="COMPANION_INVALID")
+
+    monkeypatch.setattr(provisioner, "_run_deferred_cursor_auto_router_preflight", preflight)
+    monkeypatch.setattr(provisioner, "_materialize_companions", materialize)
+    if stop_at == "companion_materialization":
+        with pytest.raises(ProfileResolutionError, match="invalid companion"):
+            await provisioner.provision(workspace_id)
+    else:
+        await provisioner.provision(workspace_id)
+    assert observed == [True]
+    launcher.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("hosted", [False, True, "no_launcher"])
+@pytest.mark.parametrize("outcome", ["launch", "fenced", "port_conflict"])
+async def test_portful_binding_stays_atomic_at_late_admission(
+    origin_repo, git_manager, session_factory, monkeypatch, hosted, outcome
+):
+    from unittest.mock import AsyncMock
+
+    profile = {
+        "name": "late-binding",
+        "services": [{"name": "daemon", "image": "ollama:test", "ports": [[11434, 18080]]}],
+        "runtime": {
+            "environment": {
+                "AWF_OLLAMA_BASE_URL": "http://daemon:11434",
+                "OPENROUTER_API_KEY": "${LATE_ROUTER_KEY}",
+            }
+        },
+    }
+    (origin_repo / ".awf").mkdir()
+    (origin_repo / ".awf/workspace.yml").write_text(yaml.safe_dump(profile))
+    _git(["add", ".awf/workspace.yml"], origin_repo)
+    _git(["commit", "-m", "late binding profile"], origin_repo)
+    payload = request(
+        provider="ollama",
+        model="coder",
+        provider_recovery={
+            "fallbacks": [{"agent": "codex", "provider": "openrouter", "model": "router/coder"}]
+        },
+    )
+    payload.preflight.allow_unverified_model = True
+    policy = freeze_execution_policy(payload, profile=None, enabled=True, environ={})
+    if hosted is True:
+        policy["pr_adoption"] = {"execution": {"mode": "hosted"}}
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        row = await repo.create(
+            repo_url=str(origin_repo),
+            branch_base="development",
+            task_title="late binding",
+            task_prompt="fix",
+            agent="codex",
+            test_commands=[],
+            profile_ref="auto",
+            task_policy=policy,
+        )
+        row.status = "provisioning"
+        if outcome == "port_conflict":
+            blocker = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="port owner",
+                task_prompt="fix",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=profile,
+            )
+            blocker.status = "ready"
+        await session.commit()
+        workspace_id, epoch = row.id, row.execution_claim_epoch
+    launcher = AsyncMock()
+    launcher.launch.return_value = None
+    launcher.render.return_value = None
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="node"),
+        stack_launcher=None if hosted == "no_launcher" else launcher,
+    )
+    monkeypatch.setattr(
+        provisioner, "_run_deferred_cursor_auto_router_preflight", AsyncMock(return_value=False)
+    )
+    if outcome == "fenced":
+        check_ports = provisioner._check_auto_resolved_profile_host_ports
+
+        async def transfer_claim(**kwargs):
+            async with session_factory() as session:
+                current = await WorkspaceRepository(session).get(workspace_id)
+                current.execution_claim_epoch += 1
+                await session.commit()
+            return await check_ports(**kwargs)
+
+        monkeypatch.setattr(provisioner, "_check_auto_resolved_profile_host_ports", transfer_claim)
+    await provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch)
+    call = launcher.render if hosted is True else launcher.launch
+    async with session_factory() as session:
+        current = await WorkspaceRepository(session).get(workspace_id)
+        if outcome == "launch":
+            if hosted == "no_launcher":
+                call.assert_not_awaited()
+                assert current.status == "ready"
+                assert execution_from_policy(current.task_policy).endpoint == "http://daemon:11434"
+                return
+            call.assert_awaited_once()
+            launch_request = call.call_args.args[0]
+            assert current.status == "ready"
+            assert current.resolved_profile["name"] == launch_request.profile.name == "late-binding"
+            assert "agent_execution_profile_pending" not in current.task_policy
+            assert execution_from_policy(current.task_policy) == launch_request.execution
+            assert launch_request.execution.endpoint == "http://daemon:11434"
+            fallback = execution_from_policy(
+                current.task_policy["provider_recovery"]["fallbacks"][0]
+            )
+            assert fallback.credential_ref == "env/LATE_ROUTER_KEY"
+        else:
+            call.assert_not_awaited()
+            assert current.task_policy == policy
+            assert current.status == ("provisioning" if outcome == "fenced" else "failed")
