@@ -164,15 +164,19 @@ class _Target:
 def preserved_attempt_disposition(text: str | None) -> PreservedAttemptDisposition | None:
     """Parse an explicit preserved-attempt disposition from an operator directive.
 
-    ``None`` unless the text both rejects a preserved attempt (not negated) and
+    ``None`` unless the text both rejects a preserved attempt (not negated or
+    conditional) and
     affirmatively asks for the thread to be resolved / called obsolete (no
     negated or conditional resolve word anywhere). Thread ids and SHA
     tokens are returned deduplicated in first-occurrence order, SHAs lowercased.
     """
     if not text:
         return None
+    # A condition anywhere in the reject's clause ("reject ... if the reviewer agrees",
+    # "once CI passes, reject ...") makes it no ruling yet: fail closed.
     rejects = any(
         not _REJECT_NEGATED_RE.search(text[_clause_start(text, match.start()) : match.start()])
+        and not _CONDITION_RE.search(_clause(text, match))
         for match in _REJECT_RE.finditer(text)
     )
     if not rejects or not _resolves_affirmatively(text):
@@ -189,14 +193,21 @@ def _clause_start(text: str, index: int) -> int:
     return max(text.rfind(char, 0, index) for char in _CLAUSE_BREAK) + 1
 
 
+def _clause(text: str, match: re.Match[str]) -> str:
+    """The whole clause (between clause breaks) that contains ``match``."""
+    start = _clause_start(text, match.start())
+    ends = [i for i in (text.find(char, match.end()) for char in _CLAUSE_BREAK) if i >= 0]
+    return text[start : min(ends, default=len(text))]
+
+
 def _resolves_affirmatively(text: str) -> bool:
     """True when the text asks to resolve and no resolve word is negated or conditional."""
     matches = list(_RESOLVE_RE.finditer(text))
     for match in matches:
         start = _clause_start(text, match.start())
-        ends = [i for i in (text.find(char, match.end()) for char in _CLAUSE_BREAK) if i >= 0]
-        clause = text[start : min(ends, default=len(text))]
-        if _RESOLVE_NEGATED_RE.search(text[start : match.start()]) or _CONDITION_RE.search(clause):
+        if _RESOLVE_NEGATED_RE.search(text[start : match.start()]) or _CONDITION_RE.search(
+            _clause(text, match)
+        ):
             return False
     return bool(matches)
 

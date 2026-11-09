@@ -912,6 +912,11 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         "Reject the preserved attempt d5889e51 and resolve the thread if CI passes.",
         "Reject the preserved attempt d5889e51; only resolve once the fix lands.",
         "Reject the preserved attempt d5889e51; resolve. Do not resolve it yet.",
+        f"Reject the preserved attempt d5889e51 on {_THREAD} if the reviewer agrees; "
+        "resolve the thread as obsolete.",
+        f"Once CI passes, reject the preserved attempt d5889e51 on {_THREAD}; resolve.",
+        f"If the reviewer confirms this is obsolete, reject the preserved attempt d5889e51 "
+        f"on {_THREAD}; reply and resolve the thread.",
     ],
     ids=[
         "none",
@@ -935,6 +940,9 @@ def test_disposition_grammar_positives(text: str, expected: PreservedAttemptDisp
         "resolve_conditional_if",
         "resolve_conditional_once",
         "resolve_contradicted",
+        "reject_conditional_trailing_if",
+        "reject_conditional_leading_once",
+        "reject_conditional_reviewer_confirms",
     ],
 )
 def test_disposition_grammar_negatives(text: str | None) -> None:
