@@ -272,6 +272,11 @@ async def test_rendered_stack_suppresses_native_mounts_and_competing_profile_env
                 "CLAUDE_CODE_USE_BEDROCK": "1",
                 "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
                 "TOOL_MODE": "safe",
+                "AWS_REGION": "eu-west-1",
+                "AWS_PROFILE": "project-tools",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/run/secrets/tool-google.json",
+                "GOOGLE_API_KEY": "competing-key",
+                "AWS_BEARER_TOKEN_BEDROCK": "competing-key",
             }
         ),
     )
@@ -296,6 +301,10 @@ async def test_rendered_stack_suppresses_native_mounts_and_competing_profile_env
     else:
         assert "OPENROUTER_API_KEY" not in env
     assert env["TOOL_MODE"] == "safe"
+    assert env["AWS_REGION"] == "eu-west-1"
+    assert env["AWS_PROFILE"] == "project-tools"
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == "/run/secrets/tool-google.json"
+    assert "GOOGLE_API_KEY" not in env and "AWS_BEARER_TOKEN_BEDROCK" not in env
     assert "OPENAI_API_KEY" not in env and "CLAUDE_CODE_USE_BEDROCK" not in env
     targets = {mount.target for mount in spec.auth_mounts}
     assert "/home/agent/.codex" not in targets
@@ -403,3 +412,32 @@ async def test_stack_materializes_only_frozen_provider_credentials(
         "openrouter" not in mount.target.lower() for mount in spec.auth_mounts
     )
     assert "fake-" not in content
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude_code"])
+def test_declared_cloud_tool_settings_survive_provider_isolation(agent):
+    selected = resolve_execution(
+        agent=agent, provider="ollama", model="coder", allow_unverified=True
+    )
+    tool_env = {
+        "AWS_REGION": "eu-west-1",
+        "AWS_PROFILE": "project-tools",
+        "AWS_ACCESS_KEY_ID": "tool-access",
+        "AWS_SECRET_ACCESS_KEY": "tool-secret",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/run/secrets/tool-google.json",
+        "GOOGLE_CLOUD_PROJECT": "project-tools",
+    }
+    model_env = {
+        "GOOGLE_API_KEY": "competing-key",
+        "GOOGLE_MODEL": "competing-model",
+        "GOOGLE_GEMINI_BASE_URL": "https://competing.invalid",
+        "AWS_BEARER_TOKEN_BEDROCK": "competing-token",
+        "AWS_BEDROCK_MODEL": "competing-model",
+        "AWS_ENDPOINT_URL_BEDROCK_RUNTIME": "https://competing.invalid",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "ANTHROPIC_VERTEX_PROJECT_ID": "competing-project",
+    }
+    env = provider_environment(selected.model_dump(), {**tool_env, **model_env})
+    assert all(env.get(k) == v for k, v in tool_env.items())
+    assert not set(model_env).intersection(env)

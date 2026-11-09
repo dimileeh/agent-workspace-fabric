@@ -33,10 +33,12 @@ _PROVIDER_PREFIXES = (
     "OPENROUTER_",
     "OPENCODE_",
     "GEMINI_",
-    "GOOGLE_",
+    "GOOGLE_GEMINI_",
+    "GOOGLE_VERTEX_",
     "CURSOR_",
     "XAI_",
-    "AWS_",
+    "AWS_BEDROCK_",
+    "AWS_ENDPOINT_URL_BEDROCK",
     "AWF_SELECTED_PROVIDER_",
     "AWF_OLLAMA_",
     "AWF_OPENCODE_",
@@ -65,7 +67,13 @@ def runtime_failure_reason(stderr: str) -> str | None:
 
 
 def competing_provider_env(name: str) -> bool:
-    return name.startswith(_PROVIDER_PREFIXES)
+    # Cloud credentials/regions/profiles can be separately declared tool access.
+    # Only model-backend overrides compete with the selected connection.
+    return name.startswith(_PROVIDER_PREFIXES) or name in {
+        "GOOGLE_API_KEY",
+        "GOOGLE_MODEL",
+        "AWS_BEARER_TOKEN_BEDROCK",
+    }
 
 
 def provider_environment(
